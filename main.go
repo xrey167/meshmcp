@@ -22,6 +22,7 @@ Usage:
   meshmcp serve --config <file>                 join mesh, expose configured backends
   meshmcp router --config <file>                join mesh, aggregate upstreams as one endpoint
   meshmcp orchestrate --config <file>           join mesh, serve a tool that calls another server
+  meshmcp control [flags]                        run the managed control plane (enroll, registry, policy)
   meshmcp connect [flags] <peer-ip:port>        bridge stdio <-> remote stdio backend
   meshmcp forward [flags] <local> <peer:port>   forward a local TCP port to a mesh peer
   meshmcp probe [flags] <peer-ip:port>          run an MCP handshake against a backend
@@ -29,6 +30,10 @@ Usage:
   meshmcp call [flags] <peer:port> <tool>       call a tool (--arg k=v, --json, --task)
   meshmcp read [flags] <peer:port> <uri>        read a resource
   meshmcp prompt [flags] <peer:port> <name>     render a prompt (--arg k=v)
+  meshmcp audit verify <file>                   verify a tamper-evident audit log's hash chain
+  meshmcp approve [flags] <peer-fqdn> <tool>    co-sign a require_cosign tool call for a peer
+  meshmcp dash [flags]                          serve the mesh control dashboard over audit/trace logs
+  meshmcp replay [flags] <trace> <peer:port>    replay a traced session against a backend and diff
   meshmcp version
 
 Mesh credentials come from flags, config, or $NB_SETUP_KEY / $NB_MANAGEMENT_URL.
@@ -68,6 +73,16 @@ func main() {
 		err = cmdRouter(os.Args[2:])
 	case "orchestrate":
 		err = cmdOrchestrate(os.Args[2:])
+	case "control":
+		err = cmdControl(os.Args[2:])
+	case "audit":
+		err = cmdAudit(os.Args[2:])
+	case "approve":
+		err = cmdApprove(os.Args[2:])
+	case "dash":
+		err = cmdDash(os.Args[2:])
+	case "replay":
+		err = cmdReplay(os.Args[2:])
 	case "version":
 		fmt.Println(version)
 	case "-h", "--help", "help":

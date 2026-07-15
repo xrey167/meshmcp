@@ -1,0 +1,64 @@
+# The agent firewall: policy-as-code for what an agent may do, enforced at the
+# network layer where no jailbreak can talk past it. This config shows every
+# capability constraint the policy engine supports.
+#
+#   - rate limits        cap how often an identity may call a tool
+#   - time windows       a tool is callable only on certain days/hours
+#   - taint tracking     untrusted data blocks downstream privileged calls
+#   - co-sign            a privileged call waits for a human's approval
+#
+# The audit log is a tamper-evident hash chain: verify it with
+#   meshmcp audit verify ./agent-firewall-audit.jsonl
+# and watch it live with
+#   meshmcp dash --audit ./agent-firewall-audit.jsonl
+mesh:
+  device_name: meshmcp-firewall
+  setup_key_env: NB_SETUP_KEY
+  config_path: ./firewall-gw.json
+  log_level: info
+
+backends:
+  - name: agent-tools
+    port: 9110
+    stdio: ["./cmd/mcpserver/mcpserver.exe"]
+    resumable: true
+    audit_log: ./agent-firewall-audit.jsonl
+    # Shared directory where human co-sign approvals land (see `meshmcp approve`).
+    cosign_store: ./cosign
+    cosign_ttl_seconds: 3600
+    policy:
+      default_allow: false
+      rules:
+        # Read-only tools: always allowed, but rate-limited per identity.
+        - peers: ["*"]
+          tools: ["read_*", "search_*", "add"]
+          allow: true
+          rate: { max: 30, per: "1m" }
+
+        # `fetch` pulls arbitrary external content — mark it a taint source.
+        # After it runs, the session is considered untrusted.
+        - peers: ["*"]
+          tools: ["fetch", "http_*"]
+          allow: true
+          taint_source: true
+
+        # `write_file` is privileged: blocked whenever the session is tainted,
+        # so poisoned content can never drive a write. Prompt-injection defense
+        # at the network layer.
+        - peers: ["*"]
+          tools: ["write_file", "run_command"]
+          allow: true
+          taint_guard: true
+
+        # Deploys only on weekday business hours (UTC).
+        - peers: ["*"]
+          tools: ["deploy"]
+          allow: true
+          when: { days: ["mon", "tue", "wed", "thu", "fri"], hours: "09:00-17:00", tz: "UTC" }
+
+        # Money movement always requires a human co-sign on the mesh:
+        #   meshmcp approve --store ./cosign <peer-fqdn> transfer_funds
+        - peers: ["*"]
+          tools: ["transfer_funds"]
+          allow: true
+          require_cosign: true

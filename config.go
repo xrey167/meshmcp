@@ -76,8 +76,16 @@ type Backend struct {
 	// Only valid for stdio backends (the gateway parses their JSON-RPC).
 	Policy *policy.Policy `yaml:"policy"`
 	// AuditLog is a file path for JSONL tool-call audit records. Empty
-	// sends audit records to stderr.
+	// sends audit records to stderr. The log is a tamper-evident hash chain
+	// (verify it with "meshmcp audit verify").
 	AuditLog string `yaml:"audit_log"`
+	// CosignStore is a shared directory holding human co-sign approvals for
+	// rules with require_cosign. A human identity grants approvals with
+	// "meshmcp approve". Only meaningful with a policy.
+	CosignStore string `yaml:"cosign_store"`
+	// CosignTTLSeconds bounds how long a co-sign approval stays valid
+	// (0 = no expiry).
+	CosignTTLSeconds int `yaml:"cosign_ttl_seconds"`
 
 	httpURL *url.URL
 }
@@ -129,6 +137,9 @@ func loadConfig(path string) (*Config, error) {
 		}
 		if b.Policy != nil && !hasStdio {
 			return nil, fmt.Errorf("backend %q: policy is only valid for stdio backends", b.Name)
+		}
+		if b.CosignStore != "" && b.Policy == nil {
+			return nil, fmt.Errorf("backend %q: cosign_store requires a policy", b.Name)
 		}
 		if hasHTTP {
 			u, err := url.Parse(b.HTTP)

@@ -251,17 +251,30 @@ func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer) s
 	if b.Policy == nil && tracer == nil {
 		return exec
 	}
+	// One Engine per backend, shared across all its connections, so rate
+	// limits and co-sign approvals are per-identity rather than per-connection.
+	var eng *policy.Engine
+	if b.Policy != nil {
+		var cosign policy.CosignStore
+		if b.CosignStore != "" {
+			cosign = &policy.FileCosign{
+				Dir: b.CosignStore,
+				TTL: time.Duration(b.CosignTTLSeconds) * time.Second,
+			}
+		}
+		eng = policy.NewEngine(b.Policy, func() time.Time { return time.Now() }, cosign)
+	}
 	return func(meta session.Meta) (session.Backend, error) {
 		inner, err := exec(meta)
 		if err != nil {
 			return nil, err
 		}
-		return policy.NewFilter(inner, policy.Caller{
+		return policy.NewFilterEngine(inner, policy.Caller{
 			Backend:  b.Name,
 			Peer:     meta.PeerFQDN,
 			PeerKey:  meta.PeerKey,
 			PeerAddr: meta.PeerAddr,
-		}, b.Policy, audit, tracer), nil
+		}, eng, audit, tracer), nil
 	}
 }
 

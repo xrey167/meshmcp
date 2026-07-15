@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 )
 
 // Caller identifies the mesh peer whose traffic a filter is enforcing.
@@ -23,10 +24,12 @@ type Caller struct {
 // with any synthetic denial responses on whole-line boundaries.
 type Filter struct {
 	inner  io.ReadWriteCloser
-	pol    *Policy
+	eng    *Engine
 	audit  *AuditLog
 	tracer *Tracer
 	caller Caller
+
+	tainted atomic.Bool // set once an untrusted (taint_source) call is made
 
 	wbuf []byte // reassembly of the peer -> backend line stream
 
@@ -37,12 +40,26 @@ type Filter struct {
 	closeOnce sync.Once
 }
 
-// NewFilter wraps inner. pol (policy), audit, and tracer are all optional:
-// with a nil pol the filter forwards everything but still traces (if a
-// tracer is set); with a nil tracer it only enforces policy.
+// NewFilter wraps inner with a policy built from pol. pol, audit, and tracer
+// are all optional: with a nil pol the filter forwards everything but still
+// traces (if a tracer is set); with a nil tracer it only enforces policy. The
+// engine it builds is private to this filter, so rate limits and co-sign are
+// per-connection — use NewFilterEngine to share them across a backend's
+// connections.
 func NewFilter(inner io.ReadWriteCloser, caller Caller, pol *Policy, audit *AuditLog, tracer *Tracer) *Filter {
+	var eng *Engine
+	if pol != nil {
+		eng = NewEngine(pol, nil, nil)
+	}
+	return NewFilterEngine(inner, caller, eng, audit, tracer)
+}
+
+// NewFilterEngine wraps inner with a shared Engine (nil to only trace). Use
+// this when several connections to the same backend must share rate-limit
+// buckets and the co-sign store.
+func NewFilterEngine(inner io.ReadWriteCloser, caller Caller, eng *Engine, audit *AuditLog, tracer *Tracer) *Filter {
 	r, w := io.Pipe()
-	f := &Filter{inner: inner, pol: pol, audit: audit, tracer: tracer, caller: caller, outR: r, outW: w}
+	f := &Filter{inner: inner, eng: eng, audit: audit, tracer: tracer, caller: caller, outR: r, outW: w}
 	go f.pumpInner()
 	return f
 }
@@ -67,7 +84,7 @@ func (f *Filter) Read(p []byte) (int, error) { return f.outR.Read(p) }
 // Write authorizes and forwards peer -> backend bytes.
 func (f *Filter) Write(p []byte) (int, error) {
 	// Fast path only when there is nothing to enforce and nothing to trace.
-	if f.pol == nil && f.tracer == nil {
+	if f.eng == nil && f.tracer == nil {
 		return f.inner.Write(p)
 	}
 	f.wbuf = append(f.wbuf, p...)
@@ -116,8 +133,8 @@ func (f *Filter) handleLine(line []byte) error {
 	// tools/call inside one. Refuse batches (when enforcing) rather than
 	// forward blind.
 	if trimmed[0] == '[' {
-		if f.pol != nil {
-			f.audit.write(f.record("<batch>", "", "", Decision{RuleID: -1}))
+		if f.eng != nil {
+			f.audit.write(f.record("<batch>", "", "", Decision{RuleID: -1, Reason: "batches unsupported"}))
 			f.traceLine("c2s", trimmed, "deny")
 			f.writeDenial(json.RawMessage("null"), "JSON-RPC batches are not supported by the mesh policy filter")
 			return nil
@@ -135,7 +152,7 @@ func (f *Filter) handleLine(line []byte) error {
 	}
 
 	// Tracing-only (no policy): record and forward everything.
-	if f.pol == nil {
+	if f.eng == nil {
 		f.traceLine("c2s", trimmed, "")
 		_, werr := f.inner.Write(line)
 		return werr
@@ -152,23 +169,38 @@ func (f *Filter) handleLine(line []byte) error {
 
 func (f *Filter) handleToolCall(line []byte, msg rpcPeek) error {
 	tool := msg.Params.Name
-	dec := f.pol.Decide(f.caller.Peer, f.caller.PeerKey, tool)
+	dec := f.eng.DecideToolCall(f.caller.Peer, f.caller.PeerKey, tool, f.tainted.Load())
 	rec := f.record(msg.Method, tool, string(msg.ID), dec)
 	f.audit.write(rec)
 	f.traceLine("c2s", line, rec.Decision)
-	if dec.Allow {
+
+	switch dec.Outcome {
+	case OutcomeAllow:
+		if dec.SetTaint {
+			// This call brings untrusted data into the session; every
+			// subsequent taint_guard tool is now blocked.
+			f.tainted.Store(true)
+		}
 		_, werr := f.inner.Write(line)
 		return werr
+	case OutcomeCosign:
+		f.writeDenial(msg.ID, fmt.Sprintf("tool %q requires a human co-sign on the mesh: %s", tool, dec.Reason))
+		return nil
+	default:
+		reason := dec.Reason
+		if reason == "" {
+			reason = "denied by mesh policy"
+		}
+		f.writeDenial(msg.ID, fmt.Sprintf("tool %q blocked for peer %s: %s", tool, f.caller.Peer, reason))
+		return nil
 	}
-	f.writeDenial(msg.ID, fmt.Sprintf("tool %q denied by mesh policy for peer %s", tool, f.caller.Peer))
-	return nil
 }
 
 // handleMethod governs a non-tool request (e.g. tasks/cancel). Methods are
 // audited and enforced only when a Methods rule matches; ungoverned methods
 // (initialize, tools/list, ...) pass through unaudited.
 func (f *Filter) handleMethod(line []byte, msg rpcPeek) error {
-	dec := f.pol.DecideMethod(f.caller.Peer, f.caller.PeerKey, msg.Method)
+	dec := f.eng.pol.DecideMethod(f.caller.Peer, f.caller.PeerKey, msg.Method)
 	if dec.RuleID == -1 {
 		f.traceLine("c2s", line, "")
 		_, werr := f.inner.Write(line)
@@ -188,7 +220,7 @@ func (f *Filter) handleMethod(line []byte, msg rpcPeek) error {
 // is dropped (no id to answer). Ungoverned notifications pass through so
 // protocol-critical ones like notifications/initialized are never lost.
 func (f *Filter) handleNotification(line []byte, method string) error {
-	dec := f.pol.DecideMethod(f.caller.Peer, f.caller.PeerKey, method)
+	dec := f.eng.pol.DecideMethod(f.caller.Peer, f.caller.PeerKey, method)
 	if dec.RuleID == -1 {
 		f.traceLine("c2s", line, "")
 		_, werr := f.inner.Write(line)
@@ -204,10 +236,6 @@ func (f *Filter) handleNotification(line []byte, method string) error {
 }
 
 func (f *Filter) record(method, tool, rpcID string, dec Decision) AuditRecord {
-	decision := "allow"
-	if !dec.Allow {
-		decision = "deny"
-	}
 	return AuditRecord{
 		Backend:  f.caller.Backend,
 		Peer:     f.caller.Peer,
@@ -216,7 +244,8 @@ func (f *Filter) record(method, tool, rpcID string, dec Decision) AuditRecord {
 		Method:   method,
 		Tool:     tool,
 		RPCID:    rpcID,
-		Decision: decision,
+		Decision: dec.Outcome.String(),
+		Reason:   dec.Reason,
 		Rule:     dec.RuleID,
 	}
 }
