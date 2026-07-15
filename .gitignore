@@ -18,6 +18,13 @@ livetest-cli.json
 /sessions/
 /registry-data/
 
+# Secret material — never commit
+secrets.json
+*-secrets.json
+*.secrets.json
+audit-signing-key.json
+/cosign/
+
 # OS / editor
 .DS_Store
 *.bak

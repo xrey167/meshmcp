@@ -19,6 +19,7 @@ import (
 
 	"meshmcp/policy"
 	"meshmcp/registry"
+	"meshmcp/secrets"
 	"meshmcp/session"
 )
 
@@ -273,18 +274,49 @@ func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer) s
 		}
 		eng = policy.NewEngine(b.Policy, func() time.Time { return time.Now() }, cosign)
 	}
+	// One credential broker per backend, sharing the backend's (hash-chained)
+	// audit so secret use lands in the same tamper-evident record.
+	var broker *secrets.Broker
+	if b.Secrets != nil {
+		store, err := secretStore(b.Secrets)
+		if err != nil {
+			log.Fatalf("backend %q: secrets store: %v", b.Name, err)
+		}
+		broker = secrets.New(store, b.Secrets.Grants, audit)
+	}
 	return func(meta session.Meta) (session.Backend, error) {
 		inner, err := exec(meta)
 		if err != nil {
 			return nil, err
 		}
-		return policy.NewFilterEngine(inner, policy.Caller{
+		f := policy.NewFilterEngine(inner, policy.Caller{
 			Backend:  b.Name,
 			Peer:     meta.PeerFQDN,
 			PeerKey:  meta.PeerKey,
 			PeerAddr: meta.PeerAddr,
-		}, eng, audit, tracer), nil
+		}, eng, audit, tracer)
+		if broker != nil {
+			f.SetSecretResolver(broker)
+		}
+		return f, nil
 	}
+}
+
+// secretStore builds the Store for a backend's secrets config: a file layered
+// under environment variables when both are set.
+func secretStore(cfg *SecretsConfig) (secrets.Store, error) {
+	var chain secrets.Chain
+	if cfg.File != "" {
+		fs, err := secrets.NewFileStore(cfg.File)
+		if err != nil {
+			return nil, err
+		}
+		chain = append(chain, fs)
+	}
+	if cfg.EnvPrefix != "" {
+		chain = append(chain, secrets.EnvStore{Prefix: cfg.EnvPrefix})
+	}
+	return chain, nil
 }
 
 // buildTracer opens the gateway-wide trace sink, or returns nil if tracing

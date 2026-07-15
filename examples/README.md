@@ -13,6 +13,7 @@ files are relative to the directory you run `meshmcp` from.
 | `live-policy.yaml` | `serve` | Per-tool policy (allowlist) with an audit log; disallowed tools denied inline. |
 | `agent-firewall.yaml` | `serve` | The full policy engine: rate limits, time windows, taint tracking, and human co-sign — plus a tamper-evident audit log. |
 | `federate.yaml` | `federate` | A cross-org federation boundary: bridge granted tools between two meshes, identity-mapped and audited. |
+| `secrets.yaml` | `serve` | The credential broker: agents reference secrets by name (`{{secret:...}}`) and never hold the value; injection is identity-gated, audited, and refused into a tainted session. |
 | `live-task.yaml` | `serve` | A resumable backend exposing an async task tool (`slow_count`) with progress. |
 | `http-backend.yaml` | `serve` | An HTTP (Streamable-HTTP) backend reverse-proxied onto the mesh. |
 | `router.yaml` | `router` | Aggregate upstreams into one namespaced endpoint; one upstream is a replica set (load-balanced + failover). |

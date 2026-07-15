@@ -61,6 +61,7 @@ firewall can't be talked past and the audit can't be repudiated.
 | 🧱 **The agent firewall** | Allow/deny per tool & method by identity, **rate limits**, **time windows**, **human co-sign**, and **data-flow labels** — enforced where no jailbreak can reach it. |
 | 🧾 **Non-repudiable audit** | Every decision is a hash-chained record sealed by **Ed25519-signed Merkle checkpoints** — provable complete-and-unedited with the public key alone. |
 | 🧠 **Policy from behavior** | `insight` profiles what agents actually do, **generates** a least-privilege policy, **simulates** changes against real traffic (CI gate), and **detects** drift. |
+| 🔑 **Credential broker** | Agents reference a secret by name (`{{secret:stripe_key}}`) and **never hold the value** — the gateway injects it by identity, audits the use (name, never value), and refuses injection into a tainted session. |
 | 🌐 **Scale & federate** | Aggregating router (LB · failover · discovery · bidirectional MCP), a managed control plane, and identity-mapped cross-org federation. |
 
 ---
@@ -181,6 +182,7 @@ Watch it live with `meshmcp dash --audit audit.jsonl`; re-run a past session wit
 | `audit verify <f> [--checkpoints --pubkey]` | Verify a log: hash chain, or signatures + Merkle. |
 | `audit keygen [--out f]` | Generate a gateway Ed25519 signing key. |
 | `approve --store <d> <peer> <tool>` | Human co-sign a held `require_cosign` call. |
+| `secrets check --config <f>` | Validate the credential broker config (never prints values). |
 | `dash --audit <f>` | Serve the live control dashboard. |
 | `replay [--fork N] <trace> <peer:port>` | Re-issue a traced session and diff every response. |
 | `probe [--full\|--task] <peer:port>` | In-process MCP handshake diagnostic. |
@@ -204,6 +206,7 @@ Watch it live with `meshmcp dash --audit audit.jsonl`; re-run a past session wit
 session/     resumable + migratable session layer (Mars-STN-style reliability · store · lease · flock)
 policy/      the agent firewall (enforce): policy engine, signed tamper-evident audit, trace, replay
 insight/     the firewall's read side (understand): profile · recommend · simulate · detect
+secrets/     credential broker: inject secrets by identity, agent never holds the value
 control/     managed control plane: enrollment (NetBird key issuance) · registry · policy distribution
 federation/  cross-org boundary: per-org tool grants · identity mapping · audited crossings
 mcp/         dependency-free MCP server framework (tools · resources · prompts · tasks · HTTP)
@@ -219,6 +222,7 @@ examples/    ready-to-adapt configs        docs/  design docs + open specs
 - **[examples/](examples/)** — annotated configs for every scenario (start with `agent-firewall.yaml`).
 - **[docs/AGENT-FIREWALL.md](docs/AGENT-FIREWALL.md)** — the policy engine, signed audit, dashboard, replay, control plane, federation.
 - **[docs/INSIGHT.md](docs/INSIGHT.md)** — the firewall's read side: observe → recommend → simulate → detect.
+- **[docs/SECRETS.md](docs/SECRETS.md)** — the credential broker: identity-gated secret injection, the agent never holds the value.
 - **[docs/spec/](docs/spec/)** — open specs: the [audit-record format](docs/spec/AUDIT-RECORD.md) and the [policy DSL](docs/spec/POLICY-DSL.md), each with a JSON Schema.
 - **[docs/HA-TOOLMESH.md](docs/HA-TOOLMESH.md)** · **[docs/reference.md](docs/reference.md)** · **[docs/VISION.md](docs/VISION.md)** — HA design, full reference, roadmap.
 

@@ -8,7 +8,21 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"meshmcp/policy"
+	"meshmcp/secrets"
 )
+
+// SecretsConfig configures the credential broker for a backend: a store to
+// resolve secret names from, and grants that decide which identities may
+// inject which secrets into which tools. Agents reference secrets by name
+// ({{secret:NAME}}) and never hold the value.
+type SecretsConfig struct {
+	// File is a JSON secrets file ({"name":"value",...}); SHOULD be mode 0600.
+	File string `yaml:"file"`
+	// EnvPrefix reads secrets from environment variables named prefix+NAME.
+	EnvPrefix string `yaml:"env_prefix"`
+	// Grants authorize secret injection by identity, tool, and session label.
+	Grants []secrets.Grant `yaml:"grants"`
+}
 
 // Config is the meshmcp serve configuration.
 type Config struct {
@@ -99,6 +113,11 @@ type Backend struct {
 	// CosignTTLSeconds bounds how long a co-sign approval stays valid
 	// (0 = no expiry).
 	CosignTTLSeconds int `yaml:"cosign_ttl_seconds"`
+	// Secrets configures the credential broker: agents reference secrets by
+	// name ({{secret:NAME}}) and the gateway injects the value by identity,
+	// so the agent never holds the raw credential. Only valid for stdio
+	// backends with a policy.
+	Secrets *SecretsConfig `yaml:"secrets"`
 
 	httpURL *url.URL
 }
@@ -159,6 +178,17 @@ func loadConfig(path string) (*Config, error) {
 		}
 		if b.AuditCheckpoints != "" && b.Policy == nil {
 			return nil, fmt.Errorf("backend %q: audit_checkpoints requires a policy (nothing to audit otherwise)", b.Name)
+		}
+		if b.Secrets != nil {
+			if !hasStdio {
+				return nil, fmt.Errorf("backend %q: secrets injection is only valid for stdio backends", b.Name)
+			}
+			if b.Policy == nil {
+				return nil, fmt.Errorf("backend %q: secrets requires a policy (injection happens at the enforcement point)", b.Name)
+			}
+			if b.Secrets.File == "" && b.Secrets.EnvPrefix == "" {
+				return nil, fmt.Errorf("backend %q: secrets needs a file or env_prefix store", b.Name)
+			}
 		}
 		if hasHTTP {
 			u, err := url.Parse(b.HTTP)

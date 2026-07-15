@@ -22,11 +22,12 @@ type Caller struct {
 // reach the backend. Reads (backend -> peer) pass through, interleaved
 // with any synthetic denial responses on whole-line boundaries.
 type Filter struct {
-	inner  io.ReadWriteCloser
-	eng    *Engine
-	audit  *AuditLog
-	tracer *Tracer
-	caller Caller
+	inner   io.ReadWriteCloser
+	eng     *Engine
+	audit   *AuditLog
+	tracer  *Tracer
+	secrets SecretResolver
+	caller  Caller
 
 	lmu    sync.Mutex      // guards labels
 	labels map[string]bool // data-flow labels accumulated this session
@@ -206,7 +207,19 @@ func (f *Filter) handleToolCall(line []byte, msg rpcPeek) error {
 		// This call may bring classified/untrusted data into the session;
 		// record its labels so downstream block_labels rules can act on them.
 		f.addLabels(dec.AddLabels)
-		_, werr := f.inner.Write(line)
+		// Inject secrets last — after audit + trace — so the resolved value
+		// reaches only the backend, never the audit or trace. A denied
+		// injection (ungranted / tainted / unavailable) blocks the call.
+		outLine := line
+		if f.secrets != nil {
+			resolved, ok, reason := f.secrets.Resolve(f.caller, tool, line, f.labelSnapshot())
+			if !ok {
+				f.writeDenial(msg.ID, fmt.Sprintf("tool %q blocked: %s", tool, reason))
+				return nil
+			}
+			outLine = resolved
+		}
+		_, werr := f.inner.Write(outLine)
 		return werr
 	case OutcomeCosign:
 		f.writeDenial(msg.ID, fmt.Sprintf("tool %q requires a human co-sign on the mesh: %s", tool, dec.Reason))

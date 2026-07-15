@@ -34,6 +34,7 @@ Usage:
   meshmcp audit verify <file> [--checkpoints f] verify an audit log (hash chain; +signatures with --checkpoints)
   meshmcp audit keygen [--out f]                generate a gateway signing key for audit checkpoints
   meshmcp approve [flags] <peer-fqdn> <tool>    co-sign a require_cosign tool call for a peer
+  meshmcp secrets check --config <file>         validate the credential broker config (never prints values)
   meshmcp dash [flags]                          serve the mesh control dashboard over audit/trace logs
   meshmcp insight <profile|recommend|simulate|detect>  turn the audit stream into policy (the firewall's read side)
   meshmcp replay [flags] <trace> <peer:port>    replay a traced session against a backend and diff
@@ -84,6 +85,8 @@ func main() {
 		err = cmdAudit(os.Args[2:])
 	case "approve":
 		err = cmdApprove(os.Args[2:])
+	case "secrets":
+		err = cmdSecrets(os.Args[2:])
 	case "dash":
 		err = cmdDash(os.Args[2:])
 	case "insight":
