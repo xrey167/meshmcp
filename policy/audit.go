@@ -45,6 +45,27 @@ type AuditLog struct {
 
 	seq  int
 	prev string // hash of the last written record ("" before the genesis record)
+
+	cp       *Checkpointer // optional: signed Merkle checkpoints
+	lastSeq  int
+	lastHash string
+}
+
+// WithCheckpointer attaches a signed-checkpoint sink: the log periodically
+// emits an Ed25519-signed Merkle commitment over its records, making it
+// non-repudiable and externally verifiable. Call Flush before shutdown to seal
+// the final partial batch.
+func (a *AuditLog) WithCheckpointer(cp *Checkpointer) *AuditLog {
+	a.cp = cp
+	return a
+}
+
+// Flush seals any buffered records into a final checkpoint.
+func (a *AuditLog) Flush() {
+	a.mu.Lock()
+	cp, seq, hash := a.cp, a.lastSeq, a.lastHash
+	a.mu.Unlock()
+	cp.Flush(seq, hash)
 }
 
 // NewAuditLog writes records to w. now supplies timestamps; if nil, records
@@ -107,4 +128,9 @@ func (a *AuditLog) write(rec AuditRecord) {
 	a.prev = h
 	a.w.Write(b)
 	a.w.Write([]byte{'\n'})
+
+	a.lastSeq, a.lastHash = rec.Seq, h
+	if a.cp != nil {
+		a.cp.add(rec.Seq, h)
+	}
 }

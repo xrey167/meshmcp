@@ -23,6 +23,14 @@ backends:
     stdio: ["./cmd/mcpserver/mcpserver.exe"]
     resumable: true
     audit_log: ./agent-firewall-audit.jsonl
+    # Make the audit log non-repudiable: sign periodic Merkle checkpoints with a
+    # gateway key (generated on first run if missing). Verify later with
+    #   meshmcp audit verify ./agent-firewall-audit.jsonl \
+    #     --checkpoints ./agent-firewall-cps.jsonl --pubkey <public-key>
+    audit_checkpoints: ./agent-firewall-cps.jsonl
+    audit_signing_key: ./audit-signing-key.json
+    audit_checkpoint_every: 64
+    # audit_anchor: ./agent-firewall-anchor.jsonl   # external witness (optional)
     # Shared directory where human co-sign approvals land (see `meshmcp approve`).
     cosign_store: ./cosign
     cosign_ttl_seconds: 3600
@@ -55,6 +63,20 @@ backends:
           tools: ["deploy"]
           allow: true
           when: { days: ["mon", "tue", "wed", "thu", "fri"], hours: "09:00-17:00", tz: "UTC" }
+
+        # Data-flow labels: reading customer records tags the session "pii"...
+        - peers: ["*"]
+          tools: ["read_customer"]
+          allow: true
+          emit_labels: ["pii"]
+
+        # ...and any external-egress tool refuses to run once "pii" is present,
+        # so customer data can never leave the mesh through an agent — a control
+        # no LLM guardrail or ordinary firewall can express.
+        - peers: ["*"]
+          tools: ["post_external", "email_*"]
+          allow: true
+          block_labels: ["pii"]
 
         # Money movement always requires a human co-sign on the mesh:
         #   meshmcp approve --store ./cosign <peer-fqdn> transfer_funds

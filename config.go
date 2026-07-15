@@ -79,6 +79,19 @@ type Backend struct {
 	// sends audit records to stderr. The log is a tamper-evident hash chain
 	// (verify it with "meshmcp audit verify").
 	AuditLog string `yaml:"audit_log"`
+	// AuditCheckpoints is a file for signed Merkle checkpoints over the audit
+	// log, making it non-repudiable and externally verifiable. Requires a
+	// signing key (audit_signing_key). Verify with
+	// "meshmcp audit verify <log> --checkpoints <f> --pubkey <hex>".
+	AuditCheckpoints string `yaml:"audit_checkpoints"`
+	// AuditSigningKey is the gateway Ed25519 key file (created by
+	// "meshmcp audit keygen"). If it does not exist it is generated on start.
+	AuditSigningKey string `yaml:"audit_signing_key"`
+	// AuditCheckpointEvery is how many records per checkpoint (default 128).
+	AuditCheckpointEvery int `yaml:"audit_checkpoint_every"`
+	// AuditAnchor is an append-only file where each checkpoint is also written
+	// as an external witness (the transparency-log seam).
+	AuditAnchor string `yaml:"audit_anchor"`
 	// CosignStore is a shared directory holding human co-sign approvals for
 	// rules with require_cosign. A human identity grants approvals with
 	// "meshmcp approve". Only meaningful with a policy.
@@ -140,6 +153,12 @@ func loadConfig(path string) (*Config, error) {
 		}
 		if b.CosignStore != "" && b.Policy == nil {
 			return nil, fmt.Errorf("backend %q: cosign_store requires a policy", b.Name)
+		}
+		if b.AuditCheckpoints != "" && b.AuditSigningKey == "" {
+			return nil, fmt.Errorf("backend %q: audit_checkpoints requires audit_signing_key", b.Name)
+		}
+		if b.AuditCheckpoints != "" && b.Policy == nil {
+			return nil, fmt.Errorf("backend %q: audit_checkpoints requires a policy (nothing to audit otherwise)", b.Name)
 		}
 		if hasHTTP {
 			u, err := url.Parse(b.HTTP)

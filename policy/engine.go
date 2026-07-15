@@ -166,9 +166,10 @@ func NewEngine(pol *Policy, now func() time.Time, cosign CosignStore) *Engine {
 func (e *Engine) Policy() *Policy { return e.pol }
 
 // DecideToolCall authorizes a tools/call, applying rate limits, time windows,
-// co-sign, and taint. tainted is the session's current taint state. The
-// returned Decision's Outcome is allow, deny, or cosign.
-func (e *Engine) DecideToolCall(peerFQDN, peerKey, tool string, tainted bool) Decision {
+// co-sign, and data-flow labels. labels is the session's current label set
+// (nil is fine). The returned Decision's Outcome is allow, deny, or cosign,
+// and AddLabels lists labels the caller should add on an allowed call.
+func (e *Engine) DecideToolCall(peerFQDN, peerKey, tool string, labels map[string]bool) Decision {
 	now := e.now()
 	for i, r := range e.pol.Rules {
 		if len(r.Methods) > 0 {
@@ -186,9 +187,12 @@ func (e *Engine) DecideToolCall(peerFQDN, peerKey, tool string, tainted bool) De
 			return Decision{RuleID: i, Outcome: OutcomeDeny, Reason: "denied by rule"}
 		}
 		// Allow branch, refined by capability constraints.
-		if r.TaintGuard && tainted {
-			return Decision{RuleID: i, Outcome: OutcomeDeny,
-				Reason: "blocked: session tainted by untrusted data (prompt-injection guard)"}
+		if blocked := firstPresent(r.blockSet(), labels); blocked != "" {
+			reason := fmt.Sprintf("blocked: session carries label %q which this tool forbids", blocked)
+			if blocked == "tainted" {
+				reason = "blocked: session tainted by untrusted data (prompt-injection guard)"
+			}
+			return Decision{RuleID: i, Outcome: OutcomeDeny, Reason: reason}
 		}
 		if r.Rate != nil && !e.allowRate(i, peerKey, *r.Rate, now) {
 			return Decision{RuleID: i, Outcome: OutcomeDeny,
@@ -197,14 +201,24 @@ func (e *Engine) DecideToolCall(peerFQDN, peerKey, tool string, tainted bool) De
 		if r.RequireCosign {
 			if e.cosign != nil && e.cosign.Approved(CosignKey(peerFQDN, tool)) {
 				return Decision{Allow: true, RuleID: i, Outcome: OutcomeAllow,
-					Reason: "co-signed", SetTaint: r.TaintSource}
+					Reason: "co-signed", AddLabels: r.emitSet()}
 			}
 			return Decision{RuleID: i, Outcome: OutcomeCosign,
 				Reason: fmt.Sprintf("awaiting human co-sign for %q", tool)}
 		}
-		return Decision{Allow: true, RuleID: i, Outcome: OutcomeAllow, SetTaint: r.TaintSource}
+		return Decision{Allow: true, RuleID: i, Outcome: OutcomeAllow, AddLabels: r.emitSet()}
 	}
 	return Decision{Allow: e.pol.DefaultAllow, RuleID: -1, Outcome: outcomeOf(e.pol.DefaultAllow)}
+}
+
+// firstPresent returns the first label in want that is set in have, or "".
+func firstPresent(want []string, have map[string]bool) string {
+	for _, l := range want {
+		if have[l] {
+			return l
+		}
+	}
+	return ""
 }
 
 // allowRate consumes one token from the (rule, identity) bucket, refilling by

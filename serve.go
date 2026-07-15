@@ -76,6 +76,7 @@ func cmdServe(args []string) error {
 	shutdown := make(chan struct{})
 	var wg sync.WaitGroup
 	var listeners []net.Listener
+	var auditLogs []*policy.AuditLog
 	for _, b := range cfg.Backends {
 		ln, err := client.ListenTCP(fmt.Sprintf(":%d", b.Port))
 		if err != nil {
@@ -110,6 +111,9 @@ func cmdServe(args []string) error {
 				wg.Wait()
 				return err
 			}
+			if audit != nil {
+				auditLogs = append(auditLogs, audit)
+			}
 			factory = backendFactory(b, audit, tracer)
 		}
 
@@ -137,6 +141,11 @@ func cmdServe(args []string) error {
 		ln.Close()
 	}
 	wg.Wait()
+	// Seal the final partial checkpoint batch so no audit records are left
+	// uncommitted by a clean shutdown.
+	for _, a := range auditLogs {
+		a.Flush()
+	}
 	return nil
 }
 
@@ -308,7 +317,55 @@ func auditSink(b *Backend) (*policy.AuditLog, error) {
 		}
 		w = f
 	}
-	return policy.NewAuditLog(w, func() string { return time.Now().UTC().Format(time.RFC3339) }), nil
+	now := func() string { return time.Now().UTC().Format(time.RFC3339) }
+	audit := policy.NewAuditLog(w, now)
+
+	if b.AuditCheckpoints != "" {
+		cp, err := checkpointer(b, now)
+		if err != nil {
+			return nil, err
+		}
+		audit.WithCheckpointer(cp)
+	}
+	return audit, nil
+}
+
+// checkpointer builds a signed-checkpoint sink for a backend, loading or
+// generating the gateway signing key.
+func checkpointer(b *Backend, now func() string) (*policy.Checkpointer, error) {
+	if b.AuditSigningKey == "" {
+		return nil, fmt.Errorf("backend %q: audit_checkpoints requires audit_signing_key", b.Name)
+	}
+	var signer *policy.Signer
+	if _, err := os.Stat(b.AuditSigningKey); err == nil {
+		signer, err = policy.LoadSigner(b.AuditSigningKey)
+		if err != nil {
+			return nil, fmt.Errorf("backend %q: load signing key: %w", b.Name, err)
+		}
+	} else {
+		signer, err = policy.GenerateSigner()
+		if err != nil {
+			return nil, err
+		}
+		if err := signer.SaveSigner(b.AuditSigningKey); err != nil {
+			return nil, fmt.Errorf("backend %q: save signing key: %w", b.Name, err)
+		}
+		log.Printf("backend %q: generated audit signing key %s (public %s)", b.Name, b.AuditSigningKey, signer.PubKeyHex())
+	}
+
+	f, err := os.OpenFile(b.AuditCheckpoints, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("backend %q: open checkpoints %s: %w", b.Name, b.AuditCheckpoints, err)
+	}
+	var anchor policy.Anchor
+	if b.AuditAnchor != "" {
+		af, err := os.OpenFile(b.AuditAnchor, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			return nil, fmt.Errorf("backend %q: open anchor %s: %w", b.Name, b.AuditAnchor, err)
+		}
+		anchor = &policy.FileAnchor{W: af}
+	}
+	return policy.NewCheckpointer(signer, f, b.AuditCheckpointEvery, now, anchor), nil
 }
 
 func allowWord(allow bool) string {

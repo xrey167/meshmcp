@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://meshmcp.dev/spec/audit-record.schema.json",
+  "title": "meshmcp audit record",
+  "description": "One line of a meshmcp tamper-evident audit log (JSONL). See AUDIT-RECORD.md v0.1.",
+  "type": "object",
+  "required": ["time", "backend", "peer", "method", "decision", "rule", "seq", "prev_hash", "hash"],
+  "additionalProperties": false,
+  "properties": {
+    "time": { "type": "string", "description": "RFC 3339 timestamp (may be empty in test vectors)" },
+    "backend": { "type": "string" },
+    "peer": { "type": "string" },
+    "peer_key": { "type": "string" },
+    "peer_addr": { "type": "string" },
+    "method": { "type": "string" },
+    "tool": { "type": "string" },
+    "rpc_id": { "type": "string" },
+    "decision": { "type": "string", "enum": ["allow", "deny", "cosign"] },
+    "reason": { "type": "string" },
+    "rule": { "type": "integer" },
+    "seq": { "type": "integer", "minimum": 1 },
+    "prev_hash": { "type": "string", "pattern": "^([0-9a-f]{64})?$" },
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

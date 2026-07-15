@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"sync"
-	"sync/atomic"
 )
 
 // Caller identifies the mesh peer whose traffic a filter is enforcing.
@@ -29,7 +28,8 @@ type Filter struct {
 	tracer *Tracer
 	caller Caller
 
-	tainted atomic.Bool // set once an untrusted (taint_source) call is made
+	lmu    sync.Mutex      // guards labels
+	labels map[string]bool // data-flow labels accumulated this session
 
 	wbuf []byte // reassembly of the peer -> backend line stream
 
@@ -59,9 +59,36 @@ func NewFilter(inner io.ReadWriteCloser, caller Caller, pol *Policy, audit *Audi
 // buckets and the co-sign store.
 func NewFilterEngine(inner io.ReadWriteCloser, caller Caller, eng *Engine, audit *AuditLog, tracer *Tracer) *Filter {
 	r, w := io.Pipe()
-	f := &Filter{inner: inner, eng: eng, audit: audit, tracer: tracer, caller: caller, outR: r, outW: w}
+	f := &Filter{inner: inner, eng: eng, audit: audit, tracer: tracer, caller: caller,
+		labels: map[string]bool{}, outR: r, outW: w}
 	go f.pumpInner()
 	return f
+}
+
+// labelSnapshot copies the current session label set for a decision.
+func (f *Filter) labelSnapshot() map[string]bool {
+	f.lmu.Lock()
+	defer f.lmu.Unlock()
+	if len(f.labels) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(f.labels))
+	for k := range f.labels {
+		out[k] = true
+	}
+	return out
+}
+
+// addLabels records labels an allowed call contributed to the session.
+func (f *Filter) addLabels(ls []string) {
+	if len(ls) == 0 {
+		return
+	}
+	f.lmu.Lock()
+	defer f.lmu.Unlock()
+	for _, l := range ls {
+		f.labels[l] = true
+	}
 }
 
 // traceLine records one message if a tracer is configured.
@@ -169,18 +196,16 @@ func (f *Filter) handleLine(line []byte) error {
 
 func (f *Filter) handleToolCall(line []byte, msg rpcPeek) error {
 	tool := msg.Params.Name
-	dec := f.eng.DecideToolCall(f.caller.Peer, f.caller.PeerKey, tool, f.tainted.Load())
+	dec := f.eng.DecideToolCall(f.caller.Peer, f.caller.PeerKey, tool, f.labelSnapshot())
 	rec := f.record(msg.Method, tool, string(msg.ID), dec)
 	f.audit.write(rec)
 	f.traceLine("c2s", line, rec.Decision)
 
 	switch dec.Outcome {
 	case OutcomeAllow:
-		if dec.SetTaint {
-			// This call brings untrusted data into the session; every
-			// subsequent taint_guard tool is now blocked.
-			f.tainted.Store(true)
-		}
+		// This call may bring classified/untrusted data into the session;
+		// record its labels so downstream block_labels rules can act on them.
+		f.addLabels(dec.AddLabels)
 		_, werr := f.inner.Write(line)
 		return werr
 	case OutcomeCosign:

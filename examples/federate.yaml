@@ -1,0 +1,37 @@
+# Cross-org federation boundary. This org runs a boundary that exposes its
+# local MCP tools to *other* orgs' meshes — but only the tools each org is
+# granted, with every crossing identity-mapped and audited. Neither org opens
+# a public port; the boundary is itself a dark mesh service.
+#
+#   remote org's agent ──(their mesh ⇄ this mesh)──▶ boundary :9300 ──▶ local upstream
+#                          identity mapped to an org, granted tools only, audited
+mesh:
+  device_name: meshmcp-boundary
+  setup_key_env: NB_SETUP_KEY
+  config_path: ./boundary-gw.json
+  log_level: info
+
+# The mesh port remote-org peers connect to.
+port: 9300
+
+# The local MCP server (a mesh addr) whose tools we selectively expose.
+upstream: 100.64.0.10:9101
+
+# Tamper-evident log of every cross-org crossing (verify with `meshmcp audit verify`).
+audit: ./federation-audit.jsonl
+
+# Map a remote mesh identity to an org id, and the local principal to stamp.
+mappings:
+  - match: "pubkey:BASE64_WIREGUARD_KEY_OF_ACME_GATEWAY"
+    org: acme
+    principal: "partner:acme"
+  - match: "*.globex.netbird.cloud"
+    org: globex
+    principal: "partner:globex"
+
+# Which tools each org may call across the boundary (name globs).
+grants:
+  - org: acme
+    tools: ["read_*", "search"]
+  - org: globex
+    tools: ["add"]

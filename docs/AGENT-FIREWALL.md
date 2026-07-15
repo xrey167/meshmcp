@@ -51,6 +51,24 @@ fetch()      → allow  (taint_source) ──► session now tainted
 write_file() → DENY   "blocked: session tainted by untrusted data"
 ```
 
+### 1a. Data-flow labels (generalized taint)
+
+Taint is one bit; real data governance needs a lattice. A rule may
+`emit_labels` (e.g. `["pii"]`, `["secret"]`) that attach to the session, and
+`block_labels` that deny a call when the session carries them. `taint_source` /
+`taint_guard` are sugar for the `"tainted"` label. This expresses controls no
+LLM guardrail or ordinary firewall can — the canonical one being "PII may not
+leave the mesh":
+
+```yaml
+- { peers: ["*"], tools: ["read_customer"], allow: true, emit_labels: ["pii"] }
+- { peers: ["*"], tools: ["post_external"], allow: true, block_labels: ["pii"] }
+```
+
+Once `read_customer` runs, the session carries `pii` and `post_external` is
+refused — enforced from data-flow state the model cannot influence. Full
+grammar: [docs/spec/POLICY-DSL.md](spec/POLICY-DSL.md).
+
 ---
 
 ## 2. Tamper-evident audit (`policy/audit.go`, `policy/chain.go`)
@@ -75,6 +93,28 @@ meshmcp audit verify ./audit.jsonl
 spans restarts. This is the "show me every tool call agent X made against
 customer data last quarter, and prove the log wasn't edited" capability that
 regulated buyers are *required* to have and that a plain log cannot provide.
+
+### 2a. Signed + anchored checkpoints (non-repudiable)
+
+A hash chain is tamper-*evident* but an insider who controls the whole file can
+rewrite and re-link it. To close that, the gateway periodically emits an
+**Ed25519-signed Merkle checkpoint** over a batch of records
+(`policy/merkle.go`, `sign.go`, `checkpoint.go`):
+
+```bash
+meshmcp audit keygen --out audit-signing-key.json   # gateway signing key
+# config: audit_checkpoints + audit_signing_key + audit_checkpoint_every
+meshmcp audit verify audit.jsonl --checkpoints cps.jsonl --pubkey <key>
+# OK  1240 records, 10 signed checkpoint(s), 1240 records committed
+#     non-repudiable: the log is complete and unedited, provable with the public key alone
+```
+
+Because the Merkle root is *signed*, editing any covered record fails
+verification (`Merkle root mismatch`) and the attacker cannot re-sign without
+the private key — even with full write access to the file. Checkpoints
+optionally **anchor** to an external witness (`audit_anchor`), defending even
+against an insider who also holds the signing key. Full format:
+[docs/spec/AUDIT-RECORD.md](spec/AUDIT-RECORD.md).
 
 ---
 
@@ -146,9 +186,34 @@ meshmcp control --registry ./registry --policies ./policies \
                 --enroll-key <netbird-setup-key>
 ```
 
-The enroller is pluggable (`control.EnrollFunc`); the shipped `StaticEnroll` is
-the MVP backend — swap in one that mints a scoped, short-lived NetBird setup key
-per node via the management API for production key issuance.
+The enroller is pluggable (`control.EnrollFunc`). `StaticEnroll` hands out a
+fixed key; `NetBirdIssuer` (`control/netbird.go`) is the production backend — it
+calls the NetBird management API to mint a **one-off, ephemeral, group-scoped**
+setup key per node (auto-expiring, revocable) and writes every issuance to a
+tamper-evident enrollment audit trail. Turn it on with `--netbird-token`.
+
+---
+
+## 7. Cross-org federation (`meshmcp federate`, `federation/`)
+
+The network-effects layer: a **boundary** bridges named tools between two
+independent meshes/orgs. Neither side exposes a public port. The boundary
+(`federation/boundary.go`) maps a remote caller's cryptographic mesh identity to
+a known **org**, admits only the tools that org is **granted**, stamps each
+relayed call with the org's local **principal**, and **audits every crossing**
+into a hash-chained log:
+
+```yaml
+mappings:
+  - { match: "pubkey:<acme-gw-key>", org: acme, principal: "partner:acme" }
+grants:
+  - { org: acme, tools: ["read_*", "search"] }
+```
+
+An unrecognized caller maps to no org and sees nothing; an org may call only its
+granted tools; every crossing is identity-attributed and recorded. This is
+agent-to-agent B2B where each org you connect raises the switching cost for all
+the others — worth starting small because it compounds.
 
 ---
 

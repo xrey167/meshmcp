@@ -7,8 +7,10 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"meshmcp/control"
+	"meshmcp/policy"
 	"meshmcp/registry"
 )
 
@@ -23,8 +25,13 @@ func cmdControl(args []string) error {
 	addr := fs.String("addr", "", "bind a plain local address instead of the mesh (dev/testing)")
 	regDir := fs.String("registry", "", "service registry directory (enables /v1/registry)")
 	polDir := fs.String("policies", "", "policy directory (enables /v1/policy)")
-	enrollKey := fs.String("enroll-key", "", "setup key handed to enrolling nodes ($NB_ENROLL_KEY)")
+	enrollKey := fs.String("enroll-key", "", "static setup key handed to enrolling nodes ($NB_ENROLL_KEY)")
 	enrollMgmt := fs.String("enroll-management-url", "", "management URL handed to enrolling nodes")
+	nbToken := fs.String("netbird-token", "", "NetBird PAT to mint per-node one-off keys ($NB_API_TOKEN)")
+	nbAPI := fs.String("netbird-api", "https://api.netbird.io", "NetBird management API base URL")
+	nbGroups := fs.String("enroll-groups", "", "comma-separated NetBird groups to place enrolled nodes in")
+	nbTTL := fs.Duration("enroll-ttl", 24*time.Hour, "issued key expiry")
+	enrollAudit := fs.String("enroll-audit", "", "tamper-evident enrollment audit log (JSONL)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -44,16 +51,54 @@ func cmdControl(args []string) error {
 		}
 		srv.Policies = ps
 	}
-	key := *enrollKey
-	if key == "" {
-		key = os.Getenv("NB_ENROLL_KEY")
+	// Enrollment: prefer real NetBird key issuance (per-node one-off keys) when
+	// a PAT is available; fall back to a static key otherwise.
+	token := *nbToken
+	if token == "" {
+		token = os.Getenv("NB_API_TOKEN")
 	}
-	if key != "" {
+	if token != "" {
+		var enrollLog *policy.AuditLog
+		if *enrollAudit != "" {
+			f, err := os.OpenFile(*enrollAudit, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+			if err != nil {
+				return fmt.Errorf("open enroll audit %s: %w", *enrollAudit, err)
+			}
+			defer f.Close()
+			enrollLog = policy.NewAuditLog(f, func() string { return time.Now().UTC().Format(time.RFC3339) })
+		}
+		var groups []string
+		if *nbGroups != "" {
+			groups = strings.Split(*nbGroups, ",")
+		}
 		mgmt := *enrollMgmt
 		if mgmt == "" {
 			mgmt = o.ManagementURL
 		}
-		srv.Enroll = control.StaticEnroll(mgmt, key, *regDir, o.DeviceName)
+		srv.Enroll = (&control.NetBirdIssuer{
+			APIURL:        *nbAPI,
+			ManagementURL: mgmt,
+			Token:         token,
+			Groups:        groups,
+			TTL:           *nbTTL,
+			RegistryDir:   *regDir,
+			ControlNode:   o.DeviceName,
+			Audit:         enrollLog,
+		}).Enroll
+		log.Printf("enrollment: NetBird key issuance via %s (per-node one-off keys)", *nbAPI)
+	} else {
+		key := *enrollKey
+		if key == "" {
+			key = os.Getenv("NB_ENROLL_KEY")
+		}
+		if key != "" {
+			mgmt := *enrollMgmt
+			if mgmt == "" {
+				mgmt = o.ManagementURL
+			}
+			srv.Enroll = control.StaticEnroll(mgmt, key, *regDir, o.DeviceName)
+			log.Printf("enrollment: static key (set --netbird-token for per-node key issuance)")
+		}
 	}
 
 	handler := srv.Handler()

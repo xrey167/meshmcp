@@ -40,11 +40,11 @@ func (o Outcome) String() string {
 // boolean fast-path used by the simple Policy.Decide callers; Outcome carries
 // the richer verdict (including co-sign) produced by the Engine.
 type Decision struct {
-	Allow    bool
-	RuleID   int     // index of the matching rule, or -1 for the default
-	Outcome  Outcome // allow | deny | cosign
-	Reason   string  // human-readable why (for audit + the denial message)
-	SetTaint bool    // the caller should mark the session tainted after this allowed call
+	Allow     bool
+	RuleID    int      // index of the matching rule, or -1 for the default
+	Outcome   Outcome  // allow | deny | cosign
+	Reason    string   // human-readable why (for audit + the denial message)
+	AddLabels []string // data-flow labels this allowed call adds to the session
 }
 
 // Rule authorizes (or denies) a set of tools OR a set of JSON-RPC methods
@@ -74,11 +74,41 @@ type Rule struct {
 	RequireCosign bool `yaml:"require_cosign"`
 	// TaintSource marks a matching call as producing untrusted data: once made,
 	// the session is tainted (e.g. a tool that fetches arbitrary web content).
+	// Sugar for emit_labels: ["tainted"].
 	TaintSource bool `yaml:"taint_source"`
 	// TaintGuard blocks a matching call whenever the session is tainted. This
 	// is prompt-injection defense at the network layer: a privileged tool
 	// simply will not be routed after untrusted data entered the session.
+	// Sugar for block_labels: ["tainted"].
 	TaintGuard bool `yaml:"taint_guard"`
+
+	// EmitLabels are data-flow classification labels this call adds to the
+	// session (e.g. ["pii"], ["secret"]). Labels model where sensitive data
+	// has flowed, generalizing taint from one bit to a lattice.
+	EmitLabels []string `yaml:"emit_labels"`
+	// BlockLabels deny a matching call if the session already carries any of
+	// these labels — e.g. an external-egress tool with block_labels: ["pii"]
+	// enforces "no PII may leave the mesh", which no LLM guardrail or ordinary
+	// firewall can express.
+	BlockLabels []string `yaml:"block_labels"`
+}
+
+// emitSet is the effective set of labels this rule adds (including taint sugar).
+func (r Rule) emitSet() []string {
+	out := append([]string(nil), r.EmitLabels...)
+	if r.TaintSource {
+		out = append(out, "tainted")
+	}
+	return out
+}
+
+// blockSet is the effective set of labels that block this rule (incl. sugar).
+func (r Rule) blockSet() []string {
+	out := append([]string(nil), r.BlockLabels...)
+	if r.TaintGuard {
+		out = append(out, "tainted")
+	}
+	return out
 }
 
 // Policy is an ordered list of rules with a default decision.

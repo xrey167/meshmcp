@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://meshmcp.dev/spec/policy.schema.json",
+  "title": "meshmcp policy",
+  "description": "A meshmcp capability policy. See POLICY-DSL.md v0.1.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "default_allow": { "type": "boolean", "default": false },
+    "rules": { "type": "array", "items": { "$ref": "#/$defs/rule" } }
+  },
+  "$defs": {
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "peers": { "type": "array", "items": { "type": "string" } },
+        "tools": { "type": "array", "items": { "type": "string" } },
+        "methods": { "type": "array", "items": { "type": "string" } },
+        "allow": { "type": "boolean" },
+        "rate": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["max"],
+          "properties": {
+            "max": { "type": "integer", "minimum": 0 },
+            "per": { "type": "string", "description": "Go duration, e.g. \"1m\"; empty = 1s" }
+          }
+        },
+        "when": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "days": { "type": "array", "items": { "type": "string", "enum": ["mon","tue","wed","thu","fri","sat","sun"] } },
+            "hours": { "type": "string", "pattern": "^\\d{1,2}:\\d{2}-\\d{1,2}:\\d{2}$" },
+            "tz": { "type": "string" }
+          }
+        },
+        "require_cosign": { "type": "boolean" },
+        "taint_source": { "type": "boolean" },
+        "taint_guard": { "type": "boolean" },
+        "emit_labels": { "type": "array", "items": { "type": "string" } },
+        "block_labels": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}
