@@ -1,157 +1,234 @@
 <div align="center">
 
-# meshmcp
+# 🕸️ meshmcp
 
-**A private, identity-native mesh for MCP servers.**
+### The identity-native control plane for agent-to-tool traffic
 
-Expose any [Model Context Protocol](https://modelcontextprotocol.io) server as a *dark service* —
-reachable only over a WireGuard mesh, with **zero open ports**, cryptographic per-caller
-identity, sessions that survive roaming *and* gateway failover, an **agent firewall**
-(rate limits, time windows, taint tracking, human co-sign), a **tamper-evident audit log**,
-and a self-healing router that unions many servers into one endpoint.
+Expose any [Model Context Protocol](https://modelcontextprotocol.io) server as a **dark service** —
+reachable only over a private WireGuard mesh, with **zero open ports**, a cryptographic identity for
+every caller, an **agent firewall** that enforces what each agent may do, and a **non-repudiable audit
+log** that proves what it did.
 
-`Go` · embedded [NetBird](https://netbird.io) WireGuard · stdio + Streamable-HTTP · `go test -race` green across 6 packages
+<br>
+
+![Go 1.26](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white)
+![MCP 2025-06-18](https://img.shields.io/badge/MCP-2025--06--18-6E56CF)
+![transport WireGuard](https://img.shields.io/badge/transport-WireGuard%20·%20NetBird-88171A?logo=wireguard&logoColor=white)
+![open ports 0](https://img.shields.io/badge/open%20ports-0-2EA043)
+![go test -race](https://img.shields.io/badge/go%20test%20--race-green%20·%209%20pkgs-2EA043)
+
+<sub>userspace WireGuard, no TUN, no admin rights · stdio + Streamable-HTTP · one static binary</sub>
 
 </div>
 
 ---
 
-## Why
-
-An MCP server is usually a local stdio process or an open HTTP port. Sharing one securely across
-machines means a VPN, a reverse proxy, auth, and hoping the connection holds. meshmcp collapses
-that into one idea: **connectivity, identity, and policy as a library**, wrapped around any MCP
-server you already have.
+An MCP server is normally a local stdio process or an open HTTP port. Sharing one securely across
+machines means a VPN, a reverse proxy, an auth layer, an audit pipeline, and hoping the connection
+holds. **meshmcp collapses all of that into one library** wrapped around any MCP server you already
+have — connectivity, identity, policy, and proof, as five composable layers:
 
 ```
-                         ┌──────────── NetBird mesh — one flat, encrypted overlay ────────────┐
-                         │                                                                    │
-   CLI / agent / IDE     │   meshmcp router :9100  ── unions ──▶  fs :9101   (stdio)          │
-   meshmcp call ─────────┼──▶  (LB · failover ·             ├──▶  fetch :9102 (stdio)          │
-   meshmcp connect       │      discovery · bidi MCP)        └──▶  demo :9104 ──┐              │
-        (over mesh)      │                                                       │ server→server│
-                         │   every call: authorized by WireGuard identity,       ▼ (orchestrator│
-                         │   audited + traced, session survives failover     calls fetch + fs)  │
-                         └────────────────────────────────────────────────────────────────────┘
-             No public ports anywhere · nmap from the internet finds nothing
+        clients / agents / IDEs  ──  meshmcp call · connect · your MCP client
+                    │
+        ════════════▼════════════  WireGuard mesh · no public ports · nmap finds nothing
+        │                        │
+        │  UNDERSTAND   insight   │   policy from behavior: profile · recommend · simulate · detect
+        │  PROVE        audit     │   Ed25519-signed, hash-chained log · dashboard · replay
+        │  ENFORCE      firewall  │   policy engine: rate · window · taint · data-flow labels · co-sign
+        │  CONNECT      mesh       │   cryptographic identity · resumable + migratable sessions
+        │                        │
+        ════════════▼════════════
+        any MCP server (stdio or HTTP), unmodified   ·   fs · fetch · db · your tools
 ```
 
-## What you get
+Scale it out with an aggregating **router**, a managed **control plane**, and cross-org **federation**.
+
+---
+
+## Why it's different
+
+Every other "MCP gateway" trusts a header or a token the caller sends. meshmcp keys everything —
+policy, audit, routing — off the **WireGuard key the transport cryptographically proves**. That one
+choice is the moat: a caller can't forge an identity it doesn't hold the private key for, so the
+firewall can't be talked past and the audit can't be repudiated.
 
 | | |
 |---|---|
-| **Zero exposure** | Backends listen only on the mesh interface (userspace WireGuard, no TUN, no admin). |
-| **Cryptographic identity** | Every request resolves to the caller's WireGuard public key + mesh FQDN — the basis for policy and audit. |
-| **Resumable + migratable sessions** | Exactly-once, in-order delivery with a bounded, flow-controlled buffer; survives client roaming *and* a gateway crash (shared durable store + ownership lease). |
-| **The agent firewall** | Policy-as-code by identity: allow/deny per tool + method, **rate limits**, **time windows**, **human co-sign** for privileged calls, and **taint tracking** that blocks a privileged tool once untrusted data enters the session — prompt-injection defense at the network layer. |
-| **Non-repudiable audit** | Every decision is a hash-chained audit record, sealed by periodic **Ed25519-signed Merkle checkpoints**; `meshmcp audit verify` proves the log is complete and unedited with the public key alone — even an insider with file-write access can't forge it. Plus an optional both-directions trace. |
-| **Data-flow labels** | Tool results carry classification labels (`pii`, `secret`, `tainted`); policy governs *flows* — e.g. "no PII may reach an external tool" — which no LLM guardrail or ordinary firewall can express. |
-| **Cross-org federation** | A boundary bridges named tools between two meshes: per-org tool grants, identity mapping, every crossing stamped and audited — agent-to-agent B2B with no public endpoint on either side. |
-| **See it & re-run it** | `meshmcp dash` renders the live identity→tool call graph, policy hits, and chain verdict; `meshmcp replay` re-issues a recorded session against a backend and diffs every response (fork at message N). |
-| **Policy from behavior** | `meshmcp insight` is the firewall's read side: it profiles what agents actually do, **recommends a least-privilege policy**, **simulates** a candidate policy against recorded traffic (a CI gate — exit non-zero on regressions), and **detects** deviation from a learned baseline, routing anomalies to co-sign. Turns "write a deny-by-default policy from scratch" into "review a generated one". |
-| **Managed control plane** | `meshmcp control` serves node enrollment, the service registry, and policy distribution as one mesh peer — adopt the mesh without hand-wiring every node. |
-| **Aggregating tool mesh** | One namespaced endpoint over N servers, with replica load-balancing, health-based failover, a discovery registry, and full bidirectional MCP (sampling/elicitation relay). |
-| **stdio + HTTP backends** | Wrap any stdio MCP server, or reverse-proxy a Streamable-HTTP one. |
-| **A real CLI** | `ls / call / read / prompt` drive tools, resources, and prompts from a terminal. |
+| 🔒 **Zero exposure** | Backends listen only on the mesh interface. No public port to scan, phish, or DDoS. |
+| 🪪 **Cryptographic identity** | Every request resolves to the caller's WireGuard public key + mesh FQDN — the root of policy and audit, not a claim. |
+| 🔁 **Sessions that survive** | Exactly-once, in-order delivery over a bounded, flow-controlled buffer; survives client roaming **and** a gateway crash (shared store + ownership lease). |
+| 🧱 **The agent firewall** | Allow/deny per tool & method by identity, **rate limits**, **time windows**, **human co-sign**, and **data-flow labels** — enforced where no jailbreak can reach it. |
+| 🧾 **Non-repudiable audit** | Every decision is a hash-chained record sealed by **Ed25519-signed Merkle checkpoints** — provable complete-and-unedited with the public key alone. |
+| 🧠 **Policy from behavior** | `insight` profiles what agents actually do, **generates** a least-privilege policy, **simulates** changes against real traffic (CI gate), and **detects** drift. |
+| 🌐 **Scale & federate** | Aggregating router (LB · failover · discovery · bidirectional MCP), a managed control plane, and identity-mapped cross-org federation. |
 
-## Install
+---
+
+## Quick start — 60 seconds
 
 ```bash
 go build -o meshmcp .
-go build -o cmd/mcpserver/mcpserver ./cmd/mcpserver   # a full demo MCP server
+go build -o cmd/mcpserver/mcpserver.exe ./cmd/mcpserver   # the demo MCP server the config runs
+
+export NB_SETUP_KEY=<key from app.netbird.io → Setup Keys>
+
+# Serve a demo MCP server on the mesh — prints its mesh IP (e.g. 100.x.y.z)
+meshmcp serve --config examples/demo-backends.yaml
 ```
 
-## Quick start
-
-Create a setup key at [app.netbird.io](https://app.netbird.io) → Setup Keys (or use your own
-self-hosted NetBird server), then:
+From **any other machine on the mesh** — nothing is exposed to the internet:
 
 ```bash
-export NB_SETUP_KEY=<your-setup-key>
-
-# Serve a demo MCP server on the mesh (prints its mesh IP, e.g. 100.x.y.z)
-meshmcp serve --config examples/demo-backends.yaml
-
-# From any other machine on the mesh:
-meshmcp ls   100.x.y.z:9101                       # list tools / resources / prompts
+meshmcp ls   100.x.y.z:9101                        # list tools / resources / prompts
 meshmcp call 100.x.y.z:9101 add --arg a=2 --arg b=40
 ```
 
-To use a mesh MCP server from Claude Code or any MCP client, add a stdio bridge:
+Wire a mesh MCP server into Claude Code (or any MCP client) with a stdio bridge:
 
 ```jsonc
 { "mcpServers": {
-    "home-tools": {
-      "command": "meshmcp",
-      "args": ["connect", "--resumable", "100.x.y.z:9101"],
-      "env": { "NB_SETUP_KEY": "<setup-key>" }
+  "home-tools": {
+    "command": "meshmcp",
+    "args": ["connect", "--resumable", "100.x.y.z:9101"],
+    "env": { "NB_SETUP_KEY": "<setup-key>" }
 } } }
 ```
 
+---
+
+## The agent firewall, in one glance
+
+Policy is declarative and keyed off cryptographic identity. This is the whole language:
+
+```yaml
+policy:
+  default_allow: false                     # deny by default
+  rules:
+    - peers: ["*"]                          # rate-limited read access for everyone
+      tools: ["read_*", "search"]
+      allow: true
+      rate: { max: 30, per: "1m" }
+
+    - peers: ["pubkey:<agent-key>"]         # deploys only in business hours, one identity
+      tools: ["deploy"]
+      allow: true
+      when: { days: [mon,tue,wed,thu,fri], hours: "09:00-17:00", tz: "UTC" }
+
+    - peers: ["*"]                          # fetch brings untrusted data in …
+      tools: ["fetch"]
+      allow: true
+      taint_source: true
+    - peers: ["*"]                          # … so writes are blocked once tainted
+      tools: ["write_file"]                 #    (prompt-injection defense, network-layer)
+      allow: true
+      taint_guard: true
+
+    - peers: ["*"]                          # PII may never reach an egress tool
+      tools: ["read_customer"]
+      allow: true
+      emit_labels: ["pii"]
+    - peers: ["*"]
+      tools: ["post_external"]
+      allow: true
+      block_labels: ["pii"]
+
+    - peers: ["*"]                          # money movement needs a human co-sign
+      tools: ["transfer_funds"]
+      allow: true
+      require_cosign: true
+```
+
+A denied call gets an inline JSON-RPC error; a `require_cosign` call is held until a human approves it
+(`meshmcp approve …`). Don't want to write this by hand? **Generate it from real traffic:**
+
+```bash
+meshmcp insight recommend audit.jsonl > policy.yaml     # least-privilege policy from behavior
+meshmcp insight simulate  audit.jsonl --policy policy.yaml   # CI gate: exit ≠ 0 on regressions
+```
+
+---
+
+## Prove what happened
+
+The audit log is a tamper-evident hash chain, sealed by signed Merkle checkpoints:
+
+```console
+$ meshmcp audit verify audit.jsonl --checkpoints cps.jsonl --pubkey <key>
+OK  1240 records, 10 signed checkpoint(s), 1240 records committed
+    non-repudiable: the log is complete and unedited, provable with the public key alone
+```
+
+Edit a single record — even re-linking the whole chain — and verification fails at the exact
+sequence number. An insider with write access to the file still can't forge it without the key.
+Watch it live with `meshmcp dash --audit audit.jsonl`; re-run a past session with `meshmcp replay`.
+
+---
+
 ## Commands
 
-| Command | Purpose |
+| Command | What it does |
 |---|---|
-| `meshmcp serve --config <f>` | Join the mesh; expose configured backends on mesh ports. |
-| `meshmcp router --config <f>` | Aggregate upstreams into one namespaced endpoint (LB, failover, discovery). |
-| `meshmcp orchestrate --config <f>` | Serve a tool that calls another server's tools over the mesh. |
-| `meshmcp control --registry <d> --policies <d>` | Managed control plane: node enrollment (real NetBird key issuance), service registry, policy distribution. |
-| `meshmcp federate --config <f>` | Cross-org federation boundary: bridge granted tools between meshes, identity-mapped and audited. |
-| `meshmcp connect [flags] <peer:port>` | Stdio ⇄ remote stdio bridge (for MCP client configs); `--resumable`. |
-| `meshmcp forward [flags] <local> <peer:port>` | Forward a local TCP port to a mesh peer (for HTTP backends). |
-| `meshmcp ls / call / read / prompt <peer:port> …` | Drive tools / resources / prompts from the CLI. |
-| `meshmcp approve --store <d> <peer> <tool>` | Human co-sign a held `require_cosign` tool call. |
-| `meshmcp audit verify <file> [--checkpoints f --pubkey k]` | Verify an audit log: hash chain, or signatures + Merkle with `--checkpoints`. |
-| `meshmcp audit keygen [--out f]` | Generate a gateway Ed25519 key for signing audit checkpoints. |
-| `meshmcp dash --audit <file>` | Serve the live control dashboard over the audit log. |
-| `meshmcp insight profile\|recommend\|simulate\|detect` | Turn the audit stream into policy: profile behavior, recommend least-privilege policy, simulate a change (CI gate), detect drift. |
-| `meshmcp replay [--fork N] <trace> <peer:port>` | Re-issue a traced session against a backend and diff responses. |
-| `meshmcp probe [--full\|--task] <peer:port>` | In-process MCP handshake diagnostic. |
+| `serve --config <f>` | Join the mesh; expose configured backends on mesh ports. |
+| `router --config <f>` | Aggregate upstreams into one namespaced endpoint (LB · failover · discovery · bidi MCP). |
+| `orchestrate --config <f>` | Serve a tool that calls other servers' tools over the mesh. |
+| `control [flags]` | Managed control plane: node enrollment (NetBird key issuance), registry, policy distribution. |
+| `federate --config <f>` | Cross-org boundary: bridge granted tools between meshes, identity-mapped & audited. |
+| `connect [flags] <peer:port>` | Stdio ⇄ remote stdio bridge for MCP client configs (`--resumable`). |
+| `forward <local> <peer:port>` | Forward a local TCP port to a mesh peer (for HTTP backends). |
+| `ls · call · read · prompt <peer:port>` | Drive tools / resources / prompts from the terminal. |
+| `insight profile·recommend·simulate·detect` | Turn the audit stream into policy; detect drift. |
+| `audit verify <f> [--checkpoints --pubkey]` | Verify a log: hash chain, or signatures + Merkle. |
+| `audit keygen [--out f]` | Generate a gateway Ed25519 signing key. |
+| `approve --store <d> <peer> <tool>` | Human co-sign a held `require_cosign` call. |
+| `dash --audit <f>` | Serve the live control dashboard. |
+| `replay [--fork N] <trace> <peer:port>` | Re-issue a traced session and diff every response. |
+| `probe [--full\|--task] <peer:port>` | In-process MCP handshake diagnostic. |
 
-Shared mesh flags: `--setup-key` (`$NB_SETUP_KEY`), `--management-url`, `--device-name`,
-`--nb-config` (persist identity), `--wg-port`.
+<sub>Shared mesh flags: `--setup-key` (`$NB_SETUP_KEY`) · `--management-url` · `--device-name` · `--nb-config` · `--wg-port`</sub>
 
-## Layout
+---
+
+## Design invariants
+
+1. **No open ports, ever** — backends listen only on the mesh interface.
+2. **Identity is cryptographic, never claimed** — authz keys off the WireGuard key the transport proves, not a header the caller sends.
+3. **Deny is the safe default** — policies are allowlists; an unopenable audit sink is a hard error.
+4. **Pure transport where possible** — the gateway parses MCP only to authorize; any MCP server runs unmodified.
+
+---
+
+## Project layout
 
 ```
-session/    resumable + migratable session layer (Mars-STN-style reliability, store, lease, flock)
-policy/     the agent firewall (enforce): policy engine (rate/window/taint/labels/co-sign), signed tamper-evident audit, trace, analyze, replay
-insight/    the firewall's read side (understand): profile behavior, recommend policy, simulate (CI gate), detect drift
-control/    managed control plane: enrollment (NetBird key issuance), registry, policy distribution
-federation/ cross-org boundary: per-org tool grants, identity mapping, audited crossings
-mcp/        dependency-free MCP server framework (tools, resources, prompts, tasks, HTTP)
-mcpclient/  MCP client over any transport (used by the router, orchestrator, CLI)
-registry/   file-based discovery registry
-cmd/        mcpserver (demo), mcpecho, mcphttp (HTTP demo)
-*.go        the meshmcp binary: serve / router / orchestrate / control / connect / forward / probe / audit / dash / replay / approve / CLI
-examples/   ready-to-adapt configs (see examples/README.md)
-docs/       reference, agent-firewall design, HA / tool-mesh design, vision, and network plan
+session/     resumable + migratable session layer (Mars-STN-style reliability · store · lease · flock)
+policy/      the agent firewall (enforce): policy engine, signed tamper-evident audit, trace, replay
+insight/     the firewall's read side (understand): profile · recommend · simulate · detect
+control/     managed control plane: enrollment (NetBird key issuance) · registry · policy distribution
+federation/  cross-org boundary: per-org tool grants · identity mapping · audited crossings
+mcp/         dependency-free MCP server framework (tools · resources · prompts · tasks · HTTP)
+mcpclient/   MCP client over any transport (used by the router, orchestrator, CLI)
+registry/    file-based discovery registry
+cmd/         mcpserver (demo) · mcpecho · mcphttp
+*.go         the meshmcp binary: serve · router · orchestrate · control · federate · insight · … · CLI
+examples/    ready-to-adapt configs        docs/  design docs + open specs
 ```
 
-## Docs & examples
+## Docs & specs
 
-- **[examples/](examples/)** — annotated configs for every scenario (`agent-firewall.yaml` for the policy engine).
-- **[docs/AGENT-FIREWALL.md](docs/AGENT-FIREWALL.md)** — the policy engine, tamper-evident audit, dashboard, replay, and control plane.
+- **[examples/](examples/)** — annotated configs for every scenario (start with `agent-firewall.yaml`).
+- **[docs/AGENT-FIREWALL.md](docs/AGENT-FIREWALL.md)** — the policy engine, signed audit, dashboard, replay, control plane, federation.
 - **[docs/INSIGHT.md](docs/INSIGHT.md)** — the firewall's read side: observe → recommend → simulate → detect.
-- **[docs/spec/](docs/spec/)** — open specs: the [audit-record format](docs/spec/AUDIT-RECORD.md) (hash chain + signed checkpoints) and the [policy DSL](docs/spec/POLICY-DSL.md), with JSON Schemas.
-- **[docs/reference.md](docs/reference.md)** — the complete feature reference.
-- **[docs/HA-TOOLMESH.md](docs/HA-TOOLMESH.md)** — session migration, lease, failover, bidirectional MCP.
-- **[docs/VISION.md](docs/VISION.md)** — the layered architecture and where it's headed.
-- **[docs/NETWORK-PLAN.md](docs/NETWORK-PLAN.md)** — the full-network build plan.
+- **[docs/spec/](docs/spec/)** — open specs: the [audit-record format](docs/spec/AUDIT-RECORD.md) and the [policy DSL](docs/spec/POLICY-DSL.md), each with a JSON Schema.
+- **[docs/HA-TOOLMESH.md](docs/HA-TOOLMESH.md)** · **[docs/reference.md](docs/reference.md)** · **[docs/VISION.md](docs/VISION.md)** — HA design, full reference, roadmap.
 
-## Develop
+## Build & test
 
 ```bash
 go build ./... && go vet ./... && go test ./... -race
 ```
 
-## Design invariants
-
-1. **No open ports, ever** — backends listen only on the mesh interface.
-2. **Identity is cryptographic, never claimed** — authz keys off the WireGuard key the transport proves, not headers the caller sends.
-3. **Deny is the safe default** — policies are allowlists; an unopenable audit sink is a hard error.
-4. **Pure transport where possible** — the gateway parses MCP only to authorize; any MCP server works unmodified.
-
----
-
-<div align="center"><sub>Built on the reliability idea behind Tencent Mars STN, the embedding pattern from caddy-netbird, and NetBird's userspace WireGuard.</sub></div>
+<div align="center">
+<br>
+<sub>Built on the reliability idea behind Tencent Mars STN, the embedding pattern from caddy-netbird, and NetBird's userspace WireGuard.</sub>
+</div>
