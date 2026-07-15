@@ -55,6 +55,12 @@ meshmcp audit verify ./agent-firewall-audit.jsonl \
 # Replay a recorded session against a backend and diff every response
 meshmcp replay ./trace.jsonl 100.x.y.z:9110 --fork 5
 
+# Turn the audit stream into policy (the firewall's read side)
+meshmcp insight profile   ./agent-firewall-audit.jsonl              # what agents actually do
+meshmcp insight recommend ./agent-firewall-audit.jsonl > policy.yaml # least-privilege policy
+meshmcp insight simulate  ./agent-firewall-audit.jsonl --policy policy.yaml  # CI gate (exit≠0 on regressions)
+meshmcp insight detect    ./today.jsonl --baseline ./last-week.jsonl # drift → open a co-sign
+
 # Run the managed control plane (enrollment, registry, policy distribution)
 meshmcp control --registry ./registry --policies ./policies --enroll-key <key>
 ```

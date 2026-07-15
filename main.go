@@ -35,6 +35,7 @@ Usage:
   meshmcp audit keygen [--out f]                generate a gateway signing key for audit checkpoints
   meshmcp approve [flags] <peer-fqdn> <tool>    co-sign a require_cosign tool call for a peer
   meshmcp dash [flags]                          serve the mesh control dashboard over audit/trace logs
+  meshmcp insight <profile|recommend|simulate|detect>  turn the audit stream into policy (the firewall's read side)
   meshmcp replay [flags] <trace> <peer:port>    replay a traced session against a backend and diff
   meshmcp version
 
@@ -85,6 +86,8 @@ func main() {
 		err = cmdApprove(os.Args[2:])
 	case "dash":
 		err = cmdDash(os.Args[2:])
+	case "insight":
+		err = cmdInsight(os.Args[2:])
 	case "replay":
 		err = cmdReplay(os.Args[2:])
 	case "version":

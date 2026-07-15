@@ -48,6 +48,7 @@ server you already have.
 | **Data-flow labels** | Tool results carry classification labels (`pii`, `secret`, `tainted`); policy governs *flows* — e.g. "no PII may reach an external tool" — which no LLM guardrail or ordinary firewall can express. |
 | **Cross-org federation** | A boundary bridges named tools between two meshes: per-org tool grants, identity mapping, every crossing stamped and audited — agent-to-agent B2B with no public endpoint on either side. |
 | **See it & re-run it** | `meshmcp dash` renders the live identity→tool call graph, policy hits, and chain verdict; `meshmcp replay` re-issues a recorded session against a backend and diffs every response (fork at message N). |
+| **Policy from behavior** | `meshmcp insight` is the firewall's read side: it profiles what agents actually do, **recommends a least-privilege policy**, **simulates** a candidate policy against recorded traffic (a CI gate — exit non-zero on regressions), and **detects** deviation from a learned baseline, routing anomalies to co-sign. Turns "write a deny-by-default policy from scratch" into "review a generated one". |
 | **Managed control plane** | `meshmcp control` serves node enrollment, the service registry, and policy distribution as one mesh peer — adopt the mesh without hand-wiring every node. |
 | **Aggregating tool mesh** | One namespaced endpoint over N servers, with replica load-balancing, health-based failover, a discovery registry, and full bidirectional MCP (sampling/elicitation relay). |
 | **stdio + HTTP backends** | Wrap any stdio MCP server, or reverse-proxy a Streamable-HTTP one. |
@@ -103,6 +104,7 @@ To use a mesh MCP server from Claude Code or any MCP client, add a stdio bridge:
 | `meshmcp audit verify <file> [--checkpoints f --pubkey k]` | Verify an audit log: hash chain, or signatures + Merkle with `--checkpoints`. |
 | `meshmcp audit keygen [--out f]` | Generate a gateway Ed25519 key for signing audit checkpoints. |
 | `meshmcp dash --audit <file>` | Serve the live control dashboard over the audit log. |
+| `meshmcp insight profile\|recommend\|simulate\|detect` | Turn the audit stream into policy: profile behavior, recommend least-privilege policy, simulate a change (CI gate), detect drift. |
 | `meshmcp replay [--fork N] <trace> <peer:port>` | Re-issue a traced session against a backend and diff responses. |
 | `meshmcp probe [--full\|--task] <peer:port>` | In-process MCP handshake diagnostic. |
 
@@ -113,7 +115,8 @@ Shared mesh flags: `--setup-key` (`$NB_SETUP_KEY`), `--management-url`, `--devic
 
 ```
 session/    resumable + migratable session layer (Mars-STN-style reliability, store, lease, flock)
-policy/     the agent firewall: policy engine (rate/window/taint/labels/co-sign), signed tamper-evident audit, trace, analyze, replay
+policy/     the agent firewall (enforce): policy engine (rate/window/taint/labels/co-sign), signed tamper-evident audit, trace, analyze, replay
+insight/    the firewall's read side (understand): profile behavior, recommend policy, simulate (CI gate), detect drift
 control/    managed control plane: enrollment (NetBird key issuance), registry, policy distribution
 federation/ cross-org boundary: per-org tool grants, identity mapping, audited crossings
 mcp/        dependency-free MCP server framework (tools, resources, prompts, tasks, HTTP)
@@ -129,6 +132,7 @@ docs/       reference, agent-firewall design, HA / tool-mesh design, vision, and
 
 - **[examples/](examples/)** — annotated configs for every scenario (`agent-firewall.yaml` for the policy engine).
 - **[docs/AGENT-FIREWALL.md](docs/AGENT-FIREWALL.md)** — the policy engine, tamper-evident audit, dashboard, replay, and control plane.
+- **[docs/INSIGHT.md](docs/INSIGHT.md)** — the firewall's read side: observe → recommend → simulate → detect.
 - **[docs/spec/](docs/spec/)** — open specs: the [audit-record format](docs/spec/AUDIT-RECORD.md) (hash chain + signed checkpoints) and the [policy DSL](docs/spec/POLICY-DSL.md), with JSON Schemas.
 - **[docs/reference.md](docs/reference.md)** — the complete feature reference.
 - **[docs/HA-TOOLMESH.md](docs/HA-TOOLMESH.md)** — session migration, lease, failover, bidirectional MCP.

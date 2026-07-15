@@ -55,9 +55,9 @@ type Decision struct {
 // is set (and Methods is empty), and governs methods when Methods is set.
 // The first matching rule wins.
 type Rule struct {
-	Peers   []string `yaml:"peers"`
-	Tools   []string `yaml:"tools"`
-	Methods []string `yaml:"methods"`
+	Peers   []string `yaml:"peers,omitempty"`
+	Tools   []string `yaml:"tools,omitempty"`
+	Methods []string `yaml:"methods,omitempty"`
 	Allow   bool     `yaml:"allow"`
 
 	// --- capability constraints (the "agent firewall") ---
@@ -65,32 +65,32 @@ type Rule struct {
 	// (not the pure Policy) evaluates them, since they carry runtime state.
 
 	// Rate caps how often this rule's identities may make matching calls.
-	Rate *RateLimit `yaml:"rate"`
+	Rate *RateLimit `yaml:"rate,omitempty"`
 	// When restricts this rule to a set of days/hours; outside the window the
 	// rule does not apply and evaluation falls through to the next rule.
-	When *Window `yaml:"when"`
+	When *Window `yaml:"when,omitempty"`
 	// RequireCosign holds a matching call as OutcomeCosign until a human
 	// identity on the mesh co-signs it (see CosignStore).
-	RequireCosign bool `yaml:"require_cosign"`
+	RequireCosign bool `yaml:"require_cosign,omitempty"`
 	// TaintSource marks a matching call as producing untrusted data: once made,
 	// the session is tainted (e.g. a tool that fetches arbitrary web content).
 	// Sugar for emit_labels: ["tainted"].
-	TaintSource bool `yaml:"taint_source"`
+	TaintSource bool `yaml:"taint_source,omitempty"`
 	// TaintGuard blocks a matching call whenever the session is tainted. This
 	// is prompt-injection defense at the network layer: a privileged tool
 	// simply will not be routed after untrusted data entered the session.
 	// Sugar for block_labels: ["tainted"].
-	TaintGuard bool `yaml:"taint_guard"`
+	TaintGuard bool `yaml:"taint_guard,omitempty"`
 
 	// EmitLabels are data-flow classification labels this call adds to the
 	// session (e.g. ["pii"], ["secret"]). Labels model where sensitive data
 	// has flowed, generalizing taint from one bit to a lattice.
-	EmitLabels []string `yaml:"emit_labels"`
+	EmitLabels []string `yaml:"emit_labels,omitempty"`
 	// BlockLabels deny a matching call if the session already carries any of
 	// these labels — e.g. an external-egress tool with block_labels: ["pii"]
 	// enforces "no PII may leave the mesh", which no LLM guardrail or ordinary
 	// firewall can express.
-	BlockLabels []string `yaml:"block_labels"`
+	BlockLabels []string `yaml:"block_labels,omitempty"`
 }
 
 // emitSet is the effective set of labels this rule adds (including taint sugar).
