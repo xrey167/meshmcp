@@ -1,0 +1,14 @@
+# Gateway hosting two MCP servers for the router to aggregate.
+mesh:
+  device_name: meshmcp-gw-live
+  setup_key_env: NB_SETUP_KEY
+  config_path: ./live-gw.json
+  log_level: error
+
+backends:
+  - name: demo
+    port: 9101
+    stdio: ["./cmd/mcpserver/mcpserver.exe", "--root", ".", "--allow-cmd", "cmd,git"]
+  - name: echo
+    port: 9102
+    stdio: ["./cmd/mcpecho/mcpecho.exe"]

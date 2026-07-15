@@ -1,0 +1,23 @@
+# Live demo: async tasks + progress notifications over the mesh, with the
+# tool authorized by policy and a method-governance rule on tasks/cancel.
+mesh:
+  device_name: meshmcp-gw-live
+  setup_key_env: NB_SETUP_KEY
+  config_path: ./live-gw.json
+  log_level: info
+
+backends:
+  - name: demo
+    port: 9107
+    stdio: ["./cmd/mcpserver/mcpserver.exe", "--root", "."]
+    resumable: true
+    audit_log: ./live-audit.jsonl
+    policy:
+      default_allow: false
+      rules:
+        - peers: ["*"]
+          tools: ["slow_count", "echo", "add", "read_*", "list_dir"]
+          allow: true
+        - peers: ["*"]
+          methods: ["tasks/cancel"]   # governance example: cancellation denied
+          allow: false

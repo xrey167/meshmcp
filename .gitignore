@@ -1,0 +1,27 @@
+# Compiled binaries
+*.exe
+/meshmcp
+cmd/*/mcpserver
+cmd/*/mcpecho
+cmd/*/mcphttp
+
+# NetBird embedded identity / state (per-peer, regenerated on run)
+*-nb.json
+*-nb-test.json
+live-gw.json
+router-nb.json
+orch-nb.json
+livetest-cli.json
+
+# Runtime logs and stores
+*.jsonl
+/sessions/
+/registry-data/
+
+# OS / editor
+.DS_Store
+*.bak
+
+# OMC operational state (skills are the committable exception)
+.omc/
+!.omc/skills/

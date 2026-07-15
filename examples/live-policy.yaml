@@ -1,0 +1,20 @@
+# Live demo of the MCP policy enforcement point: only read_* tools are
+# permitted; the echo tool must be denied inline and audited.
+mesh:
+  device_name: meshmcp-gw-live
+  setup_key_env: NB_SETUP_KEY
+  config_path: ./live-gw.json
+  log_level: info
+
+backends:
+  - name: mcpecho-guarded
+    port: 9104
+    stdio: ["./cmd/mcpecho/mcpecho.exe"]
+    resumable: true
+    audit_log: ./live-audit.jsonl
+    policy:
+      default_allow: false
+      rules:
+        - peers: ["*"]
+          tools: ["read_*", "search_*"]
+          allow: true

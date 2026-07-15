@@ -1,0 +1,210 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"os"
+	"strings"
+
+	"meshmcp/mcpclient"
+)
+
+// argFlags collects repeatable --arg key=value pairs. Values are coerced to
+// JSON (numbers, booleans, quoted strings) when possible, else kept as a
+// bare string, so "--arg n=3" is a number and "--arg path=go.mod" a string.
+type argFlags map[string]any
+
+func (a argFlags) String() string { return "" }
+
+func (a argFlags) Set(s string) error {
+	k, v, ok := strings.Cut(s, "=")
+	if !ok {
+		return fmt.Errorf("expected key=value, got %q", s)
+	}
+	var parsed any
+	if err := json.Unmarshal([]byte(v), &parsed); err == nil {
+		a[k] = parsed
+	} else {
+		a[k] = v
+	}
+	return nil
+}
+
+// dialMCP joins the mesh, dials the target backend, and completes the MCP
+// handshake. The caller must call the returned cleanup.
+func dialMCP(o *meshOptions, target string) (*mcpclient.Client, func(), error) {
+	o.BlockInbound = true
+	client, err := startMesh(o, os.Stderr)
+	if err != nil {
+		return nil, nil, err
+	}
+	conn, err := client.Dial(context.Background(), "tcp", target)
+	if err != nil {
+		stopMesh(client)
+		return nil, nil, fmt.Errorf("dial %s over mesh: %w", target, err)
+	}
+	// Print server-initiated notifications (progress, tasks/status, ...) to
+	// stderr so forwarded/streamed events are visible.
+	mc := mcpclient.New(conn, func(method string, params json.RawMessage) {
+		fmt.Fprintf(os.Stderr, "notify: %s %s\n", method, string(params))
+	})
+	if _, err := mc.Initialize(context.Background(), "meshmcp-cli"); err != nil {
+		mc.Close()
+		stopMesh(client)
+		return nil, nil, fmt.Errorf("initialize: %w", err)
+	}
+	cleanup := func() { mc.Close(); stopMesh(client) }
+	return mc, cleanup, nil
+}
+
+// cmdLs lists a backend's tools, resources, and prompts.
+func cmdLs(args []string) error {
+	fs := flag.NewFlagSet("ls", flag.ExitOnError)
+	o := meshFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: meshmcp ls [flags] <peer-ip:port>")
+	}
+	mc, cleanup, err := dialMCP(o, fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	ctx := context.Background()
+
+	tools, err := mc.ListTools(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Println("TOOLS:")
+	for _, t := range tools {
+		fmt.Printf("  %-20s %s\n", t.Name, t.Description)
+	}
+	if res, err := mc.ListResources(ctx); err == nil {
+		fmt.Println("RESOURCES:")
+		for _, r := range res {
+			fmt.Printf("  %-28s %s\n", r.URI, r.Description)
+		}
+	}
+	if pr, err := mc.ListPrompts(ctx); err == nil {
+		fmt.Println("PROMPTS:")
+		for _, p := range pr {
+			fmt.Printf("  %-20s %s\n", p.Name, p.Description)
+		}
+	}
+	return nil
+}
+
+// cmdCall invokes a tool: meshmcp call [mesh-flags] <peer> <tool> [--arg k=v ...] [--json '{...}'] [--task]
+func cmdCall(args []string) error {
+	fs := flag.NewFlagSet("call", flag.ExitOnError)
+	o := meshFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	rest := fs.Args()
+	if len(rest) < 2 {
+		return errors.New("usage: meshmcp call [mesh-flags] <peer-ip:port> <tool> [--arg k=v ...] [--json '{...}'] [--task]")
+	}
+	target, tool := rest[0], rest[1]
+
+	// Tool-argument flags come after the positionals.
+	fs2 := flag.NewFlagSet("call-args", flag.ExitOnError)
+	argv := argFlags{}
+	fs2.Var(argv, "arg", "tool argument key=value (repeatable)")
+	raw := fs2.String("json", "", "tool arguments as a raw JSON object (overrides --arg)")
+	task := fs2.Bool("task", false, "run the tool asynchronously as a task")
+	if err := fs2.Parse(rest[2:]); err != nil {
+		return err
+	}
+
+	var arguments any = map[string]any(argv)
+	if *raw != "" {
+		var m any
+		if err := json.Unmarshal([]byte(*raw), &m); err != nil {
+			return fmt.Errorf("--json: %w", err)
+		}
+		arguments = m
+	}
+
+	mc, cleanup, err := dialMCP(o, target)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	res, err := mc.CallTool(context.Background(), tool, arguments, *task)
+	if err != nil {
+		return err
+	}
+	printJSON(res)
+	return nil
+}
+
+// cmdRead reads a resource: meshmcp read <peer> <uri>
+func cmdRead(args []string) error {
+	fs := flag.NewFlagSet("read", flag.ExitOnError)
+	o := meshFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 2 {
+		return errors.New("usage: meshmcp read [flags] <peer-ip:port> <uri>")
+	}
+	mc, cleanup, err := dialMCP(o, fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	res, err := mc.ReadResource(context.Background(), fs.Arg(1))
+	if err != nil {
+		return err
+	}
+	printJSON(res)
+	return nil
+}
+
+// cmdPrompt renders a prompt: meshmcp prompt [mesh-flags] <peer> <name> [--arg k=v ...]
+func cmdPrompt(args []string) error {
+	fs := flag.NewFlagSet("prompt", flag.ExitOnError)
+	o := meshFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	rest := fs.Args()
+	if len(rest) < 2 {
+		return errors.New("usage: meshmcp prompt [mesh-flags] <peer-ip:port> <name> [--arg k=v ...]")
+	}
+	fs2 := flag.NewFlagSet("prompt-args", flag.ExitOnError)
+	argv := argFlags{}
+	fs2.Var(argv, "arg", "prompt argument key=value (repeatable)")
+	if err := fs2.Parse(rest[2:]); err != nil {
+		return err
+	}
+	mc, cleanup, err := dialMCP(o, rest[0])
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	res, err := mc.GetPrompt(context.Background(), rest[1], map[string]any(argv))
+	if err != nil {
+		return err
+	}
+	printJSON(res)
+	return nil
+}
+
+func printJSON(raw json.RawMessage) {
+	var pretty any
+	if err := json.Unmarshal(raw, &pretty); err == nil {
+		b, _ := json.MarshalIndent(pretty, "", "  ")
+		fmt.Println(string(b))
+		return
+	}
+	fmt.Println(string(raw))
+}

@@ -1,0 +1,11 @@
+# Gateway exposing an HTTP (Streamable-HTTP) MCP backend on the mesh.
+mesh:
+  device_name: meshmcp-gw-live
+  setup_key_env: NB_SETUP_KEY
+  config_path: ./live-gw.json
+  log_level: error
+
+backends:
+  - name: httpsrv
+    port: 9200
+    http: http://127.0.0.1:3001

@@ -1,0 +1,11 @@
+mesh:
+  device_name: meshmcp-router
+  setup_key_env: NB_SETUP_KEY
+  config_path: ./router-nb.json
+  log_level: error
+
+listen_port: 9100
+upstreams:
+  svc:
+    - "100.81.215.9:9099"   # dead replica (nothing listening) — router must skip it
+    - "100.81.215.9:9101"   # healthy demo backend

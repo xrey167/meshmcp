@@ -1,0 +1,9 @@
+# Server-to-server orchestrator: calls the demo server's tools over the mesh.
+mesh:
+  device_name: meshmcp-orch
+  setup_key_env: NB_SETUP_KEY
+  config_path: ./orch-nb.json
+  log_level: error
+
+listen_port: 9110
+upstream: "100.81.215.9:9101"

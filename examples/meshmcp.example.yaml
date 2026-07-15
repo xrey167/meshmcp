@@ -1,0 +1,76 @@
+# meshmcp gateway configuration
+#
+# The gateway joins the mesh once and exposes each backend on its own
+# mesh port. Nothing here is reachable from the public internet.
+
+# Optional: trace EVERY MCP message (both directions, every stdio backend)
+# to one newline-delimited JSON file — a mesh-wide, identity-attributed log
+# of every tool call, resource read/write, prompt, and notification.
+trace:
+  log: ./trace.jsonl
+  payloads: true        # include request params / response results (capped)
+  max_bytes: 2048       # per-payload cap; larger bodies logged as a marker
+
+# Optional: advertise backends in a shared registry so `meshmcp router` can
+# discover them dynamically (see docs/HA-TOOLMESH.md and docs/NETWORK-PLAN.md).
+# registry: ./registry
+
+mesh:
+  device_name: meshmcp-gw          # peer name shown in the NetBird dashboard
+  # management_url: https://api.netbird.io:443   # default; set for self-hosted
+  setup_key_env: NB_SETUP_KEY      # env var holding the setup key (default)
+  config_path: ./meshmcp-nb.json   # persist identity: same mesh IP across restarts
+  log_level: warn
+
+backends:
+  # A stdio MCP server: one subprocess is spawned per inbound mesh
+  # connection, its stdin/stdout piped to the connection.
+  # Reach it from another peer:  meshmcp connect <gw-mesh-ip>:9101
+  - name: kg-memory
+    port: 9101
+    stdio: ["python", "-m", "my_mcp_server"]
+    allow:
+      - "laptop-*.netbird.cloud"      # FQDN glob
+      - "pubkey:AbCdEf...="           # or exact WireGuard public key
+
+  # A RESUMABLE stdio server: the subprocess stays alive across client
+  # reconnects and missed messages are replayed, so the logical MCP
+  # session survives the mesh dropping (Wi-Fi<->LTE roam, sleep/wake).
+  # The client must opt in:  meshmcp connect --resumable <gw-mesh-ip>:9103
+  - name: kg-memory-durable
+    port: 9103
+    stdio: ["python", "-m", "my_mcp_server"]
+    resumable: true
+    session_ttl_seconds: 120           # keep a detached session this long
+    # Gateway HA: checkpoint session state to a shared, durable directory so
+    # another gateway sharing it resumes the session after a crash.
+    session_store: ./sessions/kg       # per-backend; two gateways share this dir
+    session_store_mode: handshake      # handshake | full | backend (see docs/HA-TOOLMESH.md)
+
+  # A GUARDED stdio server: the gateway authorizes each tools/call by the
+  # caller's cryptographic mesh identity and audits every invocation.
+  # Denied calls get a JSON-RPC error and never reach the backend.
+  - name: kg-memory-guarded
+    port: 9105
+    stdio: ["python", "-m", "my_mcp_server"]
+    resumable: true
+    audit_log: ./audit.jsonl           # JSONL audit records; omit for stderr
+    policy:
+      default_allow: false             # deny anything no rule permits
+      rules:
+        - peers: ["laptop-*.netbird.cloud"]   # trusted laptops...
+          tools: ["read_*", "search_*"]       # ...may only read/search
+          allow: true
+        - peers: ["pubkey:AbCdEf...="]        # one specific device...
+          tools: ["*"]                        # ...may call anything
+          allow: true
+
+  # An MCP server speaking Streamable HTTP on localhost: reverse-proxied
+  # onto the mesh. The gateway stamps X-Meshmcp-Peer / X-Meshmcp-Peer-Key
+  # headers with the caller's cryptographic mesh identity.
+  # Reach it:  meshmcp forward 127.0.0.1:8090 <gw-mesh-ip>:9102
+  #            then point your MCP client at http://127.0.0.1:8090/mcp
+  - name: local-llm-tools
+    port: 9102
+    http: http://127.0.0.1:3001
+    allow: []                         # empty = any mesh peer

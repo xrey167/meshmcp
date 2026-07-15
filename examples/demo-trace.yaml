@@ -1,0 +1,16 @@
+# Gateway with full tracing: every MCP message (both directions) to trace.jsonl.
+mesh:
+  device_name: meshmcp-gw-live
+  setup_key_env: NB_SETUP_KEY
+  config_path: ./live-gw.json
+  log_level: error
+
+trace:
+  log: ./trace.jsonl
+  payloads: true
+  max_bytes: 2048
+
+backends:
+  - name: demo
+    port: 9101
+    stdio: ["./cmd/mcpserver/mcpserver.exe", "--root", ".", "--allow-cmd", "cmd,git"]

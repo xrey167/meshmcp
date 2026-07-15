@@ -1,0 +1,15 @@
+# Aggregating router: presents upstreams as one namespaced endpoint on 9100.
+# Each upstream may be a single address or a list of interchangeable replicas
+# across which the router load-balances (round-robin) and fails over.
+mesh:
+  device_name: meshmcp-router
+  setup_key_env: NB_SETUP_KEY
+  config_path: ./router-nb.json
+  log_level: error
+
+listen_port: 9100
+upstreams:
+  demo: "100.81.215.9:9101"                       # single address
+  fleet:                                           # replica set (load-balanced + failover)
+    - "100.81.215.9:9102"
+    - "100.81.215.9:9103"
