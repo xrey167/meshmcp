@@ -232,6 +232,13 @@ examples/    ready-to-adapt configs        docs/  design docs + open specs
 go build ./... && go vet ./... && go test ./... -race
 ```
 
+## License
+
+**Proprietary — all rights reserved.** The source is public for reading only.
+Any use — running, deploying, copying, modifying, or redistributing — requires
+prior written permission from the copyright holder, **Rey Darius**. Ask first.
+See [LICENSE](LICENSE).
+
 <div align="center">
 <br>
 <sub>Built on the reliability idea behind Tencent Mars STN, the embedding pattern from caddy-netbird, and NetBird's userspace WireGuard.</sub>

@@ -1,0 +1,50 @@
+meshmcp — Proprietary License
+Copyright (c) 2026 Rey Darius. All rights reserved.
+
+The source code of meshmcp (the "Software") is published for public viewing and
+evaluation only. Making it publicly visible does NOT place it in the public
+domain and grants NO license or right to use it. All rights are reserved by the
+copyright holder except the single, limited permission stated below.
+
+YOU MAY, without prior permission:
+  - View and read the Software's source code where it is officially published,
+    including the transient copies your web browser or git client necessarily
+    make in order to display or clone it for reading.
+
+YOU MAY NOT, without the prior WRITTEN permission of the copyright holder:
+  - use, run, execute, install, or deploy the Software, in whole or in part,
+    for any purpose whatsoever — including personal, educational, academic,
+    research, evaluation-in-production, non-profit, or commercial use;
+  - copy, reproduce, host, or store the Software beyond the transient reading
+    copies described above;
+  - modify, adapt, translate, port, or create derivative or combined works
+    based on the Software;
+  - incorporate the Software or any part of it into another product or service;
+  - distribute, publish, redistribute, mirror, sublicense, sell, rent, lease,
+    or otherwise transfer the Software or any derivative of it;
+  - use the Software's names, concepts, or interfaces to imply endorsement; or
+  - remove, obscure, or alter this notice.
+
+HOW TO GET PERMISSION
+  Any use beyond reading requires you to ask first. Requests — describing who
+  you are and how you intend to use the Software — must be made to and approved
+  by the copyright holder, Rey Darius.
+
+  Permission, if granted, will be by a separate written agreement and may be
+  narrow, conditional, time-limited, and revocable at the copyright holder's
+  sole discretion. Silence is not permission. Absence of a response is a denial.
+
+THIRD-PARTY COMPONENTS
+  The Software depends on separate third-party components (for example, Go
+  modules and the embedded NetBird / WireGuard libraries) that are licensed by
+  their respective owners under their own terms. This License applies only to
+  the original meshmcp code and does not grant or restrict any rights in those
+  third-party components, which remain governed by their own licenses.
+
+NO WARRANTY
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER
+  IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN
+  CONNECTION WITH THE SOFTWARE OR THE USE OF OR OTHER DEALINGS IN THE SOFTWARE.
