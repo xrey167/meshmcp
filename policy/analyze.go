@@ -10,12 +10,25 @@ import (
 
 // PeerStat aggregates one caller identity's activity in an audit log.
 type PeerStat struct {
-	Peer    string `json:"peer"`
-	PeerKey string `json:"peer_key,omitempty"`
-	Calls   int    `json:"calls"`
-	Allowed int    `json:"allowed"`
-	Denied  int    `json:"denied"`
-	Cosign  int    `json:"cosign"`
+	Peer     string `json:"peer"`
+	PeerKey  string `json:"peer_key,omitempty"`
+	Calls    int    `json:"calls"`
+	Allowed  int    `json:"allowed"`
+	Denied   int    `json:"denied"`
+	Cosign   int    `json:"cosign"`
+	LastSeen string `json:"last_seen,omitempty"` // timestamp of the most recent record
+	LastTool string `json:"last_tool,omitempty"`
+}
+
+// BackendStat aggregates activity against one backend (MCP server).
+type BackendStat struct {
+	Backend  string `json:"backend"`
+	Calls    int    `json:"calls"`
+	Allowed  int    `json:"allowed"`
+	Denied   int    `json:"denied"`
+	Cosign   int    `json:"cosign"`
+	Peers    int    `json:"peers"` // distinct callers
+	LastSeen string `json:"last_seen,omitempty"`
 }
 
 // ToolStat aggregates one tool's usage across all callers.
@@ -46,7 +59,9 @@ type Summary struct {
 	Tools    []ToolStat   `json:"tools"`
 	Edges    []EdgeStat   `json:"edges"`
 	Recent   []AuditRecord `json:"recent"` // most-recent-first, capped
-	Backends []string     `json:"backends"`
+	Backends []string      `json:"backends"`
+	// BackendStats is the per-backend rollup (the "server tiles" of the room).
+	BackendStats []BackendStat `json:"backend_stats"`
 }
 
 // Analyze reads an audit JSONL stream and builds a Summary: per-peer and
@@ -71,6 +86,8 @@ func Analyze(r io.Reader, recentCap int) (Summary, error) {
 	tools := map[string]*ToolStat{}
 	edges := map[string]*EdgeStat{}
 	backends := map[string]bool{}
+	bstats := map[string]*BackendStat{}
+	bpeers := map[string]map[string]bool{} // backend -> distinct peer set
 	var recent []AuditRecord
 
 	sc := bufio.NewScanner(bytes.NewReader(data))
@@ -95,6 +112,25 @@ func Analyze(r io.Reader, recentCap int) (Summary, error) {
 		}
 		if rec.Backend != "" {
 			backends[rec.Backend] = true
+			bs := bstats[rec.Backend]
+			if bs == nil {
+				bs = &BackendStat{Backend: rec.Backend}
+				bstats[rec.Backend] = bs
+				bpeers[rec.Backend] = map[string]bool{}
+			}
+			bs.Calls++
+			switch rec.Decision {
+			case "allow":
+				bs.Allowed++
+			case "deny":
+				bs.Denied++
+			case "cosign":
+				bs.Cosign++
+			}
+			if rec.Time != "" && rec.Time >= bs.LastSeen {
+				bs.LastSeen = rec.Time
+			}
+			bpeers[rec.Backend][rec.Peer+"\x00"+rec.PeerKey] = true
 		}
 
 		pk := rec.Peer + "\x00" + rec.PeerKey
@@ -111,6 +147,12 @@ func Analyze(r io.Reader, recentCap int) (Summary, error) {
 			ps.Denied++
 		case "cosign":
 			ps.Cosign++
+		}
+		if rec.Time != "" && rec.Time >= ps.LastSeen {
+			ps.LastSeen = rec.Time
+			if rec.Tool != "" {
+				ps.LastTool = rec.Tool
+			}
 		}
 
 		if rec.Tool != "" {
@@ -163,6 +205,11 @@ func Analyze(r io.Reader, recentCap int) (Summary, error) {
 		s.Backends = append(s.Backends, b)
 	}
 	sort.Strings(s.Backends)
+	for name, bs := range bstats {
+		bs.Peers = len(bpeers[name])
+		s.BackendStats = append(s.BackendStats, *bs)
+	}
+	sort.Slice(s.BackendStats, func(i, j int) bool { return s.BackendStats[i].Calls > s.BackendStats[j].Calls })
 
 	// recent most-recent-first
 	for i, j := 0, len(recent)-1; i < j; i, j = i+1, j-1 {

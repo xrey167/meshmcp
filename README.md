@@ -228,6 +228,8 @@ Watch it live with `meshmcp dash --audit audit.jsonl`; re-run a past session wit
 | `approve --store <d> <peer> <tool>` | Human co-sign a held `require_cosign` call. |
 | `secrets check --config <f>` | Validate the credential broker config (never prints values). |
 | `dash --audit <f>` | Serve the live control dashboard. |
+| `room --audit <f>` | Serve the live **Control Room** — server tiles, agent apps, streaming decision feed. |
+| `agent --role <r> <peer:port>` | Run a demo agent app (reader/fetcher/billing/analyst) with its own mesh identity. |
 | `replay [--fork N] <trace> <peer:port>` | Re-issue a traced session and diff every response. |
 | `probe [--full\|--task] <peer:port>` | In-process MCP handshake diagnostic. |
 
@@ -263,6 +265,7 @@ examples/    ready-to-adapt configs        docs/  design docs + open specs
 
 ## Docs & specs
 
+- **[docs/DEMO.md](docs/DEMO.md)** — the live mesh demo: one gateway, four MCP servers, four agent apps, watched in the Control Room.
 - **[docs/COOKBOOK.md](docs/COOKBOOK.md)** — 10 worked "what's possible" scenarios, each with copy-paste config and a diagram.
 - **[examples/](examples/)** — annotated configs for every scenario (start with `agent-firewall.yaml`).
 - **[docs/AGENT-FIREWALL.md](docs/AGENT-FIREWALL.md)** — the policy engine, signed audit, dashboard, replay, control plane, federation.

@@ -24,6 +24,7 @@ func Register(s *mcp.Server, cfg Config) {
 	registerFS(s, cfg.Root)
 	registerSlowCount(s)
 	registerRunCommand(s, cfg.AllowedCommands)
+	registerDemo(s)
 }
 
 // --- shared helpers ---

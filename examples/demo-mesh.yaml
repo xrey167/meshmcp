@@ -1,0 +1,91 @@
+# The live mesh showcase gateway. One gateway process fronts four DIFFERENT MCP
+# servers, each governed differently, all writing to one shared tamper-evident
+# ledger that the Control Room reads live. Point the four demo agents (reader,
+# fetcher, billing, analyst) at the four ports and watch the room.
+#
+# Run it with demo/run-mesh.ps1 (Windows) or demo/run-mesh.sh — see docs/DEMO.md.
+mesh:
+  device_name: meshmcp-demo-gw
+  setup_key_env: NB_SETUP_KEY
+  config_path: ./demo/gw-nb.json
+  log_level: info
+
+# One gateway-wide ledger across all backends → one live feed, one hash chain.
+audit_log: ./demo/audit.jsonl
+
+trace:
+  log: ./demo/trace.jsonl
+  payloads: false
+
+backends:
+  # 1) fs — read-only. reader agent: read_file/list_dir allowed, write_file denied.
+  - name: fs
+    port: 9101
+    stdio: ["./cmd/mcpserver/mcpserver.exe", "--root", "."]
+    resumable: true
+    policy:
+      default_allow: false
+      rules:
+        - peers: ["*"]
+          tools: ["read_file", "list_dir", "search"]
+          allow: true
+          rate: { max: 60, per: "1m" }
+
+  # 2) web — prompt-injection defense. fetcher agent: fetch taints, write blocked.
+  - name: web
+    port: 9102
+    stdio: ["./cmd/mcpserver/mcpserver.exe", "--root", "."]
+    resumable: true
+    policy:
+      default_allow: false
+      rules:
+        - peers: ["*"]
+          tools: ["fetch"]
+          allow: true
+          taint_source: true
+        - peers: ["*"]
+          tools: ["write_file"]
+          allow: true
+          taint_guard: true
+
+  # 3) payments — credential broker + co-sign. billing agent: charge (secret
+  #    injected), transfer_funds (held for a human).
+  - name: payments
+    port: 9103
+    stdio: ["./cmd/mcpserver/mcpserver.exe", "--root", "."]
+    resumable: true
+    cosign_store: ./demo/cosign
+    policy:
+      default_allow: false
+      rules:
+        - peers: ["*"]
+          tools: ["charge"]
+          allow: true
+        - peers: ["*"]
+          tools: ["transfer_funds"]
+          allow: true
+          require_cosign: true
+    secrets:
+      file: ./demo/secrets.json         # {"stripe_key":"sk_live_demo_xxx"}
+      grants:
+        - peers: ["*"]
+          secrets: ["stripe_key"]
+          tools: ["charge"]
+
+  # 4) customer-db — data-flow labels. analyst agent: read_customer tags pii,
+  #    post_message (egress) is then blocked.
+  - name: customer-db
+    port: 9104
+    stdio: ["./cmd/mcpserver/mcpserver.exe", "--root", "."]
+    resumable: true
+    policy:
+      default_allow: false
+      rules:
+        - peers: ["*"]
+          tools: ["read_customer"]
+          allow: true
+          emit_labels: ["pii"]
+        - peers: ["*"]
+          tools: ["post_message", "email_send"]
+          allow: true
+          block_labels: ["pii"]

@@ -78,6 +78,20 @@ func cmdServe(args []string) error {
 	var wg sync.WaitGroup
 	var listeners []net.Listener
 	var auditLogs []*policy.AuditLog
+
+	// A gateway-wide shared audit ledger (one hash chain across all backends),
+	// so a unified live view reads a single, verifiable stream.
+	var sharedAudit *policy.AuditLog
+	if cfg.AuditLog != "" {
+		f, err := os.OpenFile(cfg.AuditLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			return fmt.Errorf("open shared audit log %s: %w", cfg.AuditLog, err)
+		}
+		sharedAudit = policy.NewAuditLog(f, func() string { return time.Now().UTC().Format(time.RFC3339) })
+		auditLogs = append(auditLogs, sharedAudit)
+		log.Printf("shared audit ledger: %s", cfg.AuditLog)
+	}
+
 	for _, b := range cfg.Backends {
 		ln, err := client.ListenTCP(fmt.Sprintf(":%d", b.Port))
 		if err != nil {
@@ -103,17 +117,23 @@ func cmdServe(args []string) error {
 		// to stdio backends; HTTP backends are reverse-proxied and never use it.
 		var factory session.BackendFactory
 		if b.HTTP == "" {
-			audit, err := auditSink(b)
-			if err != nil {
-				close(shutdown)
-				for _, l := range listeners {
-					l.Close()
+			// Prefer the gateway-wide shared ledger for policy backends; fall
+			// back to a per-backend audit sink when none is configured.
+			audit := sharedAudit
+			if audit == nil || b.Policy == nil {
+				var err error
+				audit, err = auditSink(b)
+				if err != nil {
+					close(shutdown)
+					for _, l := range listeners {
+						l.Close()
+					}
+					wg.Wait()
+					return err
 				}
-				wg.Wait()
-				return err
-			}
-			if audit != nil {
-				auditLogs = append(auditLogs, audit)
+				if audit != nil {
+					auditLogs = append(auditLogs, audit)
+				}
 			}
 			factory = backendFactory(b, audit, tracer)
 		}

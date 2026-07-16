@@ -24,6 +24,7 @@ Usage:
   meshmcp orchestrate --config <file>           join mesh, serve a tool that calls another server
   meshmcp control [flags]                        run the managed control plane (enroll, registry, policy)
   meshmcp federate --config <file>               run a cross-org federation boundary (granted tools only, audited)
+  meshmcp agent --role <r> [flags] <peer:port>  run a demo agent app (reader/fetcher/billing/analyst) with its own identity
   meshmcp connect [flags] <peer-ip:port>        bridge stdio <-> remote stdio backend
   meshmcp forward [flags] <local> <peer:port>   forward a local TCP port to a mesh peer
   meshmcp probe [flags] <peer-ip:port>          run an MCP handshake against a backend
@@ -36,6 +37,7 @@ Usage:
   meshmcp approve [flags] <peer-fqdn> <tool>    co-sign a require_cosign tool call for a peer
   meshmcp secrets check --config <file>         validate the credential broker config (never prints values)
   meshmcp dash [flags]                          serve the mesh control dashboard over audit/trace logs
+  meshmcp room --audit <file>                   serve the live Control Room (server tiles, apps, decision feed)
   meshmcp insight <profile|recommend|simulate|detect>  turn the audit stream into policy (the firewall's read side)
   meshmcp replay [flags] <trace> <peer:port>    replay a traced session against a backend and diff
   meshmcp version
@@ -85,10 +87,14 @@ func main() {
 		err = cmdAudit(os.Args[2:])
 	case "approve":
 		err = cmdApprove(os.Args[2:])
+	case "agent":
+		err = cmdAgent(os.Args[2:])
 	case "secrets":
 		err = cmdSecrets(os.Args[2:])
 	case "dash":
 		err = cmdDash(os.Args[2:])
+	case "room":
+		err = cmdRoom(os.Args[2:])
 	case "insight":
 		err = cmdInsight(os.Args[2:])
 	case "replay":

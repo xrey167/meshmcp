@@ -26,7 +26,12 @@ type SecretsConfig struct {
 
 // Config is the meshmcp serve configuration.
 type Config struct {
-	Mesh     MeshConfig   `yaml:"mesh"`
+	Mesh MeshConfig   `yaml:"mesh"`
+	// AuditLog, when set, is a single gateway-wide tamper-evident audit ledger
+	// shared by every policy-enabled backend — one hash chain for the whole
+	// gateway, which is what a unified live view (dash / room) reads. When
+	// empty, each backend uses its own audit_log.
+	AuditLog string       `yaml:"audit_log"`
 	Trace    *TraceConfig `yaml:"trace"`
 	Registry string       `yaml:"registry"` // dir: register backends for router discovery
 	Backends []*Backend   `yaml:"backends"`

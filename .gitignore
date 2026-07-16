@@ -25,6 +25,13 @@ secrets.json
 audit-signing-key.json
 /cosign/
 
+# Live demo runtime state (identities, ledgers, logs)
+/demo/*.json
+/demo/*.jsonl
+/demo/*.log
+/demo/*.out
+/demo/cosign/
+
 # OS / editor
 .DS_Store
 *.bak
