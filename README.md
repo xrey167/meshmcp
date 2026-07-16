@@ -219,6 +219,7 @@ examples/    ready-to-adapt configs        docs/  design docs + open specs
 
 ## Docs & specs
 
+- **[docs/COOKBOOK.md](docs/COOKBOOK.md)** — 10 worked "what's possible" scenarios, each with copy-paste config and a diagram.
 - **[examples/](examples/)** — annotated configs for every scenario (start with `agent-firewall.yaml`).
 - **[docs/AGENT-FIREWALL.md](docs/AGENT-FIREWALL.md)** — the policy engine, signed audit, dashboard, replay, control plane, federation.
 - **[docs/INSIGHT.md](docs/INSIGHT.md)** — the firewall's read side: observe → recommend → simulate → detect.
