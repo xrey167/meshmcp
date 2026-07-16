@@ -1,0 +1,762 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="meshmcp — the identity-native control plane for agent-to-tool (MCP) traffic over WireGuard: one plane over many MCP servers, with an agent firewall, non-repudiable signed audit, policy-from-behavior, and a credential broker.">
+<meta property="og:title" content="meshmcp — what's possible">
+<meta property="og:description" content="One control plane over many MCP servers: zero open ports, an agent firewall, non-repudiable signed audit, and a credential broker.">
+<meta property="og:type" content="website">
+<meta name="theme-color" content="#0a0d13">
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20100%20100'%3E%3Ctext%20y='.9em'%20font-size='90'%3E%F0%9F%95%B8%EF%B8%8F%3C/text%3E%3C/svg%3E">
+<title>meshmcp — what's possible</title>
+<style>
+  :root{
+    /* light "blueprint" theme (default) */
+    --bg:#eef1f7; --panel:#ffffff; --panel2:#e7ecf5; --line:#d6ddea;
+    --fg:#101725; --dim:#586179; --faint:#8a93a8;
+    --accent:#2f5fe0; --accent2:#1f47b8;
+    --ok:#128a45; --deny:#cf3636; --warn:#a9700a; --label:#8536e6;
+    --term-bg:#0c1018; --term-fg:#d5deee; --term-dim:#8894ad;
+    --shadow:0 1px 2px rgba(16,23,37,.06),0 8px 30px rgba(16,23,37,.06);
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#0a0d13; --panel:#12161f; --panel2:#171c27; --line:#232c3b;
+      --fg:#dce4f2; --dim:#8a97ad; --faint:#67728a;
+      --accent:#5b8cff; --accent2:#7aa2ff;
+      --ok:#37d67a; --deny:#ff5c5c; --warn:#ffb020; --label:#c07bff;
+      --term-bg:#0c1018; --term-fg:#d5deee; --term-dim:#8894ad;
+      --shadow:0 1px 0 rgba(255,255,255,.02),0 20px 50px rgba(0,0,0,.4);
+    }
+  }
+  :root[data-theme="light"]{
+    --bg:#eef1f7; --panel:#ffffff; --panel2:#e7ecf5; --line:#d6ddea;
+    --fg:#101725; --dim:#586179; --faint:#8a93a8;
+    --accent:#2f5fe0; --accent2:#1f47b8;
+    --ok:#128a45; --deny:#cf3636; --warn:#a9700a; --label:#8536e6;
+    --shadow:0 1px 2px rgba(16,23,37,.06),0 8px 30px rgba(16,23,37,.06);
+  }
+  :root[data-theme="dark"]{
+    --bg:#0a0d13; --panel:#12161f; --panel2:#171c27; --line:#232c3b;
+    --fg:#dce4f2; --dim:#8a97ad; --faint:#67728a;
+    --accent:#5b8cff; --accent2:#7aa2ff;
+    --ok:#37d67a; --deny:#ff5c5c; --warn:#ffb020; --label:#c07bff;
+    --shadow:0 1px 0 rgba(255,255,255,.02),0 20px 50px rgba(0,0,0,.4);
+  }
+
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  @media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:400 16px/1.65 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    -webkit-font-smoothing:antialiased;}
+  .mono{font-family:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace}
+  .wrap{max-width:1060px;margin:0 auto;padding:0 24px}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  h1,h2,h3{font-family:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+    text-wrap:balance;letter-spacing:-.02em;font-weight:600;margin:0}
+  section{padding:64px 0;border-top:1px solid var(--line)}
+  .eyebrow{font-family:ui-monospace,Menlo,monospace;font-size:12px;letter-spacing:.16em;
+    text-transform:uppercase;color:var(--accent);font-weight:600}
+  .lede{color:var(--dim);font-size:17px;max-width:65ch}
+  .sechead{display:flex;flex-direction:column;gap:10px;margin-bottom:34px}
+  .sechead h2{font-size:clamp(24px,3vw,32px)}
+
+  /* ---- top bar ---- */
+  .topbar{position:sticky;top:0;z-index:20;backdrop-filter:blur(10px);
+    background:color-mix(in srgb,var(--bg) 82%,transparent);border-bottom:1px solid var(--line)}
+  .topbar .wrap{display:flex;align-items:center;gap:18px;height:54px}
+  .brand{font-family:ui-monospace,Menlo,monospace;font-weight:600;letter-spacing:-.02em;display:flex;align-items:center;gap:8px}
+  .brand .dot{width:9px;height:9px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 25%,transparent)}
+  .navlinks{display:flex;gap:16px;margin-left:auto;font-size:13px}
+  .navlinks a{color:var(--dim);font-family:ui-monospace,Menlo,monospace}
+  .navlinks a:hover{color:var(--fg);text-decoration:none}
+  .toggle{margin-left:6px;cursor:pointer;background:var(--panel2);border:1px solid var(--line);
+    color:var(--fg);border-radius:7px;width:34px;height:30px;font-size:14px;display:grid;place-items:center}
+  .toggle:hover{border-color:var(--accent)}
+  @media(max-width:720px){.navlinks{display:none}}
+
+  /* ---- hero ---- */
+  .hero{padding:74px 0 40px}
+  .hero h1{font-size:clamp(40px,8vw,74px);line-height:.98;margin:16px 0 0}
+  .hero .tag{font-size:clamp(18px,2.4vw,23px);color:var(--fg);margin-top:20px;max-width:24ch;font-weight:500;
+    font-family:ui-monospace,Menlo,monospace;letter-spacing:-.01em}
+  .hero .sub{margin-top:18px;color:var(--dim);max-width:60ch;font-size:17px}
+  .badges{display:flex;flex-wrap:wrap;gap:8px;margin-top:26px}
+  .badge{font-family:ui-monospace,Menlo,monospace;font-size:12px;padding:5px 10px;border-radius:20px;
+    border:1px solid var(--line);background:var(--panel);color:var(--dim);display:inline-flex;gap:7px;align-items:center}
+  .badge b{color:var(--fg);font-weight:600}
+  .badge .g{color:var(--ok)}
+
+  /* ---- packet journey ---- */
+  .journey{margin:44px 0 8px;background:var(--panel);border:1px solid var(--line);border-radius:14px;
+    padding:26px 22px 20px;box-shadow:var(--shadow);overflow-x:auto}
+  .rail{position:relative;display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:0;min-width:640px}
+  .endpoint{display:flex;flex-direction:column;align-items:center;gap:7px;width:118px}
+  .endpoint .box{width:100%;text-align:center;padding:12px 8px;border-radius:10px;border:1px solid var(--line);
+    background:var(--panel2);font-family:ui-monospace,Menlo,monospace;font-size:12.5px;font-weight:600}
+  .endpoint small{color:var(--faint);font-size:11px;font-family:ui-monospace,Menlo,monospace}
+  .gateway{position:relative;margin:0 6px;border:1px solid color-mix(in srgb,var(--accent) 40%,var(--line));
+    border-radius:12px;background:linear-gradient(180deg,color-mix(in srgb,var(--accent) 9%,var(--panel)),var(--panel));
+    padding:14px 12px}
+  .gateway .glabel{position:absolute;top:-9px;left:14px;background:var(--bg);padding:0 8px;font-size:11px;
+    letter-spacing:.14em;text-transform:uppercase;color:var(--accent);font-family:ui-monospace,Menlo,monospace}
+  .ops{display:flex;justify-content:space-around;gap:8px;flex-wrap:wrap}
+  .op{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;color:var(--dim);display:flex;align-items:center;gap:6px}
+  .op::before{content:"";width:7px;height:7px;border-radius:2px;background:var(--accent)}
+  .track{position:absolute;left:118px;right:118px;top:50%;height:2px;background:var(--line);z-index:0}
+  .pkt{position:absolute;top:50%;left:118px;width:9px;height:9px;border-radius:50%;background:var(--accent);
+    transform:translate(-50%,-50%);box-shadow:0 0 10px var(--accent);z-index:2;animation:travel 4.6s cubic-bezier(.6,0,.4,1) infinite}
+  @keyframes travel{0%{left:120px;opacity:0}8%{opacity:1}46%{left:calc(50% - 4px)}54%{left:calc(50% - 4px)}92%{opacity:1}100%{left:calc(100% - 120px);opacity:0}}
+  @media(prefers-reduced-motion:reduce){.pkt{animation:none;left:calc(50% - 4px)}}
+  .journey .note{margin-top:16px;text-align:center;color:var(--faint);font-size:12.5px;font-family:ui-monospace,Menlo,monospace}
+  .journey .note b{color:var(--fg)}
+  .stackbox{display:flex;flex-direction:column;gap:8px;align-items:center}
+  .fan{display:flex;gap:3px}
+  .fan i{font-style:normal;font-family:ui-monospace,Menlo,monospace;font-size:9.5px;padding:2px 4px;border-radius:4px;
+    background:color-mix(in srgb,var(--accent) 12%,var(--panel));border:1px solid color-mix(in srgb,var(--accent) 30%,var(--line));color:var(--accent)}
+
+  /* ---- fabric: one plane, many servers ---- */
+  .fabric{display:grid;grid-template-columns:120px 168px 1fr;align-items:center;gap:0;min-width:660px;
+    background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px;box-shadow:var(--shadow)}
+  .fabwrap{overflow-x:auto}
+  .fcol{display:flex;flex-direction:column;gap:9px;justify-content:center}
+  .achip{font-family:ui-monospace,Menlo,monospace;font-size:12px;text-align:center;padding:9px 6px;border-radius:9px;
+    border:1px solid var(--line);background:var(--panel2);color:var(--fg)}
+  .achip small{display:block;color:var(--faint);font-size:10px}
+  .plane{position:relative;margin:0 12px;border:1px solid color-mix(in srgb,var(--accent) 45%,var(--line));border-radius:12px;
+    background:linear-gradient(180deg,color-mix(in srgb,var(--accent) 10%,var(--panel)),var(--panel));padding:15px 12px;
+    display:flex;flex-direction:column;gap:7px}
+  .plane .pl{position:absolute;top:-9px;left:50%;transform:translateX(-50%);background:var(--panel);padding:0 8px;font-size:10px;
+    letter-spacing:.13em;text-transform:uppercase;color:var(--accent);font-family:ui-monospace,Menlo,monospace;white-space:nowrap}
+  .pchip{font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--fg);display:flex;align-items:center;gap:7px}
+  .pchip::before{content:"";width:6px;height:6px;border-radius:2px;background:var(--accent);flex:none}
+  .servers-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:9px;position:relative}
+  .servers-grid::before{content:"";position:absolute;left:-12px;top:8px;bottom:8px;width:1px;border-left:1px dashed color-mix(in srgb,var(--accent) 40%,var(--line))}
+  .srv{border:1px solid var(--line);background:var(--panel2);border-radius:10px;padding:9px 11px;display:flex;flex-direction:column;gap:4px}
+  .srv .sn{font-family:ui-monospace,Menlo,monospace;font-weight:600;font-size:13px;display:flex;justify-content:space-between;align-items:center}
+  .srv .sn .tx{font-size:9.5px;color:var(--faint);font-weight:400;border:1px solid var(--line);border-radius:4px;padding:1px 5px}
+  .srv .sd{color:var(--dim);font-size:11.5px}
+  .srv .tags{display:flex;flex-wrap:wrap;gap:4px;margin-top:2px}
+  .tg{font-family:ui-monospace,Menlo,monospace;font-size:9.5px;padding:2px 6px;border-radius:20px;border:1px solid transparent}
+  .tg.secret{color:var(--label);background:color-mix(in srgb,var(--label) 13%,transparent);border-color:color-mix(in srgb,var(--label) 32%,transparent)}
+  .tg.pii{color:var(--warn);background:color-mix(in srgb,var(--warn) 13%,transparent);border-color:color-mix(in srgb,var(--warn) 32%,transparent)}
+  .tg.egress{color:var(--deny);background:color-mix(in srgb,var(--deny) 13%,transparent);border-color:color-mix(in srgb,var(--deny) 32%,transparent)}
+  .tg.cosign{color:var(--warn);background:transparent;border-color:color-mix(in srgb,var(--warn) 40%,var(--line))}
+  .tg.win{color:var(--accent);background:transparent;border-color:color-mix(in srgb,var(--accent) 40%,var(--line))}
+  .tg.ok{color:var(--ok);background:color-mix(in srgb,var(--ok) 12%,transparent);border-color:color-mix(in srgb,var(--ok) 32%,transparent)}
+  @media(max-width:560px){.servers-grid{grid-template-columns:1fr}}
+
+  /* ---- the stack ---- */
+  .stack{display:flex;flex-direction:column;gap:8px}
+  .layer{display:grid;grid-template-columns:44px 150px 1fr;align-items:center;gap:16px;
+    background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--laccent,var(--accent));
+    border-radius:11px;padding:15px 18px;transition:transform .15s ease,border-color .15s ease}
+  .layer:hover{transform:translateX(4px);border-color:var(--accent)}
+  .layer .ln{font-family:ui-monospace,Menlo,monospace;font-size:13px;color:var(--faint);font-weight:600}
+  .layer .lt{font-family:ui-monospace,Menlo,monospace;font-weight:600;font-size:15px;letter-spacing:-.01em}
+  .layer .ld{color:var(--dim);font-size:14.5px}
+  .layer .ld b{color:var(--fg);font-weight:600}
+  @media(max-width:640px){.layer{grid-template-columns:36px 1fr}.layer .ld{grid-column:1/-1}}
+
+  /* ---- scenario grid ---- */
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(292px,1fr));gap:16px}
+  .scn{background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:20px;box-shadow:var(--shadow);
+    display:flex;flex-direction:column;gap:10px}
+  .scn .k{font-family:ui-monospace,Menlo,monospace;font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--accent)}
+  .scn h3{font-size:16.5px;letter-spacing:-.01em}
+  .scn p{margin:0;color:var(--dim);font-size:14px;line-height:1.55}
+  .scn .cmd{margin-top:auto;font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--fg);
+    background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;overflow-x:auto;white-space:nowrap}
+  .scn .cmd .p{color:var(--faint)}
+
+  /* ---- terminal / code cards ---- */
+  .term{background:var(--term-bg);border:1px solid var(--line);border-radius:12px;overflow:hidden;box-shadow:var(--shadow)}
+  .term .bar{display:flex;align-items:center;gap:7px;padding:10px 14px;border-bottom:1px solid rgba(255,255,255,.06);background:rgba(255,255,255,.02)}
+  .term .bar i{width:11px;height:11px;border-radius:50%;background:#39404f;display:block}
+  .term .bar i:nth-child(1){background:#ff5f56}.term .bar i:nth-child(2){background:#ffbd2e}.term .bar i:nth-child(3){background:#27c93f}
+  .term .bar .t{margin-left:8px;font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--term-dim)}
+  .term pre{margin:0;padding:16px 18px;overflow-x:auto;font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    font-size:13px;line-height:1.6;color:var(--term-fg);tab-size:2}
+  .term pre .c{color:var(--term-dim)}
+  .term pre .k{color:#7aa2ff}
+  .term pre .s{color:#7fd88f}
+  .term pre .a{color:#ffb86c}
+  .term pre .d{color:#ff8a8a}
+  .term pre .ok{color:#37d67a}
+  .term pre .no{color:#ff6b6b}
+  .term pre .dim{color:var(--term-dim)}
+  .prompt{color:#5b8cff}
+
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:start}
+  @media(max-width:860px){.two{grid-template-columns:1fr}}
+  .explain p{color:var(--dim);font-size:15.5px}
+  .explain p b,.explain p strong{color:var(--fg);font-weight:600}
+  .explain .mono{color:var(--fg)}
+
+  /* ---- flow diagrams ---- */
+  .flow{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:22px;box-shadow:var(--shadow);overflow-x:auto}
+  .flowrow{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  .fnode{font-family:ui-monospace,Menlo,monospace;font-size:13px;padding:10px 13px;border-radius:9px;
+    border:1px solid var(--line);background:var(--panel2);white-space:nowrap}
+  .fnode.call{border-color:color-mix(in srgb,var(--accent) 45%,var(--line))}
+  .fnode.allow{border-color:color-mix(in srgb,var(--ok) 55%,var(--line));color:var(--ok)}
+  .fnode.deny{border-color:color-mix(in srgb,var(--deny) 60%,var(--line));color:var(--deny)}
+  .arr{color:var(--faint);font-family:ui-monospace,monospace;font-size:16px}
+  .chip{font-family:ui-monospace,Menlo,monospace;font-size:11px;font-weight:600;padding:3px 9px;border-radius:20px;
+    display:inline-flex;align-items:center;gap:6px;border:1px solid transparent}
+  .chip.tainted{color:var(--label);background:color-mix(in srgb,var(--label) 14%,transparent);border-color:color-mix(in srgb,var(--label) 35%,transparent)}
+  .chip.clean{color:var(--dim);background:var(--panel2);border-color:var(--line)}
+  .chip.pii{color:var(--warn);background:color-mix(in srgb,var(--warn) 14%,transparent);border-color:color-mix(in srgb,var(--warn) 35%,transparent)}
+  .flowcap{margin-top:14px;color:var(--faint);font-size:13px;font-family:ui-monospace,Menlo,monospace}
+  .flowcap b{color:var(--fg)}
+
+  /* lanes (secret injection) */
+  .lanes{display:grid;grid-template-columns:1fr 1.4fr 1fr;gap:0;min-width:620px}
+  .lane{padding:0 14px;border-right:1px dashed var(--line)}
+  .lane:last-child{border-right:0}
+  .lane .h{font-family:ui-monospace,Menlo,monospace;font-size:11px;letter-spacing:.12em;text-transform:uppercase;
+    color:var(--accent);text-align:center;padding-bottom:12px;border-bottom:1px solid var(--line);margin-bottom:14px}
+  .lane .msg{font-family:ui-monospace,Menlo,monospace;font-size:12px;background:var(--panel2);border:1px solid var(--line);
+    border-radius:8px;padding:9px 10px;color:var(--fg);word-break:break-all}
+  .lane .ann{color:var(--faint);font-size:12px;margin-top:10px;text-align:center;font-family:ui-monospace,Menlo,monospace}
+  .lane .ann.good{color:var(--ok)}
+  .redact{color:var(--faint);text-decoration:line-through}
+  .reveal{color:var(--warn)}
+
+  /* insight loop */
+  .loop{display:flex;align-items:stretch;gap:10px;flex-wrap:wrap;justify-content:center}
+  .lstep{flex:1;min-width:150px;background:var(--panel2);border:1px solid var(--line);border-radius:11px;padding:14px}
+  .lstep .n{font-family:ui-monospace,Menlo,monospace;color:var(--accent);font-size:12px;font-weight:600}
+  .lstep h4{margin:6px 0 5px;font-family:ui-monospace,Menlo,monospace;font-size:14px;letter-spacing:-.01em}
+  .lstep p{margin:0;color:var(--dim);font-size:13px;line-height:1.5}
+  .loopback{text-align:center;color:var(--faint);font-family:ui-monospace,Menlo,monospace;font-size:12.5px;margin-top:14px}
+
+  /* chain */
+  .chain{display:flex;align-items:center;gap:8px;flex-wrap:nowrap;min-width:560px}
+  .rec{border:1px solid var(--line);background:var(--panel2);border-radius:9px;padding:10px 12px;font-family:ui-monospace,Menlo,monospace;font-size:12px;min-width:120px}
+  .rec .sq{color:var(--faint)}
+  .rec .hh{color:var(--accent);font-size:11px}
+  .bracket{margin-top:14px;border:1px dashed color-mix(in srgb,var(--accent) 45%,var(--line));border-radius:10px;
+    padding:12px 14px;font-family:ui-monospace,Menlo,monospace;font-size:12.5px;color:var(--dim);display:flex;align-items:center;gap:10px}
+  .bracket b{color:var(--fg)}
+  .keytag{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--accent);border:1px solid color-mix(in srgb,var(--accent) 40%,var(--line));
+    border-radius:6px;padding:3px 8px}
+
+  /* command reference */
+  .cmds{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px}
+  .cgroup{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+  .cgroup .gh{font-family:ui-monospace,Menlo,monospace;font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin-bottom:12px}
+  .cgroup .row{display:flex;gap:10px;padding:6px 0;border-top:1px solid var(--line);font-size:13.5px}
+  .cgroup .row:first-of-type{border-top:0}
+  .cgroup .cn{font-family:ui-monospace,Menlo,monospace;color:var(--fg);font-size:12.5px;white-space:nowrap;min-width:96px}
+  .cgroup .cd{color:var(--dim);font-size:13px}
+
+  footer{border-top:1px solid var(--line);padding:40px 0 60px;color:var(--dim)}
+  footer .lic{font-family:ui-monospace,Menlo,monospace;font-size:12.5px;border:1px solid var(--line);
+    background:var(--panel);border-radius:10px;padding:14px 16px;margin-bottom:20px}
+  footer .lic b{color:var(--fg)}
+  .reveal-on{opacity:0;transform:translateY(14px);transition:opacity .6s ease,transform .6s ease}
+  .reveal-on.in{opacity:1;transform:none}
+  @media(prefers-reduced-motion:reduce){.reveal-on{opacity:1;transform:none;transition:none}}
+  .kv{font-family:ui-monospace,Menlo,monospace;color:var(--fg);background:var(--panel2);border:1px solid var(--line);border-radius:5px;padding:1px 6px;font-size:.9em}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="wrap">
+    <span class="brand"><span class="dot"></span>meshmcp</span>
+    <nav class="navlinks">
+      <a href="#stack">stack</a>
+      <a href="#fabric">the fabric</a>
+      <a href="#possible">what's possible</a>
+      <a href="#firewall">firewall</a>
+      <a href="#prove">prove</a>
+      <a href="#insight">insight</a>
+      <a href="#secrets">secrets</a>
+      <a href="#commands">commands</a>
+    </nav>
+    <button class="toggle" id="tt" title="Toggle theme" aria-label="Toggle light/dark theme">◐</button>
+  </div>
+</div>
+
+<header class="hero wrap">
+  <div class="eyebrow reveal-on">identity-native control plane · MCP over WireGuard</div>
+  <h1 class="reveal-on">meshmcp</h1>
+  <div class="tag reveal-on">Every agent-to-tool call: identified, governed, and provable.</div>
+  <p class="sub reveal-on">Expose any Model Context Protocol server as a <b>dark service</b> — reachable only over a private
+  WireGuard mesh, with zero open ports and a cryptographic identity for every caller. Then enforce what each
+  agent may do, prove what it did, learn a policy from how it behaves, and hand it credentials it never holds.</p>
+  <div class="badges reveal-on">
+    <span class="badge"><span class="g">●</span> <b>0</b> open ports</span>
+    <span class="badge">Ed25519-signed audit</span>
+    <span class="badge">MCP <b>2025-06-18</b></span>
+    <span class="badge">userspace WireGuard</span>
+    <span class="badge"><span class="g">✓</span> 10 pkgs · <b>go test -race</b></span>
+  </div>
+
+  <div class="journey reveal-on">
+    <div class="rail">
+      <div class="track"></div><div class="pkt"></div>
+      <div class="endpoint">
+        <div class="box">agent / IDE</div>
+        <small>holds a reference,<br>not a secret</small>
+      </div>
+      <div class="gateway">
+        <span class="glabel">meshmcp gateway</span>
+        <div class="ops">
+          <span class="op">identity</span>
+          <span class="op">policy</span>
+          <span class="op">audit</span>
+          <span class="op">inject</span>
+        </div>
+      </div>
+      <div class="endpoint">
+        <div class="box stackbox">
+          <span>MCP servers</span>
+          <span class="fan"><i>fs</i><i>web</i><i>pay</i><i>+N</i></span>
+        </div>
+        <small>many · different ·<br>unmodified</small>
+      </div>
+    </div>
+    <div class="note">one control plane in front of <b>every</b> MCP server — each call authorized by WireGuard key, recorded in a signed ledger, credential spliced in</div>
+  </div>
+</header>
+
+<!-- ============ THE STACK ============ -->
+<section id="stack">
+  <div class="wrap">
+    <div class="sechead reveal-on">
+      <span class="eyebrow">the architecture</span>
+      <h2>Six layers, one library</h2>
+      <p class="lede">Connectivity, identity, policy, proof, intelligence, and reach — each a Go package, each built on the
+      layer below. You adopt as much of the stack as you need; every layer keys off the same cryptographic identity.</p>
+    </div>
+    <div class="stack">
+      <div class="layer reveal-on" style="--laccent:var(--accent)">
+        <span class="ln">L1</span><span class="lt">CONNECT</span>
+        <span class="ld"><b>Dark services</b> on WireGuard · cryptographic per-caller identity · resumable + migratable sessions that survive roaming and gateway crashes.</span>
+      </div>
+      <div class="layer reveal-on" style="--laccent:var(--ok)">
+        <span class="ln">L2</span><span class="lt">ENFORCE</span>
+        <span class="ld"><b>The agent firewall</b> — allow/deny per tool by identity, plus rate limits, time windows, taint tracking, data-flow labels, and human co-sign.</span>
+      </div>
+      <div class="layer reveal-on" style="--laccent:var(--warn)">
+        <span class="ln">L3</span><span class="lt">PROVE</span>
+        <span class="ld"><b>Non-repudiable audit</b> — a hash chain sealed by Ed25519-signed Merkle checkpoints · a live dashboard · deterministic session replay.</span>
+      </div>
+      <div class="layer reveal-on" style="--laccent:var(--accent2)">
+        <span class="ln">L4</span><span class="lt">UNDERSTAND</span>
+        <span class="ld"><b>Policy from behavior</b> — profile what agents do, recommend a least-privilege policy, simulate a change as a CI gate, detect drift.</span>
+      </div>
+      <div class="layer reveal-on" style="--laccent:var(--label)">
+        <span class="ln">L5</span><span class="lt">BROKER</span>
+        <span class="ld"><b>Credential injection</b> by identity — the agent references a secret by name and never holds the value; every use is audited.</span>
+      </div>
+      <div class="layer reveal-on" style="--laccent:var(--deny)">
+        <span class="ln">L6</span><span class="lt">SCALE</span>
+        <span class="ld"><b>Reach</b> — an aggregating router (LB · failover · discovery), a managed control plane, and identity-mapped cross-org federation.</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ ONE PLANE, MANY SERVERS ============ -->
+<section id="fabric">
+  <div class="wrap">
+    <div class="sechead reveal-on">
+      <span class="eyebrow">the fabric</span>
+      <h2>One control plane, many MCP servers</h2>
+      <p class="lede">meshmcp isn't a server — it's the layer <em>in front of</em> your servers. A filesystem, a web-fetcher, a
+      payments API, a customer database, a deploy pipeline: each is a <b>different</b> MCP server, wrapped unmodified. Every
+      call to <b>any</b> of them gets the same identity, policy, audit, and secret injection — and the router unions them into
+      one namespaced endpoint.</p>
+    </div>
+    <div class="fabwrap reveal-on">
+      <div class="fabric">
+        <div class="fcol">
+          <div class="achip">agent A<small>read-only</small></div>
+          <div class="achip">agent B<small>billing</small></div>
+          <div class="achip">IDE / CLI<small>you</small></div>
+        </div>
+        <div class="plane">
+          <span class="pl">meshmcp · one plane</span>
+          <span class="pchip">identity</span>
+          <span class="pchip">policy</span>
+          <span class="pchip">audit</span>
+          <span class="pchip">secrets</span>
+          <span class="pchip">router</span>
+        </div>
+        <div class="servers-grid">
+          <div class="srv"><div class="sn">fs <span class="tx">stdio</span></div><div class="sd">filesystem</div><div class="tags"><span class="tg ok">read_*</span></div></div>
+          <div class="srv"><div class="sn">web <span class="tx">stdio</span></div><div class="sd">fetch / HTTP</div><div class="tags"><span class="tg egress">taint_source</span></div></div>
+          <div class="srv"><div class="sn">payments <span class="tx">stdio</span></div><div class="sd">Stripe API</div><div class="tags"><span class="tg secret">🔑 secret</span><span class="tg cosign">co-sign</span></div></div>
+          <div class="srv"><div class="sn">customer-db <span class="tx">stdio</span></div><div class="sd">records</div><div class="tags"><span class="tg pii">emit pii</span></div></div>
+          <div class="srv"><div class="sn">deploy <span class="tx">stdio</span></div><div class="sd">CI / CD</div><div class="tags"><span class="tg win">⏰ window</span><span class="tg cosign">co-sign</span></div></div>
+          <div class="srv"><div class="sn">github <span class="tx">http</span></div><div class="sd">repos</div><div class="tags"><span class="tg secret">🔑 secret</span></div></div>
+          <div class="srv"><div class="sn">slack <span class="tx">http</span></div><div class="sd">messaging</div><div class="tags"><span class="tg egress">block pii</span></div></div>
+          <div class="srv"><div class="sn">vectors <span class="tx">stdio</span></div><div class="sd">embeddings</div><div class="tags"><span class="tg ok">rate-limited</span></div></div>
+        </div>
+      </div>
+    </div>
+    <p class="lede reveal-on" style="margin-top:20px">Each server keeps its own nature — different tools, different transports,
+    different risk. The plane gives them a <b>shared</b> spine: one WireGuard identity per caller, one policy language, one
+    tamper-evident ledger, one credential broker. The examples below each wrap one of these servers.</p>
+  </div>
+</section>
+
+<!-- ============ WHAT'S POSSIBLE ============ -->
+<section id="possible">
+  <div class="wrap">
+    <div class="sechead reveal-on">
+      <span class="eyebrow">what's possible</span>
+      <h2>Things you can do that you couldn't before</h2>
+      <p class="lede">Each card wraps one of the servers above — a different MCP server, governed the same way. A real capability,
+      driven by one command or a few lines of config. No public endpoints, no bespoke auth service, no separate audit pipeline.</p>
+    </div>
+    <div class="grid">
+      <div class="scn reveal-on">
+        <span class="k">share · fs</span>
+        <h3>Give your team a local tool — expose nothing</h3>
+        <p>Run an MCP server behind zero open ports. Teammates reach it over the mesh; an internet scan finds nothing.</p>
+        <div class="cmd"><span class="p">$</span> meshmcp serve --config backends.yaml</div>
+      </div>
+      <div class="scn reveal-on">
+        <span class="k">defend · web</span>
+        <h3>Stop prompt injection at the network</h3>
+        <p>Untrusted content taints the session; the privileged tool simply won't route. No jailbreak can talk past a rule the mesh enforces.</p>
+        <div class="cmd">taint_source: true  <span class="p">→</span>  taint_guard: true</div>
+      </div>
+      <div class="scn reveal-on">
+        <span class="k">contain · customer-db</span>
+        <h3>Never let PII leave the mesh</h3>
+        <p>Reading customer data labels the session <span class="kv">pii</span>; any egress tool refuses to run while that label is present.</p>
+        <div class="cmd">emit_labels: [pii]  <span class="p">·</span>  block_labels: [pii]</div>
+      </div>
+      <div class="scn reveal-on">
+        <span class="k">broker · payments</span>
+        <h3>Give an agent a key it never sees</h3>
+        <p>The agent writes <span class="kv">{{secret:stripe_key}}</span>; the gateway injects the real value by identity. The agent, its logs, its context — none hold it.</p>
+        <div class="cmd"><span class="p">$</span> meshmcp secrets check --config secrets.yaml</div>
+      </div>
+      <div class="scn reveal-on">
+        <span class="k">prove · any server</span>
+        <h3>Show an auditor exactly what happened</h3>
+        <p>A tamper-evident, signed ledger of every tool call by identity. Provable complete-and-unedited with the public key alone.</p>
+        <div class="cmd"><span class="p">$</span> meshmcp audit verify log --checkpoints cps</div>
+      </div>
+      <div class="scn reveal-on">
+        <span class="k">author · all servers</span>
+        <h3>Generate a policy from real traffic</h3>
+        <p>Don't write a deny-by-default allowlist from imagination. Learn one from a week of behavior, then simulate it before enforcing.</p>
+        <div class="cmd"><span class="p">$</span> meshmcp insight recommend audit &gt; policy</div>
+      </div>
+      <div class="scn reveal-on">
+        <span class="k">gate · payments</span>
+        <h3>Require a human to co-sign money movement</h3>
+        <p>A privileged call is held until a human identity on the mesh approves it. Silence is not permission.</p>
+        <div class="cmd"><span class="p">$</span> meshmcp approve --store d peer transfer_funds</div>
+      </div>
+      <div class="scn reveal-on">
+        <span class="k">federate · cross-org</span>
+        <h3>Let two companies' agents transact</h3>
+        <p>A boundary bridges named tools between meshes: per-org grants, identity mapping, every crossing audited — no public endpoint on either side.</p>
+        <div class="cmd"><span class="p">$</span> meshmcp federate --config boundary.yaml</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ FIREWALL ============ -->
+<section id="firewall">
+  <div class="wrap">
+    <div class="sechead reveal-on">
+      <span class="eyebrow">L2 · enforce</span>
+      <h2>The agent firewall</h2>
+      <p class="lede">Policy is declarative and keyed off the WireGuard identity the transport proves — not a header the caller
+      sends. A denied call gets an inline JSON-RPC error; the backend never sees it.</p>
+    </div>
+    <div class="two">
+      <div class="term reveal-on">
+        <div class="bar"><i></i><i></i><i></i><span class="t">policy.yaml — the whole language</span></div>
+<pre><span class="k">default_allow</span>: <span class="d">false</span>            <span class="c"># deny by default</span>
+<span class="k">rules</span>:
+  <span class="c"># rate-limited reads for everyone</span>
+  - <span class="k">peers</span>: [<span class="s">"*"</span>]
+    <span class="k">tools</span>: [<span class="s">"read_*"</span>, <span class="s">"search"</span>]
+    <span class="k">allow</span>: <span class="s">true</span>
+    <span class="k">rate</span>: { max: <span class="a">30</span>, per: <span class="s">"1m"</span> }
+
+  <span class="c"># deploy only in business hours</span>
+  - <span class="k">peers</span>: [<span class="s">"pubkey:&lt;agent&gt;"</span>]
+    <span class="k">tools</span>: [<span class="s">"deploy"</span>]
+    <span class="k">allow</span>: <span class="s">true</span>
+    <span class="k">when</span>: { days: [mon,tue,wed,thu,fri],
+            hours: <span class="s">"09:00-17:00"</span>, tz: <span class="s">"UTC"</span> }
+
+  <span class="c"># money movement needs a human co-sign</span>
+  - <span class="k">peers</span>: [<span class="s">"*"</span>]
+    <span class="k">tools</span>: [<span class="s">"transfer_funds"</span>]
+    <span class="k">allow</span>: <span class="s">true</span>
+    <span class="k">require_cosign</span>: <span class="s">true</span></pre>
+      </div>
+      <div class="explain reveal-on">
+        <p><strong>Taint tracking is prompt-injection defense at the network layer.</strong> Mark data-fetching tools as a
+        <span class="mono">taint_source</span> and privileged tools as a <span class="mono">taint_guard</span>. The moment
+        untrusted content enters a session, the guarded tool stops routing — decided from connection state the model can't influence.</p>
+        <div class="flow" style="margin:18px 0">
+          <div class="flowrow">
+            <span class="fnode call">fetch()</span><span class="arr">→</span>
+            <span class="fnode allow">ALLOW</span><span class="arr">→</span>
+            <span class="chip tainted">● session: tainted</span>
+          </div>
+          <div class="flowrow" style="margin-top:12px">
+            <span class="fnode call">write_file()</span><span class="arr">→</span>
+            <span class="fnode deny">BLOCKED</span>
+            <span class="arr">·</span><span style="color:var(--deny);font-family:ui-monospace,monospace;font-size:12.5px">"session tainted by untrusted data"</span>
+          </div>
+          <div class="flowcap">The write <b>never reaches the backend</b>. No LLM guardrail or ordinary firewall can express this.</div>
+        </div>
+        <p><strong>Data-flow labels</strong> generalize taint to a lattice: <span class="mono">emit_labels: [pii]</span> on a
+        reader, <span class="mono">block_labels: [pii]</span> on an egress tool — and PII can never leave the mesh through an agent.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ PROVE ============ -->
+<section id="prove">
+  <div class="wrap">
+    <div class="sechead reveal-on">
+      <span class="eyebrow">L3 · prove</span>
+      <h2>A ledger you can prove to a regulator</h2>
+      <p class="lede">Every decision is a hash-chained record. Periodic <b>Ed25519-signed Merkle checkpoints</b> seal the chain,
+      so the log is complete-and-unedited — provable with the public key alone, even against an insider who can write the file.</p>
+    </div>
+    <div class="flow reveal-on" style="margin-bottom:20px">
+      <div class="chain">
+        <div class="rec"><div class="sq">seq 1</div><div>read_file <span style="color:var(--ok)">allow</span></div><div class="hh">hash 9f9d…</div></div>
+        <span class="arr">→</span>
+        <div class="rec"><div class="sq">seq 2</div><div>delete_all <span style="color:var(--deny)">deny</span></div><div class="hh">prev 9f9d· e8f0…</div></div>
+        <span class="arr">→</span>
+        <div class="rec"><div class="sq">seq 3</div><div>write <span style="color:var(--warn)">cosign</span></div><div class="hh">prev e8f0· 26b2…</div></div>
+      </div>
+      <div class="bracket">
+        <span class="keytag">🔑 signed checkpoint</span>
+        <span>Merkle root over seq 1–3 · <b>Ed25519 signature</b> · links to the previous checkpoint</span>
+      </div>
+      <div class="flowcap">Edit any record — even re-linking the whole chain — and the Merkle root no longer matches the <b>signed</b> root. It can't be forged without the private key.</div>
+    </div>
+    <div class="term reveal-on">
+      <div class="bar"><i></i><i></i><i></i><span class="t">$ meshmcp audit verify</span></div>
+<pre><span class="prompt">$</span> meshmcp audit verify audit.jsonl --checkpoints cps.jsonl --pubkey &lt;key&gt;
+<span class="ok">OK</span>  1240 records, 10 signed checkpoint(s), 1240 records committed
+    non-repudiable: the log is complete and unedited, provable with the public key alone
+
+<span class="c"># after a single tampered record:</span>
+<span class="prompt">$</span> meshmcp audit verify audit.jsonl --checkpoints cps.jsonl --pubkey &lt;key&gt;
+<span class="no">FAILED</span>  checkpoint 1 Merkle root mismatch: the records it covers were edited
+        (signed root 0b78259d2e2c… , recomputed d11992f3ae84…)   <span class="dim">exit 1</span></pre>
+    </div>
+  </div>
+</section>
+
+<!-- ============ INSIGHT ============ -->
+<section id="insight">
+  <div class="wrap">
+    <div class="sechead reveal-on">
+      <span class="eyebrow">L4 · understand</span>
+      <h2>Policy that writes itself</h2>
+      <p class="lede">A deny-by-default firewall nobody can author is a Ferrari with no steering wheel. <b>insight</b> is the
+      read side: it turns the audit stream into policy, then watches for drift. It's the function AUDIT-RECORD* → POLICY-DSL.</p>
+    </div>
+    <div class="flow reveal-on" style="margin-bottom:20px">
+      <div class="loop">
+        <div class="lstep"><div class="n">observe</div><h4>profile</h4><p>per-identity behavior: tools, rate p99, hours, label flows.</p></div>
+        <span class="arr" style="align-self:center">→</span>
+        <div class="lstep"><div class="n">recommend</div><h4>synthesize</h4><p>a least-privilege policy — exactly what was used, nothing more.</p></div>
+        <span class="arr" style="align-self:center">→</span>
+        <div class="lstep"><div class="n">simulate</div><h4>CI gate</h4><p>replay real traffic through the change; exit ≠ 0 on any regression.</p></div>
+        <span class="arr" style="align-self:center">→</span>
+        <div class="lstep"><div class="n">detect</div><h4>drift → co-sign</h4><p>deviation from baseline opens a human gate — fail-to-human, not fail-closed.</p></div>
+      </div>
+      <div class="loopback">↺ a detected deviation becomes new observed behavior → re-recommend. The loop closes.</div>
+    </div>
+    <div class="term reveal-on">
+      <div class="bar"><i></i><i></i><i></i><span class="t">$ meshmcp insight — the loop, live</span></div>
+<pre><span class="prompt">$</span> meshmcp insight recommend hist.jsonl <span class="dim">&gt; policy.yaml</span>
+<span class="c"># → pubkey:K granted read_dir, read_file · rate max:2/1m · when wed 09:00-17:00</span>
+
+<span class="prompt">$</span> meshmcp insight simulate hist.jsonl --policy policy.yaml
+simulated 25 decisions: 25 unchanged, coverage 96%          <span class="ok">exit 0</span>
+
+<span class="prompt">$</span> meshmcp insight simulate hist.jsonl --policy too-tight.yaml
+REGRESSIONS (were allowed, now blocked):
+  agent.mesh read_dir   <span class="no">allow→deny</span>  ×8                       <span class="no">exit 1</span>
+
+<span class="prompt">$</span> meshmcp insight detect today.jsonl --baseline last-week.jsonl
+  <span class="a">[1.00]</span> unknown-identity  stranger.mesh   → require enrollment
+  <span class="a">[0.80]</span> new-tool          exfiltrate      → open co-sign
+  <span class="a">[0.50]</span> off-hours         03:00 UTC       → open co-sign</pre>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SECRETS ============ -->
+<section id="secrets">
+  <div class="wrap">
+    <div class="sechead reveal-on">
+      <span class="eyebrow">L5 · broker</span>
+      <h2>The agent never holds the credential</h2>
+      <p class="lede">Because the gateway already parses every call, it injects secrets by identity. The agent carries a
+      reference; the real value is spliced in on the way to the backend — and reaches only the backend.</p>
+    </div>
+    <div class="flow reveal-on">
+      <div class="lanes">
+        <div class="lane">
+          <div class="h">agent</div>
+          <div class="msg">charge {<br>&nbsp;"auth":"Bearer <span style="color:var(--accent)">{{secret:stripe_key}}</span>"<br>}</div>
+          <div class="ann">holds a <b style="color:var(--fg)">reference</b>, never the key</div>
+        </div>
+        <div class="lane">
+          <div class="h">meshmcp gateway</div>
+          <div class="msg">
+            ✓ authorized by WireGuard identity<br>
+            ✓ refused if session tainted<br>
+            ✓ audited: <span style="color:var(--fg)">"stripe_key: injected"</span>
+          </div>
+          <div class="ann">trace &amp; audit see only <span class="redact">the reference</span>, never the value</div>
+        </div>
+        <div class="lane">
+          <div class="h">MCP server</div>
+          <div class="msg">charge {<br>&nbsp;"auth":"Bearer <span class="reveal">sk_live_…</span>"<br>}</div>
+          <div class="ann good">the value exists only here</div>
+        </div>
+      </div>
+      <div class="flowcap" style="text-align:center">Grants gate injection by <b>identity</b>, <b>tool</b>, and session <b>label</b> — <span class="kv">block_labels: [tainted]</span> means untrusted content can never trigger a credential use.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SCALE ============ -->
+<section id="scale">
+  <div class="wrap">
+    <div class="sechead reveal-on">
+      <span class="eyebrow">L6 · scale</span>
+      <h2>From one server to a federated network</h2>
+      <p class="lede">The same identity and audit primitives compose outward — one endpoint over many servers, a control
+      plane that onboards nodes, and boundaries that bridge organizations.</p>
+    </div>
+    <div class="grid">
+      <div class="scn reveal-on">
+        <span class="k">router</span>
+        <h3>One endpoint over N servers</h3>
+        <p>Namespaced union of many backends, with replica load-balancing, health-based failover, a discovery registry, and full bidirectional MCP.</p>
+        <div class="cmd"><span class="p">$</span> meshmcp router --config router.yaml</div>
+      </div>
+      <div class="scn reveal-on">
+        <span class="k">control</span>
+        <h3>Onboard nodes without hand-wiring</h3>
+        <p>A managed control plane serves enrollment (real NetBird one-off key issuance), the service registry, and policy distribution — as one mesh peer.</p>
+        <div class="cmd"><span class="p">$</span> meshmcp control --netbird-token &lt;pat&gt;</div>
+      </div>
+      <div class="scn reveal-on">
+        <span class="k">federate</span>
+        <h3>Bridge two organizations</h3>
+        <p>A boundary maps a remote org's identity, admits only its granted tools, stamps a local principal, and audits every crossing.</p>
+        <div class="cmd"><span class="p">$</span> meshmcp federate --config boundary.yaml</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ COMMANDS ============ -->
+<section id="commands">
+  <div class="wrap">
+    <div class="sechead reveal-on">
+      <span class="eyebrow">reference</span>
+      <h2>19 commands, one static binary</h2>
+      <p class="lede">Everything is one <span class="mono">meshmcp</span> binary. Mesh credentials come from
+      <span class="mono">$NB_SETUP_KEY</span> or flags.</p>
+    </div>
+    <div class="cmds">
+      <div class="cgroup reveal-on">
+        <div class="gh">serve &amp; scale</div>
+        <div class="row"><span class="cn">serve</span><span class="cd">expose backends on the mesh</span></div>
+        <div class="row"><span class="cn">router</span><span class="cd">aggregate upstreams into one endpoint</span></div>
+        <div class="row"><span class="cn">orchestrate</span><span class="cd">a tool that calls other servers' tools</span></div>
+        <div class="row"><span class="cn">control</span><span class="cd">enrollment · registry · policy dist.</span></div>
+        <div class="row"><span class="cn">federate</span><span class="cd">cross-org boundary</span></div>
+      </div>
+      <div class="cgroup reveal-on">
+        <div class="gh">connect &amp; drive</div>
+        <div class="row"><span class="cn">connect</span><span class="cd">stdio ⇄ remote stdio bridge</span></div>
+        <div class="row"><span class="cn">forward</span><span class="cd">local TCP → mesh peer (HTTP)</span></div>
+        <div class="row"><span class="cn">ls · call</span><span class="cd">list / call tools from the CLI</span></div>
+        <div class="row"><span class="cn">read · prompt</span><span class="cd">resources &amp; prompts</span></div>
+        <div class="row"><span class="cn">probe</span><span class="cd">in-process handshake diagnostic</span></div>
+      </div>
+      <div class="cgroup reveal-on">
+        <div class="gh">govern &amp; prove</div>
+        <div class="row"><span class="cn">approve</span><span class="cd">human co-sign a held call</span></div>
+        <div class="row"><span class="cn">secrets</span><span class="cd">check the credential broker config</span></div>
+        <div class="row"><span class="cn">audit</span><span class="cd">verify the chain · keygen</span></div>
+        <div class="row"><span class="cn">dash</span><span class="cd">live control dashboard</span></div>
+        <div class="row"><span class="cn">insight</span><span class="cd">profile · recommend · simulate · detect</span></div>
+        <div class="row"><span class="cn">replay</span><span class="cd">re-issue a session &amp; diff responses</span></div>
+      </div>
+    </div>
+
+    <div class="term reveal-on" style="margin-top:24px">
+      <div class="bar"><i></i><i></i><i></i><span class="t">quick start — 60 seconds</span></div>
+<pre><span class="prompt">$</span> go build -o meshmcp .
+<span class="prompt">$</span> export NB_SETUP_KEY=<span class="dim">&lt;key from app.netbird.io&gt;</span>
+
+<span class="prompt">$</span> meshmcp serve --config examples/demo-backends.yaml   <span class="c"># prints mesh IP 100.x.y.z</span>
+
+<span class="c"># from any other machine on the mesh — nothing is exposed to the internet:</span>
+<span class="prompt">$</span> meshmcp ls   100.x.y.z:9101
+<span class="prompt">$</span> meshmcp call 100.x.y.z:9101 add --arg a=2 --arg b=40
+  <span class="ok">→ 42</span></pre>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="lic">
+      <b>Proprietary — all rights reserved.</b> The source is public for reading only. Any use — running, deploying,
+      copying, modifying, or redistributing — requires prior written permission from the copyright holder, <b>Rey Darius</b>.
+    </div>
+    <div style="font-family:ui-monospace,Menlo,monospace;font-size:13px;color:var(--dim)">
+      meshmcp · Go · embedded NetBird WireGuard · stdio + Streamable-HTTP · 10 packages, go test -race green<br>
+      <span style="color:var(--faint)">Built on the reliability idea behind Tencent Mars STN, the embedding pattern from caddy-netbird, and NetBird's userspace WireGuard.</span>
+    </div>
+  </div>
+</footer>
+
+<script>
+  (function(){
+    var tt=document.getElementById('tt');
+    function cur(){var s=document.documentElement.getAttribute('data-theme');
+      if(s)return s;return window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';}
+    tt.addEventListener('click',function(){
+      var next=cur()==='dark'?'light':'dark';
+      document.documentElement.setAttribute('data-theme',next);
+    });
+    // scroll reveal
+    if('IntersectionObserver' in window && !window.matchMedia('(prefers-reduced-motion:reduce)').matches){
+      var io=new IntersectionObserver(function(es){
+        es.forEach(function(e){if(e.isIntersecting){e.target.classList.add('in');io.unobserve(e.target);}});
+      },{threshold:.12});
+      document.querySelectorAll('.reveal-on').forEach(function(el){io.observe(el);});
+    } else {
+      document.querySelectorAll('.reveal-on').forEach(function(el){el.classList.add('in');});
+    }
+  })();
+</script>
+</body>
+</html>
