@@ -99,6 +99,26 @@ func (s *FilePending) List() ([]Pending, error) {
 	return out, nil
 }
 
+// Has reports whether a (non-expired) pending request exists for (peer, tool).
+func (s *FilePending) Has(peer, tool string) bool {
+	if s == nil || s.Dir == "" {
+		return false
+	}
+	b, err := os.ReadFile(pendingFile(s.Dir, peer, tool))
+	if err != nil {
+		return false
+	}
+	if s.TTL > 0 {
+		var p Pending
+		if json.Unmarshal(b, &p) == nil {
+			if t, err := time.Parse(time.RFC3339, p.Requested); err == nil && time.Since(t) > s.TTL {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // Clear removes the pending record for (peer, tool) — called once it is
 // approved or denied.
 func (s *FilePending) Clear(peer, tool string) error {

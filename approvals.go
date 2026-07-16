@@ -100,6 +100,10 @@ func approvalsHandler(ps *policy.FilePending, approver func(*http.Request) strin
 					http.Error(w, err.Error(), http.StatusInternalServerError)
 					return
 				}
+				_ = policy.ClearDeny(ps.Dir, body.Peer, body.Tool)
+			} else {
+				_ = policy.Deny(ps.Dir, body.Peer, body.Tool, who, now())
+				_ = policy.Revoke(ps.Dir, body.Peer, body.Tool) // no lingering grant
 			}
 			// Whether approved or denied, the request is no longer pending.
 			_ = ps.Clear(body.Peer, body.Tool)
@@ -114,6 +118,48 @@ func approvalsHandler(ps *policy.FilePending, approver func(*http.Request) strin
 	}
 	mux.HandleFunc("/v1/approve", decide(true))
 	mux.HandleFunc("/v1/deny", decide(false))
+
+	// /v1/request lets ANY agent framework (e.g. the OpenAI Agents SDK
+	// ShellTool's on_approval) register a human-approval request over the mesh —
+	// turning meshmcp's approver into a general "human in the loop" service.
+	mux.HandleFunc("/v1/request", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct{ Peer, Tool, Backend string }
+		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body) != nil || body.Peer == "" || body.Tool == "" {
+			http.Error(w, "peer and tool are required", http.StatusBadRequest)
+			return
+		}
+		// Fresh request: clear any stale decision, then record it pending.
+		_ = policy.Revoke(ps.Dir, body.Peer, body.Tool)
+		_ = policy.ClearDeny(ps.Dir, body.Peer, body.Tool)
+		if err := ps.Record(policy.Pending{Peer: body.Peer, Tool: body.Tool, Backend: body.Backend}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSONResp(w, http.StatusOK, map[string]string{"status": "pending", "peer": body.Peer, "tool": body.Tool})
+	})
+
+	// /v1/status?peer=&tool= lets the requester poll the human's decision.
+	mux.HandleFunc("/v1/status", func(w http.ResponseWriter, r *http.Request) {
+		peer, tool := r.URL.Query().Get("peer"), r.URL.Query().Get("tool")
+		if peer == "" || tool == "" {
+			http.Error(w, "peer and tool query params are required", http.StatusBadRequest)
+			return
+		}
+		state := "unknown"
+		switch {
+		case (&policy.FileCosign{Dir: ps.Dir}).Approved(policy.CosignKey(peer, tool)):
+			state = "approved"
+		case policy.IsDenied(ps.Dir, peer, tool):
+			state = "denied"
+		case ps.Has(peer, tool):
+			state = "pending"
+		}
+		writeJSONResp(w, http.StatusOK, map[string]string{"state": state, "peer": peer, "tool": tool})
+	})
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {

@@ -86,3 +86,36 @@ func Revoke(dir, peer, tool string) error {
 	}
 	return err
 }
+
+// denyFile is the on-disk marker for an explicit denial, kept separate from the
+// grant so an approver's decision has three distinguishable states — approved,
+// denied, pending — which an external requester can poll.
+func denyFile(dir, key string) string {
+	sum := sha256.Sum256([]byte("deny:" + key))
+	return filepath.Join(dir, "deny-"+hex.EncodeToString(sum[:8])+".json")
+}
+
+// Deny records an explicit denial of (peer, tool), attributed to by.
+func Deny(dir, peer, tool, by string, now time.Time) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	a := Approval{Key: CosignKey(peer, tool), Peer: peer, Tool: tool, Approver: by, GrantedAt: now.UTC().Format(time.RFC3339)}
+	b, _ := json.MarshalIndent(a, "", "  ")
+	return os.WriteFile(denyFile(dir, a.Key), b, 0o644)
+}
+
+// IsDenied reports whether (peer, tool) was explicitly denied.
+func IsDenied(dir, peer, tool string) bool {
+	_, err := os.Stat(denyFile(dir, CosignKey(peer, tool)))
+	return err == nil
+}
+
+// ClearDeny removes any denial marker for (peer, tool).
+func ClearDeny(dir, peer, tool string) error {
+	err := os.Remove(denyFile(dir, CosignKey(peer, tool)))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}

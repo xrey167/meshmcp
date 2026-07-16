@@ -83,6 +83,54 @@ func TestApprovalsServesMobileUI(t *testing.T) {
 // attacker-controlled tool/peer name is concatenated into an inline handler.
 // The approver renders all dynamic values via textContent + addEventListener,
 // so the page must contain no inline onclick= and must use addEventListener.
+// TestApproverExternalRequestFlow exercises the general HITL bridge: an external
+// tool registers a request, polls pending, and the two decisions yield distinct
+// approved / denied states — the substrate for the OpenAI Agents SDK
+// ShellTool.on_approval bridge.
+func TestApproverExternalRequestFlow(t *testing.T) {
+	dir := t.TempDir()
+	ps := &policy.FilePending{Dir: dir}
+	h := approvalsHandler(ps, func(*http.Request) string { return "phone" }, time.Now)
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	status := func(peer, tool string) string {
+		resp, _ := http.Get(ts.URL + "/v1/status?peer=" + peer + "&tool=" + tool)
+		var s struct{ State string }
+		json.NewDecoder(resp.Body).Decode(&s)
+		return s.State
+	}
+
+	// Unknown before any request.
+	if got := status("agentA", "shell"); got != "unknown" {
+		t.Fatalf("pre-request state should be unknown, got %q", got)
+	}
+	// Register two requests.
+	post(t, ts.URL+"/v1/request", `{"peer":"agentA","tool":"shell","backend":"agent-shell"}`)
+	post(t, ts.URL+"/v1/request", `{"peer":"agentB","tool":"shell","backend":"agent-shell"}`)
+	if got := status("agentA", "shell"); got != "pending" {
+		t.Fatalf("after request, state should be pending, got %q", got)
+	}
+	// Approve A, deny B.
+	post(t, ts.URL+"/v1/approve", `{"peer":"agentA","tool":"shell"}`)
+	post(t, ts.URL+"/v1/deny", `{"peer":"agentB","tool":"shell"}`)
+	if got := status("agentA", "shell"); got != "approved" {
+		t.Fatalf("agentA should be approved, got %q", got)
+	}
+	if got := status("agentB", "shell"); got != "denied" {
+		t.Fatalf("agentB should be denied, got %q", got)
+	}
+	// A grant was actually written for A (so a gateway would let the call through).
+	if !(&policy.FileCosign{Dir: dir}).Approved(policy.CosignKey("agentA", "shell")) {
+		t.Fatalf("approve should write a usable grant")
+	}
+	// A re-request clears the prior decision back to pending.
+	post(t, ts.URL+"/v1/request", `{"peer":"agentA","tool":"shell"}`)
+	if got := status("agentA", "shell"); got != "pending" {
+		t.Fatalf("re-request should reset to pending, got %q", got)
+	}
+}
+
 func TestApproverNoInjectableHandlers(t *testing.T) {
 	if strings.Contains(approvalsHTML, "onclick=") {
 		t.Fatalf("approver must not use inline onclick handlers (XSS via interpolated tool/peer names)")

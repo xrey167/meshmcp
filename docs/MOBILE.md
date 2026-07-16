@@ -239,9 +239,18 @@ resumable session layer was built for exactly the network churn a phone lives in
 The gateway, policy, and audit don't change — the phone is just one more identity
 on the dark network.
 
+## Beyond meshmcp's own calls: any framework's approvals
+
+The approver is now a **general human-in-the-loop service**: `POST /v1/request`
++ `GET /v1/status` let *any* agent framework register an approval request and
+poll the human's decision — the OpenAI Agents SDK `ShellTool.on_approval` being
+the first consumer (see `examples/hitl/`). So the phone becomes the single
+approval inbox for every agent you run, not just meshmcp-mediated calls.
+
 ## Reference points
 
-- `approvals.go` / `policy/pending.go` — the pending registry + phone-first approver (ships now).
+- `approvals.go` / `policy/pending.go` — the pending registry + phone-first approver + external request/status endpoints (ships now).
+- `examples/hitl/` — the OpenAI Agents SDK `on_approval` bridge.
 - `approve` + `cosign_store` — the human-in-the-loop primitive the phone plugs into.
 - `session/` — resumable, migratable sessions designed for roaming networks.
 - NetBird mobile clients (iOS / Android) — the connectivity layer already exists.
