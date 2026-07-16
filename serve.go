@@ -278,11 +278,13 @@ func bridgeConn(conn net.Conn, backend session.Backend) {
 // tracer is configured; with neither, the raw subprocess is used.
 func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer) session.BackendFactory {
 	exec := session.ExecBackendFactory(b.Stdio[0], b.Stdio[1:], os.Environ())
-	if b.Policy == nil && tracer == nil {
+	if b.Policy == nil && tracer == nil && b.Capabilities == nil {
 		return exec
 	}
 	// One Engine per backend, shared across all its connections, so rate
 	// limits and co-sign approvals are per-identity rather than per-connection.
+	// Capabilities need the engine path even without an explicit policy, so a
+	// deny-by-default engine is synthesized when only capabilities are set.
 	var eng *policy.Engine
 	if b.Policy != nil {
 		var cosign policy.CosignStore
@@ -293,6 +295,17 @@ func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer) s
 			}
 		}
 		eng = policy.NewEngine(b.Policy, func() time.Time { return time.Now() }, cosign)
+	} else if b.Capabilities != nil {
+		eng = policy.NewEngine(&policy.Policy{DefaultAllow: false}, func() time.Time { return time.Now() }, nil)
+	}
+	// Capability verifier: pins the backend's trusted authority keys.
+	var capVerifier *policy.CapabilityVerifier
+	if b.Capabilities != nil {
+		v, err := policy.NewCapabilityVerifier(b.Capabilities.TrustedPublicKeys, func() time.Time { return time.Now() })
+		if err != nil {
+			log.Fatalf("backend %q: capabilities: %v", b.Name, err)
+		}
+		capVerifier = v
 	}
 	// Held-request registry lives in the cosign directory, so an approver
 	// (a human identity / a phone on the mesh) sees pending calls next to the
@@ -327,6 +340,9 @@ func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer) s
 		}
 		if pending != nil {
 			f.SetPendingStore(pending)
+		}
+		if capVerifier != nil {
+			f.SetCapabilityVerifier(capVerifier, b.Capabilities.Required)
 		}
 		return f, nil
 	}

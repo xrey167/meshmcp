@@ -25,10 +25,12 @@ type Filter struct {
 	inner   io.ReadWriteCloser
 	eng     *Engine
 	audit   *AuditLog
-	tracer  *Tracer
-	secrets SecretResolver
-	pending PendingStore
-	caller  Caller
+	tracer      *Tracer
+	secrets     SecretResolver
+	pending     PendingStore
+	capVerifier *CapabilityVerifier
+	capRequired bool
+	caller      Caller
 
 	lmu    sync.Mutex      // guards labels
 	labels map[string]bool // data-flow labels accumulated this session
@@ -198,7 +200,19 @@ func (f *Filter) handleLine(line []byte) error {
 
 func (f *Filter) handleToolCall(line []byte, msg rpcPeek) error {
 	tool := msg.Params.Name
+
+	// Extract and STRIP any presented capability so it never reaches the
+	// backend, trace, audit, or secret injection. All downstream steps use the
+	// stripped line.
+	var capToken string
+	if f.capVerifier != nil {
+		capToken, line = stripCapability(line)
+	}
+
 	dec := f.eng.DecideToolCall(f.caller.Peer, f.caller.PeerKey, tool, f.labelSnapshot())
+	if f.capVerifier != nil {
+		dec = f.applyCapability(dec, capToken, tool)
+	}
 	rec := f.record(msg.Method, tool, string(msg.ID), dec)
 	f.audit.write(rec)
 	f.traceLine("c2s", line, rec.Decision)

@@ -120,7 +120,13 @@ func cmdCall(args []string) error {
 	raw := fs2.String("json", "", "tool arguments as a raw JSON object (overrides --arg)")
 	task := fs2.Bool("task", false, "run the tool asynchronously as a task")
 	wait := fs2.Bool("wait", false, "with --task, wait for the task to finish and print its result")
+	capTok := fs2.String("capability", "", "present a signed capability grant; @file reads the token from a file")
 	if err := fs2.Parse(rest[2:]); err != nil {
+		return err
+	}
+
+	capToken, err := readCapabilityToken(*capTok)
+	if err != nil {
 		return err
 	}
 
@@ -138,6 +144,11 @@ func cmdCall(args []string) error {
 		return err
 	}
 	defer cleanup()
+	if capToken != "" {
+		// Presented in params._meta under the gateway's capability key; the
+		// gateway verifies and strips it before the backend ever sees it.
+		mc.RequestMeta = map[string]any{"com.meshmcp/capability": capToken}
+	}
 	ctx := context.Background()
 
 	if *task && *wait {
@@ -158,6 +169,23 @@ func cmdCall(args []string) error {
 	}
 	printJSON(res)
 	return nil
+}
+
+// readCapabilityToken resolves a --capability flag value: "" stays empty, a
+// leading '@' reads the token from a file (the recommended path — keeps the
+// token out of shell history), otherwise the value is the token literally.
+func readCapabilityToken(v string) (string, error) {
+	if v == "" {
+		return "", nil
+	}
+	if strings.HasPrefix(v, "@") {
+		data, err := os.ReadFile(v[1:])
+		if err != nil {
+			return "", fmt.Errorf("--capability: %w", err)
+		}
+		return strings.TrimSpace(string(data)), nil
+	}
+	return strings.TrimSpace(v), nil
 }
 
 // cmdFunctions lists a backend's tools as provider-neutral function definitions.

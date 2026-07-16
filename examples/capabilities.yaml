@@ -1,0 +1,67 @@
+# Signed capabilities: a short-lived, cryptographically signed grant lets a
+# caller reach a tool that the static policy would otherwise default-deny —
+# without editing the gateway config. Think of it as a time-boxed, subject-bound
+# ticket an authority issues out of band.
+#
+# What a capability can and cannot do (fail-closed by design):
+#   - It only UPGRADES a policy-DEFAULT deny to allow. It never overrides an
+#     explicit `allow: false` rule, and never bypasses a require_cosign gate.
+#   - It is bound to the caller's WireGuard key (subject), a single backend
+#     (audience), and a set of tool-name globs — all enforced by the gateway.
+#   - Trust roots are PINNED here (trusted_public_keys). A token that carries its
+#     own key is worthless: the gateway only honors signatures from keys it pins.
+#   - The token is stripped from params._meta before the request reaches the
+#     backend, the trace, the audit record, or secret injection.
+#   - Lifetime is capped at 24h; an invalid/expired/wrong-subject token is denied.
+#
+# Mint the authority key once (keep the private file 0600, publish only the hex):
+#   meshmcp capability keygen --out capability-key.json
+# Issue a grant for one agent (token to stdout; redirect to a 0600 file):
+#   meshmcp capability issue --key capability-key.json \
+#     --subject <agent-wireguard-key> --audience finance \
+#     --tool 'read_*' --tool get_balance --ttl 15m > read.cap
+# Present it on a call:
+#   meshmcp call <peer:port> read_invoice --capability @read.cap
+mesh:
+  device_name: meshmcp-caps
+  setup_key_env: NB_SETUP_KEY
+  config_path: ./caps-gw.json
+  log_level: info
+
+backends:
+  # 1) Capability-ONLY surface: required:true means every tools/call must present
+  #    a valid grant. No static policy is needed — the gateway synthesizes a
+  #    deny-by-default engine, and only a valid capability opens a call.
+  - name: finance
+    port: 9130
+    stdio: ["./cmd/mcpserver/mcpserver.exe"]
+    audit_log: ./caps-audit.jsonl
+    capabilities:
+      required: true
+      trusted_public_keys:
+        # Output of `meshmcp capability keygen` (the "public key:" hex line).
+        - "REPLACE_WITH_AUTHORITY_PUBLIC_KEY_HEX"
+
+  # 2) Policy PLUS capabilities: the static policy is the floor (any peer may
+  #    read), and a capability lets a specific caller reach further —
+  #    export_ledger is default-denied for everyone, but a signed grant upgrades
+  #    it. An explicit deny (delete_all) still wins over any capability.
+  - name: ledger
+    port: 9131
+    stdio: ["./cmd/mcpserver/mcpserver.exe"]
+    audit_log: ./ledger-audit.jsonl
+    capabilities:
+      required: false            # a valid grant only upgrades a policy-default call
+      trusted_public_keys:
+        - "REPLACE_WITH_AUTHORITY_PUBLIC_KEY_HEX"
+    policy:
+      default_allow: false
+      rules:
+        - peers: ["*"]
+          tools: ["read_*"]
+          allow: true
+        # No rule for export_ledger → default deny → a capability can upgrade it.
+        # Explicit deny that a capability must NOT override:
+        - peers: ["*"]
+          tools: ["delete_all"]
+          allow: false

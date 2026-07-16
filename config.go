@@ -123,8 +123,21 @@ type Backend struct {
 	// so the agent never holds the raw credential. Only valid for stdio
 	// backends with a policy.
 	Secrets *SecretsConfig `yaml:"secrets"`
+	// Capabilities pins authority keys for signed capability grants. A valid
+	// capability upgrades a policy-default-deny call to allow; required:true
+	// makes the backend a capability-only surface. Only valid for stdio.
+	Capabilities *CapabilitiesConfig `yaml:"capabilities"`
 
 	httpURL *url.URL
+}
+
+// CapabilitiesConfig configures signed-capability admission for a backend.
+type CapabilitiesConfig struct {
+	// Required makes every tools/call present a valid capability.
+	Required bool `yaml:"required"`
+	// TrustedPublicKeys are the hex Ed25519 authority keys the gateway pins;
+	// a token never supplies its own trust root.
+	TrustedPublicKeys []string `yaml:"trusted_public_keys"`
 }
 
 func (b *Backend) kind() string {
@@ -183,6 +196,17 @@ func loadConfig(path string) (*Config, error) {
 		}
 		if b.AuditCheckpoints != "" && b.Policy == nil {
 			return nil, fmt.Errorf("backend %q: audit_checkpoints requires a policy (nothing to audit otherwise)", b.Name)
+		}
+		if b.Capabilities != nil {
+			if !hasStdio {
+				return nil, fmt.Errorf("backend %q: capabilities are only valid for stdio backends", b.Name)
+			}
+			if len(b.Capabilities.TrustedPublicKeys) == 0 {
+				return nil, fmt.Errorf("backend %q: capabilities need at least one trusted_public_keys entry", b.Name)
+			}
+			if !b.Capabilities.Required && b.Policy == nil {
+				return nil, fmt.Errorf("backend %q: capabilities with required:false need a deny-by-default policy (a capability only upgrades a policy-default call)", b.Name)
+			}
 		}
 		if b.Secrets != nil {
 			if !hasStdio {

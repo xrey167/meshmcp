@@ -29,11 +29,13 @@ Usage:
   meshmcp forward [flags] <local> <peer:port>   forward a local TCP port to a mesh peer
   meshmcp probe [flags] <peer-ip:port>          run an MCP handshake against a backend
   meshmcp ls [flags] <peer-ip:port>             list a backend's tools/resources/prompts
-  meshmcp call [flags] <peer:port> <tool>       call a tool (--arg k=v, --json, --task)
+  meshmcp call [flags] <peer:port> <tool>       call a tool (--arg k=v, --json, --task, --capability @file)
   meshmcp read [flags] <peer:port> <uri>        read a resource
   meshmcp prompt [flags] <peer:port> <name>     render a prompt (--arg k=v)
   meshmcp audit verify <file> [--checkpoints f] verify an audit log (hash chain; +signatures with --checkpoints)
   meshmcp audit keygen [--out f]                generate a gateway signing key for audit checkpoints
+  meshmcp capability keygen [--out f]           generate an Ed25519 authority key backends pin as a trust root
+  meshmcp capability issue [flags]              sign a short-lived, subject-bound tool grant (--subject/--audience/--tool)
   meshmcp approve [flags] <peer-fqdn> <tool>    co-sign a require_cosign tool call for a peer
   meshmcp approvals --store <dir>               serve the co-sign approver (phone-friendly) over the mesh
   meshmcp secrets check --config <file>         validate the credential broker config (never prints values)
@@ -91,6 +93,8 @@ func main() {
 		err = cmdFederate(os.Args[2:])
 	case "audit":
 		err = cmdAudit(os.Args[2:])
+	case "capability":
+		err = cmdCapability(os.Args[2:])
 	case "approve":
 		err = cmdApprove(os.Args[2:])
 	case "approvals":
