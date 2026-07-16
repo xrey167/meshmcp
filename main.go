@@ -39,6 +39,7 @@ Usage:
   meshmcp secrets check --config <file>         validate the credential broker config (never prints values)
   meshmcp dash [flags]                          serve the mesh control dashboard over audit/trace logs
   meshmcp room --audit <file>                   serve the live Control Room (server tiles, apps, decision feed)
+  meshmcp mcp [flags]                            run meshmcp AS an MCP server (add it to Claude Code / Codex to operate the mesh)
   meshmcp insight <profile|recommend|simulate|detect>  turn the audit stream into policy (the firewall's read side)
   meshmcp replay [flags] <trace> <peer:port>    replay a traced session against a backend and diff
   meshmcp version
@@ -98,6 +99,8 @@ func main() {
 		err = cmdDash(os.Args[2:])
 	case "room":
 		err = cmdRoom(os.Args[2:])
+	case "mcp":
+		err = cmdMCP(os.Args[2:])
 	case "insight":
 		err = cmdInsight(os.Args[2:])
 	case "replay":

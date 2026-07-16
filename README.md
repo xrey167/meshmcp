@@ -223,6 +223,7 @@ Watch it live with `meshmcp dash --audit audit.jsonl`; re-run a past session wit
 | `forward <local> <peer:port>` | Forward a local TCP port to a mesh peer (for HTTP backends). |
 | `ls · call · read · prompt <peer:port>` | Drive tools / resources / prompts from the terminal. |
 | `insight profile·recommend·simulate·detect` | Turn the audit stream into policy; detect drift. |
+| `mcp [flags]` | Run meshmcp **as an MCP server** — add it to Claude Code / Codex to operate the mesh (network, call tools, run, approve). |
 | `audit verify <f> [--checkpoints --pubkey]` | Verify a log: hash chain, or signatures + Merkle. |
 | `audit keygen [--out f]` | Generate a gateway Ed25519 signing key. |
 | `approve --store <d> <peer> <tool>` | Human co-sign a held `require_cosign` call from the CLI. |
@@ -266,6 +267,7 @@ examples/    ready-to-adapt configs        docs/  design docs + open specs
 
 ## Docs & specs
 
+- **[docs/MCP-APP.md](docs/MCP-APP.md)** — add meshmcp to Claude Code / Codex as an MCP app and operate the mesh from the assistant.
 - **[docs/DEMO.md](docs/DEMO.md)** — the live mesh demo: one gateway, four MCP servers, four agent apps, watched in the Control Room.
 - **[docs/COOKBOOK.md](docs/COOKBOOK.md)** — 10 worked "what's possible" scenarios, each with copy-paste config and a diagram.
 - **[examples/](examples/)** — annotated configs for every scenario (start with `agent-firewall.yaml`).
