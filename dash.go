@@ -95,7 +95,7 @@ footer{padding:12px 22px;color:var(--dim);border-top:1px solid var(--line)}
 </section>
 <footer id="foot">loading…</footer>
 <script>
-const $=id=>document.getElementById(id), esc=s=>(s==null?'':String(s)).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const $=id=>document.getElementById(id), esc=s=>(s==null?'':String(s)).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function denybar(d,t){const p=t?Math.round(100*d/t):0;return '<div class="bar"><i style="width:'+p+'%"></i></div>';}
 async function tick(){
  let s; try{s=await (await fetch('/api/summary')).json();}catch(e){$('foot').textContent='fetch error: '+e;return;}

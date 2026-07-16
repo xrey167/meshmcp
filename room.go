@@ -148,7 +148,7 @@ main{display:grid;grid-template-columns:1.5fr 1fr;gap:14px;padding:16px 20px}
 <div class="foot" id="foot">connecting…</div>
 <script>
 var $=function(id){return document.getElementById(id)};
-function esc(s){return (s==null?'':String(s)).replace(/[&<>]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c]})}
+function esc(s){return (s==null?'':String(s)).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
 function hue(s){var h=0;for(var i=0;i<s.length;i++)h=(h*31+s.charCodeAt(i))%360;return h}
 function ago(ts){if(!ts)return '';var d=(Date.now()-Date.parse(ts))/1000;if(isNaN(d))return '';
   if(d<2)return 'now';if(d<60)return Math.floor(d)+'s';if(d<3600)return Math.floor(d/60)+'m';return Math.floor(d/3600)+'h'}

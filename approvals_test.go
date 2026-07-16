@@ -79,6 +79,22 @@ func TestApprovalsServesMobileUI(t *testing.T) {
 	}
 }
 
+// TestApproverNoInjectableHandlers guards against the XSS class where an
+// attacker-controlled tool/peer name is concatenated into an inline handler.
+// The approver renders all dynamic values via textContent + addEventListener,
+// so the page must contain no inline onclick= and must use addEventListener.
+func TestApproverNoInjectableHandlers(t *testing.T) {
+	if strings.Contains(approvalsHTML, "onclick=") {
+		t.Fatalf("approver must not use inline onclick handlers (XSS via interpolated tool/peer names)")
+	}
+	if !strings.Contains(approvalsHTML, "addEventListener") {
+		t.Fatalf("approver should attach handlers via addEventListener")
+	}
+	if !strings.Contains(approvalsHTML, "textContent") {
+		t.Fatalf("approver should render dynamic values via textContent")
+	}
+}
+
 func post(t *testing.T, url, body string) {
 	t.Helper()
 	resp, err := http.Post(url, "application/json", strings.NewReader(body))

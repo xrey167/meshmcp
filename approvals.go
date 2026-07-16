@@ -163,26 +163,37 @@ border-radius:10px;padding:10px 16px;font-size:13px;opacity:0;transition:opacity
 <div id="list"><div class="empty">loading…</div></div>
 <div class="toast" id="toast"></div>
 <script>
-var esc=function(s){return (s==null?'':String(s)).replace(/[&<>]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c]})};
+// All dynamic values (peer, tool, backend) are agent-controlled, so they are
+// only ever written via textContent / DOM APIs — never string-concatenated into
+// HTML or an inline handler — so a tool named  '),alert(1)//  cannot inject.
 function toast(m){var t=document.getElementById('toast');t.textContent=m;t.classList.add('show');setTimeout(function(){t.classList.remove('show')},1800)}
 function ago(ts){var d=(Date.now()-Date.parse(ts))/1000;if(isNaN(d))return '';if(d<60)return Math.floor(d)+'s ago';if(d<3600)return Math.floor(d/60)+'m ago';return Math.floor(d/3600)+'h ago'}
+function el(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e}
 function act(peer,tool,grant){
   fetch(grant?'/v1/approve':'/v1/deny',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({peer:peer,tool:tool})})
-   .then(function(r){return r.json()}).then(function(j){toast((grant?'✓ approved ':'✗ denied ')+tool);load()})
+   .then(function(r){return r.json()}).then(function(){toast((grant?'✓ approved ':'✗ denied ')+tool);load()})
    .catch(function(e){toast('error: '+e)});
 }
 function load(){
   fetch('/v1/pending').then(function(r){return r.json()}).then(function(j){
-    document.getElementById('you').textContent='signing as: '+esc(j.you);
-    var list=j.pending||[];
-    if(!list.length){document.getElementById('list').innerHTML='<div class="empty">✓ nothing waiting</div>';return}
-    document.getElementById('list').innerHTML=list.map(function(p){
-      return '<div class="card"><div class="tool">'+esc(p.tool)+'</div>'+
-        '<div class="meta"><b>'+esc(p.peer)+'</b> · '+esc(p.backend)+' · '+ago(p.requested)+'</div>'+
-        '<div class="row"><button class="ok" onclick="act(\''+esc(p.peer)+'\',\''+esc(p.tool)+'\',true)">Approve</button>'+
-        '<button class="no" onclick="act(\''+esc(p.peer)+'\',\''+esc(p.tool)+'\',false)">Deny</button></div></div>';
-    }).join('');
-  }).catch(function(e){document.getElementById('list').innerHTML='<div class="empty">fetch error: '+esc(e)+'</div>'});
+    document.getElementById('you').textContent='signing as: '+(j.you||'');
+    var list=j.pending||[], c=document.getElementById('list');
+    c.textContent='';
+    if(!list.length){c.appendChild(el('div','empty','✓ nothing waiting'));return}
+    list.forEach(function(p){
+      var card=el('div','card');
+      card.appendChild(el('div','tool',p.tool));
+      var meta=el('div','meta');
+      meta.appendChild(el('b',null,p.peer));
+      meta.appendChild(document.createTextNode(' · '+(p.backend||'')+' · '+ago(p.requested)));
+      card.appendChild(meta);
+      var row=el('div','row');
+      var ok=el('button','ok','Approve'); ok.addEventListener('click',function(){act(p.peer,p.tool,true)});
+      var no=el('button','no','Deny');    no.addEventListener('click',function(){act(p.peer,p.tool,false)});
+      row.appendChild(ok); row.appendChild(no); card.appendChild(row);
+      c.appendChild(card);
+    });
+  }).catch(function(e){var c=document.getElementById('list');c.textContent='';c.appendChild(el('div','empty','fetch error: '+e))});
 }
 load();setInterval(load,2000);
 </script></body></html>`
