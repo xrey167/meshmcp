@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
@@ -95,7 +96,7 @@ func cmdRoom(args []string) error {
 	})
 
 	fmt.Fprintf(os.Stderr, "meshmcp control room on http://%s (audit: %s)\n", *addr, *auditPath)
-	return http.ListenAndServe(*addr, mux)
+	return http.ListenAndServe(*addr, guardLoopback(mux, *addr))
 }
 
 func loopbackAddr(addr string) bool {
@@ -109,6 +110,57 @@ func loopbackAddr(addr string) bool {
 	}
 	return net.ParseIP(host).IsLoopback()
 }
+
+// guardLoopback wraps the room so its command endpoints can't be driven by a
+// web page the operator happens to visit. It blocks DNS rebinding (the Host
+// header must be a loopback name on the bind port, or the exact bind address —
+// an attacker's rebound domain won't match) and CSRF (any Origin must be
+// same-origin). Both are set by the browser and cannot be forged by a
+// cross-site page, so /api/shell and /api/call are unreachable except from the
+// room's own page.
+func guardLoopback(next http.Handler, addr string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !hostAllowed(r.Host, addr) {
+			http.Error(w, "forbidden host (DNS-rebinding guard)", http.StatusForbidden)
+			return
+		}
+		if o := r.Header.Get("Origin"); o != "" && !originAllowed(o, addr) {
+			http.Error(w, "forbidden origin (CSRF guard)", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func hostAllowed(reqHost, addr string) bool {
+	if reqHost == addr {
+		return true
+	}
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	h, p, err := net.SplitHostPort(reqHost)
+	if err != nil {
+		h, p = reqHost, ""
+	}
+	if p != "" && p != port {
+		return false
+	}
+	return h == "localhost" || (net.ParseIP(h) != nil && net.ParseIP(h).IsLoopback())
+}
+
+func originAllowed(origin, addr string) bool {
+	u, err := url.Parse(origin)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return false
+	}
+	return hostAllowed(u.Host, addr)
+}
+
+// maxTargets bounds the client pool so a flood of distinct targets can't
+// exhaust connections/memory.
+const maxTargets = 64
 
 func (rs *roomServer) handleRoom(w http.ResponseWriter, r *http.Request) {
 	f, err := os.Open(rs.auditPath)
@@ -143,6 +195,9 @@ func (rs *roomServer) client(target string) (*mcpclient.Client, error) {
 	if rs.mesh == nil {
 		return nil, fmt.Errorf("not connected to the mesh — restart the room with NB_SETUP_KEY to drive backends")
 	}
+	if len(rs.pool) >= maxTargets {
+		return nil, fmt.Errorf("too many open targets (%d) — restart the room", maxTargets)
+	}
 	conn, err := rs.mesh.Dial(context.Background(), "tcp", target)
 	if err != nil {
 		return nil, fmt.Errorf("dial %s over mesh: %w", target, err)
@@ -166,8 +221,12 @@ func (rs *roomServer) drop(target string) {
 }
 
 func (rs *roomServer) handleLs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
 	var body struct{ Target string }
-	if json.NewDecoder(r.Body).Decode(&body) != nil || body.Target == "" {
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body) != nil || body.Target == "" {
 		http.Error(w, "target is required", http.StatusBadRequest)
 		return
 	}
@@ -195,12 +254,16 @@ func (rs *roomServer) handleLs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (rs *roomServer) handleCall(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
 	var body struct {
 		Target string          `json:"target"`
 		Tool   string          `json:"tool"`
 		Args   json.RawMessage `json:"args"`
 	}
-	if json.NewDecoder(r.Body).Decode(&body) != nil || body.Target == "" || body.Tool == "" {
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body) != nil || body.Target == "" || body.Tool == "" {
 		http.Error(w, "target and tool are required", http.StatusBadRequest)
 		return
 	}
@@ -226,12 +289,16 @@ func (rs *roomServer) handleCall(w http.ResponseWriter, r *http.Request) {
 }
 
 func (rs *roomServer) handleShell(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
 	if !rs.localShell {
 		http.Error(w, "local shell is disabled (start the room with --local-shell)", http.StatusForbidden)
 		return
 	}
 	var body struct{ Cmd string }
-	if json.NewDecoder(r.Body).Decode(&body) != nil || strings.TrimSpace(body.Cmd) == "" {
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body) != nil || strings.TrimSpace(body.Cmd) == "" {
 		http.Error(w, "cmd is required", http.StatusBadRequest)
 		return
 	}

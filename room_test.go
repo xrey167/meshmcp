@@ -56,6 +56,36 @@ func TestRoomCallWithoutMeshErrors(t *testing.T) {
 	}
 }
 
+func TestRoomGuardBlocksRebindingAndCSRF(t *testing.T) {
+	addr := "127.0.0.1:9900"
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
+	g := guardLoopback(inner, addr)
+
+	check := func(host, origin string, want int) {
+		t.Helper()
+		req := httptest.NewRequest("POST", "http://x/api/shell", strings.NewReader("{}"))
+		req.Host = host
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		rec := httptest.NewRecorder()
+		g.ServeHTTP(rec, req)
+		if rec.Code != want {
+			t.Fatalf("host=%q origin=%q → %d, want %d", host, origin, rec.Code, want)
+		}
+	}
+	// Legit same-origin requests pass.
+	check("127.0.0.1:9900", "http://127.0.0.1:9900", 200)
+	check("localhost:9900", "", 200)
+	// DNS rebinding: attacker domain (rebound to 127.0.0.1) → Host is the domain.
+	check("evil.com:9900", "", http.StatusForbidden)
+	check("attacker.example:9900", "http://attacker.example:9900", http.StatusForbidden)
+	// CSRF: loopback host but a cross-origin page.
+	check("127.0.0.1:9900", "https://evil.com", http.StatusForbidden)
+	// Wrong port on a loopback host.
+	check("127.0.0.1:1234", "", http.StatusForbidden)
+}
+
 func TestLoopbackAddr(t *testing.T) {
 	for _, a := range []string{"127.0.0.1:9900", "localhost:9900", "[::1]:9900"} {
 		if !loopbackAddr(a) {
