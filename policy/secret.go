@@ -16,3 +16,7 @@ type SecretResolver interface {
 
 // SetSecretResolver attaches a credential broker to the filter.
 func (f *Filter) SetSecretResolver(r SecretResolver) { f.secrets = r }
+
+// SetPendingStore attaches a held-request registry so a co-sign outcome is
+// recorded for a human approver (e.g. a phone on the mesh) to act on.
+func (f *Filter) SetPendingStore(p PendingStore) { f.pending = p }

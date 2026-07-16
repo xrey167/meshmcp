@@ -59,6 +59,11 @@ While it runs:
 # Approve a held payment — the billing agent's transfer_funds starts succeeding:
 meshmcp approve --store demo/cosign <agent-billing-fqdn> transfer_funds
 
+# ...or approve from your PHONE: serve the approver on the mesh, then open it in
+# your phone's browser (the phone joined via the NetBird app). The approver is
+# your phone's mesh identity — the grant records who approved.
+meshmcp approvals --store demo/cosign        # → open http://<gateway-mesh-ip>:9700
+
 # Prove the ledger wasn't edited:
 meshmcp audit verify demo/audit.jsonl
 

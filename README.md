@@ -225,7 +225,8 @@ Watch it live with `meshmcp dash --audit audit.jsonl`; re-run a past session wit
 | `insight profile·recommend·simulate·detect` | Turn the audit stream into policy; detect drift. |
 | `audit verify <f> [--checkpoints --pubkey]` | Verify a log: hash chain, or signatures + Merkle. |
 | `audit keygen [--out f]` | Generate a gateway Ed25519 signing key. |
-| `approve --store <d> <peer> <tool>` | Human co-sign a held `require_cosign` call. |
+| `approve --store <d> <peer> <tool>` | Human co-sign a held `require_cosign` call from the CLI. |
+| `approvals --store <d>` | Serve the phone-friendly co-sign approver over the mesh (approver = your mesh identity). |
 | `secrets check --config <f>` | Validate the credential broker config (never prints values). |
 | `dash --audit <f>` | Serve the live control dashboard. |
 | `room --audit <f>` | Serve the live **Control Room** — server tiles, agent apps, streaming decision feed. |

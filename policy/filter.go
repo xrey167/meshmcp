@@ -27,6 +27,7 @@ type Filter struct {
 	audit   *AuditLog
 	tracer  *Tracer
 	secrets SecretResolver
+	pending PendingStore
 	caller  Caller
 
 	lmu    sync.Mutex      // guards labels
@@ -222,6 +223,14 @@ func (f *Filter) handleToolCall(line []byte, msg rpcPeek) error {
 		_, werr := f.inner.Write(outLine)
 		return werr
 	case OutcomeCosign:
+		// Record the held request so a human (e.g. a phone on the mesh) can
+		// see and approve it — the co-sign becomes an inbox, not a silent deny.
+		if f.pending != nil {
+			_ = f.pending.Record(Pending{
+				Peer: f.caller.Peer, PeerKey: f.caller.PeerKey, Backend: f.caller.Backend,
+				Tool: tool, RPCID: string(msg.ID),
+			})
+		}
 		f.writeDenial(msg.ID, fmt.Sprintf("tool %q requires a human co-sign on the mesh: %s", tool, dec.Reason))
 		return nil
 	default:

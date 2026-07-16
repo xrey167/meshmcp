@@ -294,6 +294,13 @@ func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer) s
 		}
 		eng = policy.NewEngine(b.Policy, func() time.Time { return time.Now() }, cosign)
 	}
+	// Held-request registry lives in the cosign directory, so an approver
+	// (a human identity / a phone on the mesh) sees pending calls next to the
+	// grants they write.
+	var pending *policy.FilePending
+	if b.CosignStore != "" {
+		pending = &policy.FilePending{Dir: b.CosignStore, TTL: time.Duration(b.CosignTTLSeconds) * time.Second}
+	}
 	// One credential broker per backend, sharing the backend's (hash-chained)
 	// audit so secret use lands in the same tamper-evident record.
 	var broker *secrets.Broker
@@ -317,6 +324,9 @@ func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer) s
 		}, eng, audit, tracer)
 		if broker != nil {
 			f.SetSecretResolver(broker)
+		}
+		if pending != nil {
+			f.SetPendingStore(pending)
 		}
 		return f, nil
 	}
