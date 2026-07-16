@@ -183,7 +183,11 @@ func readCapabilityToken(v string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("--capability: %w", err)
 		}
-		return strings.TrimSpace(string(data)), nil
+		tok := strings.TrimSpace(string(data))
+		if tok == "" {
+			return "", fmt.Errorf("--capability: file %q is empty", v[1:])
+		}
+		return tok, nil
 	}
 	return strings.TrimSpace(v), nil
 }

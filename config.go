@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/ed25519"
+	"encoding/hex"
 	"fmt"
 	"net/url"
 	"os"
@@ -204,7 +206,16 @@ func loadConfig(path string) (*Config, error) {
 			if len(b.Capabilities.TrustedPublicKeys) == 0 {
 				return nil, fmt.Errorf("backend %q: capabilities need at least one trusted_public_keys entry", b.Name)
 			}
-			if !b.Capabilities.Required && b.Policy == nil {
+			for _, k := range b.Capabilities.TrustedPublicKeys {
+				raw, err := hex.DecodeString(k)
+				if err != nil || len(raw) != ed25519.PublicKeySize {
+					return nil, fmt.Errorf("backend %q: capabilities trusted_public_keys entry %q is not a %d-byte hex Ed25519 key", b.Name, k, ed25519.PublicKeySize)
+				}
+			}
+			// required:false only makes sense against a deny-by-default policy: a
+			// capability can only upgrade a policy-default deny, so a default-allow
+			// policy would make it a silent no-op.
+			if !b.Capabilities.Required && (b.Policy == nil || b.Policy.DefaultAllow) {
 				return nil, fmt.Errorf("backend %q: capabilities with required:false need a deny-by-default policy (a capability only upgrades a policy-default call)", b.Name)
 			}
 		}

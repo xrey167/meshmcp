@@ -115,6 +115,112 @@ func runCapCall(t *testing.T, required bool, rules []Rule, token string) (reply 
 	}
 }
 
+// TestFilterCapabilityStrippedFromNonToolCall guards the invariant that the
+// token is removed from EVERY governed client->backend line, not just
+// tools/call. A caller sets the capability once on the session, so it rides
+// along on follow-up requests (task polling, tools/list); none of those may
+// forward it to the backend, trace, or audit.
+func TestFilterCapabilityStrippedFromNonToolCall(t *testing.T) {
+	base := time.Unix(1_800_000_000, 0)
+	s, _ := GenerateSigner()
+	v, _ := NewCapabilityVerifier([]string{s.PubKeyHex()}, func() time.Time { return base })
+	tok := mkToken(t, s, base, "KEY", "fs", []string{"read_*"}, base.Add(10*time.Minute))
+
+	backend := newEchoBackend()
+	eng := NewEngine(&Policy{DefaultAllow: false}, func() time.Time { return base }, nil)
+	f := NewFilterEngine(backend, Caller{Backend: "fs", Peer: "agent.mesh", PeerKey: "KEY"}, eng, NewAuditLog(nil, nil), nil)
+	f.SetCapabilityVerifier(v, false)
+
+	replies := make(chan string, 4)
+	go func() {
+		sc := bufio.NewScanner(f)
+		for sc.Scan() {
+			replies <- sc.Text()
+		}
+		close(replies)
+	}()
+
+	// A task-status poll carrying the same capability in _meta (as the CLI's
+	// session-wide RequestMeta would attach it). tasks/get is a governed method
+	// with no rule, so it passes through — but must be stripped first.
+	line := `{"jsonrpc":"2.0","id":7,"method":"tasks/get","params":{"taskId":"t1","_meta":{"com.meshmcp/capability":"` + tok + `"}}}` + "\n"
+	if _, err := f.Write([]byte(line)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-replies:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out")
+	}
+	saw := strings.Join(backend.got, "\n")
+	if !strings.Contains(saw, "tasks/get") {
+		t.Fatalf("the tasks/get request should have reached the backend: %q", saw)
+	}
+	if strings.Contains(saw, "com.meshmcp/capability") {
+		t.Fatalf("the capability token must be stripped from tasks/get before the backend, but saw: %q", saw)
+	}
+}
+
+func TestCapabilityRevocation(t *testing.T) {
+	base := time.Unix(1_800_000_000, 0)
+	s, _ := GenerateSigner()
+	tok := mkToken(t, s, base, "KEY", "fs", []string{"read_*"}, base.Add(10*time.Minute))
+
+	// Without revocation the token verifies.
+	v, _ := NewCapabilityVerifier([]string{s.PubKeyHex()}, func() time.Time { return base })
+	c, err := v.Verify(tok, "KEY", "fs", "read_file")
+	if err != nil {
+		t.Fatalf("token should verify before revocation: %v", err)
+	}
+	// Wiring a predicate that revokes exactly this token's ID must make it fail.
+	vr := v.WithRevocation(func(id string) bool { return id == c.ID })
+	if _, err := vr.Verify(tok, "KEY", "fs", "read_file"); err == nil {
+		t.Fatal("a revoked token ID must be rejected")
+	}
+	// A different ID stays valid.
+	vr2 := v.WithRevocation(func(id string) bool { return id == "cap_other" })
+	if _, err := vr2.Verify(tok, "KEY", "fs", "read_file"); err != nil {
+		t.Fatalf("a non-revoked token must still verify: %v", err)
+	}
+}
+
+func TestCapabilityNotBefore(t *testing.T) {
+	base := time.Unix(1_800_000_000, 0)
+	s, _ := GenerateSigner()
+	v, _ := NewCapabilityVerifier([]string{s.PubKeyHex()}, func() time.Time { return base })
+
+	// Issue a token that becomes valid 10m from now and expires in 30m.
+	tok, err := s.IssueCapability(CapabilityClaims{
+		Subject: "KEY", Audience: "fs", Tools: []string{"read_*"},
+		NotBefore: base.Add(10 * time.Minute).Unix(),
+		ExpiresAt: base.Add(30 * time.Minute).Unix(),
+	}, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Not yet valid at base.
+	if _, err := v.Verify(tok, "KEY", "fs", "read_file"); err == nil {
+		t.Fatal("a not-yet-valid (nbf in the future) token must be rejected")
+	}
+	// Valid once nbf has passed.
+	v2, _ := NewCapabilityVerifier([]string{s.PubKeyHex()}, func() time.Time { return base.Add(11 * time.Minute) })
+	if _, err := v2.Verify(tok, "KEY", "fs", "read_file"); err != nil {
+		t.Fatalf("token should verify after not-before: %v", err)
+	}
+}
+
+// TestCapabilityRejectsMalformedGlobAtIssue: an authority can't mint a token
+// whose tool pattern can never match.
+func TestCapabilityRejectsMalformedGlobAtIssue(t *testing.T) {
+	base := time.Unix(1_800_000_000, 0)
+	s, _ := GenerateSigner()
+	if _, err := s.IssueCapability(CapabilityClaims{
+		Subject: "KEY", Audience: "fs", Tools: []string{"read_["}, ExpiresAt: base.Add(time.Minute).Unix(),
+	}, base); err == nil {
+		t.Fatal("issuing a token with a malformed tool glob must fail")
+	}
+}
+
 func TestFilterCapabilityUpgradesDefaultDeny(t *testing.T) {
 	// deny-by-default (no rule for read_file) + a valid capability → allowed,
 	// and the token must NOT reach the backend.

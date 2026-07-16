@@ -32,7 +32,7 @@ backends:
     stdio: ["echo"]
     capabilities:
       required: true
-      trusted_public_keys: ["deadbeef"]
+      trusted_public_keys: ["04f9f6e4dfefca3cb23d93db44427e44e5b90a81661690b15f0ac47847c7796c"]
 `,
 		},
 		{
@@ -44,9 +44,53 @@ backends:
     stdio: ["echo"]
     capabilities:
       required: false
-      trusted_public_keys: ["deadbeef"]
+      trusted_public_keys: ["04f9f6e4dfefca3cb23d93db44427e44e5b90a81661690b15f0ac47847c7796c"]
 `,
 			wantErr: "need a deny-by-default policy",
+		},
+		{
+			name: "malformed hex key is rejected at load",
+			body: `
+backends:
+  - name: fs
+    port: 9001
+    stdio: ["echo"]
+    capabilities:
+      required: true
+      trusted_public_keys: ["deadbeef"]
+`,
+			wantErr: "hex Ed25519 key",
+		},
+		{
+			name: "required:false with a default-allow policy is rejected",
+			body: `
+backends:
+  - name: fs
+    port: 9001
+    stdio: ["echo"]
+    capabilities:
+      required: false
+      trusted_public_keys: ["04f9f6e4dfefca3cb23d93db44427e44e5b90a81661690b15f0ac47847c7796c"]
+    policy:
+      default_allow: true
+`,
+			wantErr: "deny-by-default policy",
+		},
+		{
+			name: "required:false with a deny-by-default policy: ok",
+			body: `
+backends:
+  - name: fs
+    port: 9001
+    stdio: ["echo"]
+    capabilities:
+      required: false
+      trusted_public_keys: ["04f9f6e4dfefca3cb23d93db44427e44e5b90a81661690b15f0ac47847c7796c"]
+    policy:
+      default_allow: false
+      rules:
+        - { peers: ["*"], tools: ["read_*"], allow: true }
+`,
 		},
 		{
 			name: "no trusted keys is rejected",
@@ -70,7 +114,7 @@ backends:
     http: "http://127.0.0.1:8080"
     capabilities:
       required: true
-      trusted_public_keys: ["deadbeef"]
+      trusted_public_keys: ["04f9f6e4dfefca3cb23d93db44427e44e5b90a81661690b15f0ac47847c7796c"]
 `,
 			wantErr: "only valid for stdio",
 		},

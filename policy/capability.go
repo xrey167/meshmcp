@@ -62,6 +62,13 @@ func (s *Signer) IssueCapability(claims CapabilityClaims, now time.Time) (string
 	if claims.Subject == "" || claims.Audience == "" || len(claims.Tools) == 0 {
 		return "", fmt.Errorf("capability needs subject, audience, and at least one tool")
 	}
+	// Reject a malformed glob at issue time; otherwise it silently never matches
+	// and the authority mints a token that can never authorize anything.
+	for _, p := range claims.Tools {
+		if _, err := path.Match(p, ""); err != nil {
+			return "", fmt.Errorf("capability tool pattern %q is not a valid glob: %w", p, err)
+		}
+	}
 	if claims.ExpiresAt <= claims.IssuedAt {
 		return "", fmt.Errorf("capability expiry must be in the future")
 	}

@@ -189,25 +189,32 @@ func (f *Filter) handleLine(line []byte) error {
 		return werr
 	}
 
-	if len(msg.ID) == 0 {
-		return f.handleNotification(line, msg.Method)
-	}
-	if msg.Method == "tools/call" {
-		return f.handleToolCall(line, msg)
-	}
-	return f.handleMethod(line, msg)
-}
-
-func (f *Filter) handleToolCall(line []byte, msg rpcPeek) error {
-	tool := msg.Params.Name
-
-	// Extract and STRIP any presented capability so it never reaches the
-	// backend, trace, audit, or secret injection. All downstream steps use the
-	// stripped line.
+	// Strip any presented capability from EVERY governed client->backend line
+	// so the token never reaches the backend, trace, audit, or secret injection.
+	// It is honored only on tools/call (below); on tasks/*, tools/list, and
+	// notifications it is simply removed — a caller sets it once on the session,
+	// so it rides along on follow-up requests (e.g. task polling) that must not
+	// forward it. Non-token lines are returned byte-identical.
 	var capToken string
 	if f.capVerifier != nil {
 		capToken, line = stripCapability(line)
 	}
+
+	if len(msg.ID) == 0 {
+		return f.handleNotification(line, msg.Method)
+	}
+	if msg.Method == "tools/call" {
+		return f.handleToolCall(line, msg, capToken)
+	}
+	return f.handleMethod(line, msg)
+}
+
+// handleToolCall authorizes a tools/call. The capability (if any) has already
+// been stripped from line by handleLine and passed in as capToken, so every
+// downstream step (audit, trace, secret injection, backend write) uses the
+// token-free line.
+func (f *Filter) handleToolCall(line []byte, msg rpcPeek, capToken string) error {
+	tool := msg.Params.Name
 
 	dec := f.eng.DecideToolCall(f.caller.Peer, f.caller.PeerKey, tool, f.labelSnapshot())
 	if f.capVerifier != nil {

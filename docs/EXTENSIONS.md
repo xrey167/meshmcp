@@ -42,10 +42,13 @@ Each grant is bound to three things the gateway proves independently:
 | `audience` | a single backend name                                |
 | `tools`    | a set of tool-name globs (e.g. `read_*`, `get_balance`) |
 
-The token travels in `params._meta` under the key `com.meshmcp/capability`. The
-gateway verifies it, then **strips it** before the request reaches the backend,
-the trace, the audit record, or secret injection — so a backend never sees the
-token, and it never lands in a log.
+The token travels in `params._meta` under the key `com.meshmcp/capability`. A
+caller typically sets it once for a session, so it rides along on follow-up
+requests (task-status polls, `tools/list`). The gateway therefore **strips it
+from every governed client→backend line** — not just `tools/call` — before the
+request reaches the backend, the trace, the audit record, or secret injection.
+It is only *honored* on `tools/call`; everywhere else it is simply removed, so a
+backend never sees the token and it never lands in a log.
 
 ### Precedence
 
@@ -111,6 +114,16 @@ meshmcp call <peer:port> read_invoice --capability @read.cap
 `--capability` accepts `@file` (recommended — keeps the token out of shell
 history) or a literal token. The token is opaque base64url; it is never raw JSON
 the backend could mistake for an argument.
+
+### Containment and revocation
+
+A capability's primary containment is its **short lifetime** — keep TTLs tight
+(the `issue` default is 15m, and 24h is a hard ceiling). The verifier also
+supports an optional **revocation predicate** (`CapabilityVerifier.WithRevocation`,
+keyed on the token's unique `cap_…` ID), but it is not yet wired to a
+config-driven revocation store, so today short TTLs are the operative control.
+Issue narrowly-scoped, short-lived grants rather than relying on being able to
+pull one back.
 
 ---
 

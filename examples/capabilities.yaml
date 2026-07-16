@@ -40,7 +40,7 @@ backends:
       required: true
       trusted_public_keys:
         # Output of `meshmcp capability keygen` (the "public key:" hex line).
-        - "REPLACE_WITH_AUTHORITY_PUBLIC_KEY_HEX"
+        - "0000000000000000000000000000000000000000000000000000000000000000"  # replace: output of `meshmcp capability keygen`
 
   # 2) Policy PLUS capabilities: the static policy is the floor (any peer may
   #    read), and a capability lets a specific caller reach further —
@@ -53,7 +53,7 @@ backends:
     capabilities:
       required: false            # a valid grant only upgrades a policy-default call
       trusted_public_keys:
-        - "REPLACE_WITH_AUTHORITY_PUBLIC_KEY_HEX"
+        - "0000000000000000000000000000000000000000000000000000000000000000"  # replace: output of `meshmcp capability keygen`
     policy:
       default_allow: false
       rules:
