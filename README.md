@@ -19,6 +19,10 @@ log** that proves what it did.
 
 <sub>userspace WireGuard, no TUN, no admin rights · stdio + Streamable-HTTP · one static binary</sub>
 
+<br><br>
+
+**[▶ Live showcase — see what's possible](https://xrey167.github.io/meshmcp/)**
+
 </div>
 
 ---
