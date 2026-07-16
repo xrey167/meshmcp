@@ -49,12 +49,12 @@ func newTaskManager() *taskManager {
 // the task's progress notifications can never precede its handle — then runs
 // the handler in a goroutine that records the outcome and emits a
 // notifications/tasks/status.
-func (m *taskManager) start(sess *Session, reqID json.RawMessage, tool Tool, args json.RawMessage) {
+func (m *taskManager) start(sess *Session, reqID json.RawMessage, toolName string, handler ToolHandler, meta, args json.RawMessage) {
 	m.mu.Lock()
 	m.seq++
 	id := fmt.Sprintf("task-%d", m.seq)
 	ctx, cancel := context.WithCancel(context.Background())
-	t := &task{id: id, tool: tool.Name, status: StatusWorking, cancel: cancel}
+	t := &task{id: id, tool: toolName, status: StatusWorking, cancel: cancel}
 	m.tasks[id] = t
 	m.order = append(m.order, id)
 	m.mu.Unlock()
@@ -67,7 +67,8 @@ func (m *taskManager) start(sess *Session, reqID json.RawMessage, tool Tool, arg
 	})
 
 	go func() {
-		res, err := tool.Handler(WithSession(ctx, sess), args)
+		tctx := withToolCall(WithSession(ctx, sess), ToolCallInfo{Tool: toolName, RequestID: reqID, Meta: meta})
+		res, err := handler(tctx, args)
 		t.mu.Lock()
 		switch {
 		case ctx.Err() != nil:

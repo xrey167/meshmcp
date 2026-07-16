@@ -77,6 +77,10 @@ func main() {
 		err = cmdRead(os.Args[2:])
 	case "prompt":
 		err = cmdPrompt(os.Args[2:])
+	case "functions":
+		err = cmdFunctions(os.Args[2:])
+	case "function-call":
+		err = cmdFunctionCall(os.Args[2:])
 	case "router":
 		err = cmdRouter(os.Args[2:])
 	case "orchestrate":

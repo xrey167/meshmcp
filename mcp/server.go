@@ -102,6 +102,9 @@ type Server struct {
 	tasks *taskManager
 	sess  *Session // the active connection's session (one Serve at a time)
 
+	globalMW []ToolMiddleware
+	toolMW   map[string][]ToolMiddleware
+
 	reqMu   sync.Mutex
 	reqSeq  int
 	pending map[int]chan clientResp
@@ -398,6 +401,8 @@ func (s *Server) callTool(ctx context.Context, req request, sess *Session, ok fu
 	if len(args) == 0 {
 		args = json.RawMessage("{}")
 	}
+	meta := rawMeta(req.Params)
+	handler := s.effectiveHandler(t)
 	if p.Task {
 		// Tasks stream progress on the session channel; a stateless transport
 		// (HTTP) has none, so reject rather than start a task nobody hears.
@@ -405,11 +410,13 @@ func (s *Server) callTool(ctx context.Context, req request, sess *Session, ok fu
 			return fail(codeInvalidParams, "tasks are not supported over this transport")
 		}
 		// start sends the working handle (with this request id) before
-		// spawning the task, so progress never precedes it.
-		s.tasks.start(sess, req.ID, t, args)
+		// spawning the task, so progress never precedes it. The same compiled
+		// middleware chain runs for the task.
+		s.tasks.start(sess, req.ID, p.Name, handler, meta, args)
 		return response{skip: true}
 	}
-	res, err := t.Handler(ctx, args)
+	ctx = withToolCall(ctx, ToolCallInfo{Tool: p.Name, RequestID: req.ID, Meta: meta})
+	res, err := handler(ctx, args)
 	if err != nil {
 		// Tool execution failures are reported as an error result, per MCP,
 		// so the model can see and react to them.

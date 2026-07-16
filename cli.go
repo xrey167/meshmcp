@@ -119,6 +119,7 @@ func cmdCall(args []string) error {
 	fs2.Var(argv, "arg", "tool argument key=value (repeatable)")
 	raw := fs2.String("json", "", "tool arguments as a raw JSON object (overrides --arg)")
 	task := fs2.Bool("task", false, "run the tool asynchronously as a task")
+	wait := fs2.Bool("wait", false, "with --task, wait for the task to finish and print its result")
 	if err := fs2.Parse(rest[2:]); err != nil {
 		return err
 	}
@@ -137,13 +138,86 @@ func cmdCall(args []string) error {
 		return err
 	}
 	defer cleanup()
+	ctx := context.Background()
 
-	res, err := mc.CallTool(context.Background(), tool, arguments, *task)
+	if *task && *wait {
+		st, err := mc.StartTool(ctx, tool, arguments)
+		if err != nil {
+			return err
+		}
+		res, err := mc.WaitTask(ctx, st.TaskID, mcpclient.WaitTaskOptions{})
+		if len(res.Raw) > 0 {
+			printJSON(res.Raw)
+		}
+		return err // non-nil (incl. *ToolExecutionError) → non-zero exit
+	}
+
+	res, err := mc.CallTool(ctx, tool, arguments, *task)
 	if err != nil {
 		return err
 	}
 	printJSON(res)
 	return nil
+}
+
+// cmdFunctions lists a backend's tools as provider-neutral function definitions.
+func cmdFunctions(args []string) error {
+	fs := flag.NewFlagSet("functions", flag.ExitOnError)
+	o := meshFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: meshmcp functions [flags] <peer-ip:port>")
+	}
+	mc, cleanup, err := dialMCP(o, fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	fns, err := mc.ListFunctions(context.Background())
+	if err != nil {
+		return err
+	}
+	b, _ := json.MarshalIndent(fns, "", "  ")
+	fmt.Println(string(b))
+	return nil
+}
+
+// cmdFunctionCall invokes a tool as a model function call: the argument is one
+// JSON object {"name","arguments"} where arguments is itself a JSON string.
+func cmdFunctionCall(args []string) error {
+	fs := flag.NewFlagSet("function-call", flag.ExitOnError)
+	o := meshFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	rest := fs.Args()
+	if len(rest) < 1 {
+		return errors.New("usage: meshmcp function-call [flags] <peer-ip:port> --json '{\"name\":...,\"arguments\":\"{...}\"}'")
+	}
+	fs2 := flag.NewFlagSet("fc", flag.ExitOnError)
+	raw := fs2.String("json", "", "the function call as {\"name\":...,\"arguments\":\"<json>\"}")
+	if err := fs2.Parse(rest[1:]); err != nil {
+		return err
+	}
+	if *raw == "" {
+		return errors.New("function-call: --json is required")
+	}
+	var call mcpclient.ModelFunctionCall
+	if err := json.Unmarshal([]byte(*raw), &call); err != nil {
+		return fmt.Errorf("--json: %w", err)
+	}
+	mc, cleanup, err := dialMCP(o, rest[0])
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	res, err := mc.InvokeFunction(context.Background(), call)
+	if len(res.Raw) > 0 {
+		printJSON(res.Raw)
+	}
+	return err
 }
 
 // cmdRead reads a resource: meshmcp read <peer> <uri>
