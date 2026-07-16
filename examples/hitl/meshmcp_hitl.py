@@ -28,7 +28,10 @@ Config:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import shlex
+import subprocess
 
 import httpx
 
@@ -81,3 +84,72 @@ def mesh_on_approval(
         return {"approve": False, "reason": "approval timed out on the mesh"}
 
     return on_approval
+
+
+def _commands_of(request) -> list[str]:
+    """Best-effort extraction of the shell command list from a ShellTool request."""
+    for path in ("data.commands", "action.commands", "commands"):
+        obj = request
+        try:
+            for part in path.split("."):
+                obj = getattr(obj, part)
+            if obj:
+                return list(obj)
+        except Exception:
+            continue
+    try:
+        return list(request["action"]["commands"])  # dict-shaped request
+    except Exception:
+        return []
+
+
+def _mesh_run(argv_base: list[str], target: str, line: str, timeout_s: int) -> str:
+    """Run one command on the mesh backend via `meshmcp call ... run_command` and
+    return its text output. Governed by the backend's policy and audited."""
+    command, *args = shlex.split(line)
+    payload = json.dumps({"command": command, "args": args})
+    argv = argv_base + [target, "run_command", "--json", payload]
+    try:
+        res = subprocess.run(argv, capture_output=True, text=True, timeout=timeout_s)
+    except Exception as e:  # noqa: BLE001
+        return f"$ {line}\n(error invoking meshmcp: {e})"
+    text = (res.stdout or "").strip()
+    try:  # `meshmcp call` prints the tool result as JSON; pull out the text content.
+        result = json.loads(text)
+        content = result.get("content") or []
+        joined = "\n".join(c.get("text", "") for c in content if isinstance(c, dict))
+        if joined:
+            text = joined
+    except Exception:
+        pass
+    if not text and res.stderr:
+        text = res.stderr.strip()
+    return f"$ {line}\n{text}"
+
+
+def mesh_executor(
+    target: str,
+    *,
+    meshmcp_bin: str = "meshmcp",
+    nb_config: str | None = None,
+    timeout_s: int = 90,
+):
+    """Return a ShellTool executor that runs commands on a GOVERNED meshmcp backend
+    (via run_command over the mesh) instead of locally — so execution is
+    allow-listed, rate-limited, taint-checked, and audited just like the approval.
+
+    target       backend mesh address, e.g. "100.64.0.2:9105"
+    meshmcp_bin  path to the meshmcp binary (default: on PATH)
+    nb_config    persist a stable mesh identity across calls (recommended)
+    """
+    argv_base = [meshmcp_bin, "call"]
+    if nb_config:
+        argv_base += ["--nb-config", nb_config]
+
+    def executor(request) -> str:
+        cmds = _commands_of(request)
+        if not cmds:
+            return "(no commands)"
+        return "\n\n".join(_mesh_run(argv_base, target, line, timeout_s) for line in cmds)
+
+    return executor

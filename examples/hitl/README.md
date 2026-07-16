@@ -42,23 +42,30 @@ meshmcp approvals --store ./cosign --addr 127.0.0.1:9700
 
 ```python
 from agents import Agent, ShellTool
-from meshmcp_hitl import mesh_on_approval          # this folder
-
-def my_executor(request):
-    ...  # or route to meshmcp's governed run_command; see docs/MCP-APP.md
+from meshmcp_hitl import mesh_on_approval, mesh_executor   # this folder
 
 shell = ShellTool(
-    executor=my_executor,
-    needs_approval=lambda *_: True,                 # hold every shell call
-    on_approval=mesh_on_approval("agent:build-bot"),  # → approve from your phone
+    # Execution ALSO on the mesh: runs on a governed backend via run_command
+    # (allow-listed, rate-limited, taint-checked, audited) — not on this host.
+    executor=mesh_executor("100.64.0.2:9105", nb_config="./agent-nb.json"),
+    needs_approval=lambda *_: True,                     # hold every shell call
+    on_approval=mesh_on_approval("agent:build-bot"),    # → approve from your phone
 )
 
 agent = Agent(name="build-bot", tools=[shell])
-# When the agent tries to run a command, it blocks until you approve on your phone.
-# Approve → the command runs; Deny → the SDK returns a rejection to the model.
+# The agent proposes a command → held → you approve on your phone → it runs on the
+# governed mesh backend → the result comes back. Deny → the SDK returns a rejection.
 ```
 
-`MESHMCP_APPROVER` overrides the approver URL (default `http://127.0.0.1:9700`).
+- `mesh_on_approval(agent_id)` — holds the call for a human on the mesh.
+- `mesh_executor(target)` — runs the approved command through meshmcp's governed
+  `run_command` over the mesh (shells out to `meshmcp call`), so both the
+  **approval** and the **execution** are governed and audited. Drop it, and the
+  agent never touches the local host at all. Omit it (use your own `executor`) if
+  you only want the approval half.
+
+`MESHMCP_APPROVER` overrides the approver URL (default `http://127.0.0.1:9700`);
+`meshmcp` must be on `PATH` (or pass `meshmcp_bin=`).
 
 ## Why route it through meshmcp instead of the SDK's local approval?
 
