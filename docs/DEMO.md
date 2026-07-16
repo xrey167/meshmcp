@@ -71,6 +71,24 @@ meshmcp audit verify demo/audit.jsonl
 meshmcp call <gateway-ip>:9101 read_file --arg path=README.md
 ```
 
+## Drive it from the Control Room console
+
+The Control Room the demo opens is interactive. If it joined the mesh (it will,
+since `NB_SETUP_KEY` is set), the console at the bottom drives backends directly —
+every call goes through the gateway's policy and audit, so you'll see your own
+commands appear in the live feed:
+
+```
+meshmcp> target 100.x.y.z:9101
+meshmcp> ls                                 # list the fs backend's tools
+meshmcp> call 100.x.y.z:9101 read_file {"path":"README.md"}
+meshmcp> run 100.x.y.z:9101 echo hello      # governed run_command terminal
+meshmcp> sh git status                      # raw local shell (only with --local-shell)
+```
+
+Start the room with `--local-shell` (loopback bind only) if you want the raw
+`sh` command; it's off by default because it bypasses the mesh firewall.
+
 ## Notes
 
 - The four backends run the same demo server (`cmd/mcpserver`) with different

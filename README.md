@@ -229,7 +229,7 @@ Watch it live with `meshmcp dash --audit audit.jsonl`; re-run a past session wit
 | `approvals --store <d>` | Serve the phone-friendly co-sign approver over the mesh (approver = your mesh identity). |
 | `secrets check --config <f>` | Validate the credential broker config (never prints values). |
 | `dash --audit <f>` | Serve the live control dashboard. |
-| `room --audit <f>` | Serve the live **Control Room** — server tiles, agent apps, streaming decision feed. |
+| `room --audit <f>` | Serve the interactive **Control Room** — live network (servers, agents, decision feed) **plus a console**: list/call tools over the mesh, a governed `run_command` terminal, and (opt-in `--local-shell`) a raw shell. |
 | `agent --role <r> <peer:port>` | Run a demo agent app (reader/fetcher/billing/analyst) with its own mesh identity. |
 | `replay [--fork N] <trace> <peer:port>` | Re-issue a traced session and diff every response. |
 | `probe [--full\|--task] <peer:port>` | In-process MCP handshake diagnostic. |
