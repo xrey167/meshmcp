@@ -66,6 +66,46 @@ firewall can't be talked past and the audit can't be repudiated.
 
 ---
 
+## One plane, many MCP servers
+
+meshmcp isn't a server — it's the layer **in front of** your servers. A filesystem,
+a web-fetcher, a payments API, a customer database, a deploy pipeline: each is a
+**different** MCP server, wrapped unmodified. Every call to **any** of them gets the
+same identity, policy, audit, and secret injection — and the router can union them
+into one namespaced endpoint.
+
+```mermaid
+flowchart LR
+  subgraph clients ["callers"]
+    A1["agent A · read-only"]
+    A2["agent B · billing"]
+    A3["IDE / CLI · you"]
+  end
+  subgraph plane ["meshmcp — one control plane"]
+    direction TB
+    P1["identity"] ~~~ P2["policy"] ~~~ P3["audit"] ~~~ P4["secrets"] ~~~ P5["router"]
+  end
+  subgraph servers ["many different MCP servers (unmodified)"]
+    S1["fs · stdio<br/>read_*"]
+    S2["web · stdio<br/>taint_source"]
+    S3["payments · stdio<br/>🔑 secret · co-sign"]
+    S4["customer-db · stdio<br/>emit pii"]
+    S5["deploy · stdio<br/>⏰ window · co-sign"]
+    S6["github · http<br/>🔑 secret"]
+    S7["slack · http<br/>block pii"]
+    S8["vectors · stdio<br/>rate-limited"]
+  end
+  A1 & A2 & A3 --> plane
+  plane --> S1 & S2 & S3 & S4 & S5 & S6 & S7 & S8
+```
+
+Each server keeps its own nature — different tools, transports, and risk. The plane
+gives them a **shared** spine: one WireGuard identity per caller, one policy language,
+one tamper-evident ledger, one credential broker. See the
+[cookbook](docs/COOKBOOK.md) for a worked example of wrapping each one.
+
+---
+
 ## Quick start — 60 seconds
 
 ```bash
