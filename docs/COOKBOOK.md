@@ -6,6 +6,55 @@ credentials come from `$NB_SETUP_KEY` or `--setup-key`.
 
 > A visual tour of the same material: the [capabilities showcase](https://claude.ai/code/artifact/063e5ce2-bc4d-42b4-bc8e-a777a803ce75).
 
+## One plane, many MCP servers
+
+meshmcp isn't a server — it's the layer **in front of** your servers. A filesystem,
+a web-fetcher, a payments API, a customer database, a deploy pipeline: each is a
+**different** MCP server, wrapped unmodified. Every call to **any** of them gets
+the same identity, policy, audit, and secret injection — and the router can union
+them into one namespaced endpoint. The scenarios below each wrap **one** of these
+servers; the point is that they all share the same spine.
+
+```mermaid
+flowchart LR
+  subgraph clients ["callers"]
+    A1["agent A · read-only"]
+    A2["agent B · billing"]
+    A3["IDE / CLI · you"]
+  end
+  subgraph plane ["meshmcp — one control plane"]
+    direction TB
+    P1["identity"] ~~~ P2["policy"] ~~~ P3["audit"] ~~~ P4["secrets"] ~~~ P5["router"]
+  end
+  subgraph servers ["many different MCP servers (unmodified)"]
+    S1["fs · stdio<br/>read_*"]
+    S2["web · stdio<br/>taint_source"]
+    S3["payments · stdio<br/>🔑 secret · co-sign"]
+    S4["customer-db · stdio<br/>emit pii"]
+    S5["deploy · stdio<br/>⏰ window · co-sign"]
+    S6["github · http<br/>🔑 secret"]
+    S7["slack · http<br/>block pii"]
+    S8["vectors · stdio<br/>rate-limited"]
+  end
+  A1 & A2 & A3 --> plane
+  plane --> S1 & S2 & S3 & S4 & S5 & S6 & S7 & S8
+```
+
+Each server keeps its own nature — different tools, transports, and risk. The
+plane gives them a **shared** spine: one WireGuard identity per caller, one policy
+language, one tamper-evident ledger, one credential broker.
+
+| server | transport | example tools | governance it gets |
+|---|---|---|---|
+| `fs` | stdio | `read_file`, `list` | rate-limited reads (§1) |
+| `web` | stdio | `fetch`, `http_get` | `taint_source` → taints the session (§2) |
+| `customer-db` | stdio | `read_customer` | `emit_labels: [pii]` (§3) |
+| `payments` | stdio | `charge`, `refund` | 🔑 secret injection + `require_cosign` (§4, §7) |
+| `deploy` | stdio | `deploy` | time `when:` window + co-sign |
+| `github` | http | `open_pr` | 🔑 secret injection |
+| `slack` | http | `post_message` | `block_labels: [pii]` — egress guard (§3) |
+| `vectors` | stdio | `embed`, `search` | rate-limited |
+
 **Contents**
 1. [Share a local tool with your team — expose nothing](#1-share-a-local-tool-with-your-team--expose-nothing)
 2. [Stop prompt injection at the network layer](#2-stop-prompt-injection-at-the-network-layer)
