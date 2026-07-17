@@ -95,6 +95,48 @@ func TestInvalidateEvictsRegardlessOfTTL(t *testing.T) {
 	}
 }
 
+func TestInvalidateForNotification(t *testing.T) {
+	rc, _ := newTestCache()
+	fresh := CacheableResult{TTLMs: 999999, CacheScope: CachePublic}
+
+	// tools/list_changed evicts the tools list.
+	rc.Store(KeyToolsList, fresh, []byte(`tools`), "")
+	if got := rc.InvalidateForNotification("notifications/tools/list_changed", ""); len(got) != 1 || got[0] != KeyToolsList {
+		t.Fatalf("tools evict keys = %v", got)
+	}
+	if _, ok := rc.Lookup(KeyToolsList, ""); ok {
+		t.Fatal("tools/list should be evicted")
+	}
+
+	// resources/list_changed evicts both the list and templates list.
+	rc.Store(KeyResourcesList, fresh, []byte(`r`), "")
+	rc.Store(KeyResourceTemplatesList, fresh, []byte(`rt`), "")
+	got := rc.InvalidateForNotification("notifications/resources/list_changed", "")
+	if len(got) != 2 {
+		t.Fatalf("resources evict keys = %v", got)
+	}
+	if _, ok := rc.Lookup(KeyResourcesList, ""); ok {
+		t.Fatal("resources/list should be evicted")
+	}
+
+	// resources/updated evicts only the specific resource read, by URI.
+	uri := "file:///project/config.json"
+	rc.Store(ResourceReadKey(uri), fresh, []byte(`cfg`), "")
+	rc.Store(ResourceReadKey("file:///other.txt"), fresh, []byte(`other`), "")
+	rc.InvalidateForNotification("notifications/resources/updated", uri)
+	if _, ok := rc.Lookup(ResourceReadKey(uri), ""); ok {
+		t.Fatal("updated resource should be evicted")
+	}
+	if _, ok := rc.Lookup(ResourceReadKey("file:///other.txt"), ""); !ok {
+		t.Fatal("unrelated resource must not be evicted")
+	}
+
+	// An unrelated notification evicts nothing.
+	if got := rc.InvalidateForNotification("notifications/message", ""); got != nil {
+		t.Fatalf("unrelated notification evicted %v", got)
+	}
+}
+
 func TestZeroTTLIsStale(t *testing.T) {
 	rc, _ := newTestCache()
 	rc.Store("k", CacheableResult{TTLMs: 0, CacheScope: CachePublic}, []byte(`v`), "")

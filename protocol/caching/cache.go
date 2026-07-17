@@ -152,6 +152,45 @@ func (c *ResponseCache) Fetch(
 	return value, nil
 }
 
+// Standard cache keys for the cacheable list verbs. A resources/read entry is
+// keyed per URI via ResourceReadKey.
+const (
+	KeyToolsList             = "tools/list"
+	KeyPromptsList           = "prompts/list"
+	KeyResourcesList         = "resources/list"
+	KeyResourceTemplatesList = "resources/templates/list"
+)
+
+// ResourceReadKey builds the cache key for a specific resources/read result.
+func ResourceReadKey(uri string) string { return "resources/read:" + uri }
+
+// InvalidateForNotification performs on-demand revalidation: given a server
+// change-notification method (and, for notifications/resources/updated, the
+// affected resource URI), it evicts the cache entries that notification affects
+// and returns the keys it dropped. The next ModeUse fetch regenerates them.
+//
+// This is the MCP analogue of on-demand ISR: a pushed change event triggers a
+// targeted cache purge rather than waiting for the TTL to lapse.
+func (c *ResponseCache) InvalidateForNotification(method, resourceURI string) []string {
+	var keys []string
+	switch method {
+	case "notifications/tools/list_changed":
+		keys = []string{KeyToolsList}
+	case "notifications/prompts/list_changed":
+		keys = []string{KeyPromptsList}
+	case "notifications/resources/list_changed":
+		keys = []string{KeyResourcesList, KeyResourceTemplatesList}
+	case "notifications/resources/updated":
+		if resourceURI != "" {
+			keys = []string{ResourceReadKey(resourceURI)}
+		}
+	}
+	for _, k := range keys {
+		c.Invalidate(k)
+	}
+	return keys
+}
+
 // evictLocked bounds the store by dropping the soonest-to-expire entries.
 func (c *ResponseCache) evictLocked() {
 	if len(c.entries) <= c.max {
