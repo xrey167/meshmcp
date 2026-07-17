@@ -34,7 +34,7 @@ no admin rights) and every caller is identified by its WireGuard public key.
 
 ```powershell
 go build -o meshmcp.exe .
-go build -o cmd/mcpserver/mcpserver.exe ./cmd/mcpserver   # the demo MCP server
+go build -o cmd/mcpserver/mcpserver.exe ./cmd/mcpserver/prompt_mcp   # the demo MCP server
 ```
 
 ## A real MCP server to serve

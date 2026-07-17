@@ -11,7 +11,7 @@ cd "$(dirname "$0")/.."   # repo root
 
 echo "==> building binaries"
 go build -o meshmcp .
-go build -o cmd/mcpserver/mcpserver ./cmd/mcpserver
+go build -o cmd/mcpserver/mcpserver ./cmd/mcpserver/prompt_mcp
 
 mkdir -p demo
 [ -f demo/secrets.json ] || printf '{"stripe_key":"sk_live_demo_PLACEHOLDER"}' > demo/secrets.json
