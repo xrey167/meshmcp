@@ -43,7 +43,8 @@ the **draft** revision adds types and a transport layer that are **not** in
 | `transport/stdio`               | Newline-delimited framing (`Delimiter`, `Frame`) + lifecycle rules |
 | `transport/streamablehttp`      | HTTP headers (`MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`, `Mcp-Param-*`), error codes (`-32020 HeaderMismatch`), and the Base64 sentinel `EncodeHeaderValue`/`DecodeHeaderValue` helpers |
 | `authorization`                 | OAuth 2.1 authorization layer: Protected Resource Metadata (RFC 9728), Authorization Server Metadata (RFC 8414/OIDC), Client ID Metadata Document, Dynamic Client Registration (RFC 7591), plus the MCP discovery-URL ordering and a `WWW-Authenticate` challenge parser |
-| `discover`                      | `server/discover` handshake (replaces `initialize`): `DiscoverRequest`, `DiscoverResult`, draft `ServerCapabilities`, `CacheableResult` (ttlMs / cacheScope), `resultType` discriminator |
+| `discover`                      | `server/discover` handshake (replaces `initialize`): `DiscoverRequest`, `DiscoverResult`, draft `ServerCapabilities`, `resultType` discriminator (re-exports `caching.CacheableResult`) |
+| `caching`                       | Draft result caching hints: `CacheableResult` (`ttlMs` / `cacheScope`) shared across all cacheable verbs (tools/list, resources/list, prompts/list, resources/read, server/discover) |
 | `mcperror`                      | Draft error catalog: `Error`, `ErrorResponse`, standard + MCP-reserved codes (`-32020..-32022`), and the structured data payloads (`UnsupportedProtocolVersionData`, `MissingRequiredClientCapabilityData`) |
 | `samplingtools`                 | Draft sampling tool-use: `ToolUseContent`, `ToolResultContent`, `ToolChoice`, message content as a single block **or array**, and a request params extended with `tools` / `toolChoice` |
 
