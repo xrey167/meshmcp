@@ -33,4 +33,14 @@ const (
 	MetaKeyClientInfo = "io.modelcontextprotocol/clientInfo"
 	// MetaKeyClientCapabilities carries the per-request client capabilities.
 	MetaKeyClientCapabilities = "io.modelcontextprotocol/clientCapabilities"
+	// MetaKeyLogLevel carries the desired per-request log level (deprecated).
+	MetaKeyLogLevel = "io.modelcontextprotocol/logLevel"
+	// MetaKeyServerInfo carries the server Implementation descriptor on results.
+	MetaKeyServerInfo = "io.modelcontextprotocol/serverInfo"
+	// MetaKeySubscriptionID correlates a notification with its subscription.
+	MetaKeySubscriptionID = "io.modelcontextprotocol/subscriptionId"
 )
+
+// MetaKeyProgressToken is the bare `_meta` key requesting out-of-band progress
+// notifications for a request (not reverse-DNS prefixed).
+const MetaKeyProgressToken = "progressToken"

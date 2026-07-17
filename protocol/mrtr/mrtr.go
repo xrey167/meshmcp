@@ -30,6 +30,19 @@ type InputRequests = map[string]any
 // elicitation.ElicitResult, sampling.CreateMessageResult, or roots.ListResult.
 type InputResponses = map[string]any
 
+// InputResponseRequestParams are the fields a client adds to any request when
+// retrying it to answer a prior InputRequiredResult: the responses to the
+// server's input requests and the opaque state the client must echo back
+// verbatim. Both are optional (the client may retry with only one).
+type InputResponseRequestParams struct {
+	// InputResponses answer the server's InputRequests, keyed by the matching
+	// request key.
+	InputResponses InputResponses `json:"inputResponses,omitempty"`
+	// RequestState is the opaque, server-owned string the client MUST echo back
+	// exactly as received and MUST NOT inspect or modify.
+	RequestState string `json:"requestState,omitempty"`
+}
+
 // InputRequiredResult is a Result indicating that additional input is needed
 // before the originating request can be completed. Servers MAY return it only
 // for prompts/get, resources/read and tools/call, and MUST include at least one

@@ -139,3 +139,12 @@ func TestElicitResult(t *testing.T) {
 		t.Fatalf("r2 content: %+v", r2.Content)
 	}
 }
+
+func TestErrorPaths(t *testing.T) {
+	if _, err := ed.DecodePrimitiveSchema([]byte(`{"type":"bogus"}`)); err == nil {
+		t.Fatal("expected error for unknown primitive schema type")
+	}
+	if _, err := ed.DecodeParams([]byte(`{"mode":"telepathy"}`)); err == nil {
+		t.Fatal("expected error for unknown elicitation mode")
+	}
+}

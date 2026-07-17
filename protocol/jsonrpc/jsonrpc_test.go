@@ -56,3 +56,10 @@ func TestDecodeMessageDiscriminates(t *testing.T) {
 		t.Fatalf("want *Error -32601, got %T", errFrame)
 	}
 }
+
+func TestDecodeMessageGarbageIsError(t *testing.T) {
+	// A frame that is neither request, notification, response nor error.
+	if _, err := jsonrpc.DecodeMessage([]byte(`{"jsonrpc":"2.0","id":1}`)); err == nil {
+		t.Fatal("expected error for a frame with no method/result/error")
+	}
+}

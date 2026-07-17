@@ -117,6 +117,26 @@ func TestHostContextResponsiveDecisions(t *testing.T) {
 	}
 }
 
+// TestContentBlockParams covers the two apps params with a content-block union
+// (ui/message and ui/update-model-context), each with its own UnmarshalJSON.
+func TestContentBlockParams(t *testing.T) {
+	var mp apps.MessageRequestParams
+	if err := json.Unmarshal([]byte(`{"role":"user","content":[{"type":"text","text":"hi"},{"type":"image","data":"AAA","mimeType":"image/png"}]}`), &mp); err != nil {
+		t.Fatalf("message params: %v", err)
+	}
+	if len(mp.Content) != 2 {
+		t.Fatalf("message content = %d blocks", len(mp.Content))
+	}
+
+	var up apps.UpdateModelContextRequestParams
+	if err := json.Unmarshal([]byte(`{"content":[{"type":"text","text":"ctx"}],"structuredContent":{"k":"v"}}`), &up); err != nil {
+		t.Fatalf("update-context params: %v", err)
+	}
+	if len(up.Content) != 1 || up.StructuredContent["k"] != "v" {
+		t.Fatalf("update-context mismatch: %+v", up)
+	}
+}
+
 func TestClientCapabilityMimeType(t *testing.T) {
 	var c apps.ClientCapabilities
 	if err := json.Unmarshal([]byte(`{"mimeTypes":["text/html;profile=mcp-app"]}`), &c); err != nil {

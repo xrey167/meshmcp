@@ -121,3 +121,9 @@ func TestTextResult(t *testing.T) {
 		t.Fatalf("block not text: %#v", r.Content[0])
 	}
 }
+
+func TestDecodeBlockUnknownIsError(t *testing.T) {
+	if _, err := samplingtools.DecodeBlock([]byte(`{"type":"bogus"}`)); err == nil {
+		t.Fatal("expected error for unknown sampling content block type")
+	}
+}

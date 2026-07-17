@@ -101,6 +101,10 @@ func ParseChallenge(header string) (scheme string, params map[string]string) {
 		}
 		key := strings.ToLower(strings.TrimSpace(rest[start:i]))
 		i++ // consume '='
+		// Skip optional bad whitespace between '=' and the value (RFC 7235 BWS).
+		for i < len(rest) && (rest[i] == ' ' || rest[i] == '\t') {
+			i++
+		}
 
 		var value string
 		if i < len(rest) && rest[i] == '"' {
