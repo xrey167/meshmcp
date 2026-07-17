@@ -262,6 +262,7 @@ control/     managed control plane: enrollment (NetBird key issuance) · registr
 federation/  cross-org boundary: per-org tool grants · identity mapping · audited crossings
 mcp/         dependency-free MCP server framework (tools · resources · prompts · tasks · HTTP)
 mcpclient/   MCP client over any transport (used by the router, orchestrator, CLI)
+protocol/    granular Go models for the MCP wire protocol — one package per domain (2025-06-18 base · draft · extensions · client helpers)
 registry/    file-based discovery registry
 cmd/         mcpserver (demo) · mcpecho · mcphttp
 *.go         the meshmcp binary: serve · router · orchestrate · control · federate · insight · … · CLI
@@ -278,6 +279,7 @@ examples/    ready-to-adapt configs        docs/  design docs + open specs
 - **[docs/INSIGHT.md](docs/INSIGHT.md)** — the firewall's read side: observe → recommend → simulate → detect.
 - **[docs/SECRETS.md](docs/SECRETS.md)** — the credential broker: identity-gated secret injection, the agent never holds the value.
 - **[docs/EXTENSIONS.md](docs/EXTENSIONS.md)** — signed capabilities (short-lived, subject-bound tool grants), server middleware, and the typed function/task client.
+- **[protocol/README.md](protocol/README.md)** — granular Go models for the full MCP wire protocol: the 2025-06-18 base schema, the draft revision (server/discover, MRTR, subscriptions, error catalog, sampling tool-use, form/url elicitation, streamable-HTTP + stdio transports, OAuth 2.1 authorization), and the Server Card / Tasks / Apps extensions — plus a client-side response cache. One package per domain, each with round-trip tests.
 - **[docs/spec/](docs/spec/)** — open specs: the [audit-record format](docs/spec/AUDIT-RECORD.md) and the [policy DSL](docs/spec/POLICY-DSL.md), each with a JSON Schema.
 - **[docs/MOBILE.md](docs/MOBILE.md)** — how the whole stack could reach phones (a phone is a human identity on the mesh — the natural co-sign approver).
 - **[examples/hitl/](examples/hitl/)** — route any agent framework's approval hook (e.g. OpenAI Agents SDK `ShellTool.on_approval`) to the mesh approver — approve from your phone, identity-attributed and audited.
