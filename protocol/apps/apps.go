@@ -67,6 +67,15 @@ const (
 	DisplayPiP        DisplayMode = "pip"
 )
 
+// Platform is the host platform type, used for responsive rendering decisions.
+type Platform string
+
+const (
+	PlatformWeb     Platform = "web"
+	PlatformDesktop Platform = "desktop"
+	PlatformMobile  Platform = "mobile"
+)
+
 // ToolVisibility is who can access a tool.
 type ToolVisibility string
 
@@ -354,10 +363,40 @@ type HostContext struct {
 	Locale                string               `json:"locale,omitempty"`
 	TimeZone              string               `json:"timeZone,omitempty"`
 	UserAgent             string               `json:"userAgent,omitempty"`
-	// Platform is "web", "desktop" or "mobile".
-	Platform           string              `json:"platform,omitempty"`
+	// Platform is the host platform ("web", "desktop" or "mobile").
+	Platform           Platform            `json:"platform,omitempty"`
 	DeviceCapabilities *DeviceCapabilities `json:"deviceCapabilities,omitempty"`
 	SafeAreaInsets     *SafeAreaInsets     `json:"safeAreaInsets,omitempty"`
+}
+
+// IsMobile reports whether the host platform is mobile.
+func (c HostContext) IsMobile() bool { return c.Platform == PlatformMobile }
+
+// IsDesktop reports whether the host platform is desktop.
+func (c HostContext) IsDesktop() bool { return c.Platform == PlatformDesktop }
+
+// IsWeb reports whether the host platform is web.
+func (c HostContext) IsWeb() bool { return c.Platform == PlatformWeb }
+
+// SupportsTouch reports whether the device advertises touch input.
+func (c HostContext) SupportsTouch() bool {
+	return c.DeviceCapabilities != nil && c.DeviceCapabilities.Touch
+}
+
+// SupportsHover reports whether the device advertises hover interactions.
+func (c HostContext) SupportsHover() bool {
+	return c.DeviceCapabilities != nil && c.DeviceCapabilities.Hover
+}
+
+// SupportsDisplayMode reports whether the host advertises support for the given
+// display mode via AvailableDisplayModes.
+func (c HostContext) SupportsDisplayMode(mode DisplayMode) bool {
+	for _, m := range c.AvailableDisplayModes {
+		if m == mode {
+			return true
+		}
+	}
+	return false
 }
 
 // SupportedContentBlockModalities declares which content-block modalities a

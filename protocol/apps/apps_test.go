@@ -89,6 +89,34 @@ func TestResourceMetaCsp(t *testing.T) {
 	}
 }
 
+func TestHostContextResponsiveDecisions(t *testing.T) {
+	raw := `{
+		"platform": "mobile",
+		"userAgent": "ExampleHost/2.0",
+		"deviceCapabilities": {"touch": true, "hover": false},
+		"availableDisplayModes": ["inline", "fullscreen"]
+	}`
+	var c apps.HostContext
+	if err := json.Unmarshal([]byte(raw), &c); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if c.Platform != apps.PlatformMobile || !c.IsMobile() || c.IsDesktop() {
+		t.Fatalf("platform decisions wrong: %+v", c)
+	}
+	if !c.SupportsTouch() || c.SupportsHover() {
+		t.Fatalf("device capability decisions wrong: %+v", c.DeviceCapabilities)
+	}
+	if !c.SupportsDisplayMode(apps.DisplayFullscreen) || c.SupportsDisplayMode(apps.DisplayPiP) {
+		t.Fatalf("display-mode support wrong: %+v", c.AvailableDisplayModes)
+	}
+
+	// A web host with no device capabilities reports false, not a panic.
+	web := apps.HostContext{Platform: apps.PlatformWeb}
+	if !web.IsWeb() || web.SupportsTouch() {
+		t.Fatalf("web host decisions wrong: %+v", web)
+	}
+}
+
 func TestClientCapabilityMimeType(t *testing.T) {
 	var c apps.ClientCapabilities
 	if err := json.Unmarshal([]byte(`{"mimeTypes":["text/html;profile=mcp-app"]}`), &c); err != nil {
