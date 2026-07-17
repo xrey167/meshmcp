@@ -42,6 +42,7 @@ the **draft** revision adds types and a transport layer that are **not** in
 | `transport`                     | Transport-agnostic constants: content types, well-known `_meta` request-metadata keys |
 | `transport/stdio`               | Newline-delimited framing (`Delimiter`, `Frame`) + lifecycle rules |
 | `transport/streamablehttp`      | HTTP headers (`MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`, `Mcp-Param-*`), error codes (`-32020 HeaderMismatch`), and the Base64 sentinel `EncodeHeaderValue`/`DecodeHeaderValue` helpers |
+| `authorization`                 | OAuth 2.1 authorization layer: Protected Resource Metadata (RFC 9728), Authorization Server Metadata (RFC 8414/OIDC), Client ID Metadata Document, Dynamic Client Registration (RFC 7591), plus the MCP discovery-URL ordering and a `WWW-Authenticate` challenge parser |
 
 These are additive and marked as draft-era in their package docs; they do not
 alter the 2025-06-18 base models.
