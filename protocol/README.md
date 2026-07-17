@@ -1,11 +1,21 @@
 # protocol — MCP data models (Go)
 
-Go models generated from the official **Model Context Protocol** TypeScript
-schema (`schema.ts`, revision **2025-06-18**), granular and grouped **one Go
-package per protocol domain**.
+Granular Go models for the **Model Context Protocol** wire format, faithfully
+translated from the official TypeScript sources and grouped **one Go package
+per protocol domain**. Coverage spans three layers:
 
-Source of truth:
-`modelcontextprotocol/modelcontextprotocol` → `schema/2025-06-18/schema.ts`.
+1. **Base** — the stable `schema.ts` revision **2025-06-18** (source of truth:
+   `modelcontextprotocol/modelcontextprotocol` → `schema/2025-06-18/schema.ts`).
+2. **Draft** — the post-2025-06-18 revision (server/discover, MRTR,
+   subscriptions, structured error catalog, sampling tool-use, form/url
+   elicitation, the streamable-HTTP + stdio transports, and the OAuth 2.1
+   authorization layer), in clearly-marked era-separated packages.
+3. **Extensions** — Server Card, Tasks (`io.modelcontextprotocol/tasks`) and
+   Apps (`ext-*` repos) — plus a small client-side response cache.
+
+Every package has round-trip / conformance tests against real payloads and the
+official example fixtures. Marker-interface unions, `Decode*` discriminators,
+and struct embedding are the recurring translation patterns (see Conventions).
 
 ## Layout
 
@@ -39,7 +49,7 @@ the **draft** revision adds types and a transport layer that are **not** in
 | ------------------------------- | -------------------------------------------------------------- |
 | `mrtr`                          | Multi Round-Trip Requests: `InputRequiredResult`, `InputRequests`/`InputResponses`, `requestState` (replaces server-initiated requests) |
 | `subscriptions`                 | `subscriptions/listen`, notification `Filter`, acknowledgment, `subscriptionId` `_meta` key (replaces `resources/subscribe`) |
-| `transport`                     | Transport-agnostic constants: content types, well-known `_meta` request-metadata keys |
+| `transport`                     | Transport-agnostic constants (content types, well-known `_meta` keys) and the typed `_meta` views: `RequestMeta` (protocolVersion / clientInfo / clientCapabilities / progressToken / logLevel), `ResultMeta` (serverInfo), `NotificationMeta` (subscriptionId) |
 | `transport/stdio`               | Newline-delimited framing (`Delimiter`, `Frame`) + lifecycle rules |
 | `transport/streamablehttp`      | HTTP headers (`MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`, `Mcp-Param-*`), error codes (`-32020 HeaderMismatch`), and the Base64 sentinel `EncodeHeaderValue`/`DecodeHeaderValue` helpers |
 | `authorization`                 | OAuth 2.1 authorization layer: Protected Resource Metadata (RFC 9728), Authorization Server Metadata (RFC 8414/OIDC), Client ID Metadata Document, Dynamic Client Registration (RFC 7591), the token endpoint (`TokenRequest.Form()` for client_credentials / private_key_jwt / jwt-bearer / RFC 8693 token-exchange incl. the ID-JAG cross-app-access flow, `TokenResponse`, `TokenExchangeResponse`, `TokenErrorResponse`), plus the MCP discovery-URL ordering and a `WWW-Authenticate` challenge parser |
@@ -118,8 +128,15 @@ package the same way.
 
 ## Tests
 
-`protocol/roundtrip_test.go` exercises the polymorphic decoders and embedding:
+Every package is tested. Coverage includes: the polymorphic decoders and their
+`default → error` branches (`content`, `resource`, `completion`, `sampling`,
+`samplingtools`, `jsonrpc`, both elicitation packages), union marshal
+round-trips, struct embedding, real 2026-07-28 draft frames, the official
+`schema/draft/examples` fixtures (ServerCapabilities, Tool), and the
+hand-written helpers (response cache modes/scope/invalidation, OAuth discovery
+ordering + `WWW-Authenticate` parsing, the streamable-HTTP Base64 sentinel,
+stdio framing).
 
 ```
-go test ./protocol/...
+go build ./... && go vet ./protocol/... && go test ./protocol/...
 ```
