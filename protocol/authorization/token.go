@@ -8,11 +8,27 @@ const (
 	GrantClientCredentials = "client_credentials"
 	// GrantJWTBearer is the RFC 7523 JWT bearer authorization grant.
 	GrantJWTBearer = "urn:ietf:params:oauth:grant-type:jwt-bearer"
+	// GrantTokenExchange is the RFC 8693 token exchange grant.
+	GrantTokenExchange = "urn:ietf:params:oauth:grant-type:token-exchange"
 )
 
 // ClientAssertionTypeJWTBearer is the client_assertion_type for private_key_jwt
 // client authentication (RFC 7523).
 const ClientAssertionTypeJWTBearer = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+
+// Token type identifiers for RFC 8693 token exchange (requested_token_type,
+// subject_token_type, issued_token_type).
+const (
+	// TokenTypeIDJAG is the Identity Assertion Authorization Grant (ID-JAG) token
+	// type used by the MCP cross-app-access flow.
+	TokenTypeIDJAG = "urn:ietf:params:oauth:token-type:id-jag"
+	// TokenTypeIDToken is an OpenID Connect ID token.
+	TokenTypeIDToken = "urn:ietf:params:oauth:token-type:id_token"
+	// TokenTypeAccessToken is an OAuth 2.0 access token.
+	TokenTypeAccessToken = "urn:ietf:params:oauth:token-type:access_token"
+	// TokenTypeJWT is a generic JWT.
+	TokenTypeJWT = "urn:ietf:params:oauth:token-type:jwt"
+)
 
 // TokenRequest is an OAuth 2.0 token-endpoint request. It is sent
 // form-encoded (application/x-www-form-urlencoded); use Form to build the body.
@@ -35,6 +51,18 @@ type TokenRequest struct {
 	ClientAssertionType string
 	// Assertion is the JWT for the jwt-bearer grant (GrantJWTBearer).
 	Assertion string
+	// Token-exchange grant fields (RFC 8693).
+	// RequestedTokenType is the desired token type (e.g. TokenTypeIDJAG).
+	RequestedTokenType string
+	// Audience is the intended audience (the target authorization server).
+	Audience string
+	// SubjectToken is the security token being exchanged (e.g. an ID token).
+	SubjectToken string
+	// SubjectTokenType is the type of SubjectToken (e.g. TokenTypeIDToken).
+	SubjectTokenType string
+	// ActorToken / ActorTokenType represent the acting party, when delegation applies.
+	ActorToken     string
+	ActorTokenType string
 	// Authorization-code grant fields.
 	Code         string
 	RedirectURI  string
@@ -66,6 +94,12 @@ func (r TokenRequest) Form() url.Values {
 	set("client_assertion", r.ClientAssertion)
 	set("client_assertion_type", r.ClientAssertionType)
 	set("assertion", r.Assertion)
+	set("requested_token_type", r.RequestedTokenType)
+	set("audience", r.Audience)
+	set("subject_token", r.SubjectToken)
+	set("subject_token_type", r.SubjectTokenType)
+	set("actor_token", r.ActorToken)
+	set("actor_token_type", r.ActorTokenType)
 	set("code", r.Code)
 	set("redirect_uri", r.RedirectURI)
 	set("code_verifier", r.CodeVerifier)
@@ -91,6 +125,25 @@ type TokenResponse struct {
 	RefreshToken string `json:"refresh_token,omitempty"`
 	// Scope is the granted scope, if it differs from the request.
 	Scope string `json:"scope,omitempty"`
+}
+
+// TokenExchangeResponse is a successful RFC 8693 token-exchange response
+// (Section 2.2), returned as JSON. For the MCP cross-app-access flow the
+// issued AccessToken is the Identity Assertion Authorization Grant (ID-JAG),
+// which is then presented as the assertion of a jwt-bearer grant.
+type TokenExchangeResponse struct {
+	// AccessToken is the security token issued by the exchange.
+	AccessToken string `json:"access_token"`
+	// IssuedTokenType is the type of the issued token (e.g. TokenTypeIDJAG).
+	IssuedTokenType string `json:"issued_token_type"`
+	// TokenType is how the token is to be used (e.g. "Bearer", or "N_A").
+	TokenType string `json:"token_type"`
+	// ExpiresIn is the token lifetime in seconds.
+	ExpiresIn int64 `json:"expires_in,omitempty"`
+	// Scope is the granted scope, if it differs from the request.
+	Scope string `json:"scope,omitempty"`
+	// RefreshToken is an optional refresh token.
+	RefreshToken string `json:"refresh_token,omitempty"`
 }
 
 // TokenErrorResponse is an OAuth 2.0 token-endpoint error response
