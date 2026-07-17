@@ -6,6 +6,10 @@
 // (a marker method must be declared in the type's own package), so these are
 // modelled as `any` aliases whose membership is documented here. The concrete
 // members live in their respective protocol/* packages.
+//
+// To decode an incoming frame into the right concrete type, use the method
+// dispatchers in decode.go: DecodeClientRequest, DecodeServerRequest,
+// DecodeClientNotification and DecodeServerNotification.
 package messages
 
 // ClientRequest is any request a client may send to a server. Members:
