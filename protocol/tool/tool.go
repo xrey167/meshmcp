@@ -87,8 +87,10 @@ type CallResult struct {
 	base.Result
 	// Content is the unstructured result of the tool call.
 	Content []content.Block `json:"content"`
-	// StructuredContent is the optional structured result.
-	StructuredContent map[string]any `json:"structuredContent,omitempty"`
+	// StructuredContent is the optional structured result. Its shape is defined
+	// by the tool's outputSchema, not the protocol, so it is kept as raw JSON
+	// (the draft revision types it as arbitrary JSON — object, array or scalar).
+	StructuredContent json.RawMessage `json:"structuredContent,omitempty"`
 	// IsError reports whether the tool call ended in an error. Tool-level errors
 	// are reported here, not as MCP protocol-level errors.
 	IsError bool `json:"isError,omitempty"`
@@ -99,7 +101,7 @@ func (r *CallResult) UnmarshalJSON(data []byte) error {
 	var raw struct {
 		Meta              base.Meta         `json:"_meta"`
 		Content           []json.RawMessage `json:"content"`
-		StructuredContent map[string]any    `json:"structuredContent"`
+		StructuredContent json.RawMessage   `json:"structuredContent"`
 		IsError           bool              `json:"isError"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {

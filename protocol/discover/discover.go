@@ -7,7 +7,11 @@
 // handshake is modelled in protocol/initialize.
 package discover
 
-import "meshmcp/protocol/base"
+import (
+	"encoding/json"
+
+	"meshmcp/protocol/base"
+)
 
 // Method is the JSON-RPC method name for the discovery request.
 const Method = "server/discover"
@@ -99,4 +103,41 @@ type ResourcesCapability struct {
 // ToolsCapability describes server support for tools.
 type ToolsCapability struct {
 	ListChanged bool `json:"listChanged,omitempty"`
+}
+
+// ClientCapabilities are the capabilities a client may support (draft
+// server/discover). Presence-based capabilities are kept as raw JSON so that a
+// present-but-empty object ("{}") is preserved distinctly from an absent one.
+type ClientCapabilities struct {
+	// Experimental holds non-standard capabilities the client supports.
+	Experimental map[string]any `json:"experimental,omitempty"`
+	// Roots is present if the client supports listing roots.
+	//
+	// Deprecated: deprecated as of protocol version 2026-07-28 (SEP-2577).
+	Roots json.RawMessage `json:"roots,omitempty"`
+	// Sampling is present if the client supports sampling from an LLM.
+	Sampling *SamplingCapability `json:"sampling,omitempty"`
+	// Elicitation is present if the client supports elicitation from the server.
+	Elicitation *ElicitationCapability `json:"elicitation,omitempty"`
+	// Extensions are the MCP extensions the client supports, keyed by extension
+	// identifier (reverse-DNS, following the _meta key naming rules).
+	Extensions map[string]any `json:"extensions,omitempty"`
+}
+
+// SamplingCapability describes client support for LLM sampling. A present-empty
+// object signals baseline support; the sub-fields opt into optional features.
+type SamplingCapability struct {
+	// Context signals support for context inclusion via includeContext.
+	Context json.RawMessage `json:"context,omitempty"`
+	// Tools signals support for tool use via tools and toolChoice.
+	Tools json.RawMessage `json:"tools,omitempty"`
+}
+
+// ElicitationCapability describes client support for elicitation modes. A
+// present-empty object implies form mode only.
+type ElicitationCapability struct {
+	// Form signals support for form-mode elicitation.
+	Form json.RawMessage `json:"form,omitempty"`
+	// URL signals support for URL-mode elicitation.
+	URL json.RawMessage `json:"url,omitempty"`
 }
