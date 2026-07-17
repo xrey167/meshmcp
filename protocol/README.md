@@ -46,6 +46,27 @@ the **draft** revision adds types and a transport layer that are **not** in
 These are additive and marked as draft-era in their package docs; they do not
 alter the 2025-06-18 base models.
 
+### Experimental extensions
+
+| Package      | Covers                                                                    |
+| ------------ | ------------------------------------------------------------------------- |
+| `servercard` | MCP Server Card: static pre-connection discovery document (`ServerCard`, `Repository`, `Remote`, `Input`, `KeyValueInput`, `Icon`) — from `experimental-ext-server-card/schema.ts` (Server Card WG, SEP-2127) |
+
+### Working groups without a stable schema (not modelled)
+
+Several MCP working-group pages are **charters** (mission, membership, cadence)
+and define no wire types. Their proposed types live in unmerged SEPs or
+experimental repos and are omitted here to avoid modelling a moving target:
+
+- **File Uploads** (`FileInputDescriptor`) — unmerged SEP-2356.
+- **Skills over MCP** — Resources-based extension; survey + unmerged SEP-2640
+  (`experimental-ext-skills` has design docs, no `schema.ts`).
+- **Triggers & Events** — still "Ideating"; no schema yet.
+
+Only Server Card publishes a stable `schema.ts`, so only it is modelled. If a
+SEP above lands (or you want speculative models from a specific SEP), add a
+package the same way.
+
 ## Conventions
 
 - **`extends` → embedding.** A TS interface that `extends Result` /
