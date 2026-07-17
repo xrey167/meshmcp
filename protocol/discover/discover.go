@@ -74,10 +74,11 @@ type DiscoverResult struct {
 type ServerCapabilities struct {
 	// Experimental holds non-standard capabilities the server supports.
 	Experimental map[string]any `json:"experimental,omitempty"`
-	// Logging is present if the server supports sending log messages.
-	Logging map[string]any `json:"logging,omitempty"`
+	// Logging is present if the server supports sending log messages. Kept as
+	// raw JSON so a present-empty object ("{}") is distinct from absent.
+	Logging json.RawMessage `json:"logging,omitempty"`
 	// Completions is present if the server supports argument autocompletion.
-	Completions map[string]any `json:"completions,omitempty"`
+	Completions json.RawMessage `json:"completions,omitempty"`
 	// Prompts is present if the server offers any prompt templates.
 	Prompts *PromptsCapability `json:"prompts,omitempty"`
 	// Resources is present if the server offers any resources to read.

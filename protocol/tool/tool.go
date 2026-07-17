@@ -16,10 +16,12 @@ const (
 	MethodListChanged = "notifications/tools/list_changed"
 )
 
-// Schema is a JSON Schema object describing a tool's input or output. Only the
-// object form is used by the protocol.
+// Schema is a convenience shape for building a simple object JSON Schema. Tool
+// input/output schemas on the wire are arbitrary JSON Schema (2020-12), so the
+// Tool fields keep them as raw JSON; use this type only when constructing a
+// plain object schema.
 type Schema struct {
-	Type       string         `json:"type"` // always "object"
+	Type       string         `json:"type"` // typically "object"
 	Properties map[string]any `json:"properties,omitempty"`
 	Required   []string       `json:"required,omitempty"`
 }
@@ -47,11 +49,12 @@ type Tool struct {
 	base.BaseMetadata
 	// Description is a human-readable description of the tool.
 	Description string `json:"description,omitempty"`
-	// InputSchema defines the expected parameters for the tool.
-	InputSchema Schema `json:"inputSchema"`
-	// OutputSchema optionally defines the structure of the tool's structured
-	// output.
-	OutputSchema *Schema `json:"outputSchema,omitempty"`
+	// InputSchema is the tool's input JSON Schema (arbitrary JSON Schema 2020-12,
+	// e.g. with oneOf/anyOf/items), kept as raw JSON.
+	InputSchema json.RawMessage `json:"inputSchema"`
+	// OutputSchema optionally defines the tool's structured output as arbitrary
+	// JSON Schema (e.g. an array schema), kept as raw JSON.
+	OutputSchema json.RawMessage `json:"outputSchema,omitempty"`
 	// Annotations are optional additional tool information (hints).
 	Annotations *Annotations `json:"annotations,omitempty"`
 	// Meta is the open `_meta` object.

@@ -45,6 +45,17 @@ the **draft** revision adds types and a transport layer that are **not** in
 | `authorization`                 | OAuth 2.1 authorization layer: Protected Resource Metadata (RFC 9728), Authorization Server Metadata (RFC 8414/OIDC), Client ID Metadata Document, Dynamic Client Registration (RFC 7591), plus the MCP discovery-URL ordering and a `WWW-Authenticate` challenge parser |
 | `discover`                      | `server/discover` handshake (replaces `initialize`): `DiscoverRequest`, `DiscoverResult`, draft `ServerCapabilities`, `CacheableResult` (ttlMs / cacheScope), `resultType` discriminator |
 | `mcperror`                      | Draft error catalog: `Error`, `ErrorResponse`, standard + MCP-reserved codes (`-32020..-32022`), and the structured data payloads (`UnsupportedProtocolVersionData`, `MissingRequiredClientCapabilityData`) |
+| `samplingtools`                 | Draft sampling tool-use: `ToolUseContent`, `ToolResultContent`, `ToolChoice`, message content as a single block **or array**, and a request params extended with `tools` / `toolChoice` |
+
+Draft frames verified end-to-end (`protocol/*_test.go`) against real
+2026-07-28 payloads and the official `schema/draft/examples` fixtures:
+`server/discover`, `tools/call` (incl. array/object `structuredContent`),
+`completion/complete`, `sampling/createMessage` (incl. multi-block tool-use),
+`notifications/cancelled`, every `Client`/`ServerCapabilities` fragment, and
+the `Tool` schema examples. Two fidelity fixes fell out of this: tool
+`inputSchema`/`outputSchema` and tool-result `structuredContent` are now kept
+as raw JSON (arbitrary JSON Schema / any JSON), and capability objects preserve
+present-empty `{}` distinctly from absent.
 
 These are additive and marked as draft-era in their package docs; they do not
 alter the 2025-06-18 base models.
