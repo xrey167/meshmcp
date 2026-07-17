@@ -46,6 +46,7 @@ the **draft** revision adds types and a transport layer that are **not** in
 | `discover`                      | `server/discover` handshake (replaces `initialize`): `DiscoverRequest`, `DiscoverResult`, draft `ServerCapabilities`, `resultType` discriminator (re-exports `caching.CacheableResult`) |
 | `caching`                       | Draft result caching hints: `CacheableResult` (`ttlMs` / `cacheScope`) shared across all cacheable verbs (tools/list, resources/list, prompts/list, resources/read, server/discover), plus a client-side `ResponseCache` that honours the hints with `use`/`refresh`/`bypass` strategies, public/private scope partitioning, and notification-driven on-demand revalidation (`InvalidateForNotification`) |
 | `mcperror`                      | Draft error catalog: `Error`, `ErrorResponse`, standard + MCP-reserved codes (`-32020..-32022`), and the structured data payloads (`UnsupportedProtocolVersionData`, `MissingRequiredClientCapabilityData`) |
+| `elicitationdraft`              | Draft `elicitation/create` redesign: form/url request modes and the expanded restricted schemas (string/number/boolean + single/multi-select enum variants, titled/untitled/legacy) with a discriminating `DecodePrimitiveSchema` |
 | `samplingtools`                 | Draft sampling tool-use: `ToolUseContent`, `ToolResultContent`, `ToolChoice`, message content as a single block **or array**, and a request params extended with `tools` / `toolChoice` |
 
 Draft frames verified end-to-end (`protocol/*_test.go`) against real
@@ -62,14 +63,14 @@ These are additive and marked as draft-era in their package docs; they do not
 alter the 2025-06-18 base models.
 
 **Not yet ported from the draft `schema.ts`.** The draft is a large redesign
-(164 exports vs 98). Beyond the packages above, it also: removes the
-`initialize` handshake, adds a `resultType` to every result, redesigns
-elicitation into form/url modes with single/multi-select enum schemas, adds
-tool-use to sampling (`ToolUseContent`, `ToolResultContent`, `ToolChoice`),
-and introduces typed `_meta` objects. Those are refinements of existing
-primitives and would live in era-separated draft variants; they are left out
-here to avoid conflating them with the stable 2025-06-18 models. Add them the
-same way if you need the full draft port.
+(164 exports vs 98). The self-contained draft additions are modelled in
+era-separated packages — `discover`, `mcperror`, `mrtr`, `subscriptions`,
+`samplingtools` (tool-use), `elicitationdraft` (form/url modes + enum
+schemas), and typed request `_meta` in `transport`. What remains un-ported is
+the pervasive `resultType` field the draft adds to *every* result; the
+2025-06-18 result models ignore it on decode without failing (a draft-only
+field), rather than each carrying it. Add a draft result variant the same way
+if you need it typed.
 
 ### Experimental extensions
 
