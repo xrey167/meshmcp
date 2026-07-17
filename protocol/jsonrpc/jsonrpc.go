@@ -42,11 +42,14 @@ type Notification struct {
 	JSONRPC string `json:"jsonrpc"` // always Version
 }
 
-// Response is a successful (non-error) response to a request.
+// Response is a successful (non-error) response to a request. Result is kept as
+// raw JSON because the concrete result type depends on the originating request;
+// decode it into the matching protocol type (e.g. tool.CallResult) using the
+// request context.
 type Response struct {
-	JSONRPC string         `json:"jsonrpc"` // always Version
-	ID      base.RequestId `json:"id"`
-	Result  base.Result    `json:"result"`
+	JSONRPC string          `json:"jsonrpc"` // always Version
+	ID      base.RequestId  `json:"id"`
+	Result  json.RawMessage `json:"result"`
 }
 
 // Error is a response to a request that indicates an error occurred.

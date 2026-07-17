@@ -10,6 +10,12 @@
 // To decode an incoming frame into the right concrete type, use the method
 // dispatchers in decode.go: DecodeClientRequest, DecodeServerRequest,
 // DecodeClientNotification and DecodeServerNotification.
+//
+// Scope: the dispatchers cover the 2025-06-18 method set. Draft-only methods
+// (server/discover, subscriptions/listen, tasks/*, elicitation url mode) are
+// modelled in their own packages — route them via those packages' Method
+// constants (e.g. discover.Method, subscriptions.MethodListen, tasks.MethodGet)
+// rather than through these dispatchers.
 package messages
 
 // ClientRequest is any request a client may send to a server. Members:
