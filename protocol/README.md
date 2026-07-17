@@ -75,6 +75,8 @@ same way if you need the full draft port.
 | Package      | Covers                                                                    |
 | ------------ | ------------------------------------------------------------------------- |
 | `servercard` | MCP Server Card: static pre-connection discovery document (`ServerCard`, `Repository`, `Remote`, `Input`, `KeyValueInput`, `Icon`) — from `experimental-ext-server-card/schema.ts` (Server Card WG, SEP-2127) |
+| `tasks`      | Tasks extension `io.modelcontextprotocol/tasks` (SEP-2663): async request processing — `Task`/`DetailedTask`, `CreateTaskResult`, `tasks/get`·`update`·`cancel`, `notifications/tasks` — from `ext-tasks/schema/draft/schema.ts` |
+| `apps`       | MCP Apps extension (`ext-apps`): host↔embedded-UI bridge — `ui/*` requests/results/notifications, host/app capabilities, host context, resource CSP/permissions — from `ext-apps/src/spec.types.ts` |
 
 ### Working groups without a stable schema (not modelled)
 
