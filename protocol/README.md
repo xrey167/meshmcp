@@ -28,6 +28,24 @@ Source of truth:
 | `elicitation`  | `elicitation/create`, restricted primitive schemas             |
 | `messages`     | Top-level client/server message unions (documented aliases)    |
 
+### Draft additions (post-2025-06-18)
+
+The base models above come from `schema.ts` (2025-06-18). The `basic/patterns`
+and `basic/transports` spec sections are defined by prose, not `schema.ts`, and
+the **draft** revision adds types and a transport layer that are **not** in
+2025-06-18. These live in clearly-marked draft packages:
+
+| Package                         | Covers                                                          |
+| ------------------------------- | -------------------------------------------------------------- |
+| `mrtr`                          | Multi Round-Trip Requests: `InputRequiredResult`, `InputRequests`/`InputResponses`, `requestState` (replaces server-initiated requests) |
+| `subscriptions`                 | `subscriptions/listen`, notification `Filter`, acknowledgment, `subscriptionId` `_meta` key (replaces `resources/subscribe`) |
+| `transport`                     | Transport-agnostic constants: content types, well-known `_meta` request-metadata keys |
+| `transport/stdio`               | Newline-delimited framing (`Delimiter`, `Frame`) + lifecycle rules |
+| `transport/streamablehttp`      | HTTP headers (`MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`, `Mcp-Param-*`), error codes (`-32020 HeaderMismatch`), and the Base64 sentinel `EncodeHeaderValue`/`DecodeHeaderValue` helpers |
+
+These are additive and marked as draft-era in their package docs; they do not
+alter the 2025-06-18 base models.
+
 ## Conventions
 
 - **`extends` → embedding.** A TS interface that `extends Result` /
