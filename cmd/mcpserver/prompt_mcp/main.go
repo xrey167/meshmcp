@@ -17,9 +17,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"meshmcp/cmd/mcpserver/prompts"
-	"meshmcp/cmd/mcpserver/resources"
-	"meshmcp/cmd/mcpserver/tools"
+	"meshmcp/cmd/mcpserver/prompt_mcp/prompts"
+	"meshmcp/cmd/mcpserver/prompt_mcp/resources"
+	"meshmcp/cmd/mcpserver/prompt_mcp/tools"
 	"meshmcp/mcp"
 )
 

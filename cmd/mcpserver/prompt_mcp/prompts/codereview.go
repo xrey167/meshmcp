@@ -9,7 +9,7 @@ import (
 
 func registerCodeReview(s *mcp.Server) {
 	s.AddPrompt(mcp.Prompt{
-		Name:        "code_review",
+		Name:        "code_review-mode",
 		Description: "Review a code snippet for bugs and clarity.",
 		Arguments: []mcp.PromptArg{
 			{Name: "language", Description: "programming language", Required: true},
@@ -28,3 +28,4 @@ func registerCodeReview(s *mcp.Server) {
 		},
 	})
 }
+
