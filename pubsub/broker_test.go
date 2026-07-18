@@ -1,6 +1,7 @@
 package pubsub
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"meshmcp/policy"
 )
 
 // fakeClock is a settable clock for deterministic time-dependent tests.
@@ -232,6 +235,42 @@ func TestRateLimit(t *testing.T) {
 	}
 }
 
+// TestRateLimitBeforeAuth verifies the limiter is charged ahead of
+// authorization and audit, so a connected-but-unauthorized peer flooding
+// rejected publishes cannot amplify audit writes: once the bucket empties,
+// further attempts return ErrRateLimited and produce no new ledger records.
+func TestRateLimitBeforeAuth(t *testing.T) {
+	clk := newClock()
+	var buf bytes.Buffer
+	audit := policy.NewAuditLog(&buf, func() string { return "t" })
+	auth := &RuleAuthorizer{} // deny by default: this peer is unauthorized
+	b := New(Options{Authorizer: auth, Audit: audit, Now: clk.now, Limits: Limits{PublishRate: 5, PublishBurst: 3}})
+
+	var denied, limited int
+	for i := 0; i < 100; i++ {
+		_, err := b.Publish(id("flood"), "t", nil, nil)
+		switch {
+		case errors.Is(err, ErrRateLimited):
+			limited++
+		case errors.Is(err, ErrDenied):
+			denied++
+		default:
+			t.Fatalf("unexpected err: %v", err)
+		}
+	}
+	// Only the burst (3) reaches authorization and is audited as a denial; the
+	// rest are rate-limited and NOT audited.
+	if denied != 3 {
+		t.Fatalf("audited denials = %d, want 3 (burst)", denied)
+	}
+	if limited != 97 {
+		t.Fatalf("rate-limited = %d, want 97", limited)
+	}
+	if n := strings.Count(buf.String(), "\n"); n != 3 {
+		t.Fatalf("audit records = %d, want 3 (flood must not amplify audit)", n)
+	}
+}
+
 func TestResourceCaps(t *testing.T) {
 	b := New(Options{Authorizer: AllowAll{}, Limits: Limits{MaxTopicsPerSub: 2, MaxSubs: 2, MaxTopicLen: 8}})
 
@@ -447,7 +486,9 @@ func TestUnsubscribeIdempotent(t *testing.T) {
 // races (run with -race). It asserts the sequence is exactly the number of
 // successful publishes and the retained chain verifies.
 func TestConcurrentFuzz(t *testing.T) {
-	b := New(Options{Authorizer: AllowAll{}, Limits: Limits{SubQueue: 8, Retain: 4096}})
+	// PublishRate: -1 opts out of rate limiting — this test exercises raw
+	// throughput and ordering, not the limiter.
+	b := New(Options{Authorizer: AllowAll{}, Limits: Limits{SubQueue: 8, Retain: 4096, PublishRate: -1}})
 	const (
 		publishers = 8
 		perPub     = 500

@@ -33,8 +33,8 @@ func DefaultLimits() Limits {
 		MaxTopicLen:     256,
 		MaxPayloadBytes: 1 << 20, // 1 MiB, aligned with the wire frame cap
 		Retain:          1024,
-		PublishRate:     0,
-		PublishBurst:    0,
+		PublishRate:     200, // per-publisher publishes/second; bounded by default
+		PublishBurst:    400,
 	}
 }
 
@@ -60,8 +60,17 @@ func (l Limits) withDefaults() Limits {
 	} else if l.Retain == 0 {
 		l.Retain = d.Retain
 	}
+	// PublishRate: 0 means "unset" and takes the bounded default; a negative
+	// value is the explicit opt-out (unlimited), normalized to 0 so the token
+	// bucket disables. This keeps the bus bounded by default while still
+	// letting an operator uncap it deliberately.
+	if l.PublishRate == 0 {
+		l.PublishRate = d.PublishRate
+	} else if l.PublishRate < 0 {
+		l.PublishRate = 0
+	}
 	if l.PublishBurst <= 0 && l.PublishRate > 0 {
-		l.PublishBurst = int(l.PublishRate) + 1
+		l.PublishBurst = 2 * int(l.PublishRate)
 	}
 	return l
 }
@@ -138,6 +147,16 @@ func (denyAll) Subscribe(Identity, string) SubDecision {
 // authorizer's emit labels (a publisher may add containment, never remove it).
 // It returns the sealed Event (with Seq and Hash) on success.
 func (b *Broker) Publish(id Identity, topic string, payload json.RawMessage, extraLabels []string) (*Event, error) {
+	// Rate-limit first, before any authorization, validation, or audit work.
+	// A connected-but-unauthorized peer must not be able to amplify CPU, disk
+	// (audit writes), or lock contention by flooding rejected publishes: the
+	// token bucket caps how many attempts per peer ever reach that work.
+	// Rate-limited attempts are dropped without an audit record — they are
+	// bounded to the token rate, and the wire layer still returns an error to
+	// the publisher, so the drop is visible without being loggable-to-flood.
+	if !b.lim.allow(id.Key) {
+		return nil, fmt.Errorf("%w: publisher %s", ErrRateLimited, id.Key)
+	}
 	if err := validateTopic(topic, b.lm.MaxTopicLen); err != nil {
 		return nil, err
 	}
@@ -149,10 +168,6 @@ func (b *Broker) Publish(id Identity, topic string, payload json.RawMessage, ext
 	if !dec.Allow {
 		b.record(id, "pubsub/publish", topic, "deny", dec.Reason, nil)
 		return nil, fmt.Errorf("%w: publish %q: %s", ErrDenied, topic, dec.Reason)
-	}
-	if !b.lim.allow(id.Key) {
-		b.record(id, "pubsub/publish", topic, "deny", "rate limit exceeded", nil)
-		return nil, fmt.Errorf("%w: publisher %s on %q", ErrRateLimited, id.Key, topic)
 	}
 	labels := unionLabels(dec.Labels, extraLabels)
 
@@ -304,7 +319,15 @@ func (b *Broker) deliverLocked(s *Subscription, ev *Event) {
 		b.closeSubLocked(s)
 		return
 	}
-	// DropOldest: evict one undelivered event, then enqueue the new one.
+	// DropOldest: a concurrent reader may have drained a slot since the first
+	// send failed — retry the non-blocking send before evicting, so we never
+	// discard a live event unnecessarily.
+	select {
+	case s.ch <- ev:
+		return
+	default:
+	}
+	// Still full: evict the oldest undelivered event, then enqueue the new one.
 	select {
 	case <-s.ch:
 	default:

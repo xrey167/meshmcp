@@ -20,6 +20,7 @@ meshmcp's identity-native event fabric: a publish/subscribe bus where every even
 
 ### Working In This Directory
 - **Fail closed.** A nil `Authorizer` denies everything; an unknown backpressure string is an error; a publish/subscribe to an ungranted topic is refused. Preserve these — do not add an ambient allow.
+- **Rate-limit before work.** `Publish` charges the per-publisher token bucket *before* authorization, validation, or audit, so rejected floods cannot amplify CPU/disk/lock load; rate-limited attempts are dropped without an audit record. Keep this ordering. Rate is bounded by default (`PublishRate: 0` → default; negative → unlimited).
 - **The hash chain is a control.** `Publish` seals each event under `b.mu` (monotonic `Seq`, `PrevHash`, `Hash`); never reorder or mutate a sealed event. `VerifyChain` must stay able to detect edits, reorders, and drops.
 - **Fan-out never blocks.** `deliverLocked` is non-blocking: on a full buffer it applies the subscription's `Backpressure` (DropOldest increments `Dropped`; Disconnect closes it). One slow reader must never stall the others or the publisher. Delivery is under `b.mu`, so ordering is deterministic.
 - **Taint is contained below the model.** An event is delivered to a subscription only if the subscription is cleared for every label the event carries (`Subscription.accepts`). A multi-topic subscription's clearance is the **intersection** across its topics (least privilege).
