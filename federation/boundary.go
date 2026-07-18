@@ -14,10 +14,14 @@ import (
 	"meshmcp/policy"
 )
 
-// Grant lists the tool-name globs a remote org may call across the boundary.
+// Grant lists what a remote org may reach across the boundary: tool-name globs
+// and, for cross-org knowledge exchange (F12), the corpora / KG subgraphs it
+// may query. Corpora are enforced with CheckCorpus in addition to the tool
+// grant, so an org can be given a vetted slice of knowledge and nothing else.
 type Grant struct {
-	Org   string   `yaml:"org"`
-	Tools []string `yaml:"tools"`
+	Org     string   `yaml:"org"`
+	Tools   []string `yaml:"tools"`
+	Corpora []string `yaml:"corpora"`
 }
 
 // Mapping maps a remote mesh identity to an org id. Match is by "pubkey:<key>"
@@ -33,6 +37,7 @@ type Mapping struct {
 // Boundary authorizes and audits cross-org tool calls.
 type Boundary struct {
 	grants    map[string][]string // org -> tool globs
+	corpora   map[string][]string // org -> corpus/subgraph globs
 	mappings  []Mapping
 	principal map[string]string // org -> local principal
 	audit     *policy.AuditLog
@@ -43,12 +48,14 @@ type Boundary struct {
 func NewBoundary(grants []Grant, mappings []Mapping, audit *policy.AuditLog) *Boundary {
 	b := &Boundary{
 		grants:    map[string][]string{},
+		corpora:   map[string][]string{},
 		mappings:  mappings,
 		principal: map[string]string{},
 		audit:     audit,
 	}
 	for _, g := range grants {
 		b.grants[g.Org] = append(b.grants[g.Org], g.Tools...)
+		b.corpora[g.Org] = append(b.corpora[g.Org], g.Corpora...)
 	}
 	for _, m := range mappings {
 		if m.Principal != "" {
@@ -133,6 +140,50 @@ func (b *Boundary) Allowed(org, tool string) bool {
 		}
 	}
 	return false
+}
+
+// CheckCorpus authorizes an org querying a named corpus / KG subgraph across
+// the boundary and records the crossing. Empty grant means no corpus is shared
+// (deny), so knowledge is opt-in per org. This composes with Check (the org
+// must be granted both the tool, e.g. "search", and the corpus).
+func (b *Boundary) CheckCorpus(org, corpus string) (allow bool, reason string) {
+	if org == "" {
+		reason = "unrecognized org (no identity mapping)"
+		b.recordCorpus("", corpus, false, reason)
+		return false, reason
+	}
+	globs := b.corpora[org]
+	for _, g := range globs {
+		if g == "*" || g == corpus {
+			b.recordCorpus(org, corpus, true, "")
+			return true, ""
+		}
+		if ok, _ := path.Match(g, corpus); ok {
+			b.recordCorpus(org, corpus, true, "")
+			return true, ""
+		}
+	}
+	reason = "corpus not granted to org"
+	b.recordCorpus(org, corpus, false, reason)
+	return false, reason
+}
+
+func (b *Boundary) recordCorpus(org, corpus string, allow bool, reason string) {
+	if b.audit == nil {
+		return
+	}
+	decision := "deny"
+	if allow {
+		decision = "allow"
+	}
+	b.audit.Append(policy.AuditRecord{
+		Backend:  "federation-boundary",
+		Peer:     org,
+		Method:   "federation/corpus/query",
+		Tool:     corpus,
+		Decision: decision,
+		Reason:   reason,
+	})
 }
 
 func (b *Boundary) record(org, tool string, allow bool, reason string) {

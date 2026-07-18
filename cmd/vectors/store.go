@@ -8,6 +8,8 @@ import (
 	"os"
 	"sort"
 	"sync"
+
+	"meshmcp/embed"
 )
 
 // doc is one stored document: its text, embedding, corpus, and the mesh
@@ -27,12 +29,12 @@ type doc struct {
 type index struct {
 	mu    sync.Mutex
 	path  string
-	emb   Embedder
+	emb   embed.Embedder
 	docs  map[string]*doc // by id
 	order []string
 }
 
-func openIndex(path string, emb Embedder) (*index, error) {
+func openIndex(path string, emb embed.Embedder) (*index, error) {
 	ix := &index{path: path, emb: emb, docs: map[string]*doc{}}
 	f, err := os.Open(path)
 	if err != nil {
@@ -116,7 +118,7 @@ func (ix *index) Search(query string, k int, corpus string) []hit {
 		if corpus != "" && d.Corpus != corpus {
 			continue
 		}
-		hits = append(hits, hit{Doc: d, Score: cosine(qv, d.Vector)})
+		hits = append(hits, hit{Doc: d, Score: embed.Cosine(qv, d.Vector)})
 	}
 	sort.SliceStable(hits, func(i, j int) bool { return hits[i].Score > hits[j].Score })
 	if len(hits) > k {

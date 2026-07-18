@@ -1,13 +1,14 @@
 package main
 
 import (
+	"meshmcp/embed"
 	"path/filepath"
 	"testing"
 )
 
 func newIndex(t *testing.T) *index {
 	t.Helper()
-	ix, err := openIndex(filepath.Join(t.TempDir(), "v.jsonl"), newHashingEmbedder(256))
+	ix, err := openIndex(filepath.Join(t.TempDir(), "v.jsonl"), embed.NewHashing(256))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -37,7 +38,7 @@ func TestSearchRanksByRelevance(t *testing.T) {
 func TestUpsertProvenanceAndPersistence(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "v.jsonl")
-	ix, _ := openIndex(path, newHashingEmbedder(256))
+	ix, _ := openIndex(path, embed.NewHashing(256))
 	d, err := ix.Upsert("doc-1", "hello mesh knowledge", "legal", "PUBKEYX")
 	if err != nil {
 		t.Fatal(err)
@@ -47,7 +48,7 @@ func TestUpsertProvenanceAndPersistence(t *testing.T) {
 	}
 
 	// Reload from disk and confirm the doc (and its corpus) survived.
-	ix2, err := openIndex(path, newHashingEmbedder(256))
+	ix2, err := openIndex(path, embed.NewHashing(256))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,11 +79,11 @@ func TestUpsertReplaces(t *testing.T) {
 }
 
 func TestEmbedderDeterministic(t *testing.T) {
-	e := newHashingEmbedder(128)
+	e := embed.NewHashing(128)
 	a := e.Embed("repeatable input")
 	b := e.Embed("repeatable input")
-	if cosine(a, b) < 0.999 {
-		t.Errorf("embedder not deterministic: cosine = %v", cosine(a, b))
+	if embed.Cosine(a, b) < 0.999 {
+		t.Errorf("embedder not deterministic: cosine = %v", embed.Cosine(a, b))
 	}
 	if e.Dim() != 128 {
 		t.Errorf("dim = %d, want 128", e.Dim())

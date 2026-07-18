@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 
+	"meshmcp/embed"
 	"meshmcp/mcp"
 )
 
@@ -26,7 +27,7 @@ func main() {
 			fmt.Sscanf(os.Args[i+1], "%d", &dim)
 		}
 	}
-	ix, err := openIndex(indexPath, newHashingEmbedder(dim))
+	ix, err := openIndex(indexPath, embed.NewHashing(dim))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "vectors:", err)
 		os.Exit(1)
