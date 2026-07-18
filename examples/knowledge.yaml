@@ -1,0 +1,52 @@
+# Knowledge backends over the mesh: a provenance-native knowledge graph (F2)
+# and a zero-exposure RAG/vector store (F3), each an ordinary stdio MCP server
+# governed by the existing firewall — no gateway change.
+#
+# Build the servers, then serve them:
+#   go build -o cmd/kg/kg.exe ./cmd/kg
+#   go build -o cmd/vectors/vectors.exe ./cmd/vectors
+#   meshmcp serve --config examples/knowledge.yaml
+#
+# Reach them from any mesh peer:
+#   meshmcp call <gw-ip>:9120 kg_assert --arg subject=alice --arg predicate=knows --arg object=bob
+#   meshmcp call <gw-ip>:9121 upsert --arg id=d1 --arg text="mesh knowledge"
+#   meshmcp call <gw-ip>:9121 search --arg query="knowledge"
+
+mesh:
+  device_name: meshmcp-knowledge
+  setup_key_env: NB_SETUP_KEY
+  config_path: ./knowledge-nb.json
+  log_level: warn
+
+audit_log: ./knowledge-audit.jsonl   # one shared, hash-chained ledger
+
+backends:
+  # Provenance-native knowledge graph. Every triple is stamped with the
+  # caller's WireGuard identity (passed as MESHMCP_PEER_KEY) and hash-chained.
+  - name: kg
+    port: 9120
+    stdio: ["./cmd/kg/kg.exe", "--store", "./kg.jsonl"]
+    policy:
+      default_allow: false
+      rules:
+        - peers: ["*"]                       # everyone may read/query/verify
+          tools: ["kg_query", "kg_neighbors", "kg_verify"]
+          allow: true
+        - peers: ["pubkey:WRITER_KEY=="]     # only trusted writers may assert/delete
+          tools: ["kg_assert", "kg_delete"]
+          allow: true
+
+  # Zero-exposure RAG. The corpus never leaves this peer; retrieval is a
+  # governed, audited capability. `search` is a taint source (see rag-firewall).
+  - name: vectors
+    port: 9121
+    stdio: ["./cmd/vectors/vectors.exe", "--index", "./vectors.jsonl"]
+    policy:
+      default_allow: false
+      rules:
+        - peers: ["*"]
+          tools: ["search", "embed"]
+          allow: true
+        - peers: ["pubkey:WRITER_KEY=="]
+          tools: ["upsert"]
+          allow: true
