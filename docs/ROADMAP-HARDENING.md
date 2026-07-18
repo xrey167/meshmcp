@@ -47,10 +47,11 @@ Shipped in this branch (tested, `CGO_ENABLED=1 go build/vet/test ./... -race` gr
   **F15** (observability — `meshmcp status` + webhook sink), **F16** (HTTP-backend policy parity),
   **F18** (pattern DLP hook), **F20** (co-sign hardening — fail-closed + operator allowlist; signed
   records pending), **F21** (capability revocation store + `capability revoke/list`), **F22**
-  (fail-closed audit mode), **F23** (identity-bound sessions).
+  (fail-closed audit mode), **F23** (identity-bound sessions), **F27** (governed scheduler —
+  `cmd/scheduler`), **F28** (governed event bus — `cmd/bus`).
 - Minors: **S11–S18, S20, S22–S32, S34–S43, S48, S52** (plus `config validate` and `audit export`).
 
-Forward backlog: flagships **F14, F17, F19, F24–F32** and minors **S19, S21, S33, S44–S47,
+Forward backlog: flagships **F14, F17, F19, F24–F26, F29–F32** and minors **S19, S21, S33, S44–S47,
 S49–S51, S53–S60**.
 
 ---
