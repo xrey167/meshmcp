@@ -365,6 +365,7 @@ func (f *Filter) record(method, tool, rpcID string, dec Decision) AuditRecord {
 		Decision: dec.Outcome.String(),
 		Reason:   dec.Reason,
 		Rule:     dec.RuleID,
+		Cost:     dec.Cost,
 	}
 }
 

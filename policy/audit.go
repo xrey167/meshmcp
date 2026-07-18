@@ -29,7 +29,8 @@ type AuditRecord struct {
 	RPCID    string `json:"rpc_id,omitempty"`
 	Decision string `json:"decision"` // "allow" | "deny" | "cosign"
 	Reason   string `json:"reason,omitempty"`
-	Rule     int    `json:"rule"` // matching rule index, -1 for default
+	Rule     int    `json:"rule"`           // matching rule index, -1 for default
+	Cost     int    `json:"cost,omitempty"` // cost/quota units this call consumed (F29)
 
 	// Provenance carries the content refs (e.g. retrieved document / triple
 	// hashes) that produced an answer — a signed provenance receipt for

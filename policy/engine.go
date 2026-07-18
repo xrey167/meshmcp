@@ -212,14 +212,27 @@ func (e *Engine) DecideToolCall(peerFQDN, peerKey, tool string, labels map[strin
 		if r.RequireCosign {
 			if e.cosign != nil && e.cosign.Approved(CosignKey(peerFQDN, tool)) {
 				return Decision{Allow: true, RuleID: i, Outcome: OutcomeAllow,
-					Reason: "co-signed", AddLabels: r.emitSet()}
+					Reason: "co-signed", AddLabels: r.emitSet(), Cost: ruleCost(r)}
 			}
 			return Decision{RuleID: i, Outcome: OutcomeCosign,
 				Reason: fmt.Sprintf("awaiting human co-sign for %q", tool)}
 		}
-		return Decision{Allow: true, RuleID: i, Outcome: OutcomeAllow, AddLabels: r.emitSet()}
+		return Decision{Allow: true, RuleID: i, Outcome: OutcomeAllow, AddLabels: r.emitSet(), Cost: ruleCost(r)}
 	}
 	return Decision{Allow: e.pol.DefaultAllow, RuleID: -1, Outcome: outcomeOf(e.pol.DefaultAllow)}
+}
+
+// ruleCost is the cost/quota units an allowed call under rule r consumes: the
+// rule's rate.cost (default 1 when a rate limit is set), or 0 when the rule has
+// no rate/cost (cost is untracked for that rule).
+func ruleCost(r Rule) int {
+	if r.Rate == nil {
+		return 0
+	}
+	if r.Rate.Cost > 0 {
+		return r.Rate.Cost
+	}
+	return 1
 }
 
 // firstPresent returns the first label in want that is set in have, or "".

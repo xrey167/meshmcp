@@ -121,7 +121,7 @@ func hookPreTool(cfg *hookConfig, eng *policy.Engine, dlp *policy.PatternDLPHook
 			_ = audit.Append(policy.AuditRecord{
 				Backend: "client:" + client, Peer: cfg.identity(),
 				Method: "tools/call", Tool: call.Tool,
-				Decision: dec.Outcome.String(), Reason: dec.Reason, Rule: dec.RuleID,
+				Decision: dec.Outcome.String(), Reason: dec.Reason, Rule: dec.RuleID, Cost: dec.Cost,
 			})
 		}
 	}

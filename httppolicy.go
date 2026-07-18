@@ -111,7 +111,7 @@ func (e *httpEnforcer) record(method, tool, rpcID string, dec policy.Decision, p
 	return policy.AuditRecord{
 		Backend: e.backend, Peer: peer, PeerKey: peerKey,
 		Method: method, Tool: tool, RPCID: rpcID,
-		Decision: dec.Outcome.String(), Reason: dec.Reason, Rule: dec.RuleID,
+		Decision: dec.Outcome.String(), Reason: dec.Reason, Rule: dec.RuleID, Cost: dec.Cost,
 	}
 }
 

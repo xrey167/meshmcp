@@ -55,6 +55,7 @@ Usage:
   meshmcp replay [flags] <trace> <peer:port>    replay a traced session against a backend and diff
   meshmcp config validate --config <file>       validate a config (policy globs, windows, enums, DLP) without joining the mesh
   meshmcp status --audit <file> [--json]        roll up an audit ledger: per-peer/tool/backend calls + chain verdict
+  meshmcp budget --audit <file> [--by-tool]     sum cost/quota units consumed per identity (FinOps for the fleet)
   meshmcp doctor --config <file>                pre-flight checks: config valid, commands present, dirs writable, secret perms
   meshmcp hook --client <c> --config <file>     PreToolUse hook adapter: govern EVERY tool call in Claude Code/Cursor/Codex by policy+audit
   meshmcp hook install --client <c>             print the hook config to add to a client's settings
@@ -142,6 +143,8 @@ func main() {
 		err = cmdConfig(os.Args[2:])
 	case "status":
 		err = cmdStatus(os.Args[2:])
+	case "budget":
+		err = cmdBudget(os.Args[2:])
 	case "doctor":
 		err = cmdDoctor(os.Args[2:])
 	case "hook":

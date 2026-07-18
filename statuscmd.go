@@ -56,6 +56,7 @@ func cmdStatus(args []string) error {
 	fmt.Printf("audit: %s\n", *auditPath)
 	fmt.Printf("chain: %s\n", chain)
 	fmt.Printf("calls: %d total — %d allow · %d deny · %d cosign\n", sum.Records, sum.Allowed, sum.Denied, sum.Cosign)
+	fmt.Printf("      (cost/budget: run `meshmcp budget --audit %s`)\n", *auditPath)
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	if len(sum.BackendStats) > 0 {
