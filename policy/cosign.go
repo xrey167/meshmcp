@@ -38,7 +38,11 @@ func cosignFile(dir, key string) string {
 	return filepath.Join(dir, "cosign-"+hex.EncodeToString(sum[:8])+".json")
 }
 
-// Approved reports whether a non-expired approval exists for key.
+// Approved reports whether a valid, non-expired approval exists for key. It
+// fails CLOSED: a missing, malformed, mismatched, or (when a TTL is set)
+// bad-timestamp record is not an approval. An approval file must parse to a
+// well-formed record for the exact key — a corrupt or hand-crafted file no
+// longer authorizes a privileged call.
 func (fc *FileCosign) Approved(key string) bool {
 	if fc == nil || fc.Dir == "" {
 		return false
@@ -47,16 +51,19 @@ func (fc *FileCosign) Approved(key string) bool {
 	if err != nil {
 		return false
 	}
+	var a Approval
+	if json.Unmarshal(b, &a) != nil {
+		return false // malformed approval — fail closed
+	}
+	if a.Key != key {
+		return false // wrong/corrupt record — fail closed
+	}
 	if fc.TTL <= 0 {
 		return true
 	}
-	var a Approval
-	if json.Unmarshal(b, &a) != nil {
-		return true // present but unparseable: fail open on the record, not on access
-	}
 	t, err := time.Parse(time.RFC3339, a.GrantedAt)
 	if err != nil {
-		return true
+		return false // unparseable timestamp — fail closed
 	}
 	return time.Since(t) <= fc.TTL
 }

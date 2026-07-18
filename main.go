@@ -44,7 +44,7 @@ Usage:
   meshmcp capability revoke --store <d> <id>    revoke a capability id (fails closed at every gateway sharing the store)
   meshmcp capability list --store <d>           list revoked capability ids
   meshmcp approve [flags] <peer-fqdn> <tool>    co-sign a require_cosign tool call for a peer
-  meshmcp approvals --store <dir>               serve the co-sign approver (phone-friendly) over the mesh
+  meshmcp approvals --store <dir> [--approver <id>]  serve the co-sign approver over the mesh (--approver restricts who may approve)
   meshmcp secrets check --config <file>         validate the credential broker config (never prints values)
   meshmcp dash [flags]                          serve the mesh control dashboard over audit/trace logs
   meshmcp room --audit <file>                   serve the live Control Room (server tiles, apps, decision feed)
