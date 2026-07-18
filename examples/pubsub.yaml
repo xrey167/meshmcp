@@ -25,6 +25,8 @@ allow:
   - "*.netbird.cloud"
 
 audit_log: ./pubsub-audit.jsonl        # one hash-chained record per allow/deny decision
+event_log: ./pubsub-events.jsonl       # durable event stream: survives restart, --since replay,
+                                       # verify with `meshmcp pubsub verify ./pubsub-events.jsonl`
 
 # Per-topic authorization. Deny by default (default_allow omitted/false): a
 # publish or subscribe is refused unless a rule grants it. First match wins.

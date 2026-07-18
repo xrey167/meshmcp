@@ -3,6 +3,9 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +13,87 @@ import (
 	"meshmcp/pubsub"
 	"meshmcp/session"
 )
+
+// TestStreamPubSinkCounts checks the streaming publisher tallies per-event acks
+// (including across a split write).
+func TestStreamPubSinkCounts(t *testing.T) {
+	s := &streamPubSink{}
+	s.Write([]byte(`{"ok":true,"seq":1}` + "\n" + `{"ok":true,"seq":2}` + "\n"))
+	s.Write([]byte(`{"error":"denied by pubsub policy"}`)) // no newline yet
+	s.Write([]byte("\n"))
+	ok, fail, last := s.counts()
+	if ok != 2 || fail != 1 || last != "denied by pubsub policy" {
+		t.Fatalf("ok=%d fail=%d last=%q", ok, fail, last)
+	}
+}
+
+// TestBrokerBackendStreamingPublish verifies many publishes ride one session
+// (the streaming producer path) and all reach a subscriber.
+func TestBrokerBackendStreamingPublish(t *testing.T) {
+	b := pubsub.New(pubsub.Options{Authorizer: pubsub.AllowAll{}})
+	defer b.Close()
+
+	sub := newBrokerBackend(b, session.Meta{PeerKey: "s", PeerFQDN: "s.netbird.cloud"})
+	defer sub.Close()
+	subLines := readLines(t, sub)
+	subHello, _ := json.Marshal(helloFrame{Role: "sub", Topics: []string{"feed"}})
+	sub.Write(append(subHello, '\n'))
+	nextLine(t, subLines) // subscribe ack
+
+	pub := newBrokerBackend(b, session.Meta{PeerKey: "p", PeerFQDN: "p.netbird.cloud"})
+	defer pub.Close()
+	pubLines := readLines(t, pub)
+	ph, _ := json.Marshal(helloFrame{Role: "pub"})
+	pub.Write(append(ph, '\n'))
+	for i := 0; i < 3; i++ {
+		pf, _ := json.Marshal(pubFrame{Topic: "feed", Payload: json.RawMessage(fmt.Sprintf(`%d`, i))})
+		pub.Write(append(pf, '\n'))
+	}
+	for i := 0; i < 3; i++ {
+		var ack ackFrame
+		json.Unmarshal([]byte(nextLine(t, pubLines)), &ack)
+		if !ack.OK || ack.Seq != uint64(i+1) {
+			t.Fatalf("publish %d ack: %+v", i, ack)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		var ev pubsub.Event
+		json.Unmarshal([]byte(nextLine(t, subLines)), &ev)
+		if ev.Topic != "feed" || ev.Seq != uint64(i+1) {
+			t.Fatalf("delivered event %d: %+v", i, ev)
+		}
+	}
+}
+
+// TestPubsubVerifyCommand checks the `meshmcp pubsub verify` path end-to-end:
+// it accepts a valid persisted log and rejects a tampered one.
+func TestPubsubVerifyCommand(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := pubsub.New(pubsub.Options{Authorizer: pubsub.AllowAll{}, Events: pubsub.NewEventLog(f)})
+	for i := 0; i < 3; i++ {
+		if _, err := b.Publish(pubsub.Identity{Key: "p"}, "t", nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b.Close()
+	f.Close()
+
+	if err := cmdPubsubVerify([]string{path}); err != nil {
+		t.Fatalf("verify of a valid log should pass: %v", err)
+	}
+
+	data, _ := os.ReadFile(path)
+	if err := os.WriteFile(path, append([]byte("GARBAGE\n"), data...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdPubsubVerify([]string{path}); err == nil {
+		t.Fatal("verify of a tampered log should fail")
+	}
+}
 
 // readLines drains a brokerBackend's broker->peer side into a channel of
 // trimmed JSON lines.

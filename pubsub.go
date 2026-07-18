@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -40,6 +42,7 @@ type PubsubConfig struct {
 	ListenPort int                   `yaml:"listen_port"`
 	Allow      []string              `yaml:"allow"`     // connection ACL: who may open a session at all
 	AuditLog   string                `yaml:"audit_log"` // hash-chained JSONL decision log
+	EventLog   string                `yaml:"event_log"` // durable append-only event stream (resumable + verifiable)
 	Policy     pubsub.RuleAuthorizer `yaml:"policy"`    // per-topic authorization
 	Limits     pubsub.Limits         `yaml:"limits"`    // resource caps
 }
@@ -59,15 +62,45 @@ func loadPubsubConfig(path string) (*PubsubConfig, error) {
 	return &cfg, nil
 }
 
-// cmdPubsub runs the broker daemon.
+// cmdPubsubVerify checks a persisted event log's hash chain, the same
+// non-repudiation guarantee `meshmcp audit verify` gives the decision ledger.
+func cmdPubsubVerify(args []string) error {
+	fs := flag.NewFlagSet("pubsub verify", flag.ExitOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: meshmcp pubsub verify <event-log>")
+	}
+	f, err := os.Open(fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	events, err := pubsub.LoadEvents(f)
+	if err != nil {
+		return fmt.Errorf("verification failed: %w", err)
+	}
+	var lastSeq uint64
+	if n := len(events); n > 0 {
+		lastSeq = events[n-1].Seq
+	}
+	fmt.Printf("OK: %d event(s), hash chain verified (through seq %d)\n", len(events), lastSeq)
+	return nil
+}
+
+// cmdPubsub runs the broker daemon, or verifies a persisted event log.
 func cmdPubsub(args []string) error {
+	if len(args) > 0 && args[0] == "verify" {
+		return cmdPubsubVerify(args[1:])
+	}
 	fs := flag.NewFlagSet("pubsub", flag.ExitOnError)
 	cfgPath := fs.String("config", "", "broker config file (required)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *cfgPath == "" {
-		return errors.New("usage: meshmcp pubsub --config broker.yaml")
+		return errors.New("usage: meshmcp pubsub --config broker.yaml   (or: meshmcp pubsub verify <event-log>)")
 	}
 	cfg, err := loadPubsubConfig(*cfgPath)
 	if err != nil {
@@ -94,10 +127,38 @@ func cmdPubsub(args []string) error {
 		audit = policy.NewAuditLog(f, func() string { return time.Now().UTC().Format(time.RFC3339) })
 	}
 
+	// Optional durable event log: resume the chain + replay window from the
+	// persisted stream, then keep appending to it.
+	var seed []pubsub.Event
+	var eventLog *pubsub.EventLog
+	if cfg.EventLog != "" {
+		if data, err := os.ReadFile(cfg.EventLog); err == nil && len(data) > 0 {
+			seed, err = pubsub.LoadEvents(bytes.NewReader(data))
+			if err != nil {
+				return fmt.Errorf("event log %s: %w", cfg.EventLog, err)
+			}
+			var lastSeq uint64
+			if n := len(seed); n > 0 {
+				lastSeq = seed[n-1].Seq
+			}
+			log.Printf("resumed %d event(s) from %s (through seq %d)", len(seed), cfg.EventLog, lastSeq)
+		} else if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("read event log %s: %w", cfg.EventLog, err)
+		}
+		f, err := os.OpenFile(cfg.EventLog, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if err != nil {
+			return fmt.Errorf("open event log %s: %w", cfg.EventLog, err)
+		}
+		defer f.Close()
+		eventLog = pubsub.NewEventLog(f)
+	}
+
 	policyCopy := cfg.Policy // take a stable address for the Authorizer
 	broker := pubsub.New(pubsub.Options{
 		Authorizer: &policyCopy,
 		Audit:      audit,
+		Events:     eventLog,
+		Seed:       seed,
 		Limits:     cfg.Limits,
 	})
 	defer broker.Close()
@@ -123,6 +184,7 @@ func cmdPublish(args []string) error {
 	o := meshFlags(fs)
 	data := fs.String("data", "", "payload (default: read from stdin)")
 	rawJSON := fs.Bool("json", false, "treat the payload as raw JSON (default: wrap it as a JSON string)")
+	streamMode := fs.Bool("stream", false, "publish one event per stdin line over a single session (a producer feed)")
 	maxBytes := fs.Int64("max-bytes", 1<<20, "reject a payload larger than this (the broker enforces its own cap too)")
 	var labels stringList
 	fs.Var(&labels, "label", "data-flow label to attach to the event (repeatable)")
@@ -133,6 +195,10 @@ func cmdPublish(args []string) error {
 		return errors.New("usage: meshmcp publish [flags] <peer-ip:port> <topic>")
 	}
 	target, topic := fs.Arg(0), fs.Arg(1)
+
+	if *streamMode {
+		return streamPublish(o, target, topic, labels, *rawJSON, *maxBytes)
+	}
 
 	var body []byte
 	if *data != "" {
@@ -205,6 +271,117 @@ func cmdPublish(args []string) error {
 	}
 	log.Printf("published to %q on %s (seq %d)", topic, target, result.Seq)
 	return nil
+}
+
+// streamPublish is the producer path: it reads stdin line by line and publishes
+// each line as one event over a single session (one mesh join, one broker
+// connection), so a continuous feed does not pay the join cost per event.
+func streamPublish(o *meshOptions, target, topic string, labels stringList, rawJSON bool, maxBytes int64) error {
+	o.BlockInbound = true
+	client, err := startMesh(o, os.Stderr)
+	if err != nil {
+		return err
+	}
+	defer stopMesh(client)
+
+	pr, pw := io.Pipe()
+	st := &streamPubSink{r: pr}
+	go func() {
+		defer pw.Close()
+		hello, _ := json.Marshal(helloFrame{Role: "pub"})
+		if _, err := pw.Write(append(hello, '\n')); err != nil {
+			return
+		}
+		sc := bufio.NewScanner(os.Stdin)
+		sc.Buffer(make([]byte, 0, 64*1024), int(maxBytes)+1)
+		for sc.Scan() {
+			line := sc.Bytes()
+			if len(line) == 0 {
+				continue
+			}
+			var payload json.RawMessage
+			if rawJSON {
+				if !json.Valid(line) {
+					log.Printf("skipping line: not valid JSON")
+					continue
+				}
+				payload = append(json.RawMessage(nil), line...)
+			} else {
+				enc, _ := json.Marshal(string(line))
+				payload = enc
+			}
+			pf, _ := json.Marshal(pubFrame{Topic: topic, Labels: labels, Payload: payload})
+			if _, err := pw.Write(append(pf, '\n')); err != nil {
+				return
+			}
+		}
+	}()
+
+	dial := func(ctx context.Context) (net.Conn, error) { return client.Dial(ctx, "tcp", target) }
+	sc := session.NewClient(dial, log.Printf)
+	runErr := sc.Run(context.Background(), st)
+	ok, failed, lastErr := st.counts()
+	if runErr != nil && ok == 0 && failed == 0 {
+		return fmt.Errorf("publish stream to %s: %w", target, runErr)
+	}
+	log.Printf("published %d event(s) to %q on %s (%d rejected)", ok, topic, target, failed)
+	if failed > 0 && lastErr != "" {
+		log.Printf("last rejection: %s", lastErr)
+	}
+	return nil
+}
+
+// streamPubSink is the local end of a streaming publish: Read yields the framed
+// outbound stream (hello + one pubFrame per stdin line) produced by the pump
+// goroutine, and Write tallies the broker's per-event acks.
+type streamPubSink struct {
+	r     io.Reader
+	mu    sync.Mutex
+	inbuf []byte
+	ok    int
+	fail  int
+	last  string
+}
+
+func (s *streamPubSink) Read(p []byte) (int, error) { return s.r.Read(p) }
+
+func (s *streamPubSink) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	s.inbuf = append(s.inbuf, p...)
+	var lines [][]byte
+	for {
+		i := bytes.IndexByte(s.inbuf, '\n')
+		if i < 0 {
+			break
+		}
+		lines = append(lines, append([]byte(nil), s.inbuf[:i]...))
+		s.inbuf = s.inbuf[i+1:]
+	}
+	for _, ln := range lines {
+		if len(ln) == 0 {
+			continue
+		}
+		var ack ackFrame
+		if json.Unmarshal(ln, &ack) != nil {
+			continue
+		}
+		if ack.Error != "" {
+			s.fail++
+			s.last = ack.Error
+		} else {
+			s.ok++
+		}
+	}
+	s.mu.Unlock()
+	return len(p), nil
+}
+
+func (s *streamPubSink) Close() error { return nil }
+
+func (s *streamPubSink) counts() (ok, fail int, last string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ok, s.fail, s.last
 }
 
 // cmdSubscribe streams events from a broker to stdout until interrupted.

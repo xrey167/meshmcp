@@ -94,6 +94,13 @@ type Options struct {
 	// Audit, if set, records every authorization decision into the shared
 	// hash-chained ledger.
 	Audit *policy.AuditLog
+	// Events, if set, is a durable append sink for the sealed event stream, so
+	// the bus survives a restart and its chain is externally verifiable.
+	Events *EventLog
+	// Seed is a previously persisted event stream (from LoadEvents) used to
+	// resume after a restart: the sequence and hash chain continue from its
+	// last event, and its tail preloads the replay ring. Nil for a fresh bus.
+	Seed []Event
 	// Now supplies the clock (for event timestamps and rate limiting).
 	// Defaults to time.Now; injected in tests for determinism.
 	Now    func() time.Time
@@ -106,11 +113,12 @@ type Options struct {
 // chain are deterministic; per-subscription delivery is non-blocking so one
 // slow reader can never stall the fan-out for the others.
 type Broker struct {
-	auth  Authorizer
-	audit *policy.AuditLog
-	now   func() time.Time
-	lim   *limiter
-	lm    Limits
+	auth   Authorizer
+	audit  *policy.AuditLog
+	events *EventLog
+	now    func() time.Time
+	lim    *limiter
+	lm     Limits
 
 	mu        sync.Mutex
 	seq       uint64
@@ -133,16 +141,33 @@ func New(opts Options) *Broker {
 	if auth == nil {
 		auth = denyAll{}
 	}
-	return &Broker{
-		auth:  auth,
-		audit: opts.Audit,
-		now:   now,
+	b := &Broker{
+		auth:    auth,
+		audit:   opts.Audit,
+		events:  opts.Events,
+		now:     now,
 		lim:     newLimiter(lm.PublishRate, lm.PublishBurst, now),
 		lm:      lm,
 		subs:    map[uint64]*Subscription{},
 		perPeer: map[string]int{},
 		ring:    newRing(lm.Retain),
 	}
+	// Resume from a persisted stream: continue the sequence and hash chain from
+	// its last event, and preload the retention ring's tail so --since replay
+	// works across the restart.
+	if n := len(opts.Seed); n > 0 {
+		last := opts.Seed[n-1]
+		b.seq = last.Seq
+		b.prev = last.Hash
+		start := 0
+		if n > lm.Retain {
+			start = n - lm.Retain
+		}
+		for _, ev := range opts.Seed[start:] {
+			b.ring.add(ev)
+		}
+	}
+	return b
 }
 
 // MaxPayloadBytes reports the broker's per-event payload cap. The wire layer
@@ -232,6 +257,12 @@ func (b *Broker) Publish(id Identity, topic string, payload json.RawMessage, ext
 	ev.Hash = h
 	b.prev = h
 	b.ring.add(*ev)
+	// Persist the sealed event in sequence order (best-effort per-event, like
+	// the audit ledger; a failed append degrades durability but never blocks
+	// delivery). Held under b.mu so the on-disk order matches the chain.
+	if b.events != nil {
+		_ = b.events.append(*ev)
+	}
 	for _, s := range b.subs {
 		if s.accepts(ev) {
 			b.deliverLocked(s, ev)
@@ -285,6 +316,12 @@ func (b *Broker) EmitInternal(source, topic string, payload json.RawMessage, lab
 	ev.Hash = h
 	b.prev = h
 	b.ring.add(*ev)
+	// Persist the sealed event in sequence order (best-effort per-event, like
+	// the audit ledger; a failed append degrades durability but never blocks
+	// delivery). Held under b.mu so the on-disk order matches the chain.
+	if b.events != nil {
+		_ = b.events.append(*ev)
+	}
 	for _, s := range b.subs {
 		if s.accepts(ev) {
 			b.deliverLocked(s, ev)

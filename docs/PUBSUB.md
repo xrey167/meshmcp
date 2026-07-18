@@ -43,6 +43,13 @@ echo '{"level":"warn","msg":"disk 90%"}' | meshmcp publish --json 100.x.y.z:9120
 meshmcp publish --data "deploy started" --label pii 100.x.y.z:9120 ops.deploys
 ```
 
+`--stream` turns publish into a producer feed: one event per stdin line over a
+single session (one mesh join for the whole feed), instead of one event per run:
+
+```sh
+tail -F app.log | meshmcp publish --stream 100.x.y.z:9120 logs.app
+```
+
 Subscribe streams matching events as newline-delimited JSON and blocks until
 Ctrl-C. Topics are globs; `--since` replays retained events first:
 
@@ -50,6 +57,30 @@ Ctrl-C. Topics are globs; `--since` replays retained events first:
 meshmcp subscribe 100.x.y.z:9120 'alerts.*' 'ops.*'
 meshmcp subscribe --since 41 100.x.y.z:9120 'alerts.prod'
 ```
+
+## Durability
+
+By default the bus is a live tap: events live in a bounded in-memory ring.
+Set `event_log:` in the broker config to make it an **event log** instead:
+
+```yaml
+event_log: ./pubsub-events.jsonl
+```
+
+Each sealed event is appended to that file in sequence order. On restart the
+broker resumes the **sequence and hash chain** from the log and preloads the
+replay window, so `--since` works across restarts and the chain is continuous.
+Because the events are hash-chained like the audit ledger, the persisted stream
+is externally verifiable — a tampered, reordered, or truncated log is detected:
+
+```sh
+meshmcp pubsub verify ./pubsub-events.jsonl
+# OK: 12043 event(s), hash chain verified (through seq 12043)
+```
+
+Persistence is best-effort per event (direct appends, no fsync — durable across
+a process restart, like the audit ledger), and a torn trailing write from a
+crash mid-append is tolerated on load; any interior break is a hard error.
 
 ---
 
