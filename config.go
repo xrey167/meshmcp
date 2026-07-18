@@ -153,6 +153,10 @@ type Backend struct {
 	// a match can deny the call or emit a data-flow label (F18). Implemented as
 	// a plugin decision hook; only valid for stdio backends with a policy.
 	DLP []policy.DLPSpec `yaml:"dlp"`
+	// ShadowPolicy is a CANDIDATE policy evaluated alongside the enforced one:
+	// where the two disagree, the divergence is logged, but enforcement is
+	// unchanged (F24). A live canary for a policy change. Stdio + a policy.
+	ShadowPolicy *policy.Policy `yaml:"shadow_policy"`
 
 	httpURL *url.URL
 }
@@ -240,6 +244,14 @@ func loadConfig(path string) (*Config, error) {
 			}
 			if _, err := policy.NewPatternDLP(b.DLP); err != nil {
 				return nil, fmt.Errorf("backend %q: %w", b.Name, err)
+			}
+		}
+		if b.ShadowPolicy != nil {
+			if !hasStdio || b.Policy == nil {
+				return nil, fmt.Errorf("backend %q: shadow_policy requires a stdio backend with a policy", b.Name)
+			}
+			if err := b.ShadowPolicy.Validate(); err != nil {
+				return nil, fmt.Errorf("backend %q: shadow_policy: %w", b.Name, err)
 			}
 		}
 		if b.CosignStore != "" && b.Policy == nil {

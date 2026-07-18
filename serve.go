@@ -352,6 +352,17 @@ func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer) s
 		}
 		dlpHook = h
 	}
+	// One shadow-policy hook per backend: it observes and logs where a candidate
+	// policy would disagree with the enforced one, without changing enforcement.
+	var shadowHook *policy.ShadowHook
+	if b.ShadowPolicy != nil {
+		name := b.Name
+		shadowHook = policy.NewShadowHook(b.ShadowPolicy, func(d policy.ShadowDivergence) {
+			log.Printf("backend %q: SHADOW divergence: peer=%s tool=%s live=%s shadow=%s",
+				name, d.Peer, d.Tool, d.Live, d.Shadow)
+		})
+		log.Printf("backend %q: shadow policy active (%d rules) — divergences logged, enforcement unchanged", b.Name, len(b.ShadowPolicy.Rules))
+	}
 	return func(meta session.Meta) (session.Backend, error) {
 		inner, err := exec(meta)
 		if err != nil {
@@ -374,6 +385,9 @@ func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer) s
 		}
 		if dlpHook != nil {
 			f.AddDecisionHook(dlpHook)
+		}
+		if shadowHook != nil {
+			f.AddDecisionHook(shadowHook)
 		}
 		return f, nil
 	}
