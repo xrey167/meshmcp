@@ -55,11 +55,37 @@ meshmcp status --audit ./hook-audit.jsonl
 Together they close the gap: the model can't reach a tool, local or remote,
 that isn't authorized and recorded.
 
-## What's next (backlog)
+## Three events, one adapter
 
-- `PostToolUse` / `afterFileEdit` adapters → audit-only observation of results
-  and file edits (content-hash provenance).
-- `UserPromptSubmit` / `beforeSubmitPrompt` → DLP-scan or taint-label the
-  session from the prompt.
+`meshmcp hook` dispatches on the hook event (auto-detected from the payload's
+`hook_event_name`, or forced with `--event`):
+
+- **pre-tool** (`PreToolUse` / `beforeShellExecution` / `beforeMCPExecution` /
+  `PermissionRequest`) — authorize the call: policy + DLP + rate/window/co-sign,
+  carrying session taint, and return allow/deny/ask.
+- **post-tool** (`PostToolUse` / `afterFileEdit` / `afterMCPExecution`) —
+  observe-only: record the result with a **content hash** of the output for
+  provenance (proves what a tool returned without storing the bytes).
+- **prompt** (`UserPromptSubmit` / `beforeSubmitPrompt`) — DLP-scan the prompt
+  and **block** on a match (e.g. a prompt-injection phrase); record it by hash.
+
+## Prompt-injection defense inside the client (taint)
+
+Set `session_dir` and `taint_tools` and the adapter carries F7's taint across
+the client's own tool loop: a local tool that pulls untrusted content
+(`WebFetch`, a browser MCP) marks the session tainted, and a later `Write`/`Edit`
+with `taint_guard` is **blocked** — the same network-layer prompt-injection
+containment the gateway does, now for local tools. Taint is per-session
+(keyed on `session_id` / `conversation_id`).
+
+## Human co-sign from your phone
+
+Point `cosign_store` at the same directory `meshmcp approvals` serves. A
+`require_cosign` local tool returns "ask" and records a pending request; a human
+approves it from a phone on the mesh (`meshmcp approvals`), and the next call is
+allowed — a local Bash/Deploy gated by a mesh identity's approval.
+
+## Backlog
+
 - `hook install --write` to merge the config into the client settings in place.
-- Route a hook co-sign to the mesh approver so a phone approves a local tool.
+- `SessionStart` context injection (tell the model the policy it's under).

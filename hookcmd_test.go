@@ -66,3 +66,55 @@ func TestHookCursorDecodeShell(t *testing.T) {
 		t.Fatalf("cursor shell decode: %+v", call)
 	}
 }
+
+func TestHookTaintStateMachine(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &hookConfig{SessionDir: dir, TaintTools: []string{"WebFetch", "mcp__*fetch*"}}
+
+	// Tool matching.
+	if !cfg.isTaintTool("WebFetch") || !cfg.isTaintTool("mcp__web__fetch_url") {
+		t.Fatal("taint tool glob match failed")
+	}
+	if cfg.isTaintTool("Read") {
+		t.Fatal("Read should not be a taint tool")
+	}
+
+	// A fresh session is clean; marking taints only that session.
+	if cfg.readTaint("s1") != nil {
+		t.Fatal("fresh session should be clean")
+	}
+	cfg.markTainted("s1")
+	if cfg.readTaint("s1")["tainted"] != true {
+		t.Fatal("s1 should be tainted after markTainted")
+	}
+	if cfg.readTaint("s2") != nil {
+		t.Fatal("taint must be per-session (s2 unaffected)")
+	}
+
+	// No session_dir → taint is a no-op (nil labels, never panics).
+	nocfg := &hookConfig{TaintTools: []string{"WebFetch"}}
+	nocfg.markTainted("s1")
+	if nocfg.readTaint("s1") != nil {
+		t.Fatal("without session_dir taint must be a no-op")
+	}
+}
+
+func TestHookEventKindDetection(t *testing.T) {
+	cases := map[string]string{
+		`{"hook_event_name":"PreToolUse"}`:         "pre-tool",
+		`{"hook_event_name":"PostToolUse"}`:        "post-tool",
+		`{"hook_event_name":"afterFileEdit"}`:      "post-tool",
+		`{"hook_event_name":"UserPromptSubmit"}`:   "prompt",
+		`{"hook_event_name":"beforeSubmitPrompt"}`: "prompt",
+		`{"tool_name":"Bash"}`:                     "pre-tool", // no event field → default
+	}
+	for raw, want := range cases {
+		if got := hookEventKind("", []byte(raw)); got != want {
+			t.Errorf("hookEventKind(%s) = %q, want %q", raw, got, want)
+		}
+	}
+	// An explicit --event overrides the payload.
+	if got := hookEventKind("prompt", []byte(`{"hook_event_name":"PreToolUse"}`)); got != "prompt" {
+		t.Errorf("explicit event override failed: %q", got)
+	}
+}
