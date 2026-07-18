@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net"
 	"os"
@@ -31,7 +32,7 @@ import (
 // mid-transfer), gated by the receiver's sender ACL, and audited (a content
 // hash of every received file lands in the ledger). No cloud, no open ports.
 //
-//	meshmcp drop <peer-ip:port> <file...>     send files to a peer
+//	meshmcp drop <peer-ip:port> <path...>     send files or directories to a peer
 //	meshmcp drop --config drop.yaml           run a drop receiver
 //
 // The transfer wire is a stream of per-file records:
@@ -64,42 +65,83 @@ type recvInfo struct {
 	Path   string // where it was installed on disk
 }
 
-// sendFiles streams each path to w as header + content + trailer records.
+// sendFiles streams each path to w as header + content + trailer records. A
+// path that is a directory is walked recursively; each file is sent with a
+// name relative to the directory's parent, so the tree (e.g. "photos/a.jpg")
+// is reproduced on the receiver. The receiver already creates parent
+// directories and rejects path traversal (see sanitizeDest / recvOne).
 func sendFiles(w io.Writer, paths []string) error {
 	bw := bufio.NewWriter(w)
 	for _, p := range paths {
+		p = filepath.Clean(p)
 		fi, err := os.Stat(p)
 		if err != nil {
 			return fmt.Errorf("stat %s: %w", p, err)
 		}
 		if fi.IsDir() {
-			return fmt.Errorf("%s is a directory (directory drops are not yet supported)", p)
+			if err := sendDir(bw, p); err != nil {
+				return err
+			}
+			continue
 		}
-		f, err := os.Open(p)
-		if err != nil {
-			return fmt.Errorf("open %s: %w", p, err)
-		}
-		hdr := dropHeader{Name: filepath.Base(p), Size: fi.Size(), Mode: uint32(fi.Mode().Perm())}
-		hb, _ := json.Marshal(hdr)
-		if _, err := bw.Write(append(hb, '\n')); err != nil {
-			f.Close()
-			return err
-		}
-		h := sha256.New()
-		n, err := io.CopyN(io.MultiWriter(bw, h), f, fi.Size())
-		f.Close()
-		if err != nil {
-			return fmt.Errorf("read %s: %w", p, err)
-		}
-		if n != fi.Size() {
-			return fmt.Errorf("%s: short read (%d of %d bytes)", p, n, fi.Size())
-		}
-		tb, _ := json.Marshal(dropTrailer{SHA256: hex.EncodeToString(h.Sum(nil))})
-		if _, err := bw.Write(append(tb, '\n')); err != nil {
+		if err := sendOneFile(bw, p, filepath.Base(p), fi); err != nil {
 			return err
 		}
 	}
 	return bw.Flush()
+}
+
+// sendDir walks dir and streams every regular file under it, naming each by
+// its path relative to dir's parent so the directory name is preserved.
+// Non-regular entries (symlinks, devices) are skipped, so a drop never follows
+// a link out of the tree.
+func sendDir(bw *bufio.Writer, dir string) error {
+	root := filepath.Dir(dir)
+	return filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !d.Type().IsRegular() {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		fi, err := d.Info()
+		if err != nil {
+			return err
+		}
+		return sendOneFile(bw, path, filepath.ToSlash(rel), fi)
+	})
+}
+
+// sendOneFile writes one file's header + content + trailer to bw under the
+// given wire name.
+func sendOneFile(bw *bufio.Writer, path, name string, fi os.FileInfo) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", path, err)
+	}
+	defer f.Close()
+	hdr := dropHeader{Name: name, Size: fi.Size(), Mode: uint32(fi.Mode().Perm())}
+	hb, _ := json.Marshal(hdr)
+	if _, err := bw.Write(append(hb, '\n')); err != nil {
+		return err
+	}
+	h := sha256.New()
+	n, err := io.CopyN(io.MultiWriter(bw, h), f, fi.Size())
+	if err != nil {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	if n != fi.Size() {
+		return fmt.Errorf("%s: short read (%d of %d bytes)", path, n, fi.Size())
+	}
+	tb, _ := json.Marshal(dropTrailer{SHA256: hex.EncodeToString(h.Sum(nil))})
+	if _, err := bw.Write(append(tb, '\n')); err != nil {
+		return err
+	}
+	return nil
 }
 
 // placer decides the final on-disk path for a received file given its header

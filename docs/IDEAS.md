@@ -29,10 +29,11 @@ whose corpus never leaves its trust boundary, or an AirDrop that is resumable **
 audited by construction. meshmcp can — because identity, policy, audit, and taint already
 exist. This extends the moat from *traffic* to *payload*.
 
-> **Status today (both codebase explorations confirm):** KG, RAG, vector/embedding, and
-> peer‑to‑peer file sharing are **all greenfield**. The `vectors` backend appears only in
-> docs and the landing page; no such server exists. The MCP framework emits **text‑only**
-> content. Persistence is entirely file/JSONL‑based (no DB). Clean slate, strong foundation.
+> **Status update:** what was greenfield at the time of writing is now built —
+> `cmd/vectors` (RAG/embedding), `cmd/kg` (provenance knowledge graph), `cmd/memory`
+> (shared agent memory), peer‑to‑peer file sharing (`meshmcp drop`/`fetch`/`push`), and
+> the `pubsub` event fabric all exist. Persistence remains file/JSONL‑based (no DB). The
+> flagship/supporting entries below are marked ✅ where delivered.
 
 ---
 

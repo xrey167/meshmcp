@@ -103,6 +103,52 @@ func TestDropRoundTrip(t *testing.T) {
 	}
 }
 
+// TestDropDirectory streams a directory tree and verifies the structure is
+// reproduced on the receiver with relative paths preserved.
+func TestDropDirectory(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+
+	// Build a small tree: photos/a.txt, photos/sub/b.txt, plus a top-level file.
+	tree := map[string][]byte{
+		"photos/a.txt":     []byte("alpha"),
+		"photos/sub/b.txt": []byte("bravo"),
+		"photos/c.bin":     {0x00, 0xff, 0x01},
+	}
+	for rel, data := range tree {
+		full := filepath.Join(src, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	pr, pw := io.Pipe()
+	go func() { pw.CloseWithError(sendFiles(pw, []string{filepath.Join(src, "photos")})) }()
+
+	got := map[string]recvInfo{}
+	if err := recvFiles(pr, dirPlacer(dst), 0, func(fi recvInfo) { got[fi.Name] = fi }); err != nil {
+		t.Fatalf("recvFiles: %v", err)
+	}
+	if len(got) != len(tree) {
+		t.Fatalf("received %d files, want %d: %v", len(got), len(tree), got)
+	}
+	for rel, data := range tree {
+		if fi, ok := got[rel]; !ok || fi.SHA256 != sha(data) {
+			t.Fatalf("file %q: ok=%v info=%+v", rel, ok, fi)
+		}
+		onDisk, err := os.ReadFile(filepath.Join(dst, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatalf("read received %q: %v", rel, err)
+		}
+		if !bytes.Equal(onDisk, data) {
+			t.Errorf("%q: content mismatch", rel)
+		}
+	}
+}
+
 // TestPushPayload verifies a stdin-style payload (sendData) is received and
 // verified like any drop — the universal-clipboard path.
 func TestPushPayload(t *testing.T) {
