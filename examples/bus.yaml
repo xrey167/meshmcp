@@ -1,0 +1,26 @@
+# Governed event bus (F28): a zero-exposure pub/sub MCP backend on the mesh.
+# The firewall in front decides who may publish and who may subscribe (poll),
+# by tool name and/or the topic argument, and audits every crossing — so an
+# event fabric where subscription is a capability and each delivery is
+# attributable to the publisher's cryptographic identity.
+mesh:
+  device_name: meshmcp-bus
+  setup_key_env: NB_SETUP_KEY
+  config_path: ./bus-gw.json
+
+backends:
+  - name: bus
+    port: 9130
+    stdio: ["./cmd/bus/bus", "--store", "./bus.jsonl"]
+    audit_log: ./bus-audit.jsonl
+    policy:
+      default_allow: false
+      rules:
+        # Publishers may publish; everyone authorized may poll and list topics.
+        - peers: ["pubkey:<publisher-key>"]
+          tools: ["publish"]
+          allow: true
+          rate: { max: 100, per: "1m" }
+        - peers: ["*"]
+          tools: ["poll", "topics"]
+          allow: true

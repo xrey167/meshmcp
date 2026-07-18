@@ -4,6 +4,9 @@
 cmd/*/mcpserver
 cmd/*/mcpecho
 cmd/*/mcphttp
+cmd/*/bus
+cmd/*/vault
+cmd/*/scheduler
 
 # NetBird embedded identity / state (per-peer, regenerated on run)
 *-nb.json
@@ -43,3 +46,4 @@ audit-signing-key.json
 # Prebuilt cmd/ backends — build from source, never commit
 /kg
 /memory
+/bus
