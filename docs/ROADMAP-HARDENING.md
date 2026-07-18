@@ -291,7 +291,11 @@ becomes the decision engine behind it: it reads the client's hook JSON on stdin,
 against the **same local policy engine + DLP + audit chain** the gateway uses (no mesh join), and
 writes the client-specific response — so the firewall governs *every* tool the model calls, not just
 mesh backends, and `meshmcp status` shows the model's local activity in the tamper-evident ledger.
-`meshmcp hook install` prints the per-client settings snippet. (Claude Code `PreToolUse`, Cursor
+`meshmcp hook install` prints the per-client settings snippet. It covers the whole tool loop —
+pre-tool (authorize), post-tool (content-hash provenance), and prompt (DLP-block) — carries **session
+taint** across local tools (a local `WebFetch` taints the session, blocking a later `Write` — F7 inside
+the client), and gates `require_cosign` local tools on a **phone approval** via the shared co-sign store.
+(Claude Code `PreToolUse`/`PostToolUse`/`UserPromptSubmit`, Cursor
 `beforeShellExecution`/`beforeMCPExecution`, Codex `PermissionRequest`; Claude Desktop / Windsurf
 have no lifecycle hook, so they're governed via the transport path `meshmcp connect`.)
 > **Why it's revolutionary:** the agent firewall stops at the mesh boundary no longer — it reaches
