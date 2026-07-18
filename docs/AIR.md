@@ -182,10 +182,11 @@ the session ones) wrap the same commands the way `drop_file` wraps `drop`:
 | `air_steer` | ships | `POST /v1/steer` → `Server.Steer` | "Steer session 9f2a on fs to re-read customer 42." |
 | `air_tasks` | ships | `mcpclient.ListTasks` | "What tasks are running on the analyst?" |
 | `air_task_steer` | ships | `mcpclient.SteerTask` → `tasks/steer` | "Nudge task-17 to focus on the API." |
-| `air_peers` · `air_push` · `air_fetch` | proposed | `peers`/`push`/`fetch` | "Who's on the mesh?" / "Push this task." |
+| `air_peers` · `air_push` · `air_fetch` | ships | `client.Status()` · `sendData` · `fetchBlob` | "Who's on the mesh?" / "Push this task." / "Fetch blob `<sha>`." |
+| `air_launch` | ships (opt-in) | `spawnAgent`, gated by `--allow-launch` | "Launch a reader agent." |
 
-Agent-target steer and launch are CLI verbs (`meshmcp air agent-steer`, `air launch`), not
-assistant tools — an assistant that exec-spawns processes is a deliberate separate step.
+Agent-target steer is the `meshmcp air agent-steer` CLI; `air_launch` is **off by default** —
+start the app with `--allow-launch` to let the assistant spawn agent processes.
 
 Config is unchanged from the existing app:
 ```jsonc
@@ -283,7 +284,7 @@ Honesty about the seam, so nobody mistakes the mockup for shipped product:
 | **Steer** — P3 task augment · P2 session core · P1 agent inbox | **Ships now** | `mcp/tasks.go` · `session/server.go` · `agent.go` · `steerinbox.go` (+ tests) |
 | **Steer** — gateway `/v1/sessions`+`/v1/steer` endpoint · `air_sessions`/`air_steer`/`air_tasks`/`air_task_steer` tools | **Ships now** | `config.go` · `serve.go` · `aircontrol.go` · `mcpapp.go` · `aircontrol_test.go` |
 | **Steer/Launch** — the `meshmcp air` CLI (`sessions` · `steer` · `launch` · `agent-steer` · `workflow`) + P4 runner | **Ships now** | `air.go` · `airworkflow.go` · `examples/air-workflow.yaml` |
-| Assistant tools `air_peers` · `air_push` · `air_fetch`; an `air_launch` tool | **Proposed** | thin `mcpapp.go` wrappers (launch stays a CLI verb by design) |
+| Assistant tools `air_peers` · `air_push` · `air_fetch` · `air_launch` (opt-in) | **Ships now** | `mcpapp.go` · `mcpapp_air_test.go` |
 | A served `meshmcp air` web page (the mockup, over a mesh port) | **Proposed** | reuse the `approvals`/`room` serving pattern |
 | Push-wake (buzz the phone on a new pending) | **Proposed** | the "push seam" — [MOBILE.md §4](MOBILE.md) |
 | Native mobile app (gomobile) | **Proposed** | binding surface — [MOBILE.md §3](MOBILE.md) |
