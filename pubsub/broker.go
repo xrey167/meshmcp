@@ -127,7 +127,28 @@ type Broker struct {
 	perPeer   map[string]int // active subscription count per identity key
 	nextSubID uint64
 	ring      *ring
+	dropped   uint64 // aggregate events dropped by backpressure across all subs
 	closed    bool
+}
+
+// Stats is a point-in-time snapshot of a broker's activity, for introspection.
+type Stats struct {
+	Subscriptions int    `json:"subscriptions"` // open subscriptions now
+	Sequence      uint64 `json:"sequence"`      // last published event's sequence
+	Retained      int    `json:"retained"`      // events held for replay
+	Dropped       uint64 `json:"dropped"`       // events dropped by backpressure (lifetime)
+}
+
+// Stats returns a snapshot of broker activity.
+func (b *Broker) Stats() Stats {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return Stats{
+		Subscriptions: len(b.subs),
+		Sequence:      b.seq,
+		Retained:      b.ring.n,
+		Dropped:       b.dropped,
+	}
 }
 
 // New builds a Broker from Options, applying defaults for any zero fields.
@@ -482,6 +503,7 @@ func (b *Broker) deliverLocked(s *Subscription, ev *Event) {
 	default:
 	}
 	atomic.AddUint64(&s.dropped, 1)
+	b.dropped++ // aggregate; deliverLocked runs under b.mu
 }
 
 // closeSubLocked removes a subscription and closes its channels exactly once.

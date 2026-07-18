@@ -5,7 +5,54 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"meshmcp/policy"
 )
+
+// TestEventCheckpoints verifies signed Merkle checkpoints over the event stream:
+// a valid stream + key verifies; a wrong key or an altered event set fails.
+func TestEventCheckpoints(t *testing.T) {
+	signer, err := policy.GenerateSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var events, cps bytes.Buffer
+	cp := policy.NewCheckpointer(signer, &cps, 2, func() string { return "t" }, nil)
+	el := NewEventLog(&events).WithCheckpointer(cp)
+	b := New(Options{Authorizer: AllowAll{}, Events: el})
+	for i := 0; i < 5; i++ {
+		if _, err := b.Publish(id("p"), "t", nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b.Close()
+	el.Flush() // seal the final partial batch (event 5)
+
+	evs, err := LoadEvents(bytes.NewReader(events.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := VerifyCheckpoints(evs, bytes.NewReader(cps.Bytes()), signer.PubKeyHex())
+	if err != nil {
+		t.Fatalf("valid checkpoints should verify: %v", err)
+	}
+	if n != 3 { // checkpoints at 2, 4, and the flushed 5
+		t.Fatalf("verified %d checkpoints, want 3", n)
+	}
+
+	// Pinning the wrong signer fails.
+	if _, err := VerifyCheckpoints(evs, bytes.NewReader(cps.Bytes()), "00"); err == nil {
+		t.Fatal("wrong pinned pubkey should fail")
+	}
+
+	// Altering an event's hash (valid hex, different value) breaks the Merkle
+	// root of the checkpoint covering it.
+	tampered := append([]Event(nil), evs...)
+	tampered[2].Hash = strings.Repeat("0", len(tampered[2].Hash))
+	if _, err := VerifyCheckpoints(tampered, bytes.NewReader(cps.Bytes()), signer.PubKeyHex()); err == nil {
+		t.Fatal("altered event set should fail checkpoint verification")
+	}
+}
 
 // TestEventLogRoundTrip persists a published stream and reloads it, verifying
 // the chain survives the file boundary.

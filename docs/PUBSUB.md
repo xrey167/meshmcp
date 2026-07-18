@@ -82,6 +82,25 @@ Persistence is best-effort per event (direct appends, no fsync — durable acros
 a process restart, like the audit ledger), and a torn trailing write from a
 crash mid-append is tolerated on load; any interior break is a hard error.
 
+For **non-repudiation**, add `event_signing_key:` + `event_checkpoints:` to emit
+Ed25519-signed Merkle checkpoints over the stream (`meshmcp audit keygen` mints
+the key). Then an insider who controls the log file can't rewrite history
+without the signature disagreeing:
+
+```sh
+meshmcp pubsub verify --checkpoints pubsub-checkpoints.jsonl --pubkey <hex> pubsub-events.jsonl
+# OK: 12043 event(s), hash chain + 94 signed checkpoint(s) verified (through seq 12043)
+```
+
+## Introspection
+
+Query a running broker for a live snapshot:
+
+```sh
+meshmcp pubsub stats 100.x.y.z:9120
+# subscriptions=7  sequence=12043  retained=4096  dropped=12
+```
+
 ---
 
 ## The broker config

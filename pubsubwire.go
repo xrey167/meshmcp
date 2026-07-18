@@ -128,8 +128,14 @@ func (bb *brokerBackend) serve() {
 		bb.serveSub(hello, sc)
 	case "pub":
 		bb.servePub(sc)
+	case "stats":
+		// Read-only introspection: reply with a stats snapshot and close. Gated
+		// only by the connection ACL (no per-topic authorization needed).
+		if line, err := json.Marshal(bb.broker.Stats()); err == nil {
+			bb.outW.Write(append(line, '\n'))
+		}
 	default:
-		bb.writeAck(ackFrame{Error: "unknown role " + hello.Role + " (want pub or sub)"})
+		bb.writeAck(ackFrame{Error: "unknown role " + hello.Role + " (want pub, sub, or stats)"})
 	}
 }
 

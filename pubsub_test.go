@@ -10,9 +10,41 @@ import (
 	"testing"
 	"time"
 
+	"meshmcp/policy"
 	"meshmcp/pubsub"
 	"meshmcp/session"
 )
+
+// TestPubsubVerifyCheckpointsCommand checks the CLI verifies signed checkpoints
+// end-to-end and rejects a wrong pinned key.
+func TestPubsubVerifyCheckpointsCommand(t *testing.T) {
+	dir := t.TempDir()
+	epath := filepath.Join(dir, "events.jsonl")
+	cpath := filepath.Join(dir, "cps.jsonl")
+	ef, _ := os.Create(epath)
+	cf, _ := os.Create(cpath)
+	signer, err := policy.GenerateSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cp := policy.NewCheckpointer(signer, cf, 2, func() string { return "t" }, nil)
+	el := pubsub.NewEventLog(ef).WithCheckpointer(cp)
+	b := pubsub.New(pubsub.Options{Authorizer: pubsub.AllowAll{}, Events: el})
+	for i := 0; i < 4; i++ {
+		b.Publish(pubsub.Identity{Key: "p"}, "t", nil, nil)
+	}
+	b.Close()
+	el.Flush()
+	ef.Close()
+	cf.Close()
+
+	if err := cmdPubsubVerify([]string{"--checkpoints", cpath, "--pubkey", signer.PubKeyHex(), epath}); err != nil {
+		t.Fatalf("verify with valid checkpoints should pass: %v", err)
+	}
+	if err := cmdPubsubVerify([]string{"--checkpoints", cpath, "--pubkey", "00", epath}); err == nil {
+		t.Fatal("verify with wrong pinned pubkey should fail")
+	}
+}
 
 // TestStreamPubSinkCounts checks the streaming publisher tallies per-event acks
 // (including across a split write).
@@ -174,6 +206,31 @@ func TestBrokerBackendEndToEnd(t *testing.T) {
 	}
 	if ev.Topic != "news.tech" || ev.Publisher != "p" || ev.Seq != 1 {
 		t.Fatalf("unexpected delivered event: %+v", ev)
+	}
+}
+
+// TestBrokerBackendStats verifies the stats wire role returns a broker snapshot.
+func TestBrokerBackendStats(t *testing.T) {
+	b := pubsub.New(pubsub.Options{Authorizer: pubsub.AllowAll{}})
+	defer b.Close()
+	// A subscription and a couple of publishes so the snapshot is non-trivial.
+	s, _ := b.Subscribe(pubsub.Identity{Key: "x"}, pubsub.SubOptions{Topics: []string{"t"}})
+	defer s.Close()
+	b.Publish(pubsub.Identity{Key: "p"}, "t", nil, nil)
+	b.Publish(pubsub.Identity{Key: "p"}, "t", nil, nil)
+
+	q := newBrokerBackend(b, session.Meta{PeerKey: "op", PeerFQDN: "op.netbird.cloud"})
+	defer q.Close()
+	lines := readLines(t, q)
+	hello, _ := json.Marshal(helloFrame{Role: "stats"})
+	q.Write(append(hello, '\n'))
+
+	var st pubsub.Stats
+	if err := json.Unmarshal([]byte(nextLine(t, lines)), &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.Subscriptions != 1 || st.Sequence != 2 {
+		t.Fatalf("unexpected stats: %+v", st)
 	}
 }
 

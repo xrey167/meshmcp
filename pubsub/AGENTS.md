@@ -15,7 +15,7 @@ meshmcp's identity-native event fabric: a publish/subscribe bus where every even
 | `authorizer.go` | `Authorizer` interface; `RuleAuthorizer` (deny-by-default topic ACL with emit/clear labels, YAML-configured); `AllowAll`. |
 | `ratelimit.go` | Per-publisher token-bucket limiter with an injected clock. |
 | `ring.go` | Bounded retention ring for `--since` replay; surfaces `truncated` rather than silently short-serving. |
-| `eventlog.go` | Durable append-only event log: `EventLog` (append sink, written by the broker in seq order under its lock) + `LoadEvents` (chain-verified, torn-tail-tolerant). Seeds `seq`/`prev`/ring on restart via `Options.Seed`, so the bus survives a restart and the chain is externally verifiable. |
+| `eventlog.go` | Durable append-only event log: `EventLog` (append sink + optional signed Merkle `Checkpointer`) + `LoadEvents` (chain-verified, torn-tail-tolerant) + `VerifyCheckpoints`. Seeds `seq`/`prev`/ring on restart via `Options.Seed`; the chain is externally verifiable and, with a signing key, non-repudiable. |
 
 ## For AI Agents
 

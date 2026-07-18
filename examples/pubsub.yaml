@@ -28,6 +28,14 @@ audit_log: ./pubsub-audit.jsonl        # one hash-chained record per allow/deny 
 event_log: ./pubsub-events.jsonl       # durable event stream: survives restart, --since replay,
                                        # verify with `meshmcp pubsub verify ./pubsub-events.jsonl`
 
+# Signed Merkle checkpoints over the event stream — non-repudiation, so an
+# insider who controls the file can't rewrite history without the signature
+# disagreeing. Generate the key once: `meshmcp audit keygen --out pubsub-signer.json`.
+event_signing_key: ./pubsub-signer.json
+event_checkpoints: ./pubsub-checkpoints.jsonl
+event_checkpoint_every: 128            # emit a signed checkpoint every N events
+# Verify: meshmcp pubsub verify --checkpoints ./pubsub-checkpoints.jsonl --pubkey <hex> ./pubsub-events.jsonl
+
 # Per-topic authorization. Deny by default (default_allow omitted/false): a
 # publish or subscribe is refused unless a rule grants it. First match wins.
 policy:

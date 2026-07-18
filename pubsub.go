@@ -43,8 +43,15 @@ type PubsubConfig struct {
 	Allow      []string              `yaml:"allow"`     // connection ACL: who may open a session at all
 	AuditLog   string                `yaml:"audit_log"` // hash-chained JSONL decision log
 	EventLog   string                `yaml:"event_log"` // durable append-only event stream (resumable + verifiable)
-	Policy     pubsub.RuleAuthorizer `yaml:"policy"`    // per-topic authorization
-	Limits     pubsub.Limits         `yaml:"limits"`    // resource caps
+	// Signed Merkle checkpoints over the event stream (non-repudiation). Enable
+	// by setting a signing key (from `meshmcp audit keygen`) and a checkpoints
+	// file; every N events (default 128) a signed checkpoint is emitted.
+	EventSigningKey      string `yaml:"event_signing_key"`
+	EventCheckpoints     string `yaml:"event_checkpoints"`
+	EventCheckpointEvery int    `yaml:"event_checkpoint_every"`
+
+	Policy pubsub.RuleAuthorizer `yaml:"policy"` // per-topic authorization
+	Limits pubsub.Limits         `yaml:"limits"` // resource caps
 }
 
 func loadPubsubConfig(path string) (*PubsubConfig, error) {
@@ -66,11 +73,13 @@ func loadPubsubConfig(path string) (*PubsubConfig, error) {
 // non-repudiation guarantee `meshmcp audit verify` gives the decision ledger.
 func cmdPubsubVerify(args []string) error {
 	fs := flag.NewFlagSet("pubsub verify", flag.ExitOnError)
+	cps := fs.String("checkpoints", "", "also verify signed checkpoints from this file")
+	pubkey := fs.String("pubkey", "", "expected signer public key (hex) to pin checkpoints against")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: meshmcp pubsub verify <event-log>")
+		return errors.New("usage: meshmcp pubsub verify [--checkpoints f --pubkey hex] <event-log>")
 	}
 	f, err := os.Open(fs.Arg(0))
 	if err != nil {
@@ -85,7 +94,80 @@ func cmdPubsubVerify(args []string) error {
 	if n := len(events); n > 0 {
 		lastSeq = events[n-1].Seq
 	}
+
+	if *cps != "" {
+		cf, err := os.Open(*cps)
+		if err != nil {
+			return err
+		}
+		defer cf.Close()
+		n, err := pubsub.VerifyCheckpoints(events, cf, *pubkey)
+		if err != nil {
+			return fmt.Errorf("checkpoint verification failed: %w", err)
+		}
+		fmt.Printf("OK: %d event(s), hash chain + %d signed checkpoint(s) verified (through seq %d)\n", len(events), n, lastSeq)
+		return nil
+	}
 	fmt.Printf("OK: %d event(s), hash chain verified (through seq %d)\n", len(events), lastSeq)
+	return nil
+}
+
+// cmdPubsubStats queries a running broker for a point-in-time snapshot
+// (subscribers, sequence, retained events, drops). Gated by the broker's
+// connection ACL, like any other session.
+func cmdPubsubStats(args []string) error {
+	fs := flag.NewFlagSet("pubsub stats", flag.ExitOnError)
+	o := meshFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: meshmcp pubsub stats [flags] <peer-ip:port>")
+	}
+	target := fs.Arg(0)
+
+	hello, _ := json.Marshal(helloFrame{Role: "stats"})
+	var mu sync.Mutex
+	var line string
+	var got bool
+	stream := &clientStream{out: append(hello, '\n'), done: make(chan struct{})}
+	stream.onLine = func(b []byte) {
+		mu.Lock()
+		defer mu.Unlock()
+		if got {
+			return
+		}
+		got = true
+		line = string(b)
+		stream.finish()
+	}
+
+	o.BlockInbound = true
+	client, err := startMesh(o, os.Stderr)
+	if err != nil {
+		return err
+	}
+	defer stopMesh(client)
+
+	dial := func(ctx context.Context) (net.Conn, error) { return client.Dial(ctx, "tcp", target) }
+	sc := session.NewClient(dial, log.Printf)
+	runErr := sc.Run(context.Background(), stream)
+	mu.Lock()
+	g, resp := got, line
+	mu.Unlock()
+	if !g {
+		if runErr != nil {
+			return fmt.Errorf("stats from %s: %w", target, runErr)
+		}
+		return fmt.Errorf("stats from %s: no response", target)
+	}
+	var st pubsub.Stats
+	if json.Unmarshal([]byte(resp), &st) == nil {
+		fmt.Printf("subscriptions=%d  sequence=%d  retained=%d  dropped=%d\n",
+			st.Subscriptions, st.Sequence, st.Retained, st.Dropped)
+	} else {
+		fmt.Println(resp)
+	}
 	return nil
 }
 
@@ -93,6 +175,9 @@ func cmdPubsubVerify(args []string) error {
 func cmdPubsub(args []string) error {
 	if len(args) > 0 && args[0] == "verify" {
 		return cmdPubsubVerify(args[1:])
+	}
+	if len(args) > 0 && args[0] == "stats" {
+		return cmdPubsubStats(args[1:])
 	}
 	fs := flag.NewFlagSet("pubsub", flag.ExitOnError)
 	cfgPath := fs.String("config", "", "broker config file (required)")
@@ -151,6 +236,29 @@ func cmdPubsub(args []string) error {
 		}
 		defer f.Close()
 		eventLog = pubsub.NewEventLog(f)
+
+		// Optional signed Merkle checkpoints over the event stream.
+		if cfg.EventSigningKey != "" && cfg.EventCheckpoints != "" {
+			signer, err := policy.LoadSigner(cfg.EventSigningKey)
+			if err != nil {
+				return fmt.Errorf("event signing key: %w", err)
+			}
+			cpf, err := os.OpenFile(cfg.EventCheckpoints, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+			if err != nil {
+				return fmt.Errorf("open event checkpoints %s: %w", cfg.EventCheckpoints, err)
+			}
+			defer cpf.Close()
+			cp := policy.NewCheckpointer(signer, cpf, cfg.EventCheckpointEvery,
+				func() string { return time.Now().UTC().Format(time.RFC3339) }, nil)
+			// Continue the checkpoint chain across restarts from the existing file.
+			if data, err := os.ReadFile(cfg.EventCheckpoints); err == nil {
+				if seq, hash, ok := lastCheckpoint(data); ok {
+					cp.SeedFrom(seq, hash)
+				}
+			}
+			eventLog = eventLog.WithCheckpointer(cp)
+			log.Printf("signed event checkpoints: %s (signer %s)", cfg.EventCheckpoints, signer.PubKeyHex())
+		}
 	}
 
 	policyCopy := cfg.Policy // take a stable address for the Authorizer
@@ -175,7 +283,28 @@ func cmdPubsub(args []string) error {
 	signal.Notify(sig, os.Interrupt)
 	<-sig
 	log.Println("pubsub broker shutting down")
+	broker.Close() // stop publishes before sealing the final checkpoint
+	if eventLog != nil {
+		eventLog.Flush()
+	}
 	return nil
+}
+
+// lastCheckpoint parses the last checkpoint line from a checkpoints file, so a
+// restart can continue the checkpoint chain from it.
+func lastCheckpoint(data []byte) (seq int, hash string, ok bool) {
+	lines := bytes.Split(bytes.TrimRight(data, "\n"), []byte("\n"))
+	for i := len(lines) - 1; i >= 0; i-- {
+		if len(bytes.TrimSpace(lines[i])) == 0 {
+			continue
+		}
+		var cp policy.Checkpoint
+		if json.Unmarshal(lines[i], &cp) == nil {
+			return cp.Seq, cp.Hash(), true
+		}
+		return 0, "", false
+	}
+	return 0, "", false
 }
 
 // cmdPublish publishes one event to a broker.

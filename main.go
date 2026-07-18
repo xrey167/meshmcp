@@ -34,6 +34,7 @@ Usage:
   meshmcp push [flags] <peer:port>              push a stdin payload to a peer's inbox (universal clipboard)
   meshmcp pubsub --config <file>                run an identity-gated, audited event bus on the mesh (durable + resumable)
   meshmcp pubsub verify <event-log>             verify a persisted event stream's hash chain
+  meshmcp pubsub stats [flags] <peer:port>      query a running broker (subscribers, sequence, drops)
   meshmcp publish [flags] <peer:port> <topic>   publish an event to a broker topic (stdin or --data; --stream: one per line)
   meshmcp subscribe [flags] <peer:port> <topic...>  stream events from a broker (--since replays, Ctrl-C to stop)
   meshmcp probe [flags] <peer-ip:port>          run an MCP handshake against a backend
