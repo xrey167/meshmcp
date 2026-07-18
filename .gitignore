@@ -39,3 +39,7 @@ audit-signing-key.json
 # OMC operational state (skills are the committable exception)
 .omc/
 !.omc/skills/
+
+# Prebuilt cmd/ backends — build from source, never commit
+/kg
+/memory
