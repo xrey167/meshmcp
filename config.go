@@ -142,6 +142,10 @@ type Backend struct {
 	// capability upgrades a policy-default-deny call to allow; required:true
 	// makes the backend a capability-only surface. Only valid for stdio.
 	Capabilities *CapabilitiesConfig `yaml:"capabilities"`
+	// DLP declares content rules scanned against every tools/call's arguments:
+	// a match can deny the call or emit a data-flow label (F18). Implemented as
+	// a plugin decision hook; only valid for stdio backends with a policy.
+	DLP []policy.DLPSpec `yaml:"dlp"`
 
 	httpURL *url.URL
 }
@@ -216,6 +220,14 @@ func loadConfig(path string) (*Config, error) {
 		case "", "handshake", "full", "backend":
 		default:
 			return nil, fmt.Errorf("backend %q: session_store_mode %q is not one of handshake|full|backend", b.Name, b.SessionStoreMode)
+		}
+		if len(b.DLP) > 0 {
+			if !hasStdio || b.Policy == nil {
+				return nil, fmt.Errorf("backend %q: dlp requires a stdio backend with a policy", b.Name)
+			}
+			if _, err := policy.NewPatternDLP(b.DLP); err != nil {
+				return nil, fmt.Errorf("backend %q: %w", b.Name, err)
+			}
 		}
 		if b.CosignStore != "" && b.Policy == nil {
 			return nil, fmt.Errorf("backend %q: cosign_store requires a policy", b.Name)

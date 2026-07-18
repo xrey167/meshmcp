@@ -330,6 +330,16 @@ func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer) s
 		}
 		broker = secrets.New(store, b.Secrets.Grants, audit)
 	}
+	// One DLP hook per backend, shared across connections (compiled regexes are
+	// stateless). Validated already in loadConfig, so NewPatternDLP won't error.
+	var dlpHook *policy.PatternDLPHook
+	if len(b.DLP) > 0 {
+		h, err := policy.NewPatternDLP(b.DLP)
+		if err != nil {
+			log.Fatalf("backend %q: dlp: %v", b.Name, err)
+		}
+		dlpHook = h
+	}
 	return func(meta session.Meta) (session.Backend, error) {
 		inner, err := exec(meta)
 		if err != nil {
@@ -349,6 +359,9 @@ func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer) s
 		}
 		if capVerifier != nil {
 			f.SetCapabilityVerifier(capVerifier, b.Capabilities.Required)
+		}
+		if dlpHook != nil {
+			f.AddDecisionHook(dlpHook)
 		}
 		return f, nil
 	}
