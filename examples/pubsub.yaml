@@ -24,6 +24,7 @@ listen_port: 9120                      # mesh port publishers/subscribers connec
 allow:
   - "*.netbird.cloud"
 
+name: alerts-bus                       # audience name for signed capability grants (below)
 audit_log: ./pubsub-audit.jsonl        # one hash-chained record per allow/deny decision
 event_log: ./pubsub-events.jsonl       # durable event stream: survives restart, --since replay,
                                        # verify with `meshmcp pubsub verify ./pubsub-events.jsonl`
@@ -73,3 +74,12 @@ limits:
   retain: 4096                         # events kept for --since replay
   publish_rate: 50                     # per-peer publish+subscribe requests/second; 0 = default (200), -1 = unlimited
   publish_burst: 100                   # per-peer burst ceiling
+
+# Signed capability grants: a caller presenting a short-lived token from one of
+# these pinned authority keys may subscribe/publish a topic beyond the default
+# deny — access minted out-of-band without editing the policy above. Mint one:
+#   meshmcp capability issue --key authority.json --subject <wg-key> \
+#     --audience alerts-bus --tool 'metrics.*' --ttl 8h > grant.tok
+# Present it:  meshmcp subscribe --capability @grant.tok <peer>:9120 'metrics.*'
+# trusted_public_keys:
+#   - "AUTHORITY_PUBKEY_HEX"            # from `meshmcp capability keygen`

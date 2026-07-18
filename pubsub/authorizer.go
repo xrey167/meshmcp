@@ -23,6 +23,10 @@ type PubDecision struct {
 	Allow  bool
 	Reason string
 	Labels []string
+	// Explicit is true when a rule matched (allow or deny), false for the
+	// default. A signed capability may upgrade only a non-explicit (default)
+	// deny to allow — never an explicit `allow: false`.
+	Explicit bool
 }
 
 // SubDecision is the authorizer's verdict for a subscribe. Clear is the set of
@@ -37,6 +41,9 @@ type SubDecision struct {
 	Reason   string
 	Clear    []string
 	ClearAll bool
+	// Explicit is true when a rule matched. A capability may upgrade only a
+	// non-explicit (default) deny.
+	Explicit bool
 }
 
 // Authorizer decides whether an identity may publish to or subscribe to a
@@ -99,7 +106,7 @@ type RuleAuthorizer struct {
 // Publish implements Authorizer.
 func (a *RuleAuthorizer) Publish(id Identity, topic string) PubDecision {
 	if r := a.match(id, topic); r != nil {
-		return PubDecision{Allow: r.Allow, Reason: reason(r.Allow, "rule"), Labels: r.emitSet()}
+		return PubDecision{Allow: r.Allow, Reason: reason(r.Allow, "rule"), Labels: r.emitSet(), Explicit: true}
 	}
 	return PubDecision{Allow: a.DefaultAllow, Reason: reason(a.DefaultAllow, "default")}
 }
@@ -107,7 +114,7 @@ func (a *RuleAuthorizer) Publish(id Identity, topic string) PubDecision {
 // Subscribe implements Authorizer.
 func (a *RuleAuthorizer) Subscribe(id Identity, topic string) SubDecision {
 	if r := a.match(id, topic); r != nil {
-		return SubDecision{Allow: r.Allow, Reason: reason(r.Allow, "rule"), Clear: r.clearSet(), ClearAll: r.ClearAll}
+		return SubDecision{Allow: r.Allow, Reason: reason(r.Allow, "rule"), Clear: r.clearSet(), ClearAll: r.ClearAll, Explicit: true}
 	}
 	return SubDecision{Allow: a.DefaultAllow, Reason: reason(a.DefaultAllow, "default")}
 }

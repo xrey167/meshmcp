@@ -35,6 +35,9 @@ type helloFrame struct {
 	Topics       []string `json:"topics,omitempty"`
 	Since        uint64   `json:"since,omitempty"`
 	Backpressure string   `json:"backpressure,omitempty"`
+	// Capability is an optional signed token granting topics beyond the
+	// broker's default-deny policy, for the whole session.
+	Capability string `json:"capability,omitempty"`
 }
 
 type pubFrame struct {
@@ -127,7 +130,7 @@ func (bb *brokerBackend) serve() {
 	case "sub":
 		bb.serveSub(hello, sc)
 	case "pub":
-		bb.servePub(sc)
+		bb.servePub(sc, hello.Capability)
 	case "stats":
 		// Read-only introspection: reply with a stats snapshot and close. Gated
 		// only by the connection ACL (no per-topic authorization needed).
@@ -149,6 +152,7 @@ func (bb *brokerBackend) serveSub(hello helloFrame, sc *bufio.Scanner) {
 		Topics:       hello.Topics,
 		Since:        hello.Since,
 		Backpressure: bp,
+		Capability:   hello.Capability,
 	})
 	if err != nil {
 		bb.writeAck(ackFrame{Error: err.Error()})
@@ -183,7 +187,7 @@ func (bb *brokerBackend) serveSub(hello helloFrame, sc *bufio.Scanner) {
 	}
 }
 
-func (bb *brokerBackend) servePub(sc *bufio.Scanner) {
+func (bb *brokerBackend) servePub(sc *bufio.Scanner, capToken string) {
 	for sc.Scan() {
 		var pf pubFrame
 		if err := json.Unmarshal(sc.Bytes(), &pf); err != nil {
@@ -192,7 +196,7 @@ func (bb *brokerBackend) servePub(sc *bufio.Scanner) {
 			}
 			continue
 		}
-		ev, err := bb.broker.Publish(bb.ident, pf.Topic, pf.Payload, pf.Labels)
+		ev, err := bb.broker.PublishCap(bb.ident, pf.Topic, pf.Payload, pf.Labels, capToken)
 		if err != nil {
 			if bb.writeAck(ackFrame{Error: err.Error()}) != nil {
 				return

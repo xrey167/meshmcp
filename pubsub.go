@@ -50,6 +50,12 @@ type PubsubConfig struct {
 	EventCheckpoints     string `yaml:"event_checkpoints"`
 	EventCheckpointEvery int    `yaml:"event_checkpoint_every"`
 
+	// Signed capability grants: a caller presenting a token from one of these
+	// pinned authority keys can subscribe/publish a topic beyond the default
+	// deny. Name is the audience the grant's `aud` must equal.
+	Name        string   `yaml:"name"`
+	TrustedKeys []string `yaml:"trusted_public_keys"`
+
 	Policy pubsub.RuleAuthorizer `yaml:"policy"` // per-topic authorization
 	Limits pubsub.Limits         `yaml:"limits"` // resource caps
 }
@@ -261,13 +267,27 @@ func cmdPubsub(args []string) error {
 		}
 	}
 
+	// Optional signed-capability grants (short-lived topic access minted
+	// out-of-band, without editing the broker policy).
+	var capVerifier *policy.CapabilityVerifier
+	if len(cfg.TrustedKeys) > 0 {
+		v, err := policy.NewCapabilityVerifier(cfg.TrustedKeys, func() time.Time { return time.Now() })
+		if err != nil {
+			return fmt.Errorf("capabilities: %w", err)
+		}
+		capVerifier = v
+		log.Printf("capability grants accepted from %d authority key(s) for audience %q", len(cfg.TrustedKeys), cfg.Name)
+	}
+
 	policyCopy := cfg.Policy // take a stable address for the Authorizer
 	broker := pubsub.New(pubsub.Options{
-		Authorizer: &policyCopy,
-		Audit:      audit,
-		Events:     eventLog,
-		Seed:       seed,
-		Limits:     cfg.Limits,
+		Authorizer:   &policyCopy,
+		Audit:        audit,
+		Events:       eventLog,
+		Seed:         seed,
+		Name:         cfg.Name,
+		Capabilities: capVerifier,
+		Limits:       cfg.Limits,
 	})
 	defer broker.Close()
 
@@ -315,6 +335,7 @@ func cmdPublish(args []string) error {
 	rawJSON := fs.Bool("json", false, "treat the payload as raw JSON (default: wrap it as a JSON string)")
 	streamMode := fs.Bool("stream", false, "publish one event per stdin line over a single session (a producer feed)")
 	maxBytes := fs.Int64("max-bytes", 1<<20, "reject a payload larger than this (the broker enforces its own cap too)")
+	capFlag := fs.String("capability", "", "present a signed capability grant; @file reads the token from a file")
 	var labels stringList
 	fs.Var(&labels, "label", "data-flow label to attach to the event (repeatable)")
 	if err := fs.Parse(args); err != nil {
@@ -324,9 +345,13 @@ func cmdPublish(args []string) error {
 		return errors.New("usage: meshmcp publish [flags] <peer-ip:port> <topic>")
 	}
 	target, topic := fs.Arg(0), fs.Arg(1)
+	capToken, err := readCapabilityToken(*capFlag)
+	if err != nil {
+		return err
+	}
 
 	if *streamMode {
-		return streamPublish(o, target, topic, labels, *rawJSON, *maxBytes)
+		return streamPublish(o, target, topic, labels, *rawJSON, *maxBytes, capToken)
 	}
 
 	var body []byte
@@ -354,7 +379,7 @@ func cmdPublish(args []string) error {
 		payload = enc
 	}
 
-	hello, _ := json.Marshal(helloFrame{Role: "pub"})
+	hello, _ := json.Marshal(helloFrame{Role: "pub", Capability: capToken})
 	pub, _ := json.Marshal(pubFrame{Topic: topic, Labels: labels, Payload: payload})
 	preamble := append(append(hello, '\n'), append(pub, '\n')...)
 
@@ -405,7 +430,7 @@ func cmdPublish(args []string) error {
 // streamPublish is the producer path: it reads stdin line by line and publishes
 // each line as one event over a single session (one mesh join, one broker
 // connection), so a continuous feed does not pay the join cost per event.
-func streamPublish(o *meshOptions, target, topic string, labels stringList, rawJSON bool, maxBytes int64) error {
+func streamPublish(o *meshOptions, target, topic string, labels stringList, rawJSON bool, maxBytes int64, capToken string) error {
 	o.BlockInbound = true
 	client, err := startMesh(o, os.Stderr)
 	if err != nil {
@@ -417,7 +442,7 @@ func streamPublish(o *meshOptions, target, topic string, labels stringList, rawJ
 	st := &streamPubSink{r: pr}
 	go func() {
 		defer pw.Close()
-		hello, _ := json.Marshal(helloFrame{Role: "pub"})
+		hello, _ := json.Marshal(helloFrame{Role: "pub", Capability: capToken})
 		if _, err := pw.Write(append(hello, '\n')); err != nil {
 			return
 		}
@@ -519,6 +544,7 @@ func cmdSubscribe(args []string) error {
 	o := meshFlags(fs)
 	since := fs.Uint64("since", 0, "replay retained events with sequence greater than this first")
 	bp := fs.String("backpressure", "drop_oldest", "buffer-full policy: drop_oldest or disconnect")
+	capFlag := fs.String("capability", "", "present a signed capability grant; @file reads the token from a file")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -528,10 +554,14 @@ func cmdSubscribe(args []string) error {
 	if _, err := pubsub.ParseBackpressure(*bp); err != nil {
 		return err
 	}
+	capToken, err := readCapabilityToken(*capFlag)
+	if err != nil {
+		return err
+	}
 	target := fs.Arg(0)
 	topics := fs.Args()[1:]
 
-	hello, _ := json.Marshal(helloFrame{Role: "sub", Topics: topics, Since: *since, Backpressure: *bp})
+	hello, _ := json.Marshal(helloFrame{Role: "sub", Topics: topics, Since: *since, Backpressure: *bp, Capability: capToken})
 	preamble := append(hello, '\n')
 
 	out := os.Stdout

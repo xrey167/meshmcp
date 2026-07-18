@@ -405,6 +405,69 @@ func TestEmitInternal(t *testing.T) {
 	}
 }
 
+// TestCapabilityGrants verifies a signed capability upgrades a default-deny to
+// allow for the right subject/audience/topic, and never for the wrong ones or
+// over an explicit deny.
+func TestCapabilityGrants(t *testing.T) {
+	signer, err := policy.GenerateSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := policy.NewCapabilityVerifier([]string{signer.PubKeyHex()}, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Deny by default, with one explicit deny on secret.*.
+	auth := &RuleAuthorizer{Rules: []TopicRule{{Topics: []string{"secret.*"}, Allow: false}}}
+	b := New(Options{Authorizer: auth, Name: "bus1", Capabilities: verifier})
+	defer b.Close()
+
+	mint := func(subject, audience string, topics []string) string {
+		tok, err := signer.IssueCapability(policy.CapabilityClaims{
+			Subject: subject, Audience: audience, Tools: topics,
+			ExpiresAt: time.Now().Add(time.Hour).Unix(),
+		}, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tok
+	}
+
+	// No capability → denied.
+	if _, err := b.Subscribe(id("alice"), SubOptions{Topics: []string{"legal.contracts"}}); !errors.Is(err, ErrDenied) {
+		t.Fatalf("no-capability subscribe: got %v want ErrDenied", err)
+	}
+
+	// A valid grant lets alice subscribe and publish legal.*.
+	tok := mint("alice", "bus1", []string{"legal.*"})
+	sub, err := b.Subscribe(id("alice"), SubOptions{Topics: []string{"legal.contracts"}, Capability: tok})
+	if err != nil {
+		t.Fatalf("capability subscribe should pass: %v", err)
+	}
+	defer sub.Close()
+	if _, err := b.PublishCap(id("alice"), "legal.contracts", nil, nil, tok); err != nil {
+		t.Fatalf("capability publish should pass: %v", err)
+	}
+	if ev := recv(t, sub); ev.Topic != "legal.contracts" {
+		t.Fatalf("delivered event: %+v", ev)
+	}
+
+	// Wrong subject, wrong topic, wrong audience — all refused.
+	if _, err := b.Subscribe(id("alice"), SubOptions{Topics: []string{"legal.x"}, Capability: mint("mallory", "bus1", []string{"legal.*"})}); !errors.Is(err, ErrDenied) {
+		t.Fatal("capability bound to another subject must not authorize alice")
+	}
+	if _, err := b.Subscribe(id("alice"), SubOptions{Topics: []string{"legal.x"}, Capability: mint("alice", "bus1", []string{"finance.*"})}); !errors.Is(err, ErrDenied) {
+		t.Fatal("capability for a different topic must not authorize legal.x")
+	}
+	if _, err := b.Subscribe(id("alice"), SubOptions{Topics: []string{"legal.x"}, Capability: mint("alice", "other-bus", []string{"legal.*"})}); !errors.Is(err, ErrDenied) {
+		t.Fatal("capability for a different audience must not authorize here")
+	}
+	// A capability cannot override an explicit deny (secret.*).
+	if _, err := b.Subscribe(id("alice"), SubOptions{Topics: []string{"secret.keys"}, Capability: mint("alice", "bus1", []string{"secret.*"})}); !errors.Is(err, ErrDenied) {
+		t.Fatal("capability must not override an explicit allow:false")
+	}
+}
+
 func TestResourceCaps(t *testing.T) {
 	b := New(Options{Authorizer: AllowAll{}, Limits: Limits{MaxTopicsPerSub: 2, MaxSubs: 2, MaxTopicLen: 8}})
 

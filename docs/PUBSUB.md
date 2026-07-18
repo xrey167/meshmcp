@@ -92,6 +92,26 @@ meshmcp pubsub verify --checkpoints pubsub-checkpoints.jsonl --pubkey <hex> pubs
 # OK: 12043 event(s), hash chain + 94 signed checkpoint(s) verified (through seq 12043)
 ```
 
+## Signed capability grants
+
+Beyond the static `policy:` rules, a caller can present a **short-lived signed
+capability** that grants a topic beyond the default-deny — access minted
+out-of-band without editing the broker config. Set `name:` (the audience) and
+`trusted_public_keys:` (pinned authorities) on the broker, then:
+
+```sh
+meshmcp capability keygen --out authority.json                     # once
+meshmcp capability issue --key authority.json --subject <wg-key> \
+  --audience alerts-bus --tool 'metrics.*' --ttl 8h > grant.tok
+meshmcp subscribe --capability @grant.tok 100.x.y.z:9120 'metrics.*'
+```
+
+Like tool capabilities, a grant is bound to the caller's WireGuard key
+(subject), one broker (audience), a set of topic globs, and a ≤24h window, and
+it can **only upgrade a default-deny — never an explicit `allow: false`**. A
+capability-granted topic carries no data-flow label clearance (it receives only
+unlabeled events): the grant conveys access, not taint clearance.
+
 ## Introspection
 
 Query a running broker for a live snapshot:

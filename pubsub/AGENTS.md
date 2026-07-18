@@ -12,7 +12,7 @@ meshmcp's identity-native event fabric: a publish/subscribe bus where every even
 | `pubsub.go` | Package doc, `Identity`, `Event` + the tamper-evident hash chain (`VerifyChain`), `Backpressure` policy, sentinel errors. |
 | `broker.go` | `Broker`: authorize → rate-limit → seal (seq + hash) → retain → fan out. Resource `Limits`, `Publish`/`Subscribe`/`Close`, non-blocking `deliverLocked`, audit integration. |
 | `subscription.go` | `Subscription`: the per-subscriber delivery stream (`C()`), label-clearance `accepts`, drop/truncation counters. |
-| `authorizer.go` | `Authorizer` interface; `RuleAuthorizer` (deny-by-default topic ACL with emit/clear labels, YAML-configured); `AllowAll`. |
+| `authorizer.go` | `Authorizer` interface; `RuleAuthorizer` (deny-by-default topic ACL with emit/clear labels, YAML-configured); `AllowAll`. Decisions carry `Explicit` so a signed capability upgrades only a *default* deny. |
 | `ratelimit.go` | Per-publisher token-bucket limiter with an injected clock. |
 | `ring.go` | Bounded retention ring for `--since` replay; surfaces `truncated` rather than silently short-serving. |
 | `eventlog.go` | Durable append-only event log: `EventLog` (append sink + optional signed Merkle `Checkpointer`) + `LoadEvents` (chain-verified, torn-tail-tolerant) + `VerifyCheckpoints`. Seeds `seq`/`prev`/ring on restart via `Options.Seed`; the chain is externally verifiable and, with a signing key, non-repudiable. |

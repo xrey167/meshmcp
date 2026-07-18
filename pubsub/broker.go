@@ -101,6 +101,15 @@ type Options struct {
 	// resume after a restart: the sequence and hash chain continue from its
 	// last event, and its tail preloads the replay ring. Nil for a fresh bus.
 	Seed []Event
+	// Name is the broker's audience name — what a signed capability's `aud`
+	// must equal for it to grant a topic here. Required only if Capabilities
+	// is set.
+	Name string
+	// Capabilities, if set, lets a caller presenting a valid signed capability
+	// (subject-bound to its WireGuard key, audience == Name, topic in the
+	// grant, unexpired) upgrade a DEFAULT-deny to allow — never an explicit
+	// `allow: false`. Mirrors the tool-capability semantics.
+	Capabilities *policy.CapabilityVerifier
 	// Now supplies the clock (for event timestamps and rate limiting).
 	// Defaults to time.Now; injected in tests for determinism.
 	Now    func() time.Time
@@ -116,6 +125,8 @@ type Broker struct {
 	auth   Authorizer
 	audit  *policy.AuditLog
 	events *EventLog
+	name   string
+	caps   *policy.CapabilityVerifier
 	now    func() time.Time
 	lim    *limiter
 	lm     Limits
@@ -166,6 +177,8 @@ func New(opts Options) *Broker {
 		auth:    auth,
 		audit:   opts.Audit,
 		events:  opts.Events,
+		name:    opts.Name,
+		caps:    opts.Capabilities,
 		now:     now,
 		lim:     newLimiter(lm.PublishRate, lm.PublishBurst, now),
 		lm:      lm,
@@ -205,11 +218,32 @@ func (denyAll) Subscribe(Identity, string) SubDecision {
 	return SubDecision{Allow: false, Reason: "no authorizer configured"}
 }
 
-// Publish authorizes and emits an event to topic. extraLabels are additional
-// data-flow labels the publisher declares; they are unioned with the
-// authorizer's emit labels (a publisher may add containment, never remove it).
-// It returns the sealed Event (with Seq and Hash) on success.
+// capAllows reports whether a presented signed capability grants topic to id
+// on this broker (subject-bound, audience == Name, unexpired). Used to upgrade
+// a default-deny; the caller must have already checked the deny was not explicit.
+func (b *Broker) capAllows(id Identity, topic, token string) bool {
+	if b.caps == nil || token == "" {
+		return false
+	}
+	_, err := b.caps.Verify(token, id.Key, b.name, topic)
+	return err == nil
+}
+
+// Publish authorizes and emits an event to topic (see PublishCap for the
+// capability-carrying form). extraLabels are additional data-flow labels the
+// publisher declares; they are unioned with the authorizer's emit labels (a
+// publisher may add containment, never remove it).
 func (b *Broker) Publish(id Identity, topic string, payload json.RawMessage, extraLabels []string) (*Event, error) {
+	return b.publish(id, topic, payload, extraLabels, "")
+}
+
+// PublishCap is Publish with a signed capability token that can upgrade a
+// default-deny on the topic to allow.
+func (b *Broker) PublishCap(id Identity, topic string, payload json.RawMessage, extraLabels []string, capToken string) (*Event, error) {
+	return b.publish(id, topic, payload, extraLabels, capToken)
+}
+
+func (b *Broker) publish(id Identity, topic string, payload json.RawMessage, extraLabels []string, capToken string) (*Event, error) {
 	// Identity is cryptographic, never claimed: a caller whose WireGuard key
 	// the transport could not prove has no identity to authorize. Fail closed
 	// before anything else, so an unproven caller can never match a rule with
@@ -236,8 +270,14 @@ func (b *Broker) Publish(id Identity, topic string, payload json.RawMessage, ext
 	}
 	dec := b.auth.Publish(id, topic)
 	if !dec.Allow {
-		b.record(id, "pubsub/publish", topic, "deny", dec.Reason, nil)
-		return nil, fmt.Errorf("%w: publish %q: %s", ErrDenied, topic, dec.Reason)
+		// A signed capability may upgrade a DEFAULT deny (never an explicit
+		// allow: false) — the same posture as tool capabilities.
+		if !dec.Explicit && b.capAllows(id, topic, capToken) {
+			dec = PubDecision{Allow: true, Reason: "capability grant"}
+		} else {
+			b.record(id, "pubsub/publish", topic, "deny", dec.Reason, nil)
+			return nil, fmt.Errorf("%w: publish %q: %s", ErrDenied, topic, dec.Reason)
+		}
 	}
 	labels := unionLabels(dec.Labels, extraLabels)
 	// Cap labels: retention holds them, so an uncapped label set would let a
@@ -362,6 +402,11 @@ type SubOptions struct {
 	Topics       []string     // topic globs (at least one)
 	Backpressure Backpressure // full-buffer policy
 	Since        uint64       // >0 replays retained events with Seq > Since first
+	// Capability is an optional signed token that can upgrade a default-deny on
+	// a topic to allow. A capability-granted topic carries no label clearance
+	// (it receives only unlabeled events) — the grant conveys access, not taint
+	// clearance.
+	Capability string
 }
 
 // Subscribe authorizes and opens a subscription. Every topic is authorized
@@ -392,8 +437,14 @@ func (b *Broker) Subscribe(id Identity, opts SubOptions) (*Subscription, error) 
 		}
 		dec := b.auth.Subscribe(id, t)
 		if !dec.Allow {
-			b.record(id, "pubsub/subscribe", t, "deny", dec.Reason, nil)
-			return nil, fmt.Errorf("%w: subscribe %q: %s", ErrDenied, t, dec.Reason)
+			// A signed capability may upgrade a DEFAULT deny; the granted topic
+			// carries no label clearance (empty Clear, not ClearAll).
+			if !dec.Explicit && b.capAllows(id, t, opts.Capability) {
+				dec = SubDecision{Allow: true, Reason: "capability grant"}
+			} else {
+				b.record(id, "pubsub/subscribe", t, "deny", dec.Reason, nil)
+				return nil, fmt.Errorf("%w: subscribe %q: %s", ErrDenied, t, dec.Reason)
+			}
 		}
 		if dec.ClearAll {
 			continue // universe: does not constrain the intersection
