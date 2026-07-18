@@ -283,6 +283,21 @@ concentrated here.
 
 *Flagship F13–F32 (20) + supporting S11–S60 (50) = 70 grounded items.*
 
+### F33 · Client hook adapters — govern every LLM tool call
+An LLM client (Claude Code, Cursor, Codex) calls **local** tools — `Bash`, `Edit`, native MCP —
+that never touch the mesh. Every serious client now exposes a **PreToolUse-style external-command
+hook** that hands over the tool + arguments and takes back an allow/deny/ask verdict. `meshmcp hook`
+becomes the decision engine behind it: it reads the client's hook JSON on stdin, evaluates the call
+against the **same local policy engine + DLP + audit chain** the gateway uses (no mesh join), and
+writes the client-specific response — so the firewall governs *every* tool the model calls, not just
+mesh backends, and `meshmcp status` shows the model's local activity in the tamper-evident ledger.
+`meshmcp hook install` prints the per-client settings snippet. (Claude Code `PreToolUse`, Cursor
+`beforeShellExecution`/`beforeMCPExecution`, Codex `PermissionRequest`; Claude Desktop / Windsurf
+have no lifecycle hook, so they're governed via the transport path `meshmcp connect`.)
+> **Why it's revolutionary:** the agent firewall stops at the mesh boundary no longer — it reaches
+> *inside* the LLM client's own tool loop, so a jailbroken agent can't run a local shell or edit a
+> secret file without a policy verdict and an audit record, in whatever client the human is driving.
+
 ---
 
 ## Recommended build order
