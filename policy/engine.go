@@ -10,9 +10,16 @@ import (
 
 // RateLimit caps how often an identity may make calls matching a rule. Max
 // tokens refill over Per (e.g. max: 10, per: "1m"). Empty Per means per second.
+//
+// Cost generalizes a rate limit into a cost/quota budget: each matching call
+// consumes Cost tokens instead of 1, so an expensive tool (an LLM-backed
+// retrieval, a large embedding batch) can be weighted against a per-identity
+// budget — e.g. {max: 1000, per: "24h", cost: 10} is a 100-call/day budget, or
+// a 1000-unit/day spend cap if Cost reflects price. Cost <= 0 means 1.
 type RateLimit struct {
-	Max int    `yaml:"max"`
-	Per string `yaml:"per"`
+	Max  int    `yaml:"max"`
+	Per  string `yaml:"per"`
+	Cost int    `yaml:"cost,omitempty"`
 }
 
 func (rl *RateLimit) window() time.Duration {
@@ -246,8 +253,12 @@ func (e *Engine) allowRate(ruleID int, peerKey string, rl RateLimit, now time.Ti
 			b.last = now
 		}
 	}
-	if b.tokens >= 1 {
-		b.tokens--
+	cost := float64(rl.Cost)
+	if cost <= 0 {
+		cost = 1
+	}
+	if b.tokens >= cost {
+		b.tokens -= cost
 		return true
 	}
 	return false

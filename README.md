@@ -222,6 +222,11 @@ Watch it live with `meshmcp dash --audit audit.jsonl`; re-run a past session wit
 | `federate --config <f>` | Cross-org boundary: bridge granted tools between meshes, identity-mapped & audited. |
 | `connect [flags] <peer:port>` | Stdio ⇄ remote stdio bridge for MCP client configs (`--resumable`). |
 | `forward <local> <peer:port>` | Forward a local TCP port to a mesh peer (for HTTP backends). |
+| `drop <peer:port> <file...>` | **AirDrop** files to a mesh peer by identity — resumable, E2E-encrypted, policy-gated, audited (`--config` runs a receiver). |
+| `peers` | List reachable mesh identities — the "who can I drop to" view. |
+| `fetch <peer:port> <sha256>` | Fetch a blob by content hash from a peer's content-addressed store. |
+| `push <peer:port>` | Push a stdin payload (clipboard / a task) to a peer's inbox over the resumable channel. |
+| `graphrag --config <f>` | Serve `graph_search`: vector retrieval + knowledge-graph entity expansion over the mesh. |
 | `ls · call · read · prompt <peer:port>` | Drive tools / resources / prompts from the terminal. |
 | `insight profile·recommend·simulate·detect` | Turn the audit stream into policy; detect drift. |
 | `mcp [flags]` | Run meshmcp **as an MCP server** — add it to Claude Code / Codex to operate the mesh (network, call tools, run, approve). |
@@ -264,7 +269,8 @@ mcp/         dependency-free MCP server framework (tools · resources · prompts
 mcpclient/   MCP client over any transport (used by the router, orchestrator, CLI)
 protocol/    granular Go models for the MCP wire protocol — one package per domain (2025-06-18 base · draft · extensions · client helpers)
 registry/    file-based discovery registry
-cmd/         mcpserver (demo) · mcpecho · mcphttp
+embed/       local, deterministic text embedder (shared by RAG + semantic policy)
+cmd/         mcpserver (demo) · mcpecho · mcphttp · kg (provenance knowledge graph) · vectors (zero-exposure RAG) · memory (agent-memory fabric)
 *.go         the meshmcp binary: serve · router · orchestrate · control · federate · insight · … · CLI
 examples/    ready-to-adapt configs        docs/  design docs + open specs
 ```
@@ -284,6 +290,7 @@ examples/    ready-to-adapt configs        docs/  design docs + open specs
 - **[docs/MOBILE.md](docs/MOBILE.md)** — how the whole stack could reach phones (a phone is a human identity on the mesh — the natural co-sign approver).
 - **[examples/hitl/](examples/hitl/)** — route any agent framework's approval hook (e.g. OpenAI Agents SDK `ShellTool.on_approval`) to the mesh approver — approve from your phone, identity-attributed and audited.
 - **[docs/HA-TOOLMESH.md](docs/HA-TOOLMESH.md)** · **[docs/reference.md](docs/reference.md)** · **[docs/VISION.md](docs/VISION.md)** — HA design, full reference, roadmap.
+- **[docs/IDEAS.md](docs/IDEAS.md)** — the payload layer: a provenance-native knowledge graph (`cmd/kg`), zero-exposure RAG (`cmd/vectors`), an agent-memory fabric (`cmd/memory`), `meshmcp drop` (AirDrop across instances) + content-addressed `fetch`, taint-contained retrieval, signed provenance receipts, and more — 22 enhancements grounded in the existing primitives (see `examples/knowledge.yaml`, `drop.yaml`, `rag-firewall.yaml`).
 
 ## Build & test
 

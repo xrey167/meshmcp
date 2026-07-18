@@ -1,0 +1,62 @@
+# Taint-contained RAG (F7): network-layer prompt-injection defense for retrieval.
+#
+# A `search` over a corpus can pull in untrusted / attacker-controlled text.
+# Marking it a taint source means: once an agent has retrieved, the session is
+# tainted, and any egress or write tool is blocked at the gateway — below the
+# model, where no jailbreak in the retrieved text can reach. This is the first
+# RAG stack whose injection containment is enforced by the network, not the LLM.
+#
+#   meshmcp serve --config examples/rag-firewall.yaml
+
+mesh:
+  device_name: meshmcp-rag-fw
+  setup_key_env: NB_SETUP_KEY
+  config_path: ./rag-fw-nb.json
+  log_level: warn
+
+audit_log: ./rag-fw-audit.jsonl
+
+backends:
+  - name: vectors
+    port: 9121
+    stdio: ["./cmd/vectors/vectors.exe", "--index", "./vectors.jsonl"]
+    policy:
+      default_allow: false
+      rules:
+        # Retrieval brings untrusted corpus text into the session → taint it.
+        - peers: ["*"]
+          tools: ["search"]
+          allow: true
+          taint_source: true
+
+        # Indexing is not a taint source (trusted content ingestion).
+        - peers: ["pubkey:WRITER_KEY=="]
+          tools: ["upsert", "embed"]
+          allow: true
+
+  - name: fs
+    port: 9122
+    stdio: ["./cmd/mcpserver/mcpserver.exe", "--root", "./workspace"]
+    policy:
+      default_allow: false
+      rules:
+        - peers: ["*"]
+          tools: ["read_*", "list_dir"]
+          allow: true
+        # Writing after a tainted retrieval is refused — prompt-injection guard.
+        - peers: ["*"]
+          tools: ["write_file"]
+          allow: true
+          taint_guard: true
+
+  - name: web
+    port: 9123
+    stdio: ["./cmd/mcpserver/mcpserver.exe", "--root", "./workspace"]
+    policy:
+      default_allow: false
+      rules:
+        # Exfiltration path: blocked once the session carries retrieved data.
+        - peers: ["*"]
+          tools: ["fetch", "post_external"]
+          allow: true
+          taint_guard: true

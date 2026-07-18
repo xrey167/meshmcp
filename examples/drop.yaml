@@ -1,0 +1,28 @@
+# meshmcp drop receiver — AirDrop across mesh instances.
+#
+# Run it:   meshmcp drop --config examples/drop.yaml
+# Send to it from any mesh peer:
+#           meshmcp drop <this-peer-mesh-ip>:9110 ./report.pdf ./photo.png
+#
+# The receiver joins the mesh, listens only on the mesh interface (no public
+# port), admits only senders matching `allow`, verifies each file's content
+# hash, and writes one tamper-evident audit record per received file.
+
+mesh:
+  device_name: meshmcp-drop
+  setup_key_env: NB_SETUP_KEY        # env var holding the NetBird setup key
+  config_path: ./drop-nb.json        # persist identity: same mesh IP across restarts
+  log_level: warn
+
+listen_port: 9110                    # mesh port senders connect to
+
+dir: ./inbox                         # received files land here (created if absent)
+
+# Only these identities may drop to us. Empty = any mesh peer (the mesh is
+# already the outer boundary). Same vocabulary as the agent firewall:
+allow:
+  - "laptop-*.netbird.cloud"         # FQDN glob
+  - "pubkey:AbCdEf0123...="          # or an exact WireGuard public key
+
+audit_log: ./drop-audit.jsonl        # one hash-chained record per file (who sent what)
+max_bytes: 1073741824                # per-file cap (1 GiB); 0 = unlimited

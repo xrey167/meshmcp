@@ -30,6 +30,12 @@ type AuditRecord struct {
 	Reason   string `json:"reason,omitempty"`
 	Rule     int    `json:"rule"` // matching rule index, -1 for default
 
+	// Provenance carries the content refs (e.g. retrieved document / triple
+	// hashes) that produced an answer — a signed provenance receipt for
+	// verifiable AI answers. Optional and omitempty, so it is covered by the
+	// hash chain and signed checkpoints without changing existing records.
+	Provenance []string `json:"provenance,omitempty"`
+
 	// Tamper-evidence chain (always present once written).
 	Seq      int    `json:"seq"`
 	PrevHash string `json:"prev_hash"`

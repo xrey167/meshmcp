@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"sync"
 	"time"
@@ -14,6 +17,7 @@ import (
 	"meshmcp/mcp"
 	"meshmcp/mcpclient"
 	"meshmcp/policy"
+	"meshmcp/session"
 )
 
 // cmdMCP runs meshmcp itself as an MCP server, so Claude Code or Codex can add
@@ -110,6 +114,7 @@ func appObj(props map[string]any, req ...string) map[string]any {
 	return m
 }
 func appStr(d string) map[string]any { return map[string]any{"type": "string", "description": d} }
+func appNum(d string) map[string]any { return map[string]any{"type": "number", "description": d} }
 func appAnyObj(d string) map[string]any {
 	return map[string]any{"type": "object", "description": d}
 }
@@ -187,6 +192,86 @@ func (a *meshApp) register(s *mcp.Server) {
 		}),
 		Handler: a.toolVerify,
 	})
+	s.AddTool(mcp.Tool{
+		Name:        "drop_file",
+		Description: "AirDrop a local file to a peer's drop receiver over the mesh (resumable, audited). target is peer-ip:port.",
+		InputSchema: appObj(map[string]any{
+			"target": appStr("drop receiver mesh address, e.g. 100.64.0.5:9110"),
+			"path":   appStr("local file path to send"),
+		}, "target", "path"),
+		Handler: a.toolDropFile,
+	})
+	s.AddTool(mcp.Tool{
+		Name:        "show_retrievals",
+		Description: "Show retrieval receipts from the audit log: which documents/triples produced answers (provenance), newest first. Answers 'what did the agent read?'.",
+		InputSchema: appObj(map[string]any{"limit": appNum("max receipts to show (default 20)")}),
+		Handler:     a.toolShowRetrievals,
+	})
+}
+
+// toolDropFile streams a local file to a peer's drop receiver over the mesh.
+func (a *meshApp) toolDropFile(ctx context.Context, args json.RawMessage) (mcp.ToolResult, error) {
+	var p struct{ Target, Path string }
+	if err := json.Unmarshal(args, &p); err != nil || p.Target == "" || p.Path == "" {
+		return errTxt("target and path are required"), nil
+	}
+	if a.mesh == nil {
+		return errTxt("not joined to the mesh (set NB_SETUP_KEY)"), nil
+	}
+	if _, err := os.Stat(p.Path); err != nil {
+		return errTxt("cannot send %s: %v", p.Path, err), nil
+	}
+	pr, pw := io.Pipe()
+	go func() { pw.CloseWithError(sendFiles(pw, []string{p.Path})) }()
+	dial := func(ctx context.Context) (net.Conn, error) { return a.mesh.Dial(ctx, "tcp", p.Target) }
+	if err := session.NewClient(dial, nil).Run(ctx, sendStream{r: pr}); err != nil {
+		return errTxt("drop to %s failed: %v", p.Target, err), nil
+	}
+	return txt(fmt.Sprintf("dropped %s to %s", p.Path, p.Target)), nil
+}
+
+// toolShowRetrievals surfaces provenance receipts from the audit log.
+func (a *meshApp) toolShowRetrievals(_ context.Context, args json.RawMessage) (mcp.ToolResult, error) {
+	if a.auditPath == "" {
+		return errTxt("no --audit configured"), nil
+	}
+	var p struct{ Limit int }
+	_ = json.Unmarshal(args, &p)
+	if p.Limit <= 0 {
+		p.Limit = 20
+	}
+	f, err := os.Open(a.auditPath)
+	if err != nil {
+		return errTxt("open audit log: %v", err), nil
+	}
+	defer f.Close()
+
+	var receipts []map[string]any
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 1<<20), 8<<20)
+	for sc.Scan() {
+		if len(sc.Bytes()) == 0 {
+			continue
+		}
+		var r policy.AuditRecord
+		if err := json.Unmarshal(sc.Bytes(), &r); err != nil {
+			continue
+		}
+		if len(r.Provenance) == 0 {
+			continue
+		}
+		receipts = append(receipts, map[string]any{
+			"seq": r.Seq, "time": r.Time, "peer": r.Peer, "tool": r.Tool, "retrieved": r.Provenance,
+		})
+	}
+	// Newest first, capped.
+	for i, j := 0, len(receipts)-1; i < j; i, j = i+1, j-1 {
+		receipts[i], receipts[j] = receipts[j], receipts[i]
+	}
+	if len(receipts) > p.Limit {
+		receipts = receipts[:p.Limit]
+	}
+	return jsonTxt(map[string]any{"count": len(receipts), "receipts": receipts}), nil
 }
 
 func (a *meshApp) toolNetwork(_ context.Context, _ json.RawMessage) (mcp.ToolResult, error) {

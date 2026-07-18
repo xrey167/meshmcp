@@ -50,14 +50,14 @@ type EdgeStat struct {
 
 // Summary is the analyzed view of an audit log for the dashboard.
 type Summary struct {
-	Records  int          `json:"records"`
-	Allowed  int          `json:"allowed"`
-	Denied   int          `json:"denied"`
-	Cosign   int          `json:"cosign"`
-	Chain    VerifyResult `json:"chain"`
-	Peers    []PeerStat   `json:"peers"`
-	Tools    []ToolStat   `json:"tools"`
-	Edges    []EdgeStat   `json:"edges"`
+	Records  int           `json:"records"`
+	Allowed  int           `json:"allowed"`
+	Denied   int           `json:"denied"`
+	Cosign   int           `json:"cosign"`
+	Chain    VerifyResult  `json:"chain"`
+	Peers    []PeerStat    `json:"peers"`
+	Tools    []ToolStat    `json:"tools"`
+	Edges    []EdgeStat    `json:"edges"`
 	Recent   []AuditRecord `json:"recent"` // most-recent-first, capped
 	Backends []string      `json:"backends"`
 	// BackendStats is the per-backend rollup (the "server tiles" of the room).

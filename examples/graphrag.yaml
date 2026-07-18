@@ -1,0 +1,17 @@
+# GraphRAG bridge (S3): serve a graph_search tool that combines the vector
+# store (F3) and the knowledge graph (F2), both reached over the mesh.
+#
+#   meshmcp graphrag --config examples/graphrag.yaml
+#
+# Then from any peer:
+#   meshmcp call <graphrag-ip>:9140 graph_search --arg query="who leads payments"
+
+mesh:
+  device_name: meshmcp-graphrag
+  setup_key_env: NB_SETUP_KEY
+  config_path: ./graphrag-nb.json
+  log_level: warn
+
+listen_port: 9140
+vectors: "100.0.0.20:9121"   # mesh address of the vectors backend
+kg: "100.0.0.20:9120"        # mesh address of the kg backend

@@ -22,9 +22,9 @@ type Caller struct {
 // reach the backend. Reads (backend -> peer) pass through, interleaved
 // with any synthetic denial responses on whole-line boundaries.
 type Filter struct {
-	inner   io.ReadWriteCloser
-	eng     *Engine
-	audit   *AuditLog
+	inner       io.ReadWriteCloser
+	eng         *Engine
+	audit       *AuditLog
 	tracer      *Tracer
 	secrets     SecretResolver
 	pending     PendingStore

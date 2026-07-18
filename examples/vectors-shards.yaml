@@ -1,0 +1,28 @@
+# Embedding / vector-shard compute mesh (S7).
+#
+# Run several `vectors` backends as dark mesh peers (each a shard of the corpus,
+# or replicas of the same corpus), then put a `meshmcp router` in front to
+# load-balance and fail over across them — the router already does round-robin
+# LB, health-based failover, and dynamic discovery across replica addresses.
+# The corpus scales horizontally with zero exposed ports.
+#
+#   meshmcp router --config examples/vectors-shards.yaml
+#
+# Callers hit one endpoint; the router spreads `search` across the shards:
+#   meshmcp call <router-ip>:9130 vectors.search --arg query="mesh knowledge"
+
+mesh:
+  device_name: meshmcp-vectors-router
+  setup_key_env: NB_SETUP_KEY
+  config_path: ./vectors-router-nb.json
+  log_level: warn
+
+listen_port: 9130
+
+upstreams:
+  # One namespaced upstream, three interchangeable replica addresses: the
+  # router round-robins and fails over across them.
+  vectors:
+    - "100.0.0.11:9121"   # shard/replica A
+    - "100.0.0.12:9121"   # shard/replica B
+    - "100.0.0.13:9121"   # shard/replica C

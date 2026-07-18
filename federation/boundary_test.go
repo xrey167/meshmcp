@@ -11,7 +11,7 @@ import (
 func testBoundary(audit *policy.AuditLog) *Boundary {
 	return NewBoundary(
 		[]Grant{
-			{Org: "acme", Tools: []string{"read_*", "search"}},
+			{Org: "acme", Tools: []string{"read_*", "search"}, Corpora: []string{"public", "shared-*"}},
 			{Org: "globex", Tools: []string{}}, // known org, but no tools granted
 		},
 		[]Mapping{
@@ -38,6 +38,32 @@ func TestOrgIdentityMapping(t *testing.T) {
 	}
 	if p := b.Principal("globex"); p != "globex" {
 		t.Fatalf("globex principal should fall back to org id, got %q", p)
+	}
+}
+
+func TestCrossOrgCorpusGrant(t *testing.T) {
+	var buf bytes.Buffer
+	audit := policy.NewAuditLog(&buf, func() string { return "T" })
+	b := testBoundary(audit)
+
+	// acme granted "public" and "shared-*" corpora.
+	if ok, _ := b.CheckCorpus("acme", "public"); !ok {
+		t.Fatal("acme should query the public corpus")
+	}
+	if ok, _ := b.CheckCorpus("acme", "shared-legal"); !ok {
+		t.Fatal("acme should query a shared-* subgraph")
+	}
+	// An ungranted corpus is blocked.
+	if ok, reason := b.CheckCorpus("acme", "private"); ok || !strings.Contains(reason, "not granted") {
+		t.Fatalf("acme private corpus should be blocked, got ok=%v reason=%q", ok, reason)
+	}
+	// globex has no corpus grant at all → blocked.
+	if ok, _ := b.CheckCorpus("globex", "public"); ok {
+		t.Fatal("globex has no corpus grant; must be blocked")
+	}
+	// Every corpus crossing is audited on the boundary.
+	if n := strings.Count(buf.String(), `"method":"federation/corpus/query"`); n != 4 {
+		t.Fatalf("expected 4 audited corpus crossings, got %d", n)
 	}
 }
 
