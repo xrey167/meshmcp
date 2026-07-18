@@ -114,13 +114,11 @@ func cmdServe(args []string) error {
 		}
 		log.Printf("backend %q: %s on mesh port %d (allow: %s%s)", b.Name, b.kind(), b.Port, allow, policyNote)
 
-		// The backend factory (subprocess + policy/trace filter) applies only
-		// to stdio backends; HTTP backends are reverse-proxied and never use it.
-		var factory session.BackendFactory
-		if b.HTTP == "" {
-			// Prefer the gateway-wide shared ledger for policy backends; fall
-			// back to a per-backend audit sink when none is configured.
-			audit := sharedAudit
+		// Resolve the audit sink for any policy-bearing backend (stdio OR http):
+		// prefer the gateway-wide shared ledger, else a per-backend sink.
+		var audit *policy.AuditLog
+		if b.Policy != nil || b.HTTP == "" {
+			audit = sharedAudit
 			if audit == nil || b.Policy == nil {
 				var err error
 				audit, err = auditSink(b)
@@ -136,21 +134,31 @@ func cmdServe(args []string) error {
 					auditLogs = append(auditLogs, audit)
 				}
 			}
+		}
+
+		// stdio backends run through the byte-stream Filter; HTTP backends with
+		// a policy run through the request-level httpEnforcer (F16).
+		var factory session.BackendFactory
+		var httpEnf *httpEnforcer
+		if b.HTTP == "" {
 			factory = backendFactory(b, audit, tracer)
+		} else if b.Policy != nil {
+			httpEnf = newHTTPEnforcer(b, audit)
+			log.Printf("backend %q: HTTP policy enforcement on (%d rules)", b.Name, len(b.Policy.Rules))
 		}
 
 		wg.Add(1)
-		go func(b *Backend, ln net.Listener, factory session.BackendFactory) {
+		go func(b *Backend, ln net.Listener, factory session.BackendFactory, httpEnf *httpEnforcer) {
 			defer wg.Done()
 			switch {
 			case b.HTTP != "":
-				serveHTTP(client, b, ln)
+				serveHTTP(client, b, ln, httpEnf)
 			case b.Resumable:
 				serveResumable(client, b, ln, shutdown, factory)
 			default:
 				serveStdio(client, b, ln, shutdown, factory)
 			}
-		}(b, ln, factory)
+		}(b, ln, factory, httpEnf)
 	}
 
 	sig := make(chan os.Signal, 1)
@@ -491,7 +499,7 @@ func allowWord(allow bool) string {
 // serveHTTP reverse-proxies mesh connections to a local HTTP MCP server,
 // enforcing the ACL and stamping the caller's mesh identity onto each
 // request so the backend can do per-agent authorization and audit.
-func serveHTTP(client *embed.Client, b *Backend, ln net.Listener) {
+func serveHTTP(client *embed.Client, b *Backend, ln net.Listener, enf *httpEnforcer) {
 	checker := newACL(b.Allow)
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -508,6 +516,18 @@ func serveHTTP(client *embed.Client, b *Backend, ln net.Listener) {
 			log.Printf("backend %q: DENIED peer %s (%s)", b.Name, fqdn, r.RemoteAddr)
 			http.Error(w, "forbidden: mesh peer not in backend ACL", http.StatusForbidden)
 			return
+		}
+		// Per-tool policy for HTTP backends (F16): parse the JSON-RPC body,
+		// authorize tools/call by identity, audit, and deny inline — the same
+		// firewall the stdio path applies.
+		if enf != nil {
+			ok, status, denial := enf.decide(fqdn, pubKey, r)
+			if !ok {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				_, _ = w.Write(denial)
+				return
+			}
 		}
 		// Identity headers are set by the gateway, never trusted from input.
 		r.Header.Del("X-Meshmcp-Peer")

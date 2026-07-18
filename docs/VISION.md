@@ -91,8 +91,10 @@ when" becomes queryable for an entire agent fleet.
 
 ## Honest limitations
 
-- Policy applies to **stdio** backends (newline-delimited JSON-RPC). Streamable-HTTP
-  backends get network ACL + identity headers, not per-tool parsing, yet.
+- Policy applies to **stdio** backends (newline-delimited JSON-RPC) in full, and to
+  Streamable-HTTP backends for per-tool authorization + audit + rate/window/co-sign
+  (F16, request-body parsing). Taint labels, secret injection, and capability upgrades
+  remain stdio-only (they need per-session state / SSE body rewriting).
 - NetBird **group** membership isn't available through the embed API; policy matches FQDN
   and pubkey today. Group-based rules need the management API.
 - The gateway binary is heavy (~44 MB, NetBird's dep tree) — a daemon, not something to

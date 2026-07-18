@@ -96,8 +96,10 @@ type Backend struct {
 	// client->backend log, idempotent backends), or "backend" (the backend
 	// restores its own state from MESHMCP_SESSION_ID).
 	SessionStoreMode string `yaml:"session_store_mode"`
-	// Policy authorizes individual tools/call requests by caller identity.
-	// Only valid for stdio backends (the gateway parses their JSON-RPC).
+	// Policy authorizes individual tools/call requests by caller identity. For
+	// stdio backends the gateway parses the JSON-RPC stream; for HTTP backends
+	// it parses each request body (F16). Rate limits, time windows, co-sign,
+	// and audit apply to both; taint/secret injection/capabilities are stdio.
 	Policy *policy.Policy `yaml:"policy"`
 	// AuditLog is a file path for JSONL tool-call audit records. Empty
 	// sends audit records to stderr. The log is a tamper-evident hash chain
@@ -216,9 +218,6 @@ func loadConfig(path string) (*Config, error) {
 		}
 		if b.SessionStore != "" && !b.Resumable {
 			return nil, fmt.Errorf("backend %q: session_store requires resumable: true", b.Name)
-		}
-		if b.Policy != nil && !hasStdio {
-			return nil, fmt.Errorf("backend %q: policy is only valid for stdio backends", b.Name)
 		}
 		if b.Policy != nil {
 			if err := b.Policy.Validate(); err != nil {
