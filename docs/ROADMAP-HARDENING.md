@@ -44,12 +44,14 @@ Shipped in this branch (tested, `CGO_ENABLED=1 go build/vet/test ./... -race` gr
 
 - **P0-1, P0-2, P0-3** — all three fix-now issues.
 - Flagships: **F13** (plugin seams — `DecisionHook`, `AuditSink`, subcommand registry + `plugins`),
-  **F16** (HTTP-backend policy parity), **F18** (pattern DLP hook), **F21** (capability revocation
-  store + `capability revoke/list`), **F22** (fail-closed audit mode), **F23** (identity-bound sessions).
-- Minors: **S11–S18, S20, S22–S32, S36–S40, S48** (plus `config validate`).
+  **F15** (observability — `meshmcp status` + webhook sink), **F16** (HTTP-backend policy parity),
+  **F18** (pattern DLP hook), **F20** (co-sign hardening — fail-closed + operator allowlist; signed
+  records pending), **F21** (capability revocation store + `capability revoke/list`), **F22**
+  (fail-closed audit mode), **F23** (identity-bound sessions).
+- Minors: **S11–S18, S20, S22–S32, S34–S43, S48, S52** (plus `config validate` and `audit export`).
 
-Forward backlog: flagships **F14, F15, F17, F19, F20, F24–F32** and minors **S19, S21, S33–S35,
-S41–S47, S49–S60**.
+Forward backlog: flagships **F14, F17, F19, F24–F32** and minors **S19, S21, S33, S44–S47,
+S49–S51, S53–S60**.
 
 ---
 
