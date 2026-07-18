@@ -105,7 +105,7 @@ is covered by `go test -race`:
 | **Attributable & ordered** | Each event sealed under lock with a monotonic sequence and the publisher's proven key. |
 | **Tamper-evident** | Hash chain over every event; `VerifyChain` (and `meshmcp audit`) detect edits/reorders/drops. |
 | **Taint containment** | An event is delivered to a subscription only if it is cleared for *every* label the event carries. |
-| **Bounded memory** | Fixed per-subscriber buffers; `Backpressure` is `drop_oldest` (evict + count) or `disconnect` (close, resume via `--since`). |
+| **Bounded memory** | Fixed per-subscriber buffers; a per-event payload cap (`max_payload_bytes`) bounds retention at `retain × cap`; `Backpressure` is `drop_oldest` (evict + count) or `disconnect` (close, resume via `--since`). |
 | **Fan-out isolation** | Delivery is non-blocking, so one slow subscriber never stalls the publisher or other subscribers. |
 | **Rate limiting** | Per-publisher token bucket; a single peer cannot flood the bus. |
 | **Resource caps** | Hard bounds on subscriptions, topics/subscription, topic length, and per-frame size — checked before allocation. |

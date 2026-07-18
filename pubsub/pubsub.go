@@ -152,6 +152,10 @@ var (
 	ErrTooMany = errors.New("resource limit exceeded")
 	// ErrBadTopic is returned for an empty, oversized, or malformed topic.
 	ErrBadTopic = errors.New("invalid topic")
+	// ErrPayloadTooLarge is returned when a publish payload exceeds the
+	// broker's MaxPayloadBytes. Retention holds full payloads, so this cap
+	// (times Retain) bounds the broker's memory.
+	ErrPayloadTooLarge = errors.New("payload too large")
 	// ErrClosed is returned by broker operations after Close.
 	ErrClosed = errors.New("broker closed")
 )

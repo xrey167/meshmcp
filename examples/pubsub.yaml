@@ -57,6 +57,7 @@ limits:
   max_subs: 1024                       # concurrent subscriptions
   max_topics_per_sub: 64               # topic patterns per subscription
   max_topic_len: 256                   # topic/pattern length (bytes)
+  max_payload_bytes: 1048576           # per-event payload cap (1 MiB); retain × this bounds memory
   retain: 4096                         # events kept for --since replay
   publish_rate: 50                     # per-publisher publishes/second (0 = unlimited)
   publish_burst: 100                   # per-publisher burst ceiling

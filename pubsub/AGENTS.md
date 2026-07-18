@@ -24,6 +24,7 @@ meshmcp's identity-native event fabric: a publish/subscribe bus where every even
 - **Fan-out never blocks.** `deliverLocked` is non-blocking: on a full buffer it applies the subscription's `Backpressure` (DropOldest increments `Dropped`; Disconnect closes it). One slow reader must never stall the others or the publisher. Delivery is under `b.mu`, so ordering is deterministic.
 - **Taint is contained below the model.** An event is delivered to a subscription only if the subscription is cleared for every label the event carries (`Subscription.accepts`). A multi-topic subscription's clearance is the **intersection** across its topics (least privilege).
 - **No silent caps.** Replay that can't reach the requested sequence sets `Truncated`; dropped events increment `Dropped`. Surface both to the caller.
+- **Bounded memory.** Retention holds full event payloads, so `Publish` caps payload size (`Limits.MaxPayloadBytes`); `Retain × MaxPayloadBytes` is the broker's memory bound. Keep any new buffering bounded the same way.
 
 ### Testing Requirements
 - `CGO_ENABLED=1 go test ./pubsub/ -race`. The suite covers deny-by-default, ordering, hash-chain tamper detection, both backpressure policies, rate limiting (fake clock), resource caps, label/taint containment, replay + truncation, fan-out isolation, and a concurrent fuzz.

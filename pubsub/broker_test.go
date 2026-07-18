@@ -2,6 +2,7 @@ package pubsub
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -257,6 +258,22 @@ func TestResourceCaps(t *testing.T) {
 		t.Fatalf("subscribe should succeed after a slot frees: %v", err)
 	}
 	s2.Close()
+}
+
+func TestMaxPayloadBytes(t *testing.T) {
+	b := New(Options{Authorizer: AllowAll{}, Limits: Limits{MaxPayloadBytes: 16}})
+	if _, err := b.Publish(id("p"), "t", json.RawMessage(`"0123456789"`), nil); err != nil {
+		t.Fatalf("payload within cap should pass: %v", err)
+	}
+	big := json.RawMessage(`"` + strings.Repeat("x", 64) + `"`)
+	_, err := b.Publish(id("p"), "t", big, nil)
+	if err == nil || !errors.Is(err, ErrPayloadTooLarge) {
+		t.Fatalf("oversized payload: got %v want ErrPayloadTooLarge", err)
+	}
+	// The rejected publish must not advance the sequence or retention.
+	if b.Seq() != 1 {
+		t.Fatalf("rejected publish advanced seq to %d", b.Seq())
+	}
 }
 
 func TestLabelContainment(t *testing.T) {

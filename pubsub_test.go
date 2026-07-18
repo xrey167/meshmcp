@@ -117,6 +117,34 @@ func TestBrokerBackendDenied(t *testing.T) {
 	}
 }
 
+// TestBrokerBackendCloseUnblocks verifies Close tears the backend down even
+// when serve() is parked writing to a peer that has stopped reading (transport
+// backpressure). Without closing the read end, Close would deadlock on done.
+func TestBrokerBackendCloseUnblocks(t *testing.T) {
+	b := pubsub.New(pubsub.Options{Authorizer: pubsub.AllowAll{}, Limits: pubsub.Limits{SubQueue: 2}})
+	defer b.Close()
+
+	bb := newBrokerBackend(b, session.Meta{PeerKey: "s", PeerFQDN: "s.netbird.cloud"}, nolog)
+	hello, _ := json.Marshal(helloFrame{Role: "sub", Topics: []string{"t"}})
+	if _, err := bb.Write(append(hello, '\n')); err != nil {
+		t.Fatal(err)
+	}
+	// Never call bb.Read — the peer is "not reading". Publish enough that
+	// serve()'s event loop parks on outW.Write once the pipe backs up.
+	for i := 0; i < 50; i++ {
+		b.Publish(id2("p"), "t", json.RawMessage(`"x"`), nil)
+	}
+	done := make(chan struct{})
+	go func() { bb.Close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close deadlocked while serve() was parked on a blocked write")
+	}
+}
+
+func id2(k string) pubsub.Identity { return pubsub.Identity{Key: k, FQDN: k + ".netbird.cloud"} }
+
 // TestClientStreamFraming unit-tests the client local stream: it emits the
 // preamble, then feeds complete inbound lines (including a split write) to
 // onLine, and returns EOF after finish().

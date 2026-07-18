@@ -87,7 +87,12 @@ func (bb *brokerBackend) Read(p []byte) (int, error)  { return bb.outR.Read(p) }
 
 func (bb *brokerBackend) Close() error {
 	bb.closeOnce.Do(func() {
-		bb.inW.Close() // unblock the serve scanner
+		bb.inW.Close() // unblock the serve scanner / input drain
+		// Unblock any in-flight outW.Write: if the transport is backpressured
+		// (a slow peer, session send buffer full), serveSub can be parked in a
+		// write while we wait on done — closing the read end breaks that so
+		// serve() can exit and Close() does not deadlock.
+		bb.outR.CloseWithError(io.EOF)
 		bb.mu.Lock()
 		s := bb.sub
 		bb.mu.Unlock()

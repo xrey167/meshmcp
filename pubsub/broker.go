@@ -18,6 +18,7 @@ type Limits struct {
 	MaxSubs         int     `yaml:"max_subs"`          // maximum concurrent subscriptions
 	MaxTopicsPerSub int     `yaml:"max_topics_per_sub"` // maximum topic patterns in one subscription
 	MaxTopicLen     int     `yaml:"max_topic_len"`     // maximum topic/pattern length in bytes
+	MaxPayloadBytes int     `yaml:"max_payload_bytes"` // maximum event payload size in bytes
 	Retain          int     `yaml:"retain"`            // events kept for replay-from-sequence
 	PublishRate     float64 `yaml:"publish_rate"`      // per-publisher publishes/second (0 = unlimited)
 	PublishBurst    int     `yaml:"publish_burst"`     // per-publisher burst ceiling
@@ -30,6 +31,7 @@ func DefaultLimits() Limits {
 		MaxSubs:         1024,
 		MaxTopicsPerSub: 64,
 		MaxTopicLen:     256,
+		MaxPayloadBytes: 1 << 20, // 1 MiB, aligned with the wire frame cap
 		Retain:          1024,
 		PublishRate:     0,
 		PublishBurst:    0,
@@ -49,6 +51,9 @@ func (l Limits) withDefaults() Limits {
 	}
 	if l.MaxTopicLen <= 0 {
 		l.MaxTopicLen = d.MaxTopicLen
+	}
+	if l.MaxPayloadBytes <= 0 {
+		l.MaxPayloadBytes = d.MaxPayloadBytes
 	}
 	if l.Retain < 0 {
 		l.Retain = 0
@@ -135,6 +140,10 @@ func (denyAll) Subscribe(Identity, string) SubDecision {
 func (b *Broker) Publish(id Identity, topic string, payload json.RawMessage, extraLabels []string) (*Event, error) {
 	if err := validateTopic(topic, b.lm.MaxTopicLen); err != nil {
 		return nil, err
+	}
+	if len(payload) > b.lm.MaxPayloadBytes {
+		b.record(id, "pubsub/publish", topic, "deny", "payload too large", nil)
+		return nil, fmt.Errorf("%w: %d bytes exceeds max %d", ErrPayloadTooLarge, len(payload), b.lm.MaxPayloadBytes)
 	}
 	dec := b.auth.Publish(id, topic)
 	if !dec.Allow {
