@@ -5,10 +5,14 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"net"
 	"sync"
 	"time"
 )
+
+// ErrNoSession is returned by Steer when no live session has the given id.
+var ErrNoSession = errors.New("session: no such session")
 
 // Server manages resumable sessions for one backend definition. Each
 // session keeps its backend subprocess alive across client reconnects for
@@ -60,9 +64,33 @@ type serverSession struct {
 	reaper  *time.Timer   // fires when a detached session's TTL expires
 	active  int           // number of live Handle goroutines for this session
 
+	meta      Meta      // caller identity (for enumeration)
+	createdAt time.Time // when this session was opened/rehydrated here (for age)
+
+	sendMu sync.Mutex // serializes peer-bound Sends so a Steer lands on a line boundary
+
 	cmu         sync.Mutex // guards replay / captureDone
 	replay      []byte     // captured client->backend bytes to replay on migration
 	captureDone bool       // handshake captured (handshake mode)
+}
+
+// sendLines forwards complete-line data to the peer, chunked to the frame cap,
+// under sendMu so a concurrent Steer cannot interleave mid-line. Callers must
+// pass a region that ends on a line boundary (or the final bytes at EOF).
+func (ss *serverSession) sendLines(data []byte) error {
+	ss.sendMu.Lock()
+	defer ss.sendMu.Unlock()
+	for len(data) > 0 {
+		n := len(data)
+		if n > maxPayload {
+			n = maxPayload
+		}
+		if err := ss.ep.Send(data[:n]); err != nil {
+			return err
+		}
+		data = data[n:]
+	}
+	return nil
 }
 
 // Handle takes ownership of one accepted mesh connection: it reads the
@@ -168,10 +196,12 @@ func (s *Server) attach(id sessionID, meta Meta) (*serverSession, bool, error) {
 		return nil, false, err
 	}
 	sess := &serverSession{
-		ep:      newEndpoint(newID),
-		backend: backend,
-		reader:  bufio.NewReaderSize(backend, maxPayload+64),
-		active:  1,
+		ep:        newEndpoint(newID),
+		backend:   backend,
+		reader:    bufio.NewReaderSize(backend, maxPayload+64),
+		active:    1,
+		meta:      meta,
+		createdAt: time.Now(),
 	}
 	s.sessions[newID] = sess
 	s.pump(sess)
@@ -216,6 +246,8 @@ func (s *Server) rehydrate(ps PersistedSession, meta Meta) (*serverSession, erro
 		backend:     backend,
 		reader:      reader,
 		active:      1,
+		meta:        meta,
+		createdAt:   time.Now(),
 		replay:      ps.Replay,
 		captureDone: true,
 	}
@@ -269,17 +301,28 @@ func (s *Server) pump(sess *serverSession) {
 	if s.store != nil {
 		sess.ep.afterAck = func() { s.checkpoint(sess) }
 	}
-	// backend stdout -> peer
+	// backend stdout -> peer, line-framed. The backend emits newline-delimited
+	// JSON-RPC; we only ever Send complete-line regions (holding sendMu), so an
+	// out-of-band Server.Steer can inject a whole line between two of ours and
+	// the peer's reassembled stream stays cleanly newline-delimited.
 	go func() {
 		buf := make([]byte, maxPayload)
+		var pending []byte
 		for {
 			n, err := sess.reader.Read(buf)
 			if n > 0 {
-				if serr := sess.ep.Send(buf[:n]); serr != nil {
-					return
+				pending = append(pending, buf[:n]...)
+				if nl := bytes.LastIndexByte(pending, '\n'); nl >= 0 {
+					if serr := sess.sendLines(pending[:nl+1]); serr != nil {
+						return
+					}
+					pending = append([]byte(nil), pending[nl+1:]...)
 				}
 			}
 			if err != nil {
+				if len(pending) > 0 {
+					_ = sess.sendLines(pending) // flush a final unterminated line
+				}
 				sess.ep.sendClose()
 				s.remove(sess.ep.id)
 				return
@@ -321,8 +364,6 @@ func (s *Server) pump(sess *serverSession) {
 	}()
 }
 
-
-
 // remove tears down a session and its backend.
 func (s *Server) remove(id sessionID) {
 	s.mu.Lock()
@@ -350,6 +391,56 @@ func (s *Server) Count() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.sessions)
+}
+
+// SessionInfo describes one live session for enumeration (Air's "Sessions"
+// view). The session layer knows the caller and the age; a gateway can enrich
+// it with a backend label it holds elsewhere.
+type SessionInfo struct {
+	ID   string        // hex session id
+	Peer string        // caller mesh FQDN
+	Age  time.Duration // since the session opened/rehydrated on this gateway
+}
+
+// Sessions lists the live sessions on this gateway.
+func (s *Server) Sessions() []SessionInfo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	out := make([]SessionInfo, 0, len(s.sessions))
+	for id, sess := range s.sessions {
+		out = append(out, SessionInfo{ID: id.String(), Peer: sess.meta.PeerFQDN, Age: now.Sub(sess.createdAt)})
+	}
+	return out
+}
+
+// Steer delivers a server->client MCP notification into a live session (Air ·
+// Steer, P2): the agent driving the session receives {"jsonrpc":"2.0","method",
+// "params"} as a well-formed, newline-delimited line, injected between complete
+// backend lines so it never splices one. A notification (no id) is used, so no
+// response is expected on the wire. It is a transport mechanism — the caller
+// (control plane) authorizes and audits it; it returns ErrNoSession if the id
+// is not live here.
+func (s *Server) Steer(id string, method string, params any) error {
+	sid, err := parseSessionID(id)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	sess, ok := s.sessions[sid]
+	s.mu.Unlock()
+	if !ok {
+		return ErrNoSession
+	}
+	line, err := json.Marshal(struct {
+		JSONRPC string `json:"jsonrpc"`
+		Method  string `json:"method"`
+		Params  any    `json:"params,omitempty"`
+	}{"2.0", method, params})
+	if err != nil {
+		return err
+	}
+	return sess.sendLines(append(line, '\n'))
 }
 
 func randID() (sessionID, error) {

@@ -1,12 +1,14 @@
 # Air · Steer — build spec
 
-**Status: P3 (`tasks/steer`) shipped · P1 · P2 · P4 proposed.** This is a code-ready
-design for the *Steer* capability of [Air](AIR.md): address and drive **live work** — an
-**agent** (by name), a **session** (by id), or a **task/subagent** (by id) — and act on it
-(**send** · **cancel** · **nudge** · **broadcast** · **launch**). The first primitive,
-task steer/augment (**P3**, [§4](#4--p3--task-steer--augment)), is **implemented and
-tested**; P1/P2/P4 remain proposed. Each primitive names the exact existing seam it reuses
-so the diff stays small and idiomatic.
+**Status: P3 (`tasks/steer`) + P2 session core shipped · P1 · P4 · gateway exposure proposed.**
+This is a code-ready design for the *Steer* capability of [Air](AIR.md): address and drive
+**live work** — an **agent** (by name), a **session** (by id), or a **task/subagent** (by
+id) — and act on it (**send** · **cancel** · **nudge** · **broadcast** · **launch**). Two
+primitives are **implemented and tested**: task steer/augment (**P3**,
+[§4](#4--p3--task-steer--augment)) and the session core (**P2**,
+[§3](#3--p2--session-enumeration--injection)) — `SessionStore.List`, `Server.Sessions`, and a
+line-safe `Server.Steer`. P1, P4, and the gateway exposure (control endpoint + `air_*` tools +
+CLI) remain proposed. Each primitive names the exact existing seam it reuses.
 
 > Air's `push` already delivers a payload *to a passive `drop` inbox* — there is no
 > consumer that acts on it, and no way to reach a running session or task. Steer closes
@@ -112,58 +114,62 @@ listens for steers.
 
 ---
 
-## 3 · P2 — Session enumeration + injection
+## 3 · P2 — Session enumeration + line-safe steer  ✅ *session core shipped*
 
-**Problem.** Sessions have durable, resumable ids, but there is **no `List()`** anywhere
-(only `Server.Count()`, `session/server.go:349-353`), no metadata retained to describe a
-live session, and **no application-level way to steer one**.
+Implemented in `session/store.go` (`SessionStore.List` + `MemStore`/`FileStore`) and
+`session/server.go` (`serverSession` gained `meta`/`createdAt`, a line-aware backend→peer
+pump, `SessionInfo`, `Server.Sessions`, and `Server.Steer`), with `TestStoreList`,
+`TestSteerLineFraming`, and `TestSteerUnknownSession`. The **gateway exposure** (a
+`/v1/sessions`+`/v1/steer` control endpoint, the `air_sessions`/`air_steer` tools, the CLI)
+is the remaining, still-proposed part. The sketch below is what landed.
 
-**Design.** One small store method, plus two additions to the session server. The steer must
-go through a **line-framed MCP message**, not the raw byte pipe.
+**Problem.** Sessions have durable, resumable ids, but there was **no `List()`** anywhere
+(only `Server.Count()`, `session/server.go`), no metadata retained to describe a live
+session, and **no safe way to steer one**.
+
+**Design.** One small store method, plus additions to the session server. The steer goes
+through a **line-framed server→client notification**, not the raw byte pipe — the
+backend→peer pump was made line-aware and a per-session send lock guarantees an injected line
+lands on a boundary.
 
 ```go
-// session/store.go — enumerate persisted sessions (FileStore scans <dir>/*.json). SMALL.
+// session/store.go — enumerate persisted sessions (FileStore scans <dir>/*.json).
 type SessionStore interface {
     Save(PersistedSession) error
     Load(id string) (PersistedSession, bool, error)
     DeleteIfOwner(id, owner string) error
-    List() ([]PersistedSession, error)   // NEW — the small part
+    List() ([]PersistedSession, error)   // shipped
 }
 
-// session/server.go — a live view. NOTE: serverSession (server.go:56-66) today stores only
-// ep/backend/reader/reaper/active/replay — NO Meta, NO backend name, NO createdAt. So this
-// requires the session to *retain* the caller Meta + a backend label + a start time first.
-type SessionInfo struct { ID, Peer, Backend string; Age time.Duration }
-func (s *Server) Sessions() []SessionInfo   // NEW — needs the added fields above, not free
+// session/server.go — serverSession gained meta + createdAt so a live view is possible.
+type SessionInfo struct { ID, Peer string; Age time.Duration } // shipped
+func (s *Server) Sessions() []SessionInfo                       // shipped
 
-// Steering a live session = a line-framed server→client message, NOT ep.Send(bytes).
-func (s *Server) Steer(id string, method string, params any) error { // NEW
-    sess, ok := s.sessions[parse(id)]        // guarded by s.mu
+// Steering a live session = a line-framed server→client NOTIFICATION, not ep.Send(bytes).
+func (s *Server) Steer(id, method string, params any) error {  // shipped
+    sess, ok := s.sessions[parseSessionID(id)]  // guarded by s.mu
     if !ok { return ErrNoSession }
-    // route through the session's MCP server so it is a well-formed JSON-RPC
-    // request/notification the client can actually dispatch (mcp/server.go:161,224).
-    return sess.notifyClient(method, params)  // wraps Server.Notify / Server.Request
+    line, _ := json.Marshal(notification{"2.0", method, params})
+    return sess.sendLines(append(line, '\n'))   // sendMu-guarded, chunked to the frame cap
 }
 ```
 
 - **`List()`** on `FileStore` is a directory scan of the files it already writes
-  (`<dir>/<id>.json`, `session/store.go:96`); `MemStore` returns its map values. This part is
-  genuinely small.
-- **Why not `endpoint.Send`.** `ep.Send` (`session/endpoint.go:80-125`) is a raw ordered byte
-  pipe; the backend→peer pump already writes stdout in `maxPayload` chunks with no line
-  boundary (`session/server.go:267-288`). Injecting bytes there can splice into the middle of
-  a JSON-RPC line, and a generic MCP client won't act on unsolicited server→client bytes. So
-  a real steer is an **MCP server→client notification/request** (`Server.Notify`/`Request`,
-  the same mechanism `bidir_test.go` exercises for sampling), which is line-framed and
-  dispatchable. The end client must understand the steer method for it to *do* anything —
-  the transport is generic, the semantics are opt-in.
-- **`Sessions()` is not free.** It needs `serverSession` to gain the retained `Meta` (peer),
-  a backend label, and a `createdAt` (for `Age`) — a struct change, budgeted here honestly.
-- **Expose** via `control/control.go`: `GET /v1/sessions` (list) and `POST /v1/steer`
-  (`{id, method, params}`), gated by control-plane auth and audited; and via the
-  `air_sessions` / `air_steer` MCP tools (§6).
-- **Safety:** steering is privileged and deny-by-default; the ledger records the steerer's
-  identity, the session id, and a content hash of the payload.
+  (`<dir>/<id>.json`); `MemStore` returns its map values.
+- **Line-safe steer, not `endpoint.Send`.** `ep.Send` is a raw ordered byte pipe and the
+  old backend→peer pump forwarded `maxPayload` chunks with no line boundary — injecting there
+  could splice mid-JSON-RPC-line. The pump is now **line-aware**: it buffers backend output
+  and only ever `Send`s complete-line regions under a per-session `sendMu`; `Steer` marshals a
+  JSON-RPC **notification** (no id → no response noise) and `sendLines` it under the same lock,
+  so it always lands on a boundary. `TestSteerLineFraming` proves it (including a steer injected
+  mid-partial-line and an oversize, multi-frame backend line). The end client must understand
+  the steer method to *act*; the transport is generic, the semantics opt-in.
+- **`Sessions()` retains just what the session layer knows** — id, peer FQDN, age (from the new
+  `createdAt`); a gateway can enrich with a backend label it holds elsewhere.
+- **Governance/audit live at the gateway (still proposed).** The session layer is mechanism
+  only. Exposure via `control/control.go` — `GET /v1/sessions`, `POST /v1/steer` gated by
+  control-plane auth and audited — plus the `air_sessions`/`air_steer` tools (§6) is the next
+  increment, not yet built.
 
 ---
 
@@ -298,8 +304,10 @@ mesh call, never a backdoor.
 
 1. **P3 tasks/steer** — ✅ **done.** Cancel-symmetric augmentation in `mcp/tasks.go` +
    `mcp/server.go` + `mcpclient/tasks.go`, with `TestTaskSteer` in `mcp/tasks_test.go`.
-2. **P2 session List + Steer** — `List()` is small, but budget the `serverSession` fields
-   `Sessions()` needs and the **server→client notify** steer path (not `endpoint.Send`).
+2. **P2 session List + Steer** — ✅ **session core done.** `SessionStore.List`,
+   `Server.Sessions`, and the line-safe `Server.Steer` in `session/store.go` + `session/server.go`,
+   with `TestStoreList`/`TestSteerLineFraming`/`TestSteerUnknownSession`. Gateway exposure
+   (control endpoint + tools + CLI) still to do.
 3. **P1 steerable agent** — the listener-role addition (inbound + ACL + audit) on `agent.go`.
 4. **P4 launch + workflow** — the runner + a new `examples/air-workflow.yaml` (proposed file).
 5. **Air surface** — `air_sessions`/`air_tasks`/`air_steer`/`air_launch` in `mcpapp.go`;
