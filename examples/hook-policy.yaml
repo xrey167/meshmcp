@@ -1,0 +1,29 @@
+# Policy for the meshmcp client-hook adapter (F33). Point a client's PreToolUse
+# hook at `meshmcp hook --client <c> --config examples/hook-policy.yaml` and
+# EVERY tool the model calls — Bash, Edit, a native MCP tool — is authorized by
+# this policy and recorded in the tamper-evident audit ledger, not just calls to
+# mesh backends. No mesh join required (this runs locally).
+#
+# Install the hook:  meshmcp hook install --client claude-code --config examples/hook-policy.yaml
+identity: claude-code-local        # the identity recorded for this client
+audit_log: ./hook-audit.jsonl      # tamper-evident ledger of every governed call
+
+policy:
+  default_allow: true              # allow-with-holes: govern the risky tools
+  rules:
+    # Block destructive shell by tool name (tighten as needed per client).
+    - peers: ["*"]
+      tools: ["Bash"]
+      allow: true
+      rate: { max: 60, per: "1m" }
+    # A privileged tool waits for a human (mapped to the client's "ask" prompt).
+    - peers: ["*"]
+      tools: ["Deploy", "mcp__github__delete_*"]
+      allow: true
+      require_cosign: true
+
+# Content-aware DLP: a hard-coded cloud key or private key in ANY tool's
+# arguments is denied before the tool runs — below the model, at the hook.
+dlp:
+  - patterns: ['AKIA[0-9A-Z]{16}', '-----BEGIN [A-Z ]*PRIVATE KEY-----']
+    deny: true

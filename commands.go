@@ -64,7 +64,7 @@ var builtinCommands = []string{
 	"ls", "call", "read", "prompt", "functions", "function-call", "router",
 	"orchestrate", "graphrag", "control", "federate", "audit", "capability",
 	"approve", "approvals", "agent", "secrets", "dash", "room", "mcp",
-	"insight", "replay", "config", "status", "doctor", "plugins", "version",
+	"insight", "replay", "config", "status", "doctor", "hook", "plugins", "version",
 }
 
 // cmdPlugins lists the extensions compiled into this binary: registered plugin
