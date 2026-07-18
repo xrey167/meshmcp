@@ -24,8 +24,12 @@ import (
 // layer, a subscriber survives roaming and can resume from its last sequence.
 
 // maxFrame bounds a single wire frame so a hostile peer cannot force the
-// broker to buffer an unbounded line in memory.
-const maxFrame = 1 << 20 // 1 MiB
+// broker to buffer an unbounded line in memory. It sits above the core's
+// default 1 MiB payload cap so a maximum-size payload plus its JSON envelope
+// (topic, labels, field names) still fits in one frame rather than being
+// silently rejected by the scanner; the broker's MaxPayloadBytes remains the
+// authoritative payload limit.
+const maxFrame = (1 << 20) + (1 << 16) // 1 MiB payload + 64 KiB envelope headroom
 
 type helloFrame struct {
 	Role         string   `json:"role"` // "pub" | "sub"

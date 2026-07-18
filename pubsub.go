@@ -122,6 +122,11 @@ func cmdPubsub(args []string) error {
 			return nil
 		}
 		pubKey, fqdn := peerIdentity(client, conn.RemoteAddr())
+		if pubKey == "" {
+			log.Printf("pubsub session DENIED from %s: identity could not be proven", conn.RemoteAddr())
+			conn.Close()
+			continue
+		}
 		if !checker.allows(pubKey, fqdn) {
 			log.Printf("pubsub session DENIED from %s (%s): not in allow list", fqdn, shortKey(pubKey))
 			conn.Close()

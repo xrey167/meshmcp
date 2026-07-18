@@ -102,6 +102,7 @@ is covered by `go test -race`:
 | Invariant | How |
 |---|---|
 | **Deny by default** | Publish and subscribe both refused unless a rule grants the identity+topic; a nil authorizer denies everything. |
+| **Identity never claimed** | A caller whose WireGuard key the transport could not prove (empty identity) is refused before authorization — at the broker connection boundary and again in the core — so it can never match a rule with no explicit `peers:` restriction. |
 | **Attributable & ordered** | Each event sealed under lock with a monotonic sequence and the publisher's proven key. |
 | **Tamper-evident** | Hash chain over every event; `VerifyChain` (and `meshmcp audit`) detect edits/reorders/drops. |
 | **Taint containment** | An event is delivered to a subscription only if it is cleared for *every* label the event carries. |

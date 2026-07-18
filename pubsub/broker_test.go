@@ -271,6 +271,38 @@ func TestRateLimitBeforeAuth(t *testing.T) {
 	}
 }
 
+// TestEmptyIdentityDenied verifies an unproven caller (empty WireGuard key) is
+// refused even by an otherwise-permissive authorizer — identity is never claimed.
+func TestEmptyIdentityDenied(t *testing.T) {
+	b := New(Options{Authorizer: AllowAll{}}) // would allow anything with an identity
+	if _, err := b.Publish(Identity{Key: ""}, "t", nil, nil); !errors.Is(err, ErrDenied) {
+		t.Fatalf("empty-identity publish: got %v want ErrDenied", err)
+	}
+	if _, err := b.Subscribe(Identity{Key: ""}, SubOptions{Topics: []string{"t"}}); !errors.Is(err, ErrDenied) {
+		t.Fatalf("empty-identity subscribe: got %v want ErrDenied", err)
+	}
+	// A real identity still works.
+	if _, err := b.Publish(id("real"), "t", nil, nil); err != nil {
+		t.Fatalf("proven identity should pass: %v", err)
+	}
+}
+
+// TestSubscribeAuditSingleRecord verifies a wide subscribe writes exactly one
+// audit record, not one per topic (no ledger amplification).
+func TestSubscribeAuditSingleRecord(t *testing.T) {
+	var buf bytes.Buffer
+	audit := policy.NewAuditLog(&buf, func() string { return "t" })
+	b := New(Options{Authorizer: AllowAll{}, Audit: audit})
+	sub, err := b.Subscribe(id("a"), SubOptions{Topics: []string{"a.*", "b.*", "c.*", "d.*"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sub.Close()
+	if n := strings.Count(buf.String(), `"method":"pubsub/subscribe"`); n != 1 {
+		t.Fatalf("subscribe audit records = %d, want 1", n)
+	}
+}
+
 func TestResourceCaps(t *testing.T) {
 	b := New(Options{Authorizer: AllowAll{}, Limits: Limits{MaxTopicsPerSub: 2, MaxSubs: 2, MaxTopicLen: 8}})
 

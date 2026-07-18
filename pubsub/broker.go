@@ -3,6 +3,7 @@ package pubsub
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -147,7 +148,14 @@ func (denyAll) Subscribe(Identity, string) SubDecision {
 // authorizer's emit labels (a publisher may add containment, never remove it).
 // It returns the sealed Event (with Seq and Hash) on success.
 func (b *Broker) Publish(id Identity, topic string, payload json.RawMessage, extraLabels []string) (*Event, error) {
-	// Rate-limit first, before any authorization, validation, or audit work.
+	// Identity is cryptographic, never claimed: a caller whose WireGuard key
+	// the transport could not prove has no identity to authorize. Fail closed
+	// before anything else, so an unproven caller can never match a rule with
+	// no explicit peer restriction.
+	if id.Key == "" {
+		return nil, fmt.Errorf("%w: unproven identity", ErrDenied)
+	}
+	// Rate-limit next, before any authorization, validation, or audit work.
 	// A connected-but-unauthorized peer must not be able to amplify CPU, disk
 	// (audit writes), or lock contention by flooding rejected publishes: the
 	// token bucket caps how many attempts per peer ever reach that work.
@@ -218,6 +226,9 @@ type SubOptions struct {
 // subscription's label clearance is the intersection across its topics, so a
 // multi-topic subscription is never more cleared than its least-cleared topic.
 func (b *Broker) Subscribe(id Identity, opts SubOptions) (*Subscription, error) {
+	if id.Key == "" {
+		return nil, fmt.Errorf("%w: unproven identity", ErrDenied)
+	}
 	if len(opts.Topics) == 0 {
 		return nil, fmt.Errorf("%w: subscription needs at least one topic", ErrBadTopic)
 	}
@@ -289,9 +300,9 @@ func (b *Broker) Subscribe(id Identity, opts SubOptions) (*Subscription, error) 
 	}
 	b.mu.Unlock()
 
-	for _, t := range opts.Topics {
-		b.record(id, "pubsub/subscribe", t, "allow", "subscribed", nil)
-	}
+	// One audit record per subscribe (not per topic) so a wide or churning
+	// subscribe cannot amplify ledger writes.
+	b.record(id, "pubsub/subscribe", strings.Join(opts.Topics, ","), "allow", "subscribed", nil)
 	return s, nil
 }
 
