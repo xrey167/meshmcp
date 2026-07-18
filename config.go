@@ -28,15 +28,25 @@ type SecretsConfig struct {
 
 // Config is the meshmcp serve configuration.
 type Config struct {
-	Mesh MeshConfig   `yaml:"mesh"`
+	Mesh MeshConfig `yaml:"mesh"`
 	// AuditLog, when set, is a single gateway-wide tamper-evident audit ledger
 	// shared by every policy-enabled backend — one hash chain for the whole
 	// gateway, which is what a unified live view (dash / room) reads. When
 	// empty, each backend uses its own audit_log.
-	AuditLog string       `yaml:"audit_log"`
-	Trace    *TraceConfig `yaml:"trace"`
-	Registry string       `yaml:"registry"` // dir: register backends for router discovery
-	Backends []*Backend   `yaml:"backends"`
+	AuditLog string         `yaml:"audit_log"`
+	Trace    *TraceConfig   `yaml:"trace"`
+	Registry string         `yaml:"registry"` // dir: register backends for router discovery
+	Control  *ControlConfig `yaml:"control"`  // optional: Air session-control endpoint
+	Backends []*Backend     `yaml:"backends"`
+}
+
+// ControlConfig enables the Air session-control endpoint: a mesh HTTP surface
+// (GET /v1/sessions, POST /v1/steer) that lists and steers this gateway's live
+// resumable sessions. It listens only on the mesh, resolves the caller's
+// WireGuard identity, gates on Allow, and audits every steer.
+type ControlConfig struct {
+	Port  int      `yaml:"port"`  // mesh port to serve the control endpoint on
+	Allow []string `yaml:"allow"` // identities permitted to list/steer (FQDN globs or pubkey:<key>); empty = any mesh peer
 }
 
 // TraceConfig turns on a gateway-wide trace of every MCP message (both
@@ -236,6 +246,14 @@ func loadConfig(path string) (*Config, error) {
 				return nil, fmt.Errorf("backend %q: invalid http url %q", b.Name, b.HTTP)
 			}
 			b.httpURL = u
+		}
+	}
+	if cfg.Control != nil && cfg.Control.Port != 0 {
+		if cfg.Control.Port < 0 || cfg.Control.Port > 65535 {
+			return nil, fmt.Errorf("control: port must be 1-65535")
+		}
+		if other, dup := seen[cfg.Control.Port]; dup {
+			return nil, fmt.Errorf("control: port %d already used by backend %q", cfg.Control.Port, other)
 		}
 	}
 	return &cfg, nil

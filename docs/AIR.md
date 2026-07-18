@@ -284,7 +284,8 @@ Honesty about the seam, so nobody mistakes the mockup for shipped product:
 | Assistant tools `air_peers` · `air_push` · `air_fetch` | **Proposed** | thin wrappers in `mcpapp.go`, like `drop_file` |
 | **Steer** — task augment (`tasks/steer`, cancel-symmetric) | **Ships now** | `mcp/tasks.go` · `mcp/server.go` · `mcpclient/tasks.go` · `TestTaskSteer` (P3) |
 | **Steer** — session core: `List` · `Sessions` · line-safe `Steer` | **Ships now** | `session/store.go` · `session/server.go` · `TestSteerLineFraming` (P2) |
-| **Steer** — agent inbox (P1) · gateway exposure (`/v1/sessions`+`/v1/steer`, `air_*` tools, CLI) | **Proposed** | code-ready spec — [AIR-STEER.md](AIR-STEER.md) |
+| **Steer** — gateway exposure: `/v1/sessions`+`/v1/steer` endpoint · `air_sessions`/`air_steer`/`air_tasks`/`air_task_steer` tools | **Ships now** | `config.go` · `serve.go` · `aircontrol.go` · `mcpapp.go` · `aircontrol_test.go` |
+| **Steer** — agent inbox (P1) · the `meshmcp air` CLI | **Proposed** | code-ready spec — [AIR-STEER.md](AIR-STEER.md) |
 | **Launch** — spawn agent / run workflow | **Proposed** | [AIR-STEER.md](AIR-STEER.md) P4 · `examples/air-workflow.yaml` |
 | Assistant tools `air_sessions` · `air_tasks` · `air_steer` · `air_launch` | **Proposed** | [AIR-STEER.md §6](AIR-STEER.md) |
 | Push-wake (buzz the phone on a new pending) | **Proposed** | the "push seam" — [MOBILE.md §4](MOBILE.md) |

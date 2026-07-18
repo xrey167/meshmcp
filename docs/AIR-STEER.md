@@ -254,22 +254,28 @@ to the same firewall as any caller.
 
 ---
 
-## 6 · Assistant-facing MCP tools
+## 6 · Assistant-facing MCP tools  ✅ *shipped*
 
-Add to `meshmcp mcp` (`mcpapp.go`), each with the same registration + handler shape as
-`toolDropFile` (`mcpapp.go:196-231`):
+`meshmcp mcp` exposes these (each registered like `toolDropFile`, `mcpapp.go`); the session
+tools reach the gateway's Air control endpoint over the mesh via an
+`http.Transport{DialContext: mesh.Dial}` (pass `--control <gateway-ip:port>`):
 
 | Tool | Args | Wraps |
 |---|---|---|
-| `air_sessions` | — | `Server.Sessions()` / `/v1/sessions` (P2) |
-| `air_tasks` | `{target}` | `mcpclient.ListTasks` (`mcpclient/tasks.go:44`) |
-| `air_steer` | `{target, type, tool?, args?, text?, broadcast?}` | agent inbox (P1) · `Server.Steer` (P2) · `tasks/steer`/`tasks/cancel` (P3) |
-| `air_launch` | `{role \| workflow, gateway}` | P4 |
+| `air_sessions` | — | `GET /v1/sessions` → gateway `Server.Sessions()` (P2) |
+| `air_steer` | `{backend, id, method, params}` | `POST /v1/steer` → gateway `Server.Steer` (P2) |
+| `air_tasks` | `{target}` | `mcpclient.ListTasks` (`mcpclient/tasks.go`) |
+| `air_task_steer` | `{target, task_id, payload}` | `mcpclient.SteerTask` → `tasks/steer` (P3) |
 
-So an assistant can say: *"steer the analyst agent to re-read customer 42"*, *"cancel task
-9f2a"*, *"nudge the running summarize task to focus on the API"*, *"broadcast a pause to all
-reader agents"*, *"launch a reader agent against the fs backend"* — each a governed, audited
-mesh call, never a backdoor.
+The **gateway control endpoint** (`config.go` `ControlConfig`, `serve.go`, `aircontrol.go`)
+serves `GET /v1/sessions` and `POST /v1/steer {backend,id,method,params}` on a mesh port,
+gated by the caller's WireGuard identity + an `allow` ACL and audited into the shared ledger;
+`session.ErrNoSession`/unknown-backend → 404, ACL deny → 403. Tests: `aircontrol_test.go`.
+
+So an assistant can say: *"list the live sessions"* → `air_sessions`; *"steer session 9f2a on
+fs to re-read customer 42"* → `air_steer`; *"what tasks are running on the analyst?"* →
+`air_tasks`; *"nudge task-17 to focus on the API"* → `air_task_steer` — each a governed,
+audited mesh call, never a backdoor. (Agent-target steer + `air_launch` land with P1/P4.)
 
 ---
 
