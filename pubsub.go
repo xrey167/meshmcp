@@ -14,6 +14,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -554,6 +555,30 @@ func (s *streamPubSink) counts() (ok, fail int, last string) {
 	return s.ok, s.fail, s.last
 }
 
+// readCursor reads a persisted subscriber sequence cursor. ok is false if the
+// file is absent or unparseable (treated as "start from the beginning").
+func readCursor(path string) (seq uint64, ok bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, false
+	}
+	n, err := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// writeCursor persists the last-seen sequence atomically (temp file + rename),
+// so a crash mid-write cannot corrupt the cursor.
+func writeCursor(path string, seq uint64) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(strconv.FormatUint(seq, 10)), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 // cmdSubscribe streams events from a broker to stdout until interrupted.
 func cmdSubscribe(args []string) error {
 	fs := flag.NewFlagSet("subscribe", flag.ExitOnError)
@@ -561,6 +586,7 @@ func cmdSubscribe(args []string) error {
 	since := fs.Uint64("since", 0, "replay retained events with sequence greater than this first")
 	bp := fs.String("backpressure", "drop_oldest", "buffer-full policy: drop_oldest or disconnect")
 	capFlag := fs.String("capability", "", "present a signed capability grant; @file reads the token from a file")
+	durable := fs.String("durable", "", "persist the last-seen sequence to this file and resume from it (at-least-once across restarts)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -577,7 +603,16 @@ func cmdSubscribe(args []string) error {
 	target := fs.Arg(0)
 	topics := fs.Args()[1:]
 
-	hello, _ := json.Marshal(helloFrame{Role: "sub", Topics: topics, Since: *since, Backpressure: *bp, Capability: capToken})
+	// Durable subscriber: resume from the persisted cursor so no events are
+	// missed across a disconnect or broker restart (with a broker event_log).
+	effectiveSince := *since
+	if *durable != "" {
+		if c, ok := readCursor(*durable); ok && c > effectiveSince {
+			effectiveSince = c
+		}
+	}
+
+	hello, _ := json.Marshal(helloFrame{Role: "sub", Topics: topics, Since: effectiveSince, Backpressure: *bp, Capability: capToken})
 	preamble := append(hello, '\n')
 
 	out := os.Stdout
@@ -606,6 +641,14 @@ func cmdSubscribe(args []string) error {
 			return
 		}
 		out.Write(append(line, '\n'))
+		if *durable != "" {
+			var ev struct {
+				Seq uint64 `json:"seq"`
+			}
+			if json.Unmarshal(line, &ev) == nil && ev.Seq > 0 {
+				_ = writeCursor(*durable, ev.Seq)
+			}
+		}
 	}
 
 	o.BlockInbound = true

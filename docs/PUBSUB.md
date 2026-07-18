@@ -68,6 +68,16 @@ meshmcp subscribe 100.x.y.z:9120 'alerts.*' 'ops.*'
 meshmcp subscribe --since 41 100.x.y.z:9120 'alerts.prod'
 ```
 
+`--durable <file>` makes a subscriber **at-least-once**: it persists the
+last-seen sequence to the file and resumes from it, so with a broker `event_log:`
+no events are missed across a disconnect or a broker restart (a duplicate is
+possible if a crash lands between delivery and the cursor write — at-least-once,
+not exactly-once):
+
+```sh
+meshmcp subscribe --durable ./alerts.cursor 100.x.y.z:9120 'alerts.prod'
+```
+
 ## Durability
 
 By default the bus is a live tap: events live in a bounded in-memory ring.

@@ -46,6 +46,33 @@ func TestPubsubVerifyCheckpointsCommand(t *testing.T) {
 	}
 }
 
+// TestDurableCursor checks the subscriber cursor round-trips and that a missing
+// or corrupt cursor is treated as "start from the beginning".
+func TestDurableCursor(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cursor")
+	if _, ok := readCursor(path); ok {
+		t.Fatal("missing cursor should not be ok")
+	}
+	if err := writeCursor(path, 42); err != nil {
+		t.Fatal(err)
+	}
+	if seq, ok := readCursor(path); !ok || seq != 42 {
+		t.Fatalf("cursor round-trip: seq=%d ok=%v", seq, ok)
+	}
+	// Overwrite advances it (atomic replace).
+	if err := writeCursor(path, 100); err != nil {
+		t.Fatal(err)
+	}
+	if seq, _ := readCursor(path); seq != 100 {
+		t.Fatalf("cursor after overwrite = %d, want 100", seq)
+	}
+	// A corrupt file reads as not-ok.
+	os.WriteFile(path, []byte("not-a-number"), 0o600)
+	if _, ok := readCursor(path); ok {
+		t.Fatal("corrupt cursor should not be ok")
+	}
+}
+
 // TestStreamPubSinkCounts checks the streaming publisher tallies per-event acks
 // (including across a split write).
 func TestStreamPubSinkCounts(t *testing.T) {
