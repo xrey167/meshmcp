@@ -41,10 +41,12 @@ func cmdAir(args []string) error {
 		return cmdAirAgentSteer(args[1:])
 	case "workflow":
 		return cmdAirWorkflow(args[1:])
+	case "serve":
+		return cmdAirServe(args[1:])
 	case "-h", "--help", "help":
 		return airUsage()
 	default:
-		return fmt.Errorf("meshmcp air: unknown subcommand %q (want sessions | steer | launch | agent-steer | workflow)", args[0])
+		return fmt.Errorf("meshmcp air: unknown subcommand %q (want sessions | steer | launch | agent-steer | workflow | serve)", args[0])
 	}
 }
 
@@ -59,6 +61,7 @@ func airUsage() error {
   air agent-steer <agent-ip:port> --type task|nudge|cancel [--tool t --arg k=v | --text s]
                                                           send an instruction to an agent's steer inbox
   air workflow [--dry-run] <file.yaml>                   run a declarative launch/steer/call workflow
+  air serve    [--port N] [--control ip:port]            serve the live Air web page over the mesh
 
 Shared mesh flags apply (see "meshmcp air <sub> -h").
 `)

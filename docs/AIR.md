@@ -285,7 +285,7 @@ Honesty about the seam, so nobody mistakes the mockup for shipped product:
 | **Steer** — gateway `/v1/sessions`+`/v1/steer` endpoint · `air_sessions`/`air_steer`/`air_tasks`/`air_task_steer` tools | **Ships now** | `config.go` · `serve.go` · `aircontrol.go` · `mcpapp.go` · `aircontrol_test.go` |
 | **Steer/Launch** — the `meshmcp air` CLI (`sessions` · `steer` · `launch` · `agent-steer` · `workflow`) + P4 runner | **Ships now** | `air.go` · `airworkflow.go` · `examples/air-workflow.yaml` |
 | Assistant tools `air_peers` · `air_push` · `air_fetch` · `air_launch` (opt-in) | **Ships now** | `mcpapp.go` · `mcpapp_air_test.go` |
-| A served `meshmcp air` web page (the mockup, over a mesh port) | **Proposed** | reuse the `approvals`/`room` serving pattern |
+| A served **live** Air web page over the mesh (`meshmcp air serve`) | **Ships now** | `airserve.go` · `site/air-live.html` · `airserve_test.go` |
 | Push-wake (buzz the phone on a new pending) | **Proposed** | the "push seam" — [MOBILE.md §4](MOBILE.md) |
 | Native mobile app (gomobile) | **Proposed** | binding surface — [MOBILE.md §3](MOBILE.md) |
 
