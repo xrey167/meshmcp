@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -15,6 +16,8 @@ import (
 	"path/filepath"
 	"text/tabwriter"
 	"time"
+
+	"meshmcp/session"
 )
 
 // cmdAir is the umbrella for Air's live-work verbs: list and steer sessions on
@@ -34,10 +37,12 @@ func cmdAir(args []string) error {
 		return cmdAirSteer(args[1:])
 	case "launch":
 		return cmdAirLaunch(args[1:])
+	case "agent-steer":
+		return cmdAirAgentSteer(args[1:])
 	case "-h", "--help", "help":
 		return airUsage()
 	default:
-		return fmt.Errorf("meshmcp air: unknown subcommand %q (want sessions | steer | launch)", args[0])
+		return fmt.Errorf("meshmcp air: unknown subcommand %q (want sessions | steer | launch | agent-steer)", args[0])
 	}
 }
 
@@ -49,6 +54,8 @@ func airUsage() error {
                                                           steer a live session
   air launch   --role <role> [--nb-config dir] <gateway-ip:port>
                                                           spawn a new agent identity
+  air agent-steer <agent-ip:port> --type task|nudge|cancel [--tool t --arg k=v | --text s]
+                                                          send an instruction to an agent's steer inbox
 
 Shared mesh flags apply (see "meshmcp air <sub> -h").
 `)
@@ -202,5 +209,57 @@ func cmdAirLaunch(args []string) error {
 		return fmt.Errorf("air launch: start agent: %w", err)
 	}
 	fmt.Printf("launched agent role=%s pid=%d identity=%s -> %s\n", *role, cmd.Process.Pid, cfgPath, gateway)
+	return nil
+}
+
+// cmdAirAgentSteer sends one steer envelope to an agent's steer inbox (P1),
+// over the same resumable mesh channel as a drop but framed as newline JSON.
+func cmdAirAgentSteer(args []string) error {
+	fs := flag.NewFlagSet("air agent-steer", flag.ExitOnError)
+	o := meshFlags(fs)
+	typ := fs.String("type", "task", "steer type: task | nudge | cancel")
+	tool := fs.String("tool", "", "type=task: tool to call")
+	text := fs.String("text", "", "type=nudge: guidance text")
+	steerArgs := argFlags{}
+	fs.Var(&steerArgs, "arg", "type=task: tool arg key=value (repeatable)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: meshmcp air agent-steer [flags] <agent-ip:port>")
+	}
+	switch *typ {
+	case "task":
+		if *tool == "" {
+			return errors.New("air agent-steer --type task needs --tool")
+		}
+	case "nudge", "cancel":
+	default:
+		return fmt.Errorf("air agent-steer: unknown --type %q (want task | nudge | cancel)", *typ)
+	}
+	target := fs.Arg(0)
+
+	env := steerEnvelope{Type: *typ, Tool: *tool, Text: *text}
+	if len(steerArgs) > 0 {
+		b, _ := json.Marshal(map[string]any(steerArgs))
+		env.Args = b
+	}
+	line, _ := json.Marshal(env)
+	line = append(line, '\n')
+
+	o.BlockInbound = true
+	client, err := startMesh(o, os.Stderr)
+	if err != nil {
+		return err
+	}
+	defer stopMesh(client)
+
+	pr, pw := io.Pipe()
+	go func() { _, werr := pw.Write(line); pw.CloseWithError(werr) }()
+	dial := func(ctx context.Context) (net.Conn, error) { return client.Dial(ctx, "tcp", target) }
+	if err := session.NewClient(dial, log.Printf).Run(context.Background(), sendStream{r: pr}); err != nil {
+		return fmt.Errorf("air agent-steer: %w", err)
+	}
+	fmt.Printf("steered %s -> %s\n", *typ, target)
 	return nil
 }

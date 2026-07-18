@@ -89,7 +89,7 @@ on it. Three target types, one vocabulary:
 
 | Target | Addressed by | Backed by the seam |
 |---|---|---|
-| **Agent** | mesh FQDN / registry name (`peers.go`, `registry/`) | a new agent **inbox** (the `drop` receiver pattern applied to `agent.go`) |
+| **Agent** | mesh FQDN / registry name (`peers.go`, `registry/`) | the agent **inbox** — `--steer-port` + `air agent-steer` (**shipped**, the `drop` receiver pattern on `agent.go`) |
 | **Session** | 16-byte session id (`session/`) | `SessionStore.List` + `Server.Sessions` + a line-safe `Server.Steer` server→client notification (**shipped**) — *not* raw `endpoint.Send` |
 | **Task / subagent** | task id (`mcp/tasks.go`) | a governed `tasks/steer` (**shipped**), symmetric with the existing `tasks/cancel` |
 
@@ -285,8 +285,9 @@ Honesty about the seam, so nobody mistakes the mockup for shipped product:
 | **Steer** — task augment (`tasks/steer`, cancel-symmetric) | **Ships now** | `mcp/tasks.go` · `mcp/server.go` · `mcpclient/tasks.go` · `TestTaskSteer` (P3) |
 | **Steer** — session core: `List` · `Sessions` · line-safe `Steer` | **Ships now** | `session/store.go` · `session/server.go` · `TestSteerLineFraming` (P2) |
 | **Steer** — gateway exposure: `/v1/sessions`+`/v1/steer` endpoint · `air_sessions`/`air_steer`/`air_tasks`/`air_task_steer` tools | **Ships now** | `config.go` · `serve.go` · `aircontrol.go` · `mcpapp.go` · `aircontrol_test.go` |
-| **Steer/Launch** — the `meshmcp air` CLI (`sessions` · `steer` · `launch`) | **Ships now** | `air.go` · `main.go` |
-| **Steer** — agent inbox (P1) · workflow files (P4) | **Proposed** | code-ready spec — [AIR-STEER.md](AIR-STEER.md) |
+| **Steer/Launch** — the `meshmcp air` CLI (`sessions` · `steer` · `launch` · `agent-steer`) | **Ships now** | `air.go` · `main.go` |
+| **Steer** — agent steer inbox (P1): `--steer-port` + `air agent-steer` | **Ships now** | `steerenvelope.go` · `steerinbox.go` · `agent.go` |
+| **Launch** — declarative workflow files (P4) | **Proposed** | code-ready spec — [AIR-STEER.md](AIR-STEER.md) |
 | **Launch** — spawn agent / run workflow | **Proposed** | [AIR-STEER.md](AIR-STEER.md) P4 · `examples/air-workflow.yaml` |
 | Assistant tools `air_sessions` · `air_tasks` · `air_steer` · `air_launch` | **Proposed** | [AIR-STEER.md §6](AIR-STEER.md) |
 | Push-wake (buzz the phone on a new pending) | **Proposed** | the "push seam" — [MOBILE.md §4](MOBILE.md) |

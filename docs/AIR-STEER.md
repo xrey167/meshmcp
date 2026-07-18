@@ -1,14 +1,14 @@
 # Air · Steer — build spec
 
-**Status: P3 (`tasks/steer`) + P2 session core shipped · P1 · P4 · gateway exposure proposed.**
-This is a code-ready design for the *Steer* capability of [Air](AIR.md): address and drive
-**live work** — an **agent** (by name), a **session** (by id), or a **task/subagent** (by
-id) — and act on it (**send** · **cancel** · **nudge** · **broadcast** · **launch**). Two
-primitives are **implemented and tested**: task steer/augment (**P3**,
-[§4](#4--p3--task-steer--augment)) and the session core (**P2**,
-[§3](#3--p2--session-enumeration--injection)) — `SessionStore.List`, `Server.Sessions`, and a
-line-safe `Server.Steer`. P1, P4, and the gateway exposure (control endpoint + `air_*` tools +
-CLI) remain proposed. Each primitive names the exact existing seam it reuses.
+**Status: P1 · P2 · P3 + gateway exposure + CLI shipped · P4 (workflow files) proposed.**
+This is the design for the *Steer* capability of [Air](AIR.md): address and drive **live
+work** — an **agent** (by name), a **session** (by id), or a **task/subagent** (by id) — and
+act on it (**send** · **cancel** · **nudge** · **launch**). Implemented and tested: **P3**
+task steer/augment ([§4](#4--p3--task-steer--augment)), the **P2** session core
+([§3](#3--p2--session-enumeration--injection)), **P1** the agent steer inbox
+([§2](#2--p1--steerable-agent-the-receive-path)), the **gateway control endpoint** + `air_*`
+tools ([§6](#6--assistant-facing-mcp-tools)), and the **`meshmcp air` CLI**. Only **P4**
+declarative workflow files remain. Each primitive names the exact seam it reuses.
 
 > Air's `push` already delivers a payload *to a passive `drop` inbox* — there is no
 > consumer that acts on it, and no way to reach a running session or task. Steer closes
@@ -68,7 +68,14 @@ is audited with the caller's WireGuard identity.
 
 ---
 
-## 2 · P1 — Steerable agent (the receive path)
+## 2 · P1 — Steerable agent (the receive path)  ✅ *shipped*
+
+Implemented: `steerenvelope.go` (`steerEnvelope`), `steerinbox.go`
+(`newSteerFactory`/`recvEnvelopes`, reusing `dropSink`), and `agent.go` — a `--steer-port`
+(with `--steer-allow`) starts the agent inbound-enabled via `runSteerableAgent`, and
+`runAgentLoop` gained a `steer` channel + `applySteer` (task→`CallTool`, nudge→log,
+cancel→stop). The sender is `meshmcp air agent-steer` (`air.go`). Tests:
+`TestRunAgentLoopSteerTask`, `TestRecvEnvelopes`. The sketch below is what landed.
 
 **Problem.** `agent.go` is a script-driven **pure client** (`runAgentLoop`,
 `agent.go:100-118`) with no way to accept an external instruction — and it is *outbound
@@ -314,7 +321,8 @@ audited mesh call, never a backdoor. (Agent-target steer + `air_launch` land wit
    `Server.Sessions`, and the line-safe `Server.Steer` in `session/store.go` + `session/server.go`,
    with `TestStoreList`/`TestSteerLineFraming`/`TestSteerUnknownSession`. Gateway exposure
    (control endpoint + tools + CLI) still to do.
-3. **P1 steerable agent** — the listener-role addition (inbound + ACL + audit) on `agent.go`.
+3. **P1 steerable agent** — ✅ **done.** `--steer-port` inbox on `agent.go` (`steerenvelope.go`,
+   `steerinbox.go`) + `air agent-steer` sender, with `TestRunAgentLoopSteerTask`/`TestRecvEnvelopes`.
 4. **P4 launch + workflow** — the runner + a new `examples/air-workflow.yaml` (proposed file).
 5. **Air surface** — `air_sessions`/`air_tasks`/`air_steer`/`air_launch` in `mcpapp.go`;
    the Steer tab in `site/air.html`; the `air steer`/`air launch` CLI verbs.
