@@ -20,11 +20,18 @@ the exact existing seam it reuses so the diff stays small and idiomatic.
 | Name → address | logical registry, control-plane `/v1/registry` | `registry/registry.go`, `control/control.go` |
 | `<name>.<tool>` namespacing | router proxy tool names | `router.go:421` |
 | "on behalf of" origin identity | `_meta` origin stamp on every hop | `router.go:174-176` |
-| Server → client push mid-call | bidirectional MCP request/notify | `mcp/server.go:161,224`, `bidir_test.go` |
+| Server → client push mid-call | bidirectional MCP request/notify (line-framed) | `mcp/server.go:161,224`, `./bidir_test.go` |
 | Async work + interrupt | MCP Tasks + governable `tasks/cancel` | `mcp/tasks.go`, `mcpclient/tasks.go`, `examples/live-task.yaml` |
-| Resumable session + injection seam | `endpoint.Send`, `Server.sessions[id].ep` | `session/endpoint.go:80-125`, `session/server.go` |
+| Resumable session + a live handle to reach it | `Server.sessions[id]` (durable id, ATTACH resume) | `session/server.go`, `session/store.go` |
 | Receive-a-payload-by-identity pattern | drop receiver + framing | `drop.go:302-432`, `push.go:33-46` |
 | Sender ACL · audit | firewall ACL + hash-chained ledger | `acl.go`, `policy/` |
+
+> **`endpoint.Send` is deliberately *not* in this table.** It exists
+> (`session/endpoint.go:80-125`) and is the raw ordered byte pipe, but it is the **wrong
+> layer to steer at** — it carries `maxPayload`-sized chunks with no JSON-RPC line boundary,
+> so an injected payload can splice into the middle of a message, and an ordinary MCP client
+> would not act on unsolicited server→client bytes anyway. Steering a live session goes
+> through the **line-framed** `Server.Request`/`Server.Notify` instead (see P2).
 
 Steer is built **entirely** from these; the new code is glue, one store method, one task
 channel, and one control endpoint.
@@ -49,25 +56,34 @@ rides the same resumable, audited, ACL'd channel as a file drop:
 ```
 
 The envelope is the single vocabulary across all three target types; each primitive below
-consumes the subset it understands. It is authorized before delivery: a steer is a
-governed method (`air/steer`), audited with the caller's WireGuard identity.
+consumes the subset it understands. It is authorized **before delivery, at whichever gate
+its transport crosses** — the drop-inbox sender ACL (P1), the control-plane auth (P2), or
+the MCP `methods:` policy filter (P3, `tasks/steer`). See [§7](#7--governance--security-all-reused);
+the gates differ by path, and only `tasks/steer` is a policy `methods:` rule. Every delivery
+is audited with the caller's WireGuard identity.
 
 ---
 
 ## 2 · P1 — Steerable agent (the receive path)
 
 **Problem.** `agent.go` is a script-driven **pure client** (`runAgentLoop`,
-`agent.go:100-118`) with no way to accept an external instruction.
+`agent.go:100-118`) with no way to accept an external instruction — and it is *outbound
+only*: `dialMCP` sets `o.BlockInbound = true` (`cli.go:39`), so its mesh client never
+listens.
 
-**Design.** Give the agent an inbox by reusing the drop receiver verbatim. Alongside
-dialling its backend, the agent runs a `session.NewServer` on a **steer port**, whose
+**Design.** Give the agent an inbox by **adding a listener role** modelled on the drop
+receiver. This is the biggest of the four changes: the agent flips to inbound-enabled and,
+alongside dialling its backend, runs a `session.NewServer` on a **steer port** with its own
+`newACL` gate and audit wiring (all the `dropReceive` scaffolding, `drop.go:304-367`), whose
 backend factory parses steer envelopes and pushes them onto a channel the loop selects on.
+It is *feasible with existing patterns*, not a one-line diff.
 
 ```go
-// new: a control backend for the agent's steer port — mirrors newDropFactory (drop.go).
+// new: a control backend for the agent's steer port — a parallel to newDropFactory
+// (drop.go) that parses envelope JSON instead of file frames (not literal reuse).
 func newSteerFactory(ch chan<- steerEnvelope, acl *ACL) session.BackendFactory { … }
 
-// agent.go: the loop gains one more select case.
+// agent.go: with the listener in place, the loop gains one more select case.
 func runAgentLoop(ctx, mc, steps, count, interval, steer <-chan steerEnvelope, logf) error {
     for {
         select {
@@ -79,9 +95,10 @@ func runAgentLoop(ctx, mc, steps, count, interval, steer <-chan steerEnvelope, l
 }
 ```
 
-- **Reuses:** `dropReceive` / `newDropFactory` (`drop.go:302-432`) for the listener,
-  `sendData` (`push.go:33-46`) for the sender, `acl.go` for the sender allow-list, and the
-  `policy` audit for one record per delivered envelope.
+- **Mirrors (not verbatim):** the `dropReceive` / `newDropFactory` listener shape
+  (`drop.go:302-432`), `sendData` (`push.go:33-46`) for the sender, `acl.go` for the sender
+  allow-list, and the `policy` audit for one record per delivered envelope. The steer factory
+  is a new parallel that reads envelope JSON, not the file-frame parser.
 - **Governance:** the steer port is ACL'd exactly like a drop receiver (`examples/drop.yaml`
   `allow:`), so only permitted identities may steer this agent.
 - **`type=task`** injects a `mc.CallTool` step; **`nudge`** updates a guidance field the
@@ -96,60 +113,83 @@ listens for steers.
 ## 3 · P2 — Session enumeration + injection
 
 **Problem.** Sessions have durable, resumable ids, but there is **no `List()`** anywhere
-(only `Server.Count()`, `session/server.go:349-353`) and **no out-of-band injection**.
+(only `Server.Count()`, `session/server.go:349-353`), no metadata retained to describe a
+live session, and **no application-level way to steer one**.
 
-**Design — three small additions:**
+**Design.** One small store method, plus two additions to the session server. The steer must
+go through a **line-framed MCP message**, not the raw byte pipe.
 
 ```go
-// session/store.go — enumerate persisted sessions (FileStore scans <dir>/*.json).
+// session/store.go — enumerate persisted sessions (FileStore scans <dir>/*.json). SMALL.
 type SessionStore interface {
     Save(PersistedSession) error
     Load(id string) (PersistedSession, bool, error)
     DeleteIfOwner(id, owner string) error
-    List() ([]PersistedSession, error)   // NEW
+    List() ([]PersistedSession, error)   // NEW — the small part
 }
 
-// session/server.go — live view + the injection seam.
+// session/server.go — a live view. NOTE: serverSession (server.go:56-66) today stores only
+// ep/backend/reader/reaper/active/replay — NO Meta, NO backend name, NO createdAt. So this
+// requires the session to *retain* the caller Meta + a backend label + a start time first.
 type SessionInfo struct { ID, Peer, Backend string; Age time.Duration }
-func (s *Server) Sessions() []SessionInfo            // NEW: from s.sessions keys/meta
-func (s *Server) Steer(id string, payload []byte) error {  // NEW
-    sess, ok := s.sessions[parse(id)]                 // guarded by s.mu
+func (s *Server) Sessions() []SessionInfo   // NEW — needs the added fields above, not free
+
+// Steering a live session = a line-framed server→client message, NOT ep.Send(bytes).
+func (s *Server) Steer(id string, method string, params any) error { // NEW
+    sess, ok := s.sessions[parse(id)]        // guarded by s.mu
     if !ok { return ErrNoSession }
-    return sess.ep.Send(payload)                       // endpoint.go:80-125 — server→peer DATA
+    // route through the session's MCP server so it is a well-formed JSON-RPC
+    // request/notification the client can actually dispatch (mcp/server.go:161,224).
+    return sess.notifyClient(method, params)  // wraps Server.Notify / Server.Request
 }
 ```
 
 - **`List()`** on `FileStore` is a directory scan of the files it already writes
-  (`<dir>/<id>.json`, `session/store.go:96`); `MemStore` returns its map values.
-- **`Steer()`** delivers bytes into the live session's endpoint — for a resumable client
-  bridge (`connect --resumable`, `bridge.go`) that surfaces on the client's stdio, i.e. it
-  steers the connected MCP client/agent.
+  (`<dir>/<id>.json`, `session/store.go:96`); `MemStore` returns its map values. This part is
+  genuinely small.
+- **Why not `endpoint.Send`.** `ep.Send` (`session/endpoint.go:80-125`) is a raw ordered byte
+  pipe; the backend→peer pump already writes stdout in `maxPayload` chunks with no line
+  boundary (`session/server.go:267-288`). Injecting bytes there can splice into the middle of
+  a JSON-RPC line, and a generic MCP client won't act on unsolicited server→client bytes. So
+  a real steer is an **MCP server→client notification/request** (`Server.Notify`/`Request`,
+  the same mechanism `bidir_test.go` exercises for sampling), which is line-framed and
+  dispatchable. The end client must understand the steer method for it to *do* anything —
+  the transport is generic, the semantics are opt-in.
+- **`Sessions()` is not free.** It needs `serverSession` to gain the retained `Meta` (peer),
+  a backend label, and a `createdAt` (for `Age`) — a struct change, budgeted here honestly.
 - **Expose** via `control/control.go`: `GET /v1/sessions` (list) and `POST /v1/steer`
-  (`{id, payload}`), both governed and audited; and via the `air_sessions` / `air_steer`
-  MCP tools (§6).
-- **Safety:** injection is a privileged, deny-by-default method; the ledger records the
-  steerer's identity, the session id, and a content hash of the payload.
+  (`{id, method, params}`), gated by control-plane auth and audited; and via the
+  `air_sessions` / `air_steer` MCP tools (§6).
+- **Safety:** steering is privileged and deny-by-default; the ledger records the steerer's
+  identity, the session id, and a content hash of the payload.
 
 ---
 
 ## 4 · P3 — Task steer / augment
 
-**Problem.** A task is **immutable once started** — `tasks/cancel` exists
-(`mcp/server.go:326-341`, governed in `examples/live-task.yaml:20-23`), but there is no way
-to feed new guidance to a running task.
+**Problem.** A task is **immutable once started** — `tasks/cancel` exists (the JSON-RPC
+method is dispatched at `mcp/server.go:378-379` and handled by `taskCancel`,
+`mcp/server.go:514-525`; governed in `examples/live-task.yaml:21-23`), but there is no way
+to feed new guidance to a running task. *(The separate `notifications/cancelled` handler at
+`mcp/server.go:326-341` is the cancel-notification path, not the method.)*
 
 **Design.** Add an input channel to the task and a governed `tasks/steer` method that
-mirrors the existing cancel path.
+mirrors the existing cancel path. The handler receives the steer via **context plumbing**,
+the same way the session and tool-call info already reach handlers today — there is no
+`TaskContext` type.
 
 ```go
-// mcp/tasks.go — task gains a steer channel next to its cancel func (tasks.go:19-28).
-type task struct { id, tool, status, result, errMsg string; cancel context.CancelFunc; steer chan json.RawMessage }
+// mcp/tasks.go — task gains a steer channel. The real struct (tasks.go:19-28) is:
+//   task{ id, tool string; mu sync.Mutex; status string; result ToolResult; errMsg string;
+//         cancel context.CancelFunc }
+// add:  steer chan json.RawMessage   // sends must respect t.mu / be a buffered channel
 
 // mcp/server.go — dispatch beside tasks/list|get|result|cancel (server.go:372-379).
 case "tasks/steer":  tm.steer(taskID, params.payload)   // non-blocking send to t.steer
 
-// handler-facing accessor, symmetric with ctx cancellation.
-func (tc *TaskContext) Steer() <-chan json.RawMessage    // a cooperative handler selects on this
+// handler-facing accessor: a context helper mirroring WithSession / withToolCall
+// (mcp/tasks.go:70), NOT a method on a new type. A cooperative handler selects on it.
+func SteerChan(ctx context.Context) <-chan json.RawMessage
 ```
 
 Client helper in `mcpclient/tasks.go`, beside `CancelTask` (`tasks.go:74`):
@@ -158,9 +198,10 @@ Client helper in `mcpclient/tasks.go`, beside `CancelTask` (`tasks.go:74`):
 func (c *Client) SteerTask(ctx context.Context, id string, payload json.RawMessage) error
 ```
 
-- **Cooperative:** like cancellation, only handlers that select on `TaskContext.Steer()`
-  react; others ignore it. No handler is forced to change.
-- **Governed:** `tasks/steer` is a policy method just like `tasks/cancel` — a rule can deny
+- **Cooperative:** like cancellation, only handlers that select on `SteerChan(ctx)` react;
+  others ignore it. No handler is forced to change.
+- **Governed:** `tasks/steer` is a real MCP method reaching the backend through the policy
+  filter, so it *is* governed by a `methods:` rule just like `tasks/cancel` — a rule can deny
   it (`methods: ["tasks/steer"] allow: false`) exactly as `live-task.yaml` denies cancel.
 - **Subagents:** when the target task is itself an orchestrator/router hop, steering the
   parent task propagates via the origin `_meta` (`router.go:174-176`) so the child sees who
@@ -221,8 +262,18 @@ mesh call, never a backdoor.
 
 ## 7 · Governance & security (all reused)
 
-- **Deny by default.** `air/steer`, `air/launch`, and `tasks/steer` are policy methods
-  governed exactly like `tasks/cancel` (`examples/live-task.yaml:20-23`).
+- **Deny by default — but at three different gates, not one.** Each steer transport is
+  authorized where it crosses the boundary:
+  - **`tasks/steer` (P3)** is a real MCP method reaching a backend through the policy filter,
+    so it *is* governed by a `methods:` rule **exactly like `tasks/cancel`** (`policy/filter.go`
+    `handleMethod` → `policy.DecideMethod`, `policy/policy.go:60,149`;
+    `examples/live-task.yaml:21-23`).
+  - **`air/steer` to an agent inbox (P1)** is gated by the drop-receiver **sender ACL**
+    (`acl.go`), not a `methods:` rule.
+  - **`air/launch` and the control-plane `/v1/steer` (P2/P4)** are gated by **control-plane
+    auth** on those HTTP endpoints.
+  Three distinct, deny-by-default gates — do not conflate them under one "governed like
+  `tasks/cancel`" claim; that phrase is exact only for `tasks/steer`.
 - **Identity-attributed.** Every steer/launch resolves to the caller's WireGuard key; the
   ledger records who steered/launched what, when — provable with the public key alone.
 - **ACL'd inbox.** An agent's steer port admits only allow-listed senders (`acl.go`,
@@ -240,10 +291,11 @@ mesh call, never a backdoor.
 
 1. **P3 tasks/steer** — smallest, self-contained (`mcp/tasks.go` + `mcp/server.go` +
    `mcpclient/tasks.go`), lands cancel-symmetric augmentation with tests beside
-   `mcp/tasks_test.go`.
-2. **P2 session List + Steer** — one store method, one server method, one control endpoint.
-3. **P1 steerable agent** — the drop-receiver pattern applied to `agent.go`.
-4. **P4 launch + workflow** — the runner + `examples/air-workflow.yaml`.
+   `mcp/tasks_test.go`. **Start here** — it's the strongest and genuinely cancel-symmetric.
+2. **P2 session List + Steer** — `List()` is small, but budget the `serverSession` fields
+   `Sessions()` needs and the **server→client notify** steer path (not `endpoint.Send`).
+3. **P1 steerable agent** — the listener-role addition (inbound + ACL + audit) on `agent.go`.
+4. **P4 launch + workflow** — the runner + a new `examples/air-workflow.yaml` (proposed file).
 5. **Air surface** — `air_sessions`/`air_tasks`/`air_steer`/`air_launch` in `mcpapp.go`;
    the Steer tab in `site/air.html`; the `air steer`/`air launch` CLI verbs.
 

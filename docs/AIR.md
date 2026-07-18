@@ -90,7 +90,7 @@ on it. Three target types, one vocabulary:
 | Target | Addressed by | Backed by the seam |
 |---|---|---|
 | **Agent** | mesh FQDN / registry name (`peers.go`, `registry/`) | a new agent **inbox** (the `drop` receiver pattern applied to `agent.go`) |
-| **Session** | 16-byte session id (`session/`) | `Server.Steer(id)` via `endpoint.Send` (`session/endpoint.go`) + a new `List()` |
+| **Session** | 16-byte session id (`session/`) | a new `List()` + `Server.Steer(id)` via a line-framed server→client MCP notify/request (`Server.Notify`/`Request`) — *not* raw `endpoint.Send` |
 | **Task / subagent** | task id (`mcp/tasks.go`) | a governed `tasks/steer`, symmetric with the existing `tasks/cancel` |
 
 Five actions across those targets:
@@ -112,7 +112,7 @@ See [AIR-STEER.md](AIR-STEER.md) for the code-ready spec.
 
 ```bash
 meshmcp air launch --role reader 100.x.y.z:9101          # spawn a new agent identity
-meshmcp air launch --workflow examples/air-workflow.yaml  # run a declarative multi-step workflow
+meshmcp air launch --workflow air-workflow.yaml           # run a declarative multi-step workflow (example file proposed)
 ```
 
 An agent launch reuses `roleScripts` (`agent.go`) with a fresh `--nb-config`, so the new
@@ -278,7 +278,7 @@ Honesty about the seam, so nobody mistakes the mockup for shipped product:
 | `site/air.html` unified Air mockup | **This change** (mockup only) | `site/air.html` |
 | `meshmcp air` umbrella command (one page serving the verbs) | **Proposed** | would wrap the commands above |
 | Assistant tools `air_peers` · `air_push` · `air_fetch` | **Proposed** | thin wrappers in `mcpapp.go`, like `drop_file` |
-| **Steer** — agent inbox · session `List()`+inject · `tasks/steer` | **Proposed** | code-ready spec — [AIR-STEER.md](AIR-STEER.md) (P1–P3) |
+| **Steer** — agent inbox · session `List()` + server→client notify · `tasks/steer` | **Proposed** | code-ready spec — [AIR-STEER.md](AIR-STEER.md) (P1–P3) |
 | **Launch** — spawn agent / run workflow | **Proposed** | [AIR-STEER.md](AIR-STEER.md) P4 · `examples/air-workflow.yaml` |
 | Assistant tools `air_sessions` · `air_tasks` · `air_steer` · `air_launch` | **Proposed** | [AIR-STEER.md §6](AIR-STEER.md) |
 | Push-wake (buzz the phone on a new pending) | **Proposed** | the "push seam" — [MOBILE.md §4](MOBILE.md) |
