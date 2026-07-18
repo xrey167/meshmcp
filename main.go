@@ -22,6 +22,7 @@ Usage:
   meshmcp serve --config <file>                 join mesh, expose configured backends
   meshmcp router --config <file>                join mesh, aggregate upstreams as one endpoint
   meshmcp orchestrate --config <file>           join mesh, serve a tool that calls another server
+  meshmcp graphrag --config <file>              serve graph_search: vector retrieval + knowledge-graph expansion (S3)
   meshmcp control [flags]                        run the managed control plane (enroll, registry, policy)
   meshmcp federate --config <file>               run a cross-org federation boundary (granted tools only, audited)
   meshmcp agent --role <r> [flags] <peer:port>  run a demo agent app (reader/fetcher/billing/analyst) with its own identity
@@ -99,6 +100,8 @@ func main() {
 		err = cmdRouter(os.Args[2:])
 	case "orchestrate":
 		err = cmdOrchestrate(os.Args[2:])
+	case "graphrag":
+		err = cmdGraphRAG(os.Args[2:])
 	case "control":
 		err = cmdControl(os.Args[2:])
 	case "federate":
