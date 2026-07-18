@@ -138,6 +138,27 @@ seam, identity‑mapped, capability‑gated, metered, and audited on both sides.
 > **Why it's revolutionary:** a B2B knowledge/tool marketplace where access is a mintable
 > grant and every use is attributable — with no public surface.
 
+### F13 · Identity-native event fabric — `meshmcp pubsub`  ✅ *built*
+A publish/subscribe bus over the mesh where every event is stamped with the publisher's
+WireGuard key, delivery is authorized **per topic by identity (deny by default)**, data-flow
+labels **contain tainted events at the bus** (a crawler's `web.*` event never reaches an
+uncleared subscriber — prompt-injection defense below the model), and the event stream is
+**hash-chained** and audited exactly like the ledger. Delivery rides the resumable session
+layer, so subscribers survive roaming and replay missed events with `--since`. See
+[PUBSUB.md](PUBSUB.md); core in `pubsub/`, wiring in `pubsub.go` / `pubsubwire.go`.
+
+> **Why it's revolutionary:** a message bus where "who published what to whom" is
+> cryptographic, taint is contained at the network layer, and the whole stream is
+> tamper-evident — none of which an ordinary queue can claim.
+
+**Hardening (the bulk of the work, all `-race`-tested):** deny-by-default publish *and*
+subscribe; monotonic ordering + tamper-evident hash chain; bounded per-subscriber buffers
+with `drop_oldest` / `disconnect` backpressure; fan-out isolation (one slow reader never
+stalls the others); per-publisher token-bucket rate limiting; hard resource caps
+(subscriptions, topics/sub, topic length, frame size); taint/label containment with
+least-privilege intersection across a subscription's topics; bounded replay that surfaces
+truncation rather than silently short-serving; and an audit record for every decision.
+
 ---
 
 ## Supporting tier — high value, lower lift (mostly primitive reuse)
@@ -155,7 +176,7 @@ seam, identity‑mapped, capability‑gated, metered, and audited on both sides.
 | **S9** | **Multiplayer Control‑Room knowledge canvas** — humans + agents co‑edit a live graph and drag‑drop files to AirDrop them. | `room.go` |
 | **S10** | **Natural‑language mesh ops** — "share these files with Alice's laptop" / "give the analyst read access to the legal corpus until 5pm", attributed and audited. | `mcpapp.go` |
 
-*Flagship F1–F12 + supporting S1–S10 = 22 grounded ideas.*
+*Flagship F1–F13 + supporting S1–S10 = 23 grounded ideas.*
 
 ---
 

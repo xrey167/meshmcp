@@ -1,0 +1,62 @@
+# meshmcp pubsub broker — the identity-native event fabric.
+#
+# Run it:   meshmcp pubsub --config examples/pubsub.yaml
+# Publish:  echo '{"level":"warn","msg":"disk 90%"}' | \
+#             meshmcp publish --json <this-peer-mesh-ip>:9120 alerts.prod
+# Subscribe:  meshmcp subscribe <this-peer-mesh-ip>:9120 'alerts.*'
+#
+# The broker joins the mesh, listens only on the mesh interface (no public
+# port), admits only peers matching `allow`, and authorizes every publish and
+# subscribe per topic by the caller's WireGuard identity. Events are stamped
+# with the publisher's key, contained by data-flow labels, hash-chained, and
+# audited — the same guarantees the gateway gives tool calls, for events.
+
+mesh:
+  device_name: meshmcp-pubsub
+  setup_key_env: NB_SETUP_KEY          # env var holding the NetBird setup key
+  config_path: ./pubsub-nb.json        # persist identity: same mesh IP across restarts
+  log_level: warn
+
+listen_port: 9120                      # mesh port publishers/subscribers connect to
+
+# Connection ACL: who may open a pub/sub session at all. Empty = any mesh peer
+# (the mesh is already the outer boundary). Same vocabulary as the firewall.
+allow:
+  - "*.netbird.cloud"
+
+audit_log: ./pubsub-audit.jsonl        # one hash-chained record per allow/deny decision
+
+# Per-topic authorization. Deny by default (default_allow omitted/false): a
+# publish or subscribe is refused unless a rule grants it. First match wins.
+policy:
+  default_allow: false
+  rules:
+    # A crawler publishes to web.* topics; every such event is marked tainted
+    # at the source, so only cleared subscribers ever receive it.
+    - peers: ["crawler.netbird.cloud"]
+      topics: ["web.*"]
+      allow: true
+      taint: true
+
+    # Trusted analysts may subscribe to everything, cleared for all labels
+    # (including tainted content).
+    - peers: ["analyst-*.netbird.cloud"]
+      topics: ["*"]
+      allow: true
+      clear_all: true
+
+    # Services may publish and subscribe to their own alerts namespace, but are
+    # NOT cleared for tainted data — a tainted event is contained away from them.
+    - peers: ["pubkey:AbCdEf0123...="]
+      topics: ["alerts.*"]
+      allow: true
+
+# Resource caps. Zero fields fall back to conservative defaults.
+limits:
+  sub_queue: 256                       # per-subscriber buffer before backpressure
+  max_subs: 1024                       # concurrent subscriptions
+  max_topics_per_sub: 64               # topic patterns per subscription
+  max_topic_len: 256                   # topic/pattern length (bytes)
+  retain: 4096                         # events kept for --since replay
+  publish_rate: 50                     # per-publisher publishes/second (0 = unlimited)
+  publish_burst: 100                   # per-publisher burst ceiling

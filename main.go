@@ -32,6 +32,9 @@ Usage:
   meshmcp peers [flags]                          list mesh peers you can reach (identities you can drop to)
   meshmcp fetch [flags] <peer:port> <sha256>    fetch a blob by content hash from a peer's store (F11)
   meshmcp push [flags] <peer:port>              push a stdin payload to a peer's inbox (universal clipboard)
+  meshmcp pubsub --config <file>                run an identity-gated, audited event bus on the mesh
+  meshmcp publish [flags] <peer:port> <topic>   publish one event to a broker topic (payload from stdin or --data)
+  meshmcp subscribe [flags] <peer:port> <topic...>  stream events from a broker (--since replays, Ctrl-C to stop)
   meshmcp probe [flags] <peer-ip:port>          run an MCP handshake against a backend
   meshmcp ls [flags] <peer-ip:port>             list a backend's tools/resources/prompts
   meshmcp call [flags] <peer:port> <tool>       call a tool (--arg k=v, --json, --task, --capability @file)
@@ -82,6 +85,12 @@ func main() {
 		err = cmdFetch(os.Args[2:])
 	case "push":
 		err = cmdPush(os.Args[2:])
+	case "pubsub":
+		err = cmdPubsub(os.Args[2:])
+	case "publish":
+		err = cmdPublish(os.Args[2:])
+	case "subscribe":
+		err = cmdSubscribe(os.Args[2:])
 	case "probe":
 		err = cmdProbe(os.Args[2:])
 	case "ls":
