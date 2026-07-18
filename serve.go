@@ -92,6 +92,27 @@ func cmdServe(args []string) error {
 		log.Printf("shared audit ledger: %s", cfg.AuditLog)
 	}
 
+	// Optional gateway event hooks: publish every policy decision onto the
+	// event bus and/or a webhook. Kept as a nil interface when disabled so the
+	// filter never invokes it.
+	var hookSink policy.EventHook
+	if cfg.Hooks != nil {
+		gh, err := newGatewayHooks(cfg.Hooks, client, sharedAudit)
+		if err != nil {
+			return fmt.Errorf("hooks: %w", err)
+		}
+		defer gh.Close()
+		hookSink = gh
+		note := []string{}
+		if cfg.Hooks.Bus != nil {
+			note = append(note, fmt.Sprintf("bus on port %d", cfg.Hooks.Bus.ListenPort))
+		}
+		if cfg.Hooks.Webhook != nil && cfg.Hooks.Webhook.URL != "" {
+			note = append(note, "webhook")
+		}
+		log.Printf("gateway hooks enabled (%s)", strings.Join(note, ", "))
+	}
+
 	for _, b := range cfg.Backends {
 		ln, err := client.ListenTCP(fmt.Sprintf(":%d", b.Port))
 		if err != nil {
@@ -135,7 +156,7 @@ func cmdServe(args []string) error {
 					auditLogs = append(auditLogs, audit)
 				}
 			}
-			factory = backendFactory(b, audit, tracer)
+			factory = backendFactory(b, audit, tracer, hookSink)
 		}
 
 		wg.Add(1)
@@ -276,7 +297,7 @@ func bridgeConn(conn net.Conn, backend session.Backend) {
 // backendFactory builds the per-session backend for a stdio backend. It
 // wraps the subprocess with the inspection filter when a policy is set OR a
 // tracer is configured; with neither, the raw subprocess is used.
-func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer) session.BackendFactory {
+func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer, hook policy.EventHook) session.BackendFactory {
 	exec := session.ExecBackendFactory(b.Stdio[0], b.Stdio[1:], os.Environ())
 	if b.Policy == nil && tracer == nil && b.Capabilities == nil {
 		return exec
@@ -343,6 +364,9 @@ func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer) s
 		}
 		if capVerifier != nil {
 			f.SetCapabilityVerifier(capVerifier, b.Capabilities.Required)
+		}
+		if hook != nil {
+			f.SetEventHook(hook)
 		}
 		return f, nil
 	}

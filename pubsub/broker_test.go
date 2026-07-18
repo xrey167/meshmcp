@@ -366,6 +366,45 @@ func TestLabelCap(t *testing.T) {
 	}
 }
 
+// TestEmitInternal verifies gateway-side internal emission bypasses per-topic
+// publish authorization (and rate limiting) while normal publishes stay
+// governed, and that internal events are sealed into the same hash chain and
+// delivered to cleared subscribers.
+func TestEmitInternal(t *testing.T) {
+	// Only "sub" may subscribe to gateway.*; nobody has a publish grant.
+	auth := &RuleAuthorizer{Rules: []TopicRule{
+		{Peers: []string{"pubkey:sub"}, Topics: []string{"gateway.*"}, Allow: true, ClearAll: true},
+	}}
+	b := New(Options{Authorizer: auth})
+	defer b.Close()
+
+	sub, err := b.Subscribe(Identity{Key: "sub"}, SubOptions{Topics: []string{"gateway.*"}})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	defer sub.Close()
+
+	// A normal publish by an ungranted peer is denied...
+	if _, err := b.Publish(Identity{Key: "other"}, "gateway.deny", nil, nil); !errors.Is(err, ErrDenied) {
+		t.Fatalf("normal publish should be denied: %v", err)
+	}
+	// ...but internal emission from the gateway operator succeeds.
+	ev, err := b.EmitInternal("gateway", "gateway.deny", json.RawMessage(`{"tool":"x"}`), nil)
+	if err != nil {
+		t.Fatalf("EmitInternal: %v", err)
+	}
+	if ev.Publisher != "gateway" || ev.Topic != "gateway.deny" {
+		t.Fatalf("unexpected internal event: %+v", ev)
+	}
+	got := recv(t, sub)
+	if got.Seq != ev.Seq || got.Publisher != "gateway" {
+		t.Fatalf("subscriber got wrong event: %+v", got)
+	}
+	if err := VerifyChain(b.Retained()); err != nil {
+		t.Fatalf("chain must verify after internal emit: %v", err)
+	}
+}
+
 func TestResourceCaps(t *testing.T) {
 	b := New(Options{Authorizer: AllowAll{}, Limits: Limits{MaxTopicsPerSub: 2, MaxSubs: 2, MaxTopicLen: 8}})
 

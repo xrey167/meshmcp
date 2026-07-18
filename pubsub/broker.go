@@ -243,6 +243,59 @@ func (b *Broker) Publish(id Identity, topic string, payload json.RawMessage, ext
 	return ev, nil
 }
 
+// EmitInternal publishes a system event from the broker operator itself — e.g.
+// the gateway emitting its own lifecycle events (policy decisions, taint trips)
+// onto the bus. It bypasses per-topic authorization and rate limiting (the
+// operator running the broker is trusted to emit), but the event is still
+// validated, capped, sealed into the hash chain, retained, fanned out subject
+// to each subscriber's label clearance, and audited. source names the event's
+// Publisher (a system identifier, not a WireGuard key).
+func (b *Broker) EmitInternal(source, topic string, payload json.RawMessage, labels []string) (*Event, error) {
+	if err := validateTopic(topic, b.lm.MaxTopicLen); err != nil {
+		return nil, err
+	}
+	if len(payload) > b.lm.MaxPayloadBytes {
+		return nil, fmt.Errorf("%w: %d bytes exceeds max %d", ErrPayloadTooLarge, len(payload), b.lm.MaxPayloadBytes)
+	}
+	labels = unionLabels(labels, nil)
+	if len(labels) > b.lm.MaxLabels {
+		return nil, fmt.Errorf("%w: %d labels exceeds max %d", ErrBadTopic, len(labels), b.lm.MaxLabels)
+	}
+
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return nil, ErrClosed
+	}
+	b.seq++
+	ev := &Event{
+		Topic:     topic,
+		Seq:       b.seq,
+		Time:      b.now().UTC().Format(time.RFC3339Nano),
+		Publisher: source,
+		Labels:    labels,
+		Payload:   payload,
+		PrevHash:  b.prev,
+	}
+	h, err := chainHash(*ev)
+	if err != nil {
+		b.mu.Unlock()
+		return nil, fmt.Errorf("hash event: %w", err)
+	}
+	ev.Hash = h
+	b.prev = h
+	b.ring.add(*ev)
+	for _, s := range b.subs {
+		if s.accepts(ev) {
+			b.deliverLocked(s, ev)
+		}
+	}
+	b.mu.Unlock()
+
+	b.record(Identity{Key: source, FQDN: source}, "pubsub/emit", topic, "allow", "internal emit", ev.Labels)
+	return ev, nil
+}
+
 // SubOptions parameterize a subscription.
 type SubOptions struct {
 	Topics       []string     // topic globs (at least one)

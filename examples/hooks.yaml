@@ -1,0 +1,56 @@
+# Gateway hooks — publish the firewall's decisions as an observable event
+# stream. Every policy decision (deny / co-sign / allow) can be emitted onto the
+# identity-native event bus AND/OR POSTed to a webhook. Hooks are strictly
+# observability: they never block or change a decision (a full queue drops,
+# a slow/dead sink is fire-and-forget).
+#
+# Run:   meshmcp serve --config examples/hooks.yaml
+# Watch the deny/cosign stream from any authorized mesh peer:
+#        meshmcp subscribe <gateway-mesh-ip>:9130 'gateway.*'
+
+mesh:
+  device_name: meshmcp-hooks
+  setup_key_env: NB_SETUP_KEY
+  config_path: ./hooks-gw.json
+  log_level: info
+
+audit_log: ./hooks-audit.jsonl        # shared ledger; hook bus events chain here too
+
+hooks:
+  events: ["deny", "cosign"]           # which decisions to emit (default: deny + cosign)
+  topic_prefix: gateway                # topic is "<prefix>.<outcome>", e.g. gateway.deny
+  queue_size: 1024                     # in-flight events before dropping (never blocks enforcement)
+
+  # Publish onto an embedded event bus on the mesh. Peers subscribe like any
+  # other broker; subscription is authorized per topic by identity.
+  bus:
+    listen_port: 9130
+    allow: ["*.netbird.cloud"]         # who may open a subscribe session at all
+    policy:
+      default_allow: false
+      rules:
+        - peers: ["soc-*.netbird.cloud"]   # the SOC dashboard may watch everything
+          topics: ["gateway.*"]
+          allow: true
+          clear_all: true
+
+  # Also POST each event as JSON to an external URL. NOTE: a public URL sends
+  # gateway metadata off the mesh; only decision metadata is sent (never tool
+  # arguments, payloads, or injected secrets).
+  webhook:
+    url: https://siem.example.com/ingest/meshmcp
+    timeout_seconds: 5
+    auth_header: "Bearer ${SIEM_TOKEN}"   # optional; sent as the Authorization header
+
+backends:
+  - name: fs
+    port: 9001
+    stdio: ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/data"]
+    policy:
+      default_allow: false
+      rules:
+        - peers: ["*"]
+          tools: ["read_*", "list_*"]
+          allow: true
+        # everything else (write_*, delete_*, ...) is denied by default and
+        # every denial is published to gateway.deny.

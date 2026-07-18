@@ -113,6 +113,43 @@ is covered by `go test -race`:
 | **No silent caps** | Replay past the retention window sets `truncated`; dropped events are counted and surfaced. |
 | **Audited** | Every allow/deny decision is a record in the shared hash-chained ledger (`audit_log`). |
 
+## Gateway hooks — the firewall as a stream
+
+Beyond hand-published events, the gateway itself can emit **its own policy
+decisions** onto the bus (and/or a webhook), turning the firewall into an
+observable event stream. Add a `hooks:` block to a `meshmcp serve` config
+([`examples/hooks.yaml`](../examples/hooks.yaml)):
+
+```yaml
+hooks:
+  events: ["deny", "cosign"]     # decisions to emit (topic "gateway.<outcome>")
+  bus:                            # embedded broker on the mesh; peers subscribe
+    listen_port: 9130
+    allow: ["*.netbird.cloud"]
+    policy: { default_allow: false, rules: [ ... ] }
+  webhook:                        # and/or POST each event as JSON
+    url: https://siem.example.com/ingest/meshmcp
+    auth_header: "Bearer ${SIEM_TOKEN}"
+```
+
+Every policy decision then flows to `gateway.deny` / `gateway.cosign` /
+`gateway.allow`. Watch it live from any authorized peer:
+
+```sh
+meshmcp subscribe <gateway-mesh-ip>:9130 'gateway.*'
+```
+
+Hooks are **strictly observability, decoupled from enforcement**: the emit path
+never blocks or fails a decision — it drops onto a bounded queue and a worker
+fans out, so a slow or dead sink can never delay the request path. Only decision
+metadata is emitted (backend, peer, method, tool, reason, rule, audit sequence)
+— never tool arguments, payloads, or injected secrets. Internal emission is
+sealed into the same hash chain and audited, but bypasses per-topic publish
+authorization (the gateway is the broker operator). A webhook to a public URL
+sends that metadata off the mesh, so it is explicit and opt-in.
+
+## Wire protocol
+
 The wire protocol is newline-delimited JSON over the resumable session
 transport; a client sends one `{"role":"pub"|"sub", ...}` hello frame, then
 either publishes (one frame in, one ack out) or streams events.

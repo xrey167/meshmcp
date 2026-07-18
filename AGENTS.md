@@ -29,6 +29,7 @@ meshmcp is an **identity-native control plane for agent-to-tool (MCP) traffic**.
 | `agent.go` | `agent --role …` — demo agent apps (reader/fetcher/billing/analyst) each with their own mesh identity. |
 | `probe.go` · `replay.go` | `probe` (handshake diagnostic) and `replay` (re-issue a traced session and diff). |
 | `pubsub.go` · `pubsubwire.go` | `pubsub` (identity-gated event-bus daemon), `publish`, `subscribe`; the wire protocol + `session.Backend` adapter over the `pubsub/` core. |
+| `hooks.go` | Gateway event hooks: publishes each policy decision (`policy.EventHook`) onto an embedded event bus and/or a webhook — observability, decoupled from enforcement (never blocks a decision). |
 | `README.md` · `LICENSE` | Project overview; proprietary license (© Rey Darius). |
 | `index.html` | Published GitHub Pages site, merged to the code root (Pages still deploys from the `gh-pages` branch). |
 

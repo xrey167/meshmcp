@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -216,4 +217,77 @@ func TestFilterEnforcesAndAudits(t *testing.T) {
 		t.Fatalf("audit missing expected fields:\n%s", auditStr)
 	}
 	t.Logf("enforcement + audit verified; audit log:\n%s", auditStr)
+}
+
+// captureHook records the AuditRecords the filter emits to the event hook.
+type captureHook struct {
+	mu   sync.Mutex
+	recs []AuditRecord
+}
+
+func (c *captureHook) Emit(rec AuditRecord) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.recs = append(c.recs, rec)
+}
+
+func (c *captureHook) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.recs)
+}
+
+func (c *captureHook) snapshot() []AuditRecord {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]AuditRecord(nil), c.recs...)
+}
+
+// TestFilterEventHook verifies the filter forwards every policy decision to an
+// attached EventHook, mirroring the audit record (this is the gateway->bus
+// bridge the hooks feature relies on).
+func TestFilterEventHook(t *testing.T) {
+	backend := newEchoBackend()
+	pol := &Policy{
+		DefaultAllow: false,
+		Rules:        []Rule{{Peers: []string{"*"}, Tools: []string{"read_*"}, Allow: true}},
+	}
+	hook := &captureHook{}
+	f := NewFilter(backend, Caller{Backend: "kg", Peer: "p.netbird.cloud"}, pol, nil, nil)
+	f.SetEventHook(hook)
+
+	go func() {
+		sc := bufio.NewScanner(f)
+		for sc.Scan() {
+		}
+	}()
+	f.Write([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"delete_all"}}` + "\n"))
+	f.Write([]byte(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_x"}}` + "\n"))
+
+	deadline := time.After(5 * time.Second)
+	for hook.count() < 2 {
+		select {
+		case <-deadline:
+			t.Fatalf("hook received %d records, want 2", hook.count())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	var allow, deny int
+	for _, r := range hook.snapshot() {
+		switch r.Decision {
+		case "allow":
+			allow++
+			if r.Tool != "read_x" {
+				t.Fatalf("allow hook for wrong tool: %q", r.Tool)
+			}
+		case "deny":
+			deny++
+			if r.Tool != "delete_all" {
+				t.Fatalf("deny hook for wrong tool: %q", r.Tool)
+			}
+		}
+	}
+	if allow != 1 || deny != 1 {
+		t.Fatalf("hook decisions: allow=%d deny=%d, want 1/1", allow, deny)
+	}
 }
