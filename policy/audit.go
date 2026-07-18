@@ -127,6 +127,10 @@ func (a *AuditLog) SeedFrom(seq int, prevHash string) {
 	a.prev = prevHash
 }
 
+// maxReasonBytes bounds the audit record's free-form Reason so no single record
+// can approach the verifier's 16 MiB line cap.
+const maxReasonBytes = 8192
+
 // chainHash computes the record's hash over its JSON with the Hash field
 // cleared. PrevHash is already a field of rec, so it is covered by the hash.
 func chainHash(rec AuditRecord) (string, []byte, error) {
@@ -156,6 +160,13 @@ func (a *AuditLog) write(rec AuditRecord) error {
 		return nil
 	}
 	rec.Time = a.nowf()
+	// Bound the one free-form field so a single record can never approach the
+	// 16 MiB line cap the verifier (chain.go) and analyzer read with — an
+	// over-long record would otherwise be unverifiable. Truncation happens
+	// before hashing, so the hash covers exactly what is written.
+	if len(rec.Reason) > maxReasonBytes {
+		rec.Reason = rec.Reason[:maxReasonBytes] + "…(truncated)"
+	}
 
 	a.mu.Lock()
 	defer a.mu.Unlock()

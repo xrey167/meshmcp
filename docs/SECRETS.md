@@ -98,6 +98,19 @@ the same.
 - **v1 scope:** injection is into stdio `tools/call` arguments (where the gateway
   parses JSON-RPC). HTTP-backend header injection is a natural follow-on on the
   forward/HTTP path.
+- **Confused-deputy — cover it with taint:** a `{{secret:NAME}}` reference is
+  resolved wherever it appears in an outbound call, including argument fields
+  that may derive from untrusted, model-supplied, or retrieved content. The
+  guard against a jailbroken agent tricking the gateway into injecting a secret
+  is the label lattice: any tool that can *carry untrusted content into a
+  credentialed call* must taint the session (`taint_source: true` on the tool
+  that pulls the content) so the grant's `block_labels: ["tainted"]` refuses the
+  injection. Rule of thumb: **every secret grant should set
+  `block_labels: ["tainted"]`, and every untrusted-content source should set
+  `taint_source: true`** — the broker already refuses injection into a tainted
+  session; this is how you make sure the session is tainted when it should be.
+- **Permissions:** a file store MUST be mode `0600` — `NewFileStore` refuses a
+  group- or world-accessible secrets file rather than read it.
 
 ## Reference implementation
 

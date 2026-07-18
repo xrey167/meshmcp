@@ -173,6 +173,15 @@ func (b *Backend) kind() string {
 	return fmt.Sprintf("stdio -> %v", b.Stdio)
 }
 
+// loadConfig parses and validates a gateway config.
+//
+// Trust model: the config file is TRUSTED operator input (it names the backend
+// commands the gateway will exec, the pinned trust roots, and the audit sinks).
+// It is not attacker-controlled, so YAML alias/anchor expansion is not a
+// hardening concern here. If a deployment ever renders configs from less-trusted
+// input, template them into a fixed schema rather than unmarshalling them
+// directly. Everything the config *governs* (peers, tool calls) remains
+// untrusted and is enforced at request time.
 func loadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
