@@ -49,6 +49,7 @@ Usage:
   meshmcp mcp [flags]                            run meshmcp AS an MCP server (add it to Claude Code / Codex to operate the mesh)
   meshmcp insight <profile|recommend|simulate|detect>  turn the audit stream into policy (the firewall's read side)
   meshmcp replay [flags] <trace> <peer:port>    replay a traced session against a backend and diff
+  meshmcp plugins                                list extensions compiled into this build
   meshmcp version
 
 Mesh credentials come from flags, config, or $NB_SETUP_KEY / $NB_MANAGEMENT_URL.
@@ -128,14 +129,22 @@ func main() {
 		err = cmdInsight(os.Args[2:])
 	case "replay":
 		err = cmdReplay(os.Args[2:])
+	case "plugins":
+		err = cmdPlugins(os.Args[2:])
 	case "version":
 		fmt.Println(version)
 	case "-h", "--help", "help":
 		usage()
 	default:
-		fmt.Fprintf(os.Stderr, "meshmcp: unknown command %q\n\n", os.Args[1])
-		usage()
-		os.Exit(2)
+		// Fall through to the plugin subcommand registry before giving up, so a
+		// compiled-in extension can add a verb without editing this switch.
+		if handled, perr := dispatchPlugin(os.Args[1], os.Args[2:]); handled {
+			err = perr
+		} else {
+			fmt.Fprintf(os.Stderr, "meshmcp: unknown command %q\n\n", os.Args[1])
+			usage()
+			os.Exit(2)
+		}
 	}
 	if err != nil {
 		log.Fatal(err)

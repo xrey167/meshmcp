@@ -30,6 +30,7 @@ type Filter struct {
 	pending     PendingStore
 	capVerifier *CapabilityVerifier
 	capRequired bool
+	hooks       []DecisionHook
 	caller      Caller
 
 	lmu    sync.Mutex      // guards labels
@@ -145,7 +146,8 @@ type rpcPeek struct {
 	Method string          `json:"method"`
 	ID     json.RawMessage `json:"id,omitempty"`
 	Params struct {
-		Name string `json:"name"`
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
 	} `json:"params"`
 }
 
@@ -219,6 +221,13 @@ func (f *Filter) handleToolCall(line []byte, msg rpcPeek, capToken string) error
 	dec := f.eng.DecideToolCall(f.caller.Peer, f.caller.PeerKey, tool, f.labelSnapshot())
 	if f.capVerifier != nil {
 		dec = f.applyCapability(dec, capToken, tool)
+	}
+	// Plugin decision hooks run last and may only tighten the outcome (deny /
+	// co-sign) or add labels — never widen a deny into an allow.
+	if len(f.hooks) > 0 {
+		dec = applyDecisionHooks(f.hooks, ToolCallInfo{
+			Caller: f.caller, Tool: tool, Arguments: msg.Params.Arguments, Labels: f.labelSnapshot(),
+		}, dec)
 	}
 	rec := f.record(msg.Method, tool, string(msg.ID), dec)
 	if err := f.audit.write(rec); err != nil {

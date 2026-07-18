@@ -57,7 +57,26 @@ type AuditLog struct {
 	lastSeq  int
 	lastHash string
 
-	failClosed bool // when set, a failed write is surfaced to deny the call
+	failClosed bool        // when set, a failed write is surfaced to deny the call
+	secondary  []AuditSink // observer sinks (SIEM, webhook, OTel) — best-effort
+}
+
+// AuditSink receives finalized audit records. *AuditLog is the primary sink
+// (the tamper-evident hash chain); plugins can register additional observer
+// sinks (a SIEM, a webhook, an OTel exporter) via AuditLog.AddSink. Observer
+// sinks see each record AFTER it commits to the chain and their errors never
+// affect the call — the chain, not the observer, is the control.
+type AuditSink interface {
+	Append(rec AuditRecord) error
+}
+
+// AddSink registers an observer sink that receives every committed record. It
+// is not safe to call concurrently with writes; register sinks at setup time.
+func (a *AuditLog) AddSink(s AuditSink) *AuditLog {
+	if s != nil {
+		a.secondary = append(a.secondary, s)
+	}
+	return a
 }
 
 // WithFailClosed makes the log a hard control: when the underlying sink cannot
@@ -169,6 +188,10 @@ func (a *AuditLog) write(rec AuditRecord) error {
 	a.lastSeq, a.lastHash = rec.Seq, h
 	if a.cp != nil {
 		a.cp.add(rec.Seq, h)
+	}
+	// Fan out to observer sinks (best-effort — the chain above is the control).
+	for _, s := range a.secondary {
+		_ = s.Append(rec)
 	}
 	return nil
 }
