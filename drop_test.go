@@ -250,15 +250,17 @@ func TestDropOverSession(t *testing.T) {
 	go func() { pw.CloseWithError(sendFiles(pw, []string{p})) }()
 
 	sc := session.NewClient(dial, nil)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := sc.Run(ctx, sendStream{r: pr}); err != nil {
 		t.Fatalf("session run: %v", err)
 	}
 
-	// The receiver finalizes asynchronously; wait for the installed file.
+	// The receiver finalizes asynchronously; wait for the installed file. The
+	// deadline is generous so the test never false-fails under a loaded -race
+	// run (it normally completes in tens of milliseconds).
 	dstFile := filepath.Join(dst, "report.bin")
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(20 * time.Second)
 	for {
 		if b, err := os.ReadFile(dstFile); err == nil {
 			if !bytes.Equal(b, payload) {

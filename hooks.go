@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"sync"
@@ -147,7 +148,13 @@ func newGatewayHooks(cfg *HooksConfig, client *embed.Client, audit *policy.Audit
 		}
 		h.webhookURL = cfg.Webhook.URL
 		h.webhookHdr = cfg.Webhook.AuthHeader
-		h.httpc = &http.Client{Timeout: to}
+		h.httpc = &http.Client{
+			Timeout: to,
+			// Do not follow redirects: a redirect must not cause the decision
+			// payload (which may carry an Authorization header) to be re-sent to
+			// a different host than the operator configured.
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		}
 	}
 
 	h.wg.Add(1)
@@ -218,6 +225,8 @@ func (h *gatewayHooks) postWebhook(m hookMessage) {
 	if err != nil {
 		return // best-effort observability; never surfaces to the request path
 	}
+	// Drain (bounded) and close so the connection can be reused.
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
 	resp.Body.Close()
 }
 

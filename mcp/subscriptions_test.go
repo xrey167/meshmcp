@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -91,6 +92,65 @@ func TestSubscriptionsCloseOnDisconnect(t *testing.T) {
 	json.Unmarshal(comp.Result, &res)
 	if res.ResultType != "complete" {
 		t.Fatalf("disconnect terminal result = %q, want complete", res.ResultType)
+	}
+}
+
+// TestSubscriptionsCap verifies the per-connection subscription count is
+// bounded: past the cap, further listen requests are rejected (not registered),
+// so a client cannot exhaust server memory.
+func TestSubscriptionsCap(t *testing.T) {
+	s := New("test", "1.0")
+	h := startHarness(t, s)
+	total := maxSubscriptions + 1
+	for i := 1; i <= total; i++ {
+		h.send(t, fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"subscriptions/listen","params":{"notifications":{"toolsListChanged":true}}}`, i))
+	}
+	acks, errs := 0, 0
+	deadline := time.After(5 * time.Second)
+	for acks+errs < total {
+		select {
+		case m, ok := <-h.msgs:
+			if !ok {
+				t.Fatalf("stream closed: acks=%d errs=%d", acks, errs)
+			}
+			switch {
+			case len(m.ID) == 0 && m.Method == methodSubscriptionsAck:
+				acks++
+			case len(m.ID) > 0 && len(m.Error) > 0:
+				errs++
+			}
+		case <-deadline:
+			t.Fatalf("timeout: acks=%d errs=%d", acks, errs)
+		}
+	}
+	if acks != maxSubscriptions || errs != 1 {
+		t.Fatalf("acks=%d errs=%d, want %d/1", acks, errs, maxSubscriptions)
+	}
+}
+
+// TestSubscriptionsRejectsAbuse verifies duplicate ids and oversized resource
+// subscription lists are refused.
+func TestSubscriptionsRejectsAbuse(t *testing.T) {
+	s := New("test", "1.0")
+	h := startHarness(t, s)
+
+	h.send(t, `{"jsonrpc":"2.0","id":1,"method":"subscriptions/listen","params":{"notifications":{"toolsListChanged":true}}}`)
+	h.waitNotification(t, methodSubscriptionsAck)
+	// Re-using id 1 is rejected.
+	h.send(t, `{"jsonrpc":"2.0","id":1,"method":"subscriptions/listen","params":{"notifications":{"toolsListChanged":true}}}`)
+	if dup := h.waitResponse(t, 1); len(dup.Error) == 0 {
+		t.Fatal("duplicate subscription id should be rejected")
+	}
+
+	// An oversized resourceSubscriptions list is rejected.
+	big := make([]string, maxResourceSubsPerListen+1)
+	for i := range big {
+		big[i] = fmt.Sprintf("file:///%d", i)
+	}
+	params, _ := json.Marshal(map[string]any{"notifications": map[string]any{"resourceSubscriptions": big}})
+	h.send(t, fmt.Sprintf(`{"jsonrpc":"2.0","id":2,"method":"subscriptions/listen","params":%s}`, params))
+	if over := h.waitResponse(t, 2); len(over.Error) == 0 {
+		t.Fatal("oversized resourceSubscriptions should be rejected")
 	}
 }
 

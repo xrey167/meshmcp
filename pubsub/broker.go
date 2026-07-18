@@ -292,7 +292,10 @@ func (b *Broker) EmitInternal(source, topic string, payload json.RawMessage, lab
 	}
 	b.mu.Unlock()
 
-	b.record(Identity{Key: source, FQDN: source}, "pubsub/emit", topic, "allow", "internal emit", ev.Labels)
+	// Internal emission is not audited here: its events derive from decisions
+	// the gateway already recorded in the ledger, and re-auditing every one
+	// would double ledger volume under a deny-flood. External publish/subscribe
+	// on the bus are still audited.
 	return ev, nil
 }
 

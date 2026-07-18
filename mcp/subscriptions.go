@@ -23,6 +23,12 @@ const (
 	methodSubscriptionsAck    = "notifications/subscriptions/acknowledged"
 	metaKeySubscriptionID     = "io.modelcontextprotocol/subscriptionId"
 	subscriptionComplete      = "complete"
+
+	// Caps on client-controlled allocation: a client opens subscriptions and
+	// chooses how many resource URIs each carries, so both are bounded to keep
+	// one connection from exhausting server memory.
+	maxSubscriptions         = 256
+	maxResourceSubsPerListen = 512
 )
 
 // SubscriptionFilter selects which notification types a subscription delivers.
@@ -54,23 +60,38 @@ func (s *Server) handleListen(req request, sess *Session) response {
 				Error: &rpcError{Code: codeInvalidParams, Message: "invalid subscriptions/listen params: " + err.Error()}}
 		}
 	}
+	if n := len(p.Notifications.ResourceSubscriptions); n > maxResourceSubsPerListen {
+		return response{JSONRPC: "2.0", ID: req.ID,
+			Error: &rpcError{Code: codeInvalidParams, Message: "too many resourceSubscriptions"}}
+	}
 	uris := make(map[string]bool, len(p.Notifications.ResourceSubscriptions))
 	for _, u := range p.Notifications.ResourceSubscriptions {
 		uris[u] = true
 	}
 	sub := &subscription{id: req.ID, sess: sess, filter: p.Notifications, uris: uris}
+	idStr := string(req.ID)
 
 	s.submu.Lock()
 	if s.subs == nil {
 		s.subs = map[string]*subscription{}
 	}
-	s.subs[string(req.ID)] = sub
+	if _, dup := s.subs[idStr]; dup {
+		s.submu.Unlock()
+		return response{JSONRPC: "2.0", ID: req.ID,
+			Error: &rpcError{Code: codeInvalidParams, Message: "duplicate subscription id"}}
+	}
+	if len(s.subs) >= maxSubscriptions {
+		s.submu.Unlock()
+		return response{JSONRPC: "2.0", ID: req.ID,
+			Error: &rpcError{Code: codeInvalidParams, Message: "too many active subscriptions"}}
+	}
+	s.subs[idStr] = sub
 	s.submu.Unlock()
 
 	// The acknowledgment is the first message on the stream: it echoes the
 	// honored filter and carries the subscription id in _meta.
 	sess.Notify(methodSubscriptionsAck, map[string]any{
-		"_meta":         map[string]any{metaKeySubscriptionID: string(req.ID)},
+		"_meta":         map[string]any{metaKeySubscriptionID: idStr},
 		"notifications": p.Notifications,
 	})
 	return response{skip: true} // keep the request open
