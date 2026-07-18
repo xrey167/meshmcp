@@ -113,8 +113,9 @@ func appObj(props map[string]any, req ...string) map[string]any {
 	}
 	return m
 }
-func appStr(d string) map[string]any { return map[string]any{"type": "string", "description": d} }
-func appNum(d string) map[string]any { return map[string]any{"type": "number", "description": d} }
+func appStr(d string) map[string]any  { return map[string]any{"type": "string", "description": d} }
+func appNum(d string) map[string]any  { return map[string]any{"type": "number", "description": d} }
+func appBool(d string) map[string]any { return map[string]any{"type": "boolean", "description": d} }
 func appAnyObj(d string) map[string]any {
 	return map[string]any{"type": "object", "description": d}
 }
@@ -207,6 +208,113 @@ func (a *meshApp) register(s *mcp.Server) {
 		InputSchema: appObj(map[string]any{"limit": appNum("max receipts to show (default 20)")}),
 		Handler:     a.toolShowRetrievals,
 	})
+	s.AddTool(mcp.Tool{
+		Name:        "pubsub_publish",
+		Description: "Publish an event to a pub/sub broker topic over the mesh (identity-gated, audited). target is broker-ip:port.",
+		InputSchema: appObj(map[string]any{
+			"target": appStr("broker mesh address, e.g. 100.64.0.5:9120"),
+			"topic":  appStr("topic to publish to, e.g. alerts.prod"),
+			"data":   appStr("event payload (wrapped as a JSON string unless json=true)"),
+			"json":   appBool("treat data as raw JSON (default false)"),
+			"retain": appBool("store as the topic's retained last-value (default false)"),
+		}, "target", "topic", "data"),
+		Handler: a.toolPubsubPublish,
+	})
+	s.AddTool(mcp.Tool{
+		Name:        "pubsub_stats",
+		Description: "Query a running pub/sub broker for a live snapshot (subscriptions, sequence, retained, drops). target is broker-ip:port.",
+		InputSchema: appObj(map[string]any{"target": appStr("broker mesh address, e.g. 100.64.0.5:9120")}, "target"),
+		Handler:     a.toolPubsubStats,
+	})
+}
+
+// toolPubsubPublish publishes one event to a broker over the mesh.
+func (a *meshApp) toolPubsubPublish(ctx context.Context, args json.RawMessage) (mcp.ToolResult, error) {
+	var p struct {
+		Target, Topic, Data string
+		JSON, Retain        bool
+	}
+	if err := json.Unmarshal(args, &p); err != nil || p.Target == "" || p.Topic == "" {
+		return errTxt("target and topic are required"), nil
+	}
+	if a.mesh == nil {
+		return errTxt("not joined to the mesh (set NB_SETUP_KEY)"), nil
+	}
+	var payload json.RawMessage
+	if p.JSON {
+		if !json.Valid([]byte(p.Data)) {
+			return errTxt("json=true but data is not valid JSON"), nil
+		}
+		payload = json.RawMessage(p.Data)
+	} else {
+		enc, _ := json.Marshal(p.Data)
+		payload = enc
+	}
+	hello, _ := json.Marshal(helloFrame{Role: "pub"})
+	pf, _ := json.Marshal(pubFrame{Topic: p.Topic, Retain: p.Retain, Payload: payload})
+	preamble := append(append(hello, '\n'), append(pf, '\n')...)
+
+	var mu sync.Mutex
+	var ack ackFrame
+	var got bool
+	stream := &clientStream{out: preamble, done: make(chan struct{})}
+	stream.onLine = func(line []byte) {
+		mu.Lock()
+		defer mu.Unlock()
+		if got {
+			return
+		}
+		got = true
+		_ = json.Unmarshal(line, &ack)
+		stream.finish()
+	}
+	dial := func(ctx context.Context) (net.Conn, error) { return a.mesh.Dial(ctx, "tcp", p.Target) }
+	_ = session.NewClient(dial, nil).Run(ctx, stream)
+	mu.Lock()
+	g, r := got, ack
+	mu.Unlock()
+	if !g {
+		return errTxt("no acknowledgment from broker %s", p.Target), nil
+	}
+	if r.Error != "" {
+		return errTxt("broker rejected publish: %s", r.Error), nil
+	}
+	return txt(fmt.Sprintf("published to %q on %s (seq %d)", p.Topic, p.Target, r.Seq)), nil
+}
+
+// toolPubsubStats returns a running broker's snapshot.
+func (a *meshApp) toolPubsubStats(ctx context.Context, args json.RawMessage) (mcp.ToolResult, error) {
+	var p struct{ Target string }
+	if err := json.Unmarshal(args, &p); err != nil || p.Target == "" {
+		return errTxt("target is required"), nil
+	}
+	if a.mesh == nil {
+		return errTxt("not joined to the mesh (set NB_SETUP_KEY)"), nil
+	}
+	hello, _ := json.Marshal(helloFrame{Role: "stats"})
+	var mu sync.Mutex
+	var line string
+	var got bool
+	stream := &clientStream{out: append(hello, '\n'), done: make(chan struct{})}
+	stream.onLine = func(b []byte) {
+		mu.Lock()
+		defer mu.Unlock()
+		if got {
+			return
+		}
+		got = true
+		line = string(b)
+		stream.finish()
+	}
+	dial := func(ctx context.Context) (net.Conn, error) { return a.mesh.Dial(ctx, "tcp", p.Target) }
+	_ = session.NewClient(dial, nil).Run(ctx, stream)
+	mu.Lock()
+	g, resp := got, line
+	mu.Unlock()
+	if !g {
+		return errTxt("no response from broker %s", p.Target), nil
+	}
+	return txt(resp), nil
 }
 
 // toolDropFile streams a local file to a peer's drop receiver over the mesh.

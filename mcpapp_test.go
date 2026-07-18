@@ -34,6 +34,22 @@ func TestMCPAppRegistersControlTools(t *testing.T) {
 	}
 }
 
+func TestMCPAppPubsubTools(t *testing.T) {
+	app := &meshApp{}
+	app.register(mcp.New("t", "1"))
+	// Missing required args → error.
+	if res, _ := app.toolPubsubPublish(context.Background(), []byte(`{}`)); !res.IsError {
+		t.Fatal("pubsub_publish without target/topic should error")
+	}
+	// Valid args but no mesh → "not joined" error (proves the handler is wired).
+	if res, _ := app.toolPubsubPublish(context.Background(), []byte(`{"target":"100.64.0.1:9120","topic":"t","data":"hi"}`)); !res.IsError {
+		t.Fatal("pubsub_publish without mesh should error")
+	}
+	if res, _ := app.toolPubsubStats(context.Background(), []byte(`{"target":"100.64.0.1:9120"}`)); !res.IsError {
+		t.Fatal("pubsub_stats without mesh should error")
+	}
+}
+
 func TestMCPAppNetwork(t *testing.T) {
 	dir := t.TempDir()
 	audit := filepath.Join(dir, "audit.jsonl")
