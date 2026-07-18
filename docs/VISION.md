@@ -54,6 +54,13 @@ surface.
 rates; the audit stream shipped to any sink (OTel, a SIEM). "Who called what, from where,
 when" becomes queryable for an entire agent fleet.
 
+> The open phases above are developed, sized, and mapped to concrete seams in
+> **[ROADMAP-HARDENING.md](ROADMAP-HARDENING.md)** (Wave 2): Phase 4 → F21 (capability
+> revocation lifecycle), Phase 5 → F29 (cost & budget governance), Phase 6 → F14/F31 (plugin
+> marketplace, SSO-mapped federation), Phase 7 → F15 (observability plane, OTel/SIEM export).
+> It also adds the compile-time **plugin platform** (F13), HTTP-backend policy parity (F16),
+> and a 30-finding hardening sweep — 20 flagships (F13–F32) + 50 minor (S11–S60).
+
 ## Where it goes — wilder (still grounded in the primitives)
 
 - **Self-hosted push for agents.** The embedded peer holds a persistent E2E channel; a

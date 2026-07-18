@@ -291,6 +291,7 @@ examples/    ready-to-adapt configs        docs/  design docs + open specs
 - **[examples/hitl/](examples/hitl/)** — route any agent framework's approval hook (e.g. OpenAI Agents SDK `ShellTool.on_approval`) to the mesh approver — approve from your phone, identity-attributed and audited.
 - **[docs/HA-TOOLMESH.md](docs/HA-TOOLMESH.md)** · **[docs/reference.md](docs/reference.md)** · **[docs/VISION.md](docs/VISION.md)** — HA design, full reference, roadmap.
 - **[docs/IDEAS.md](docs/IDEAS.md)** — the payload layer: a provenance-native knowledge graph (`cmd/kg`), zero-exposure RAG (`cmd/vectors`), an agent-memory fabric (`cmd/memory`), `meshmcp drop` (AirDrop across instances) + content-addressed `fetch`, taint-contained retrieval, signed provenance receipts, and more — 22 enhancements grounded in the existing primitives (see `examples/knowledge.yaml`, `drop.yaml`, `rag-firewall.yaml`).
+- **[docs/ROADMAP-HARDENING.md](docs/ROADMAP-HARDENING.md)** — the Wave-2 roadmap: a compile-time **plugin platform** (tool · decision · sink · subcommand seams), a governed plugin marketplace, HTTP-backend policy parity, federated Mesh Spotlight, new dark backends (vault · scheduler · event bus), fail-closed audit + identity-bound sessions, and a 30-finding hardening sweep — **20 flagships (F13–F32) + 50 minor (S11–S60)**, each grounded in an existing primitive.
 
 ## Build & test
 
