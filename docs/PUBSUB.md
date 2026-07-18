@@ -108,8 +108,8 @@ is covered by `go test -race`:
 | **Taint containment** | An event is delivered to a subscription only if it is cleared for *every* label the event carries. |
 | **Bounded memory** | Fixed per-subscriber buffers; a per-event payload cap (`max_payload_bytes`) bounds retention at `retain × cap`; `Backpressure` is `drop_oldest` (evict + count) or `disconnect` (close, resume via `--since`). |
 | **Fan-out isolation** | Delivery is non-blocking, so one slow subscriber never stalls the publisher or other subscribers. |
-| **Rate limiting** | Per-publisher token bucket, charged *before* authorization and audit, so a connected-but-unauthorized peer cannot amplify CPU/disk/lock load by flooding rejected publishes. Bounded by default (`publish_rate: 0` → 200/s; `-1` → unlimited). |
-| **Resource caps** | Hard bounds on subscriptions, topics/subscription, topic length, and per-frame size — checked before allocation. |
+| **Rate limiting** | Per-peer token bucket over **publish *and* subscribe**, charged *before* authorization and audit, so a connected-but-unauthorized peer cannot amplify CPU/disk/lock load by flooding rejected requests. Bounded by default (`publish_rate: 0` → 200/s; `-1` → unlimited). |
+| **Resource caps** | Hard bounds on subscriptions (global **and per-peer**, so one identity can't pin every slot), topics/subscription, topic length, labels/event, payload size, and per-frame size — checked before allocation. |
 | **No silent caps** | Replay past the retention window sets `truncated`; dropped events are counted and surfaced. |
 | **Audited** | Every allow/deny decision is a record in the shared hash-chained ledger (`audit_log`). |
 

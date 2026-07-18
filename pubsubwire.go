@@ -23,13 +23,12 @@ import (
 // Event lines, until it disconnects. Because the transport is the session
 // layer, a subscriber survives roaming and can resume from its last sequence.
 
-// maxFrame bounds a single wire frame so a hostile peer cannot force the
-// broker to buffer an unbounded line in memory. It sits above the core's
-// default 1 MiB payload cap so a maximum-size payload plus its JSON envelope
-// (topic, labels, field names) still fits in one frame rather than being
-// silently rejected by the scanner; the broker's MaxPayloadBytes remains the
+// frameEnvelope is the headroom added above the broker's payload cap when
+// sizing the wire-frame scanner, so a maximum-size payload plus its JSON
+// envelope (topic, labels, field names) still fits in one frame rather than
+// being silently rejected. The broker's MaxPayloadBytes remains the
 // authoritative payload limit.
-const maxFrame = (1 << 20) + (1 << 16) // 1 MiB payload + 64 KiB envelope headroom
+const frameEnvelope = 1 << 16 // 64 KiB
 
 type helloFrame struct {
 	Role         string   `json:"role"` // "pub" | "sub"
@@ -115,7 +114,9 @@ func (bb *brokerBackend) serve() {
 	defer bb.outW.Close()
 
 	sc := bufio.NewScanner(bb.inR)
-	sc.Buffer(make([]byte, 0, 8192), maxFrame)
+	// Size the frame cap from the broker's authoritative payload limit plus
+	// envelope headroom, so a within-cap payload always fits in one frame.
+	sc.Buffer(make([]byte, 0, 8192), bb.broker.MaxPayloadBytes()+frameEnvelope)
 	if !sc.Scan() {
 		return // peer closed before a hello
 	}
@@ -197,6 +198,11 @@ func (bb *brokerBackend) servePub(sc *bufio.Scanner) {
 		if bb.writeAck(ackFrame{OK: true, Seq: ev.Seq}) != nil {
 			return
 		}
+	}
+	// Surface a scanner error (e.g. an over-cap frame → bufio.ErrTooLong) as an
+	// explicit ack instead of a silent disconnect, so the publisher learns why.
+	if err := sc.Err(); err != nil {
+		bb.writeAck(ackFrame{Error: "publish frame rejected: " + err.Error()})
 	}
 }
 

@@ -58,6 +58,8 @@ limits:
   max_topics_per_sub: 64               # topic patterns per subscription
   max_topic_len: 256                   # topic/pattern length (bytes)
   max_payload_bytes: 1048576           # per-event payload cap (1 MiB); retain × this bounds memory
+  max_labels: 32                       # max data-flow labels per event
+  max_subs_per_peer: 128               # one identity cannot pin every global slot
   retain: 4096                         # events kept for --since replay
-  publish_rate: 50                     # per-publisher publishes/second; 0 = bounded default (200), -1 = unlimited
-  publish_burst: 100                   # per-publisher burst ceiling
+  publish_rate: 50                     # per-peer publish+subscribe requests/second; 0 = default (200), -1 = unlimited
+  publish_burst: 100                   # per-peer burst ceiling

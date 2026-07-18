@@ -18,11 +18,13 @@ type Limits struct {
 	SubQueue        int     `yaml:"sub_queue"`         // per-subscription delivery buffer (events)
 	MaxSubs         int     `yaml:"max_subs"`          // maximum concurrent subscriptions
 	MaxTopicsPerSub int     `yaml:"max_topics_per_sub"` // maximum topic patterns in one subscription
-	MaxTopicLen     int     `yaml:"max_topic_len"`     // maximum topic/pattern length in bytes
-	MaxPayloadBytes int     `yaml:"max_payload_bytes"` // maximum event payload size in bytes
-	Retain          int     `yaml:"retain"`            // events kept for replay-from-sequence
-	PublishRate     float64 `yaml:"publish_rate"`      // per-publisher publishes/second (0 = unlimited)
-	PublishBurst    int     `yaml:"publish_burst"`     // per-publisher burst ceiling
+	MaxTopicLen     int     `yaml:"max_topic_len"`      // maximum topic/pattern length in bytes
+	MaxPayloadBytes int     `yaml:"max_payload_bytes"`  // maximum event payload size in bytes
+	MaxLabels       int     `yaml:"max_labels"`         // maximum data-flow labels per event
+	MaxSubsPerPeer  int     `yaml:"max_subs_per_peer"`  // maximum concurrent subscriptions per identity
+	Retain          int     `yaml:"retain"`             // events kept for replay-from-sequence
+	PublishRate     float64 `yaml:"publish_rate"`       // per-peer publish+subscribe requests/second (0 = default, <0 = unlimited)
+	PublishBurst    int     `yaml:"publish_burst"`      // per-peer burst ceiling
 }
 
 // DefaultLimits are conservative caps suitable for a small trusted mesh.
@@ -32,9 +34,11 @@ func DefaultLimits() Limits {
 		MaxSubs:         1024,
 		MaxTopicsPerSub: 64,
 		MaxTopicLen:     256,
-		MaxPayloadBytes: 1 << 20, // 1 MiB, aligned with the wire frame cap
+		MaxPayloadBytes: 1 << 20, // 1 MiB
+		MaxLabels:       32,
+		MaxSubsPerPeer:  128,
 		Retain:          1024,
-		PublishRate:     200, // per-publisher publishes/second; bounded by default
+		PublishRate:     200, // per-peer publish+subscribe requests/second; bounded by default
 		PublishBurst:    400,
 	}
 }
@@ -55,6 +59,12 @@ func (l Limits) withDefaults() Limits {
 	}
 	if l.MaxPayloadBytes <= 0 {
 		l.MaxPayloadBytes = d.MaxPayloadBytes
+	}
+	if l.MaxLabels <= 0 {
+		l.MaxLabels = d.MaxLabels
+	}
+	if l.MaxSubsPerPeer <= 0 {
+		l.MaxSubsPerPeer = d.MaxSubsPerPeer
 	}
 	if l.Retain < 0 {
 		l.Retain = 0
@@ -106,6 +116,7 @@ type Broker struct {
 	seq       uint64
 	prev      string // hash of the last published event ("" before genesis)
 	subs      map[uint64]*Subscription
+	perPeer   map[string]int // active subscription count per identity key
 	nextSubID uint64
 	ring      *ring
 	closed    bool
@@ -126,12 +137,17 @@ func New(opts Options) *Broker {
 		auth:  auth,
 		audit: opts.Audit,
 		now:   now,
-		lim:   newLimiter(lm.PublishRate, lm.PublishBurst, now),
-		lm:    lm,
-		subs:  map[uint64]*Subscription{},
-		ring:  newRing(lm.Retain),
+		lim:     newLimiter(lm.PublishRate, lm.PublishBurst, now),
+		lm:      lm,
+		subs:    map[uint64]*Subscription{},
+		perPeer: map[string]int{},
+		ring:    newRing(lm.Retain),
 	}
 }
+
+// MaxPayloadBytes reports the broker's per-event payload cap. The wire layer
+// sizes its frame scanner from this so a within-cap payload always fits.
+func (b *Broker) MaxPayloadBytes() int { return b.lm.MaxPayloadBytes }
 
 // denyAll is the fail-closed default Authorizer used when none is supplied.
 type denyAll struct{}
@@ -178,6 +194,19 @@ func (b *Broker) Publish(id Identity, topic string, payload json.RawMessage, ext
 		return nil, fmt.Errorf("%w: publish %q: %s", ErrDenied, topic, dec.Reason)
 	}
 	labels := unionLabels(dec.Labels, extraLabels)
+	// Cap labels: retention holds them, so an uncapped label set would let a
+	// tiny payload carry ~1 frame of labels and break the MaxPayloadBytes×Retain
+	// memory bound. Each label is also length-bounded like a topic.
+	if len(labels) > b.lm.MaxLabels {
+		b.record(id, "pubsub/publish", topic, "deny", "too many labels", nil)
+		return nil, fmt.Errorf("%w: %d labels exceeds max %d", ErrBadTopic, len(labels), b.lm.MaxLabels)
+	}
+	for _, l := range labels {
+		if len(l) > b.lm.MaxTopicLen {
+			b.record(id, "pubsub/publish", topic, "deny", "label too long", nil)
+			return nil, fmt.Errorf("%w: label exceeds %d bytes", ErrBadTopic, b.lm.MaxTopicLen)
+		}
+	}
 
 	b.mu.Lock()
 	if b.closed {
@@ -229,6 +258,11 @@ func (b *Broker) Subscribe(id Identity, opts SubOptions) (*Subscription, error) 
 	if id.Key == "" {
 		return nil, fmt.Errorf("%w: unproven identity", ErrDenied)
 	}
+	// Rate-limit before auth/audit/replay, like Publish, so a peer cannot flood
+	// the ledger with denied subscribes or amplify replay work by reconnecting.
+	if !b.lim.allow(id.Key) {
+		return nil, fmt.Errorf("%w: subscriber %s", ErrRateLimited, id.Key)
+	}
 	if len(opts.Topics) == 0 {
 		return nil, fmt.Errorf("%w: subscription needs at least one topic", ErrBadTopic)
 	}
@@ -279,8 +313,15 @@ func (b *Broker) Subscribe(id Identity, opts SubOptions) (*Subscription, error) 
 		b.mu.Unlock()
 		return nil, fmt.Errorf("%w: %d subscriptions at max", ErrTooMany, b.lm.MaxSubs)
 	}
+	// Per-peer cap: one identity must not be able to pin every global slot
+	// (an abandoned subscription lingers for the session TTL).
+	if b.perPeer[id.Key] >= b.lm.MaxSubsPerPeer {
+		b.mu.Unlock()
+		return nil, fmt.Errorf("%w: %d subscriptions for peer at max", ErrTooMany, b.lm.MaxSubsPerPeer)
+	}
 	b.nextSubID++
 	s.ID = b.nextSubID
+	b.perPeer[id.Key]++
 	// Register before replay so backpressure (Disconnect) during replay is
 	// handled by the normal close path instead of leaving a closed
 	// subscription in the map.
@@ -360,6 +401,11 @@ func (b *Broker) closeSubLocked(s *Subscription) {
 		return
 	}
 	delete(b.subs, s.ID)
+	if n := b.perPeer[s.ident.Key] - 1; n <= 0 {
+		delete(b.perPeer, s.ident.Key)
+	} else {
+		b.perPeer[s.ident.Key] = n
+	}
 	s.closeOnce.Do(func() { close(s.ch); close(s.closed) })
 }
 
@@ -376,6 +422,7 @@ func (b *Broker) Close() {
 		delete(b.subs, s.ID)
 		s.closeOnce.Do(func() { close(s.ch); close(s.closed) })
 	}
+	b.perPeer = map[string]int{}
 }
 
 // Seq returns the sequence number of the last published event.

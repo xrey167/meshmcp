@@ -303,6 +303,69 @@ func TestSubscribeAuditSingleRecord(t *testing.T) {
 	}
 }
 
+// TestSubscribeRateLimited verifies subscribe is rate-limited before auth/audit
+// like publish, so a peer flooding denied subscribes cannot flood the ledger.
+func TestSubscribeRateLimited(t *testing.T) {
+	var buf bytes.Buffer
+	audit := policy.NewAuditLog(&buf, func() string { return "t" })
+	auth := &RuleAuthorizer{} // deny by default
+	b := New(Options{Authorizer: auth, Audit: audit, Limits: Limits{PublishRate: 5, PublishBurst: 3}})
+
+	var limited, denied int
+	for i := 0; i < 50; i++ {
+		_, err := b.Subscribe(id("flood"), SubOptions{Topics: []string{"t"}})
+		switch {
+		case errors.Is(err, ErrRateLimited):
+			limited++
+		case errors.Is(err, ErrDenied):
+			denied++
+		default:
+			t.Fatalf("unexpected err: %v", err)
+		}
+	}
+	if denied != 3 || limited != 47 {
+		t.Fatalf("denied=%d limited=%d, want 3/47", denied, limited)
+	}
+	if n := strings.Count(buf.String(), "\n"); n != 3 {
+		t.Fatalf("audit records=%d want 3 (subscribe flood must not amplify audit)", n)
+	}
+}
+
+// TestMaxSubsPerPeer verifies one identity cannot pin every global slot.
+func TestMaxSubsPerPeer(t *testing.T) {
+	b := New(Options{Authorizer: AllowAll{}, Limits: Limits{MaxSubsPerPeer: 2, PublishRate: -1}})
+	s1, _ := b.Subscribe(id("a"), SubOptions{Topics: []string{"x"}})
+	s2, _ := b.Subscribe(id("a"), SubOptions{Topics: []string{"y"}})
+	if _, err := b.Subscribe(id("a"), SubOptions{Topics: []string{"z"}}); !errors.Is(err, ErrTooMany) {
+		t.Fatalf("per-peer cap: got %v want ErrTooMany", err)
+	}
+	// A different identity is unaffected.
+	if _, err := b.Subscribe(id("b"), SubOptions{Topics: []string{"z"}}); err != nil {
+		t.Fatalf("other peer should subscribe: %v", err)
+	}
+	// Freeing a slot lets the first peer subscribe again.
+	s1.Close()
+	s3, err := b.Subscribe(id("a"), SubOptions{Topics: []string{"z"}})
+	if err != nil {
+		t.Fatalf("after close should subscribe: %v", err)
+	}
+	s2.Close()
+	s3.Close()
+}
+
+func TestLabelCap(t *testing.T) {
+	b := New(Options{Authorizer: AllowAll{}, Limits: Limits{MaxLabels: 3, MaxTopicLen: 8}})
+	if _, err := b.Publish(id("p"), "t", nil, []string{"a", "b", "c"}); err != nil {
+		t.Fatalf("within label cap should pass: %v", err)
+	}
+	if _, err := b.Publish(id("p"), "t", nil, []string{"a", "b", "c", "d"}); !errors.Is(err, ErrBadTopic) {
+		t.Fatalf("over label count: got %v want ErrBadTopic", err)
+	}
+	if _, err := b.Publish(id("p"), "t", nil, []string{"waytoolonglabel"}); !errors.Is(err, ErrBadTopic) {
+		t.Fatalf("over-long label: got %v want ErrBadTopic", err)
+	}
+}
+
 func TestResourceCaps(t *testing.T) {
 	b := New(Options{Authorizer: AllowAll{}, Limits: Limits{MaxTopicsPerSub: 2, MaxSubs: 2, MaxTopicLen: 8}})
 

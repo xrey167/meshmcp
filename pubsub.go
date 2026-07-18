@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -142,7 +143,7 @@ func cmdPublish(args []string) error {
 	o := meshFlags(fs)
 	data := fs.String("data", "", "payload (default: read from stdin)")
 	rawJSON := fs.Bool("json", false, "treat the payload as raw JSON (default: wrap it as a JSON string)")
-	maxBytes := fs.Int64("max-bytes", maxFrame, "reject a payload larger than this")
+	maxBytes := fs.Int64("max-bytes", 1<<20, "reject a payload larger than this (the broker enforces its own cap too)")
 	var labels stringList
 	fs.Var(&labels, "label", "data-flow label to attach to the event (repeatable)")
 	if err := fs.Parse(args); err != nil {
@@ -182,10 +183,16 @@ func cmdPublish(args []string) error {
 	pub, _ := json.Marshal(pubFrame{Topic: topic, Labels: labels, Payload: payload})
 	preamble := append(append(hello, '\n'), append(pub, '\n')...)
 
+	// ack/gotAck are written in the session inbound goroutine (via onLine) and
+	// read in this goroutine after Run returns; that goroutine is not joined,
+	// so guard the shared state with a mutex to stay race-free.
+	var mu sync.Mutex
 	var ack ackFrame
 	var gotAck bool
 	stream := &clientStream{out: preamble, done: make(chan struct{})}
 	stream.onLine = func(line []byte) {
+		mu.Lock()
+		defer mu.Unlock()
 		if gotAck {
 			return
 		}
@@ -203,16 +210,20 @@ func cmdPublish(args []string) error {
 
 	dial := func(ctx context.Context) (net.Conn, error) { return client.Dial(ctx, "tcp", target) }
 	sc := session.NewClient(dial, log.Printf)
-	if err := sc.Run(context.Background(), stream); err != nil && !gotAck {
-		return fmt.Errorf("publish to %s: %w", target, err)
+	runErr := sc.Run(context.Background(), stream)
+	mu.Lock()
+	got, result := gotAck, ack
+	mu.Unlock()
+	if runErr != nil && !got {
+		return fmt.Errorf("publish to %s: %w", target, runErr)
 	}
-	if !gotAck {
+	if !got {
 		return fmt.Errorf("publish to %s: no acknowledgment received", target)
 	}
-	if ack.Error != "" {
-		return fmt.Errorf("broker rejected publish: %s", ack.Error)
+	if result.Error != "" {
+		return fmt.Errorf("broker rejected publish: %s", result.Error)
 	}
-	log.Printf("published to %q on %s (seq %d)", topic, target, ack.Seq)
+	log.Printf("published to %q on %s (seq %d)", topic, target, result.Seq)
 	return nil
 }
 
@@ -238,6 +249,9 @@ func cmdSubscribe(args []string) error {
 	preamble := append(hello, '\n')
 
 	out := os.Stdout
+	// subErr is written in the session inbound goroutine (via onLine) and read
+	// here after Run returns; guard it since that goroutine is not joined.
+	var mu sync.Mutex
 	var subErr error
 	firstLine := true
 	stream := &clientStream{out: preamble, done: make(chan struct{})}
@@ -247,7 +261,9 @@ func cmdSubscribe(args []string) error {
 			var ack ackFrame
 			_ = json.Unmarshal(line, &ack)
 			if ack.Error != "" {
+				mu.Lock()
 				subErr = fmt.Errorf("broker rejected subscribe: %s", ack.Error)
+				mu.Unlock()
 				stream.finish()
 				return
 			}
@@ -281,8 +297,11 @@ func cmdSubscribe(args []string) error {
 	dial := func(ctx context.Context) (net.Conn, error) { return client.Dial(ctx, "tcp", target) }
 	scl := session.NewClient(dial, log.Printf)
 	err = scl.Run(ctx, stream)
-	if subErr != nil {
-		return subErr
+	mu.Lock()
+	se := subErr
+	mu.Unlock()
+	if se != nil {
+		return se
 	}
 	if err != nil && ctx.Err() == nil {
 		return fmt.Errorf("subscribe to %s: %w", target, err)
