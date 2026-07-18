@@ -61,6 +61,7 @@ type recvInfo struct {
 	Name   string
 	SHA256 string
 	Bytes  int64
+	Path   string // where it was installed on disk
 }
 
 // sendFiles streams each path to w as header + content + trailer records.
@@ -101,9 +102,19 @@ func sendFiles(w io.Writer, paths []string) error {
 	return bw.Flush()
 }
 
-// recvFiles parses the stream on r, writing verified files into dir. maxBytes
+// placer decides the final on-disk path for a received file given its header
+// and verified content hash. The default names files in a directory; the CAS
+// placer names them by hash (content-addressed, dedup-automatic).
+type placer func(hdr dropHeader, hash string) (string, error)
+
+// dirPlacer stores a received file under its (sanitized) name in dir.
+func dirPlacer(dir string) placer {
+	return func(hdr dropHeader, _ string) (string, error) { return sanitizeDest(dir, hdr.Name) }
+}
+
+// recvFiles parses the stream on r, writing verified files via place. maxBytes
 // (>0) caps any single file. onFile is called once per received file.
-func recvFiles(r io.Reader, dir string, maxBytes int64, onFile func(recvInfo)) error {
+func recvFiles(r io.Reader, place placer, maxBytes int64, onFile func(recvInfo)) error {
 	br := bufio.NewReader(r)
 	for {
 		line, err := br.ReadBytes('\n')
@@ -123,11 +134,7 @@ func recvFiles(r io.Reader, dir string, maxBytes int64, onFile func(recvInfo)) e
 		if maxBytes > 0 && hdr.Size > maxBytes {
 			return fmt.Errorf("file %q is %d bytes, over the %d-byte limit", hdr.Name, hdr.Size, maxBytes)
 		}
-		dest, err := sanitizeDest(dir, hdr.Name)
-		if err != nil {
-			return err
-		}
-		info, err := recvOne(br, dest, hdr)
+		info, err := recvOne(br, place, hdr)
 		if err != nil {
 			return err
 		}
@@ -138,12 +145,9 @@ func recvFiles(r io.Reader, dir string, maxBytes int64, onFile func(recvInfo)) e
 }
 
 // recvOne reads exactly hdr.Size content bytes plus the trailer, verifies the
-// hash, and atomically installs the file at dest.
-func recvOne(br *bufio.Reader, dest string, hdr dropHeader) (recvInfo, error) {
-	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-		return recvInfo{}, err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(dest), ".drop-*")
+// hash, then places the file at the path chosen by place (atomic rename).
+func recvOne(br *bufio.Reader, place placer, hdr dropHeader) (recvInfo, error) {
+	tmp, err := os.CreateTemp("", ".drop-*")
 	if err != nil {
 		return recvInfo{}, err
 	}
@@ -172,6 +176,13 @@ func recvOne(br *bufio.Reader, dest string, hdr dropHeader) (recvInfo, error) {
 		return recvInfo{}, fmt.Errorf("hash mismatch for %q: sent %s, received %s", hdr.Name, trailer.SHA256, got)
 	}
 
+	dest, err := place(hdr, got)
+	if err != nil {
+		return recvInfo{}, err
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return recvInfo{}, err
+	}
 	mode := os.FileMode(hdr.Mode).Perm()
 	if mode == 0 {
 		mode = 0o644
@@ -180,9 +191,30 @@ func recvOne(br *bufio.Reader, dest string, hdr dropHeader) (recvInfo, error) {
 		return recvInfo{}, err
 	}
 	if err := os.Rename(tmpName, dest); err != nil {
-		return recvInfo{}, fmt.Errorf("install %q: %w", hdr.Name, err)
+		// Cross-device rename (temp dir on another filesystem): fall back to copy.
+		if err := copyFile(tmpName, dest, mode); err != nil {
+			return recvInfo{}, fmt.Errorf("install %q: %w", hdr.Name, err)
+		}
 	}
-	return recvInfo{Name: hdr.Name, SHA256: got, Bytes: hdr.Size}, nil
+	return recvInfo{Name: hdr.Name, SHA256: got, Bytes: hdr.Size, Path: dest}, nil
+}
+
+// copyFile is the cross-filesystem fallback for os.Rename.
+func copyFile(src, dst string, mode os.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 // sanitizeDest resolves name against dir and rejects any path that is absolute
@@ -308,7 +340,17 @@ func dropReceive(cfgPath string) error {
 	signal.Notify(sig, os.Interrupt)
 	go func() { <-sig; ln.Close() }()
 
-	srv := session.NewServer(newDropFactory(cfg.Dir, cfg.MaxBytes, audit), 2*time.Minute, log.Printf)
+	place := dirPlacer(cfg.Dir)
+	if cfg.CAS {
+		place = casPlacer(cfg.Dir)
+		log.Printf("content-addressed store enabled (files stored by hash)")
+		if cfg.FetchPort > 0 {
+			if err := serveFetchListener(client, cfg.FetchPort, casStore{dir: cfg.Dir}, newACL(cfg.Allow)); err != nil {
+				return err
+			}
+		}
+	}
+	srv := session.NewServer(newDropFactory(place, cfg.MaxBytes, audit), 2*time.Minute, log.Printf)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -326,13 +368,13 @@ func dropReceive(cfgPath string) error {
 }
 
 // newDropFactory returns a session backend factory whose backends receive a
-// dropped file stream into dir, verify each hash, and audit each file.
-func newDropFactory(dir string, maxBytes int64, audit *policy.AuditLog) session.BackendFactory {
+// dropped file stream, verify each hash, place each file via place, and audit.
+func newDropFactory(place placer, maxBytes int64, audit *policy.AuditLog) session.BackendFactory {
 	return func(meta session.Meta) (session.Backend, error) {
 		pr, pw := io.Pipe()
 		d := &dropSink{pw: pw, done: make(chan struct{})}
 		go func() {
-			err := recvFiles(pr, dir, maxBytes, func(fi recvInfo) {
+			err := recvFiles(pr, place, maxBytes, func(fi recvInfo) {
 				log.Printf("received %q (%d bytes, sha256 %s) from %s", fi.Name, fi.Bytes, fi.SHA256, meta.PeerFQDN)
 				if audit != nil {
 					audit.Append(policy.AuditRecord{
@@ -405,6 +447,8 @@ type DropConfig struct {
 	Allow      []string   `yaml:"allow"`     // sender ACL: FQDN globs or "pubkey:<key>"; empty = any mesh peer
 	AuditLog   string     `yaml:"audit_log"` // JSONL hash-chained log; one record per received file
 	MaxBytes   int64      `yaml:"max_bytes"` // per-file size cap (0 = unlimited)
+	CAS        bool       `yaml:"cas"`       // store received files by content hash (dedup) and serve `fetch`
+	FetchPort  int        `yaml:"fetch_port"` // if >0 and cas, serve fetch-by-hash on this mesh port
 }
 
 func loadDropConfig(path string) (*DropConfig, error) {

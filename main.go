@@ -29,6 +29,8 @@ Usage:
   meshmcp forward [flags] <local> <peer:port>   forward a local TCP port to a mesh peer
   meshmcp drop [flags] <peer:port> <file...>    AirDrop files to a mesh peer (resumable, audited); --config runs a receiver
   meshmcp peers [flags]                          list mesh peers you can reach (identities you can drop to)
+  meshmcp fetch [flags] <peer:port> <sha256>    fetch a blob by content hash from a peer's store (F11)
+  meshmcp push [flags] <peer:port>              push a stdin payload to a peer's inbox (universal clipboard)
   meshmcp probe [flags] <peer-ip:port>          run an MCP handshake against a backend
   meshmcp ls [flags] <peer-ip:port>             list a backend's tools/resources/prompts
   meshmcp call [flags] <peer:port> <tool>       call a tool (--arg k=v, --json, --task, --capability @file)
@@ -75,6 +77,10 @@ func main() {
 		err = cmdDrop(os.Args[2:])
 	case "peers":
 		err = cmdPeers(os.Args[2:])
+	case "fetch":
+		err = cmdFetch(os.Args[2:])
+	case "push":
+		err = cmdPush(os.Args[2:])
 	case "probe":
 		err = cmdProbe(os.Args[2:])
 	case "ls":

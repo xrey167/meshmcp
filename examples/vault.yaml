@@ -1,0 +1,35 @@
+# Personal knowledge vault (S2) — sync between YOUR OWN devices only.
+#
+# Model each of your devices (laptop, desktop, phone, home server) as an
+# identity on one private mesh. Run this receiver on the device that holds the
+# vault; the `allow` list is restricted to your own WireGuard public keys, so
+# nothing but your devices can write to it. Content-addressed storage dedups
+# identical files pushed from several devices.
+#
+#   meshmcp drop --config examples/vault.yaml
+#
+# From another of your devices:
+#   meshmcp drop <vault-mesh-ip>:9111 ~/notes/*.md
+#   pbpaste | meshmcp push <vault-mesh-ip>:9111        # clipboard -> vault
+
+mesh:
+  device_name: meshmcp-vault
+  setup_key_env: NB_SETUP_KEY
+  config_path: ./vault-nb.json
+  log_level: warn
+
+listen_port: 9111
+dir: ./vault
+
+cas: true                 # store by content hash: dedup across devices
+fetch_port: 9112          # serve fetch-by-hash so other devices can pull blobs
+
+# ONLY your own devices. Replace with your real WireGuard public keys
+# (meshmcp peers shows them). No FQDN globs here — be strict for a vault.
+allow:
+  - "pubkey:LAPTOP_WIREGUARD_KEY=="
+  - "pubkey:PHONE_WIREGUARD_KEY=="
+  - "pubkey:DESKTOP_WIREGUARD_KEY=="
+
+audit_log: ./vault-audit.jsonl
+max_bytes: 2147483648     # 2 GiB per file

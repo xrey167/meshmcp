@@ -78,7 +78,7 @@ func TestDropRoundTrip(t *testing.T) {
 	go func() { pw.CloseWithError(sendFiles(pw, paths)) }()
 
 	got := map[string]recvInfo{}
-	if err := recvFiles(pr, dst, 0, func(fi recvInfo) { got[fi.Name] = fi }); err != nil {
+	if err := recvFiles(pr, dirPlacer(dst), 0, func(fi recvInfo) { got[fi.Name] = fi }); err != nil {
 		t.Fatalf("recvFiles: %v", err)
 	}
 
@@ -100,6 +100,28 @@ func TestDropRoundTrip(t *testing.T) {
 		if !bytes.Equal(onDisk, data) {
 			t.Errorf("%q: content mismatch", name)
 		}
+	}
+}
+
+// TestPushPayload verifies a stdin-style payload (sendData) is received and
+// verified like any drop — the universal-clipboard path.
+func TestPushPayload(t *testing.T) {
+	dst := t.TempDir()
+	payload := []byte("meet at 15:00 — pushed from the clipboard")
+
+	pr, pw := io.Pipe()
+	go func() { pw.CloseWithError(sendData(pw, "clip.txt", payload)) }()
+
+	var got recvInfo
+	if err := recvFiles(pr, dirPlacer(dst), 0, func(fi recvInfo) { got = fi }); err != nil {
+		t.Fatalf("recvFiles: %v", err)
+	}
+	if got.SHA256 != sha(payload) {
+		t.Errorf("hash mismatch: %s vs %s", got.SHA256, sha(payload))
+	}
+	onDisk, _ := os.ReadFile(filepath.Join(dst, "clip.txt"))
+	if !bytes.Equal(onDisk, payload) {
+		t.Errorf("pushed payload not received intact")
 	}
 }
 
@@ -128,7 +150,7 @@ func TestDropDetectsCorruption(t *testing.T) {
 	buf.WriteString("abc")
 	buf.WriteString(`{"sha256":"deadbeef"}` + "\n")
 
-	err := recvFiles(&buf, dst, 0, nil)
+	err := recvFiles(&buf, dirPlacer(dst), 0, nil)
 	if err == nil || !strings.Contains(err.Error(), "hash mismatch") {
 		t.Fatalf("expected hash mismatch error, got %v", err)
 	}
@@ -143,7 +165,7 @@ func TestDropEnforcesMaxBytes(t *testing.T) {
 	p := writeTemp(t, src, "big.dat", bytes.Repeat([]byte{7}, 4096))
 	pr, pw := io.Pipe()
 	go func() { pw.CloseWithError(sendFiles(pw, []string{p})) }()
-	if err := recvFiles(pr, dst, 1024, nil); err == nil || !strings.Contains(err.Error(), "over the") {
+	if err := recvFiles(pr, dirPlacer(dst), 1024, nil); err == nil || !strings.Contains(err.Error(), "over the") {
 		t.Fatalf("expected size-limit error, got %v", err)
 	}
 }
@@ -164,7 +186,7 @@ func TestDropOverSession(t *testing.T) {
 		t.Fatalf("listen: %v", err)
 	}
 	defer ln.Close()
-	srv := session.NewServer(newDropFactory(dst, 0, audit), 2*time.Minute, nil)
+	srv := session.NewServer(newDropFactory(dirPlacer(dst), 0, audit), 2*time.Minute, nil)
 	go func() {
 		for {
 			conn, err := ln.Accept()
