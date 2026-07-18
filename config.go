@@ -203,6 +203,16 @@ func loadConfig(path string) (*Config, error) {
 		if b.Policy != nil && !hasStdio {
 			return nil, fmt.Errorf("backend %q: policy is only valid for stdio backends", b.Name)
 		}
+		if b.Policy != nil {
+			if err := b.Policy.Validate(); err != nil {
+				return nil, fmt.Errorf("backend %q: policy: %w", b.Name, err)
+			}
+		}
+		switch b.SessionStoreMode {
+		case "", "handshake", "full", "backend":
+		default:
+			return nil, fmt.Errorf("backend %q: session_store_mode %q is not one of handshake|full|backend", b.Name, b.SessionStoreMode)
+		}
 		if b.CosignStore != "" && b.Policy == nil {
 			return nil, fmt.Errorf("backend %q: cosign_store requires a policy", b.Name)
 		}

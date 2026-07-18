@@ -72,7 +72,11 @@ func (w *Window) active(t time.Time) bool {
 	}
 	lo, hi, ok := parseHourRange(w.Hours)
 	if !ok {
-		return true // malformed range: don't accidentally lock everything out
+		// Fail closed: a malformed hours range makes the window inactive, so
+		// the rule falls through to the next rule / the default (deny) rather
+		// than an allow rule firing 24/7 on a typo. Config load validates
+		// windows (Policy.Validate), so this is defense in depth.
+		return false
 	}
 	mins := lt.Hour()*60 + lt.Minute()
 	if lo <= hi {
