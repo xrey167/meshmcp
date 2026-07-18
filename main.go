@@ -52,6 +52,7 @@ Usage:
   meshmcp insight <profile|recommend|simulate|detect>  turn the audit stream into policy (the firewall's read side)
   meshmcp replay [flags] <trace> <peer:port>    replay a traced session against a backend and diff
   meshmcp config validate --config <file>       validate a config (policy globs, windows, enums, DLP) without joining the mesh
+  meshmcp status --audit <file> [--json]        roll up an audit ledger: per-peer/tool/backend calls + chain verdict
   meshmcp plugins                                list extensions compiled into this build
   meshmcp version
 
@@ -134,6 +135,8 @@ func main() {
 		err = cmdReplay(os.Args[2:])
 	case "config":
 		err = cmdConfig(os.Args[2:])
+	case "status":
+		err = cmdStatus(os.Args[2:])
 	case "plugins":
 		err = cmdPlugins(os.Args[2:])
 	case "version":

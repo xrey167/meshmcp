@@ -36,7 +36,12 @@ type Config struct {
 	AuditLog string `yaml:"audit_log"`
 	// AuditFailClosed makes the gateway-wide shared ledger a hard control:
 	// a record that cannot be written denies the call. Off by default.
-	AuditFailClosed bool         `yaml:"audit_fail_closed"`
+	AuditFailClosed bool `yaml:"audit_fail_closed"`
+	// AuditWebhook POSTs audit records to an external URL (SIEM / Slack /
+	// PagerDuty) via a best-effort observer sink. AuditWebhookAll forwards every
+	// record; by default only deny/cosign records are sent.
+	AuditWebhook    string       `yaml:"audit_webhook"`
+	AuditWebhookAll bool         `yaml:"audit_webhook_all"`
 	Trace           *TraceConfig `yaml:"trace"`
 	Registry        string       `yaml:"registry"` // dir: register backends for router discovery
 	Backends        []*Backend   `yaml:"backends"`

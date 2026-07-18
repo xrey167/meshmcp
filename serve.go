@@ -89,6 +89,10 @@ func cmdServe(args []string) error {
 		}
 		sharedAudit = policy.NewAuditLog(f, func() string { return time.Now().UTC().Format(time.RFC3339) }).
 			WithFailClosed(cfg.AuditFailClosed)
+		if cfg.AuditWebhook != "" {
+			sharedAudit.AddSink(newWebhookSink(cfg.AuditWebhook, !cfg.AuditWebhookAll))
+			log.Printf("audit webhook sink: %s (deny/cosign only=%v)", cfg.AuditWebhook, !cfg.AuditWebhookAll)
+		}
 		auditLogs = append(auditLogs, sharedAudit)
 		log.Printf("shared audit ledger: %s", cfg.AuditLog)
 	}
