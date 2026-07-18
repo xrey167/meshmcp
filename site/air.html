@@ -1,0 +1,439 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>meshmcp · Air</title>
+<style>
+  :root {
+    --ink: #0c0f16; --panel: #141a25; --panel2: #0f141d; --line: #26303f;
+    --text: #dbe4f0; --muted: #8593a8;
+    --crimson: #e8546b; --cyan: #3ad6c6; --amber: #e0a558; --green: #2ea043;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background:
+      radial-gradient(900px 500px at 78% -8%, color-mix(in srgb, var(--cyan) 9%, transparent), transparent 60%),
+      radial-gradient(800px 500px at 12% 108%, color-mix(in srgb, var(--crimson) 9%, transparent), transparent 60%),
+      var(--ink);
+    color: var(--text); font-family: var(--sans);
+    display: flex; flex-direction: column; align-items: center; min-height: 100%;
+  }
+
+  /* page chrome */
+  header.page { width: 100%; padding: 12px 18px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  header.page h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+  header.page h1 .m { font-family: var(--mono); color: var(--cyan); }
+  header.page .sub { color: var(--muted); font-size: 12.5px; }
+  header.page .spacer { flex: 1; }
+  header.page a { color: var(--muted); font-size: 12px; text-decoration: none; border-bottom: 1px dotted var(--line); }
+  header.page a:hover { color: var(--cyan); border-color: var(--cyan); }
+
+  .stage { flex: 1; display: flex; gap: 34px; align-items: center; justify-content: center;
+    padding: 30px 18px 40px; flex-wrap: wrap; width: 100%; max-width: 1080px; }
+
+  /* pitch column */
+  .pitch { max-width: 340px; }
+  .pitch .kicker { font-family: var(--mono); font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--cyan); }
+  .pitch h2 { font-size: 26px; line-height: 1.15; margin: 10px 0 12px; letter-spacing: -0.02em; }
+  .pitch p { color: var(--muted); font-size: 13.5px; line-height: 1.6; margin: 0 0 16px; }
+  .pitch .verbs { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; }
+  .pitch .verbs li { display: flex; gap: 10px; align-items: baseline; font-size: 12.5px; }
+  .pitch .verbs b { font-family: var(--mono); color: var(--text); min-width: 66px; }
+  .pitch .verbs span { color: var(--muted); }
+  .pitch .foot { margin-top: 18px; font-size: 11.5px; color: var(--muted); }
+  .pitch .foot code { font-family: var(--mono); color: var(--amber); }
+
+  /* phone */
+  .phone { width: 330px; height: 680px; border-radius: 42px; background: #05070c;
+    border: 1px solid var(--line); padding: 12px;
+    box-shadow: 0 40px 90px -30px rgba(0,0,0,.85), inset 0 0 0 2px #0b0f16;
+    position: relative; flex: 0 0 auto; }
+  .screen { position: absolute; inset: 12px; border-radius: 32px; overflow: hidden;
+    background: linear-gradient(180deg, var(--panel2), var(--ink)); display: flex; flex-direction: column; }
+  .notch { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); z-index: 6;
+    width: 116px; height: 26px; background: #05070c; border-radius: 0 0 16px 16px; }
+
+  .statusbar { display: flex; justify-content: space-between; align-items: center;
+    padding: 12px 20px 4px; font-size: 11px; color: var(--muted); font-family: var(--mono); }
+  .statusbar .dots { display: flex; gap: 4px; align-items: center; }
+  .statusbar .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); box-shadow: 0 0 6px var(--green); }
+
+  .appbar { padding: 6px 18px 12px; display: flex; align-items: center; gap: 9px; border-bottom: 1px solid var(--line); }
+  .appbar .logo { font-size: 17px; }
+  .appbar h3 { margin: 0; font-size: 16px; font-weight: 700; letter-spacing: -0.01em; }
+  .appbar h3 .a { color: var(--cyan); }
+  .appbar .me { margin-left: auto; text-align: right; font-family: var(--mono); font-size: 9.5px; color: var(--muted); line-height: 1.4; }
+  .appbar .me b { color: var(--text); font-weight: 600; }
+
+  .body { flex: 1; overflow-y: auto; padding: 14px 14px 8px; }
+  .body::-webkit-scrollbar { width: 0; }
+  .view { display: none; animation: fade .18s ease; }
+  .view.on { display: block; }
+  @keyframes fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+  .vhead { font-size: 12px; color: var(--muted); margin: 0 2px 10px; line-height: 1.5; }
+  .vhead b { color: var(--text); font-weight: 600; }
+
+  /* peer rows */
+  .peer { display: flex; align-items: center; gap: 11px; padding: 10px 11px; border: 1px solid var(--line);
+    border-radius: 13px; background: var(--panel); margin-bottom: 9px; cursor: pointer; transition: border-color .15s, transform .05s; }
+  .peer:hover { border-color: var(--cyan); }
+  .peer:active { transform: scale(.99); }
+  .peer.sel { border-color: var(--cyan); box-shadow: inset 0 0 0 1px var(--cyan); }
+  .peer .av { width: 38px; height: 38px; border-radius: 11px; flex: 0 0 auto; display: flex; align-items: center;
+    justify-content: center; font-family: var(--mono); font-size: 13px; font-weight: 700; color: #05070c; }
+  .peer .meta { min-width: 0; flex: 1; }
+  .peer .fqdn { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .peer .key { font-family: var(--mono); font-size: 10px; color: var(--muted); }
+  .peer .st { font-family: var(--mono); font-size: 9.5px; padding: 3px 7px; border-radius: 20px; white-space: nowrap; }
+  .st.up { color: var(--green); background: color-mix(in srgb, var(--green) 16%, transparent); }
+  .st.idle { color: var(--amber); background: color-mix(in srgb, var(--amber) 16%, transparent); }
+  .peer .role { font-size: 10px; color: var(--muted); }
+
+  /* drop zone */
+  .dz { display: block; border: 1px dashed var(--line); border-radius: 15px; background: var(--panel);
+    padding: 26px 16px; text-align: center; color: var(--muted); font-size: 12.5px; transition: .15s; cursor: pointer; }
+  .dz.hot { border-color: var(--crimson); background: color-mix(in srgb, var(--crimson) 16%, var(--panel)); color: var(--text); }
+  .dz .big { font-size: 30px; display: block; margin-bottom: 8px; }
+  .dz b { color: var(--text); }
+  .target { display: flex; align-items: center; gap: 9px; padding: 9px 11px; border: 1px solid var(--line);
+    border-radius: 11px; background: var(--panel2); margin-bottom: 12px; font-size: 12px; }
+  .target .av { width: 26px; height: 26px; border-radius: 8px; display: flex; align-items: center; justify-content: center;
+    font-family: var(--mono); font-size: 11px; font-weight: 700; color: #05070c; }
+  .target .muted { color: var(--muted); }
+  .target .chg { margin-left: auto; font-family: var(--mono); font-size: 10.5px; color: var(--cyan); cursor: pointer; }
+
+  .cmd { font-family: var(--mono); font-size: 10.5px; color: var(--cyan); background: #05070c; border: 1px solid var(--line);
+    border-radius: 10px; padding: 10px 12px; margin-top: 12px; word-break: break-all; line-height: 1.5; }
+  .cmd .k { color: var(--crimson); }
+  .prog { height: 6px; border-radius: 6px; background: var(--panel2); overflow: hidden; margin-top: 12px; border: 1px solid var(--line); }
+  .prog > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--cyan), var(--green)); transition: width .12s linear; }
+  .note { font-size: 11px; color: var(--muted); margin-top: 9px; line-height: 1.5; }
+  .note .ok { color: var(--green); }
+  .note code { font-family: var(--mono); color: var(--amber); }
+
+  textarea { width: 100%; min-height: 92px; resize: none; background: var(--panel); color: var(--text);
+    border: 1px solid var(--line); border-radius: 13px; padding: 12px; font-family: var(--sans); font-size: 13px; }
+  textarea:focus { outline: none; border-color: var(--cyan); }
+  .btn { width: 100%; margin-top: 11px; font-family: var(--mono); font-size: 13px; color: #05070c; font-weight: 700;
+    background: var(--cyan); border: none; border-radius: 12px; padding: 12px; cursor: pointer; }
+  .btn:active { transform: scale(.99); }
+  .btn.ghost { background: var(--panel); color: var(--text); border: 1px solid var(--line); font-weight: 600; }
+  .btn.danger { background: transparent; color: var(--crimson); border: 1px solid color-mix(in srgb, var(--crimson) 45%, var(--line)); }
+
+  /* approval card */
+  .cosign { border: 1px solid color-mix(in srgb, var(--crimson) 40%, var(--line)); border-radius: 16px;
+    background: color-mix(in srgb, var(--crimson) 8%, var(--panel)); padding: 16px; }
+  .cosign .tag { font-family: var(--mono); font-size: 10px; color: var(--crimson); letter-spacing: .1em; text-transform: uppercase; }
+  .cosign h4 { margin: 8px 0 4px; font-size: 16px; }
+  .cosign h4 code { font-family: var(--mono); color: var(--amber); font-size: 14px; }
+  .cosign .who { font-size: 12px; color: var(--muted); margin-bottom: 14px; }
+  .cosign .who b { color: var(--text); font-family: var(--mono); font-size: 11px; }
+  .cosign .row { display: flex; gap: 10px; }
+  .cosign .row .btn { margin-top: 0; }
+  .faceid { display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 12px;
+    font-size: 11px; color: var(--muted); font-family: var(--mono); }
+  .faceid .glyph { width: 18px; height: 18px; border: 1.5px solid var(--muted); border-radius: 6px; position: relative; }
+  .empty { text-align: center; color: var(--muted); font-size: 12.5px; padding: 40px 10px; }
+  .empty .big { font-size: 30px; display: block; margin-bottom: 10px; opacity: .7; }
+
+  /* receipts */
+  .rec { border: 1px solid var(--line); border-left: 2px solid var(--cyan); border-radius: 10px; background: var(--panel);
+    padding: 9px 11px; margin-bottom: 8px; }
+  .rec.deny { border-left-color: var(--crimson); }
+  .rec.cosign { border-left-color: var(--amber); }
+  .rec .top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .rec .act { font-family: var(--mono); font-size: 11.5px; font-weight: 700; }
+  .rec .seq { font-family: var(--mono); font-size: 9.5px; color: var(--muted); }
+  .rec .line { font-size: 11px; color: var(--muted); margin-top: 3px; }
+  .rec .line b { color: var(--text); }
+  .rec .hash { font-family: var(--mono); font-size: 9.5px; color: var(--cyan); word-break: break-all; margin-top: 3px; }
+  .chainbar { display: flex; align-items: center; gap: 7px; font-family: var(--mono); font-size: 10.5px;
+    color: var(--green); margin: 2px 2px 12px; }
+  .chainbar .d { width: 6px; height: 6px; border-radius: 50%; background: var(--green); box-shadow: 0 0 6px var(--green); }
+
+  /* tab bar */
+  .tabs { display: flex; border-top: 1px solid var(--line); background: var(--panel2); padding: 6px 4px 10px; }
+  .tab { flex: 1; background: none; border: none; color: var(--muted); font-family: var(--sans); font-size: 9.5px;
+    display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 4px 0; cursor: pointer; }
+  .tab .ic { font-size: 17px; line-height: 1; }
+  .tab.on { color: var(--cyan); }
+  .tab .badge { position: absolute; margin: -6px 0 0 14px; background: var(--crimson); color: #fff; font-size: 8px;
+    font-family: var(--mono); min-width: 14px; height: 14px; border-radius: 8px; display: flex; align-items: center; justify-content: center; padding: 0 3px; }
+
+  @media (max-width: 720px) { .pitch { order: 2; } .stage { gap: 24px; } }
+</style>
+</head>
+<body>
+<header class="page">
+  <h1>🕸️ <span class="m">meshmcp</span> · Air</h1>
+  <span class="sub">AirDrop for agents &amp; humans — identity-native, dark, resumable, audited</span>
+  <span class="spacer"></span>
+  <a href="../docs/AIR.md">docs/AIR.md ↗</a>
+</header>
+
+<div class="stage">
+  <div class="pitch">
+    <div class="kicker">concept mockup</div>
+    <h2>Drop a file to a key,<br>not to a cloud.</h2>
+    <p>Air is the AirDrop-native face of meshmcp. Discover who's on your mesh, drop a
+       file, push a snippet, fetch by hash, approve a held call — every transfer between
+       cryptographic identities on a dark mesh: no cloud, no accounts, no open ports.
+       Resumable across a roam, policy-gated, and provable in a tamper-evident ledger.</p>
+    <ul class="verbs">
+      <li><b>discover</b><span>who's reachable — each row a WireGuard identity</span></li>
+      <li><b>drop</b><span>files, E2E-encrypted &amp; content-hash audited</span></li>
+      <li><b>push</b><span>clipboard or a task to a peer's inbox</span></li>
+      <li><b>fetch</b><span>a blob by content hash, zero-exposure</span></li>
+      <li><b>approve</b><span>co-sign a held call — the phone is the human</span></li>
+    </ul>
+    <div class="foot">Backed by <code>peers</code> · <code>drop</code> · <code>push</code> ·
+      <code>fetch</code> · <code>approvals</code> — see docs/AIR.md for what's real vs. proposed.</div>
+  </div>
+
+  <div class="phone">
+    <div class="notch"></div>
+    <div class="screen">
+      <div class="statusbar">
+        <span id="clock">9:41</span>
+        <span class="dots"><span class="dot"></span>mesh</span>
+      </div>
+      <div class="appbar">
+        <span class="logo">🕸️</span>
+        <h3><span class="a">Air</span></h3>
+        <div class="me">you · <b>rey-phone</b><br>.netbird.cloud</div>
+      </div>
+
+      <div class="body">
+        <!-- NEARBY -->
+        <div class="view on" data-view="nearby">
+          <p class="vhead"><b>Nearby on the mesh.</b> Each identity is a WireGuard key, proven by the
+            transport — not a name it typed. Tap one to drop to it.</p>
+          <div id="peerlist"></div>
+        </div>
+
+        <!-- DROP -->
+        <div class="view" data-view="drop">
+          <div id="dropTarget"></div>
+          <label class="dz" id="dz">
+            <span class="big">📄</span>
+            <b>Drop a file</b> or tap to choose
+            <input type="file" id="fileIn" hidden>
+          </label>
+          <div id="dropOut"></div>
+        </div>
+
+        <!-- PUSH -->
+        <div class="view" data-view="push">
+          <p class="vhead"><b>Push a snippet or a task.</b> Streams from here to a peer's inbox over the
+            same resumable, audited channel as a drop.</p>
+          <textarea id="pushText" placeholder="meet at 15:00 — or paste a task.json for an agent…">meet at 15:00 · bring the mesh keys</textarea>
+          <button class="btn" id="pushBtn">Push to inbox</button>
+          <div id="pushOut" class="note"></div>
+        </div>
+
+        <!-- APPROVALS -->
+        <div class="view" data-view="approve">
+          <p class="vhead"><b>Held for a human.</b> The firewall paused a privileged call until an
+            identity on the mesh co-signs. That's you.</p>
+          <div id="cosignWrap"></div>
+        </div>
+
+        <!-- RECEIPTS -->
+        <div class="view" data-view="receipts">
+          <div class="chainbar"><span class="d"></span> chain intact · <span id="recCount">0</span> records · Ed25519-signed checkpoints</div>
+          <div id="recList"></div>
+        </div>
+      </div>
+
+      <div class="tabs">
+        <button class="tab on" data-tab="nearby"><span class="ic">📡</span>Nearby</button>
+        <button class="tab" data-tab="drop"><span class="ic">📤</span>Drop</button>
+        <button class="tab" data-tab="push"><span class="ic">✂️</span>Push</button>
+        <button class="tab" data-tab="approve"><span class="ic">✅</span>Approve<span class="badge" id="apBadge">1</span></button>
+        <button class="tab" data-tab="receipts"><span class="ic">🧾</span>Ledger</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var esc = function (s) { return String(s).replace(/[&<>"']/g, function (c) {
+    return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]; }); };
+
+  // ---- sample mesh (static, believable — no real network) ----
+  var peers = [
+    { fqdn: "rey-laptop.netbird.cloud",   key: "AbCdEf01",  status: "up",   role: "your laptop" },
+    { fqdn: "billing.mesh.netbird.cloud", key: "9KpLmn22",  status: "up",   role: "billing agent" },
+    { fqdn: "analyst.mesh.netbird.cloud", key: "Qr7 Tz88".replace(" ",""), status: "up", role: "analyst agent" },
+    { fqdn: "vault.mesh.netbird.cloud",   key: "Zx3Wv44",  status: "idle", role: "knowledge vault" },
+    { fqdn: "deploy.mesh.netbird.cloud",  key: "Mn5Bq77",  status: "up",   role: "deploy pipeline" }
+  ];
+  var PALETTE = ["#3ad6c6", "#e8546b", "#e0a558", "#7c9cf5", "#6ad39f", "#c98be0"];
+  function colorFor(key) { // deterministic "avatar color from pubkey hash"
+    var h = 0; for (var i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0;
+    return PALETTE[h % PALETTE.length];
+  }
+  function initials(fqdn) { return fqdn.replace(/\..*/, "").slice(0, 2).toUpperCase(); }
+
+  var DROP_PORT = 9110;
+  var selected = peers[0];
+
+  // ---- shared tamper-evident ledger ----
+  var seq = 1240;
+  var receipts = [];
+  function shortHash() {
+    var hex = "0123456789abcdef", s = "";
+    for (var i = 0; i < 16; i++) s += hex[(Math.floor(Math.random() * 16))];
+    return s + "…";
+  }
+  function now() {
+    var d = new Date();
+    return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0") +
+           ":" + String(d.getSeconds()).padStart(2, "0");
+  }
+  function record(kind, act, peer, line, hash) {
+    receipts.unshift({ seq: ++seq, kind: kind, act: act, peer: peer, line: line, hash: hash, time: now() });
+    renderReceipts();
+  }
+  // ---- render: peers ----
+  var peerlist = document.getElementById("peerlist");
+  function renderPeers() {
+    peerlist.innerHTML = peers.map(function (p, i) {
+      var c = colorFor(p.key);
+      return '<div class="peer' + (p === selected ? " sel" : "") + '" data-i="' + i + '">' +
+        '<div class="av" style="background:' + c + '">' + initials(p.fqdn) + '</div>' +
+        '<div class="meta"><div class="fqdn">' + esc(p.fqdn.replace(".netbird.cloud", "")) + '</div>' +
+        '<div class="key">pubkey:' + esc(p.key) + '… · <span class="role">' + esc(p.role) + '</span></div></div>' +
+        '<div class="st ' + p.status + '">' + (p.status === "up" ? "connected" : "idle") + '</div></div>';
+    }).join("");
+    [].forEach.call(peerlist.querySelectorAll(".peer"), function (el) {
+      el.onclick = function () { selected = peers[+el.dataset.i]; renderPeers(); renderTarget(); go("drop"); };
+    });
+  }
+
+  // ---- render: drop target + zone ----
+  var dropTarget = document.getElementById("dropTarget");
+  function renderTarget() {
+    var c = colorFor(selected.key);
+    dropTarget.innerHTML = '<div class="target"><div class="av" style="background:' + c + '">' +
+      initials(selected.fqdn) + '</div><div>to <b>' + esc(selected.fqdn.replace(".netbird.cloud", "")) +
+      '</b><br><span class="muted">' + esc(selected.role) + ' · :' + DROP_PORT + '</span></div>' +
+      '<span class="chg" data-go="nearby">change</span></div>';
+    dropTarget.querySelector(".chg").onclick = function () { go("nearby"); };
+  }
+  var dz = document.getElementById("dz"), fileIn = document.getElementById("fileIn"), dropOut = document.getElementById("dropOut");
+  function sendDrop(name, size) {
+    var peer = selected.fqdn.replace(".netbird.cloud", "");
+    var cmd = '<div class="cmd"><span class="k">meshmcp</span> drop ' + esc(peer) + ':' + DROP_PORT +
+      ' <span style="color:var(--amber)">' + esc(name) + '</span></div>' +
+      '<div class="prog"><i></i></div>' +
+      '<div class="note" id="dnote">streaming over WireGuard · resumable…</div>';
+    dropOut.innerHTML = cmd;
+    var bar = dropOut.querySelector(".prog > i"), note = document.getElementById("dnote"), pct = 0;
+    var t = setInterval(function () {
+      pct = Math.min(100, pct + 9 + Math.random() * 12); bar.style.width = pct + "%";
+      if (pct >= 100) {
+        clearInterval(t);
+        var h = shortHash();
+        note.innerHTML = '<span class="ok">✓ delivered.</span> content hash <code>' + h +
+          '</code> recorded in the ledger.';
+        record("allow", "drop", peer, esc(name) + (size ? " · " + size : ""), h);
+      }
+    }, 130);
+  }
+  function human(bytes) {
+    if (!bytes && bytes !== 0) return "";
+    var u = ["B", "KB", "MB", "GB"], i = 0; while (bytes >= 1024 && i < 3) { bytes /= 1024; i++; }
+    return (i ? bytes.toFixed(1) : bytes) + " " + u[i];
+  }
+  fileIn.onchange = function () { if (fileIn.files[0]) sendDrop(fileIn.files[0].name, human(fileIn.files[0].size)); };
+  ["dragenter", "dragover"].forEach(function (e) { dz.addEventListener(e, function (ev) { ev.preventDefault(); dz.classList.add("hot"); }); });
+  ["dragleave", "drop"].forEach(function (e) { dz.addEventListener(e, function (ev) { ev.preventDefault(); dz.classList.remove("hot"); }); });
+  dz.addEventListener("drop", function (ev) {
+    var f = ev.dataTransfer && ev.dataTransfer.files[0];
+    if (f) sendDrop(f.name, human(f.size)); else sendDrop("report.pdf", "");
+  });
+
+  // ---- push ----
+  document.getElementById("pushBtn").onclick = function () {
+    var txt = document.getElementById("pushText").value.trim();
+    var out = document.getElementById("pushOut");
+    if (!txt) { out.innerHTML = "nothing to push."; return; }
+    var peer = selected.fqdn.replace(".netbird.cloud", ""), h = shortHash();
+    out.innerHTML = '<span class="ok">✓ pushed</span> to <code>' + esc(peer) + ':' + DROP_PORT +
+      '</code> · ' + txt.length + ' B · ledger #' + (seq + 1);
+    record("allow", "push", peer, "clip · " + txt.length + " B", h);
+  };
+
+  // ---- approvals ----
+  var cosignWrap = document.getElementById("cosignWrap"), apBadge = document.getElementById("apBadge");
+  var pending = { peer: "billing.mesh", fqdn: "billing.mesh.netbird.cloud", tool: "transfer_funds", detail: "$500 → acct ****8821" };
+  function renderCosign() {
+    if (!pending) {
+      cosignWrap.innerHTML = '<div class="empty"><span class="big">🛡️</span>Nothing held for approval.<br>' +
+        'When the firewall pauses a <code style="font-family:var(--mono);color:var(--amber)">require_cosign</code> call, it lands here.</div>';
+      apBadge.style.display = "none";
+      return;
+    }
+    apBadge.style.display = "flex"; apBadge.textContent = "1";
+    cosignWrap.innerHTML = '<div class="cosign"><div class="tag">require_cosign · held</div>' +
+      '<h4><code>' + esc(pending.tool) + '</code></h4>' +
+      '<div class="who"><b>' + esc(pending.fqdn) + '</b> wants to run this · ' + esc(pending.detail) + '</div>' +
+      '<div class="row"><button class="btn danger" id="denyBtn">Deny</button>' +
+      '<button class="btn" id="apprBtn">Approve</button></div>' +
+      '<div class="faceid"><span class="glyph"></span> Face ID confirms — then it signs as rey-phone</div></div>';
+    document.getElementById("apprBtn").onclick = function () {
+      record("cosign", "cosign", pending.peer, esc(pending.tool) + " granted · approver rey-phone", shortHash());
+      pending = null; renderCosign(); go("receipts");
+    };
+    document.getElementById("denyBtn").onclick = function () {
+      record("deny", "cosign_deny", pending.peer, esc(pending.tool) + " denied by rey-phone", shortHash());
+      pending = null; renderCosign();
+    };
+  }
+
+  // ---- receipts ----
+  var recList = document.getElementById("recList"), recCount = document.getElementById("recCount");
+  function renderReceipts() {
+    recCount.textContent = receipts.length;
+    recList.innerHTML = receipts.map(function (r) {
+      return '<div class="rec ' + r.kind + '"><div class="top"><span class="act">' + esc(r.act) +
+        '</span><span class="seq">#' + r.seq + ' · ' + r.time + '</span></div>' +
+        '<div class="line"><b>' + esc(r.peer) + '</b> · ' + r.line + '</div>' +
+        '<div class="hash">sha256 ' + r.hash + '</div></div>';
+    }).join("");
+  }
+
+  // ---- nav ----
+  function go(name) {
+    [].forEach.call(document.querySelectorAll(".view"), function (v) { v.classList.toggle("on", v.dataset.view === name); });
+    [].forEach.call(document.querySelectorAll(".tab"), function (t) { t.classList.toggle("on", t.dataset.tab === name); });
+    document.querySelector(".body").scrollTop = 0;
+  }
+  [].forEach.call(document.querySelectorAll(".tab"), function (t) { t.onclick = function () { go(t.dataset.tab); }; });
+
+  // clock
+  (function tick() {
+    var d = new Date();
+    document.getElementById("clock").textContent = d.getHours() + ":" + String(d.getMinutes()).padStart(2, "0");
+    setTimeout(tick, 20000);
+  })();
+
+  // seed a little history (after render fns + element refs exist)
+  record("allow", "drop_recv", "rey-laptop", "received keynote.pdf · 4.2 MB", "a91f0c72d4e8b135…");
+  record("cosign", "cosign", "billing.mesh", "transfer_funds granted · approver rey-phone", "5b2ee0173ac9f640…");
+  record("allow", "push", "analyst.mesh", "clip-1737… · 41 B", "77c1a9be2d0f4831…");
+
+  renderPeers(); renderTarget(); renderCosign(); renderReceipts();
+})();
+</script>
+</body>
+</html>
