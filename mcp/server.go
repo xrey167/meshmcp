@@ -9,6 +9,7 @@ package mcp
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,13 +22,43 @@ import (
 const ProtocolVersion = "2025-06-18"
 
 // Content is a single content block in a tool result or prompt message.
+// A block is one of: text ("text"), an inline image ("image") or audio
+// ("audio") carrying base64 Data + MimeType, or an embedded binary resource
+// ("resource") carrying a Resource with a base64 Blob. The concrete kind is
+// selected by Type, matching the MCP 2025-06-18 content union.
 type Content struct {
-	Type string `json:"type"`           // "text" (this framework emits text)
+	Type string `json:"type"`
+	// Text is set for a "text" block.
 	Text string `json:"text,omitempty"`
+	// Data is base64-encoded bytes for an "image" or "audio" block.
+	Data string `json:"data,omitempty"`
+	// MimeType classifies the Data of an "image"/"audio" block.
+	MimeType string `json:"mimeType,omitempty"`
+	// Resource carries the embedded contents of a "resource" block.
+	Resource *ResourceContents `json:"resource,omitempty"`
 }
 
 // Text is a convenience constructor for a text content block.
 func Text(s string) Content { return Content{Type: "text", Text: s} }
+
+// Image is a convenience constructor for an inline image content block;
+// data is the raw image bytes (base64-encoded on the wire).
+func Image(mimeType string, data []byte) Content {
+	return Content{Type: "image", Data: base64.StdEncoding.EncodeToString(data), MimeType: mimeType}
+}
+
+// Audio is a convenience constructor for an inline audio content block;
+// data is the raw audio bytes (base64-encoded on the wire).
+func Audio(mimeType string, data []byte) Content {
+	return Content{Type: "audio", Data: base64.StdEncoding.EncodeToString(data), MimeType: mimeType}
+}
+
+// Blob is a convenience constructor for a content block carrying arbitrary
+// binary data as an embedded resource; data is the raw bytes (base64 on wire).
+func Blob(uri, mimeType string, data []byte) Content {
+	rc := BlobResource(uri, mimeType, data)
+	return Content{Type: "resource", Resource: &rc}
+}
 
 // ToolResult is what a tool handler returns.
 type ToolResult struct {
@@ -44,11 +75,19 @@ type Tool struct {
 	Handler     func(ctx context.Context, args json.RawMessage) (ToolResult, error)
 }
 
-// ResourceContents is the body returned by reading a resource.
+// ResourceContents is the body returned by reading a resource. It carries
+// either Text (a text resource) or Blob (base64-encoded binary), matching the
+// MCP TextResourceContents / BlobResourceContents shapes.
 type ResourceContents struct {
 	URI      string `json:"uri"`
 	MimeType string `json:"mimeType,omitempty"`
-	Text     string `json:"text"`
+	Text     string `json:"text,omitempty"`
+	Blob     string `json:"blob,omitempty"`
+}
+
+// BlobResource builds a binary ResourceContents from raw bytes (base64 on wire).
+func BlobResource(uri, mimeType string, data []byte) ResourceContents {
+	return ResourceContents{URI: uri, MimeType: mimeType, Blob: base64.StdEncoding.EncodeToString(data)}
 }
 
 // Resource is a readable resource identified by a URI.

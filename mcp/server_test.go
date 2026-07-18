@@ -152,3 +152,46 @@ func TestUnknownMethod(t *testing.T) {
 		t.Fatalf("expected method not found, got %+v", r)
 	}
 }
+
+// TestBinaryContent verifies the framework emits image/audio/blob content and
+// binary resource reads in the MCP content-union wire shape.
+func TestBinaryContent(t *testing.T) {
+	raw := []byte{0x00, 0x01, 0x02, 0xff}
+	wantB64 := "AAEC/w=="
+
+	s := New("bin", "1.0")
+	s.AddTool(Tool{Name: "img", Handler: func(_ context.Context, _ json.RawMessage) (ToolResult, error) {
+		return ToolResult{Content: []Content{Image("image/png", raw), Blob("blob://a", "application/octet-stream", raw)}}, nil
+	}})
+	s.AddResource(Resource{URI: "bin://x", Name: "x", Read: func(_ context.Context) (ResourceContents, error) {
+		return BlobResource("bin://x", "application/octet-stream", raw), nil
+	}})
+
+	m := mustResult(t, call(t, s, "tools/call", `{"name":"img"}`))
+	content := m["content"].([]any)
+	img := content[0].(map[string]any)
+	if img["type"] != "image" || img["data"] != wantB64 || img["mimeType"] != "image/png" {
+		t.Fatalf("bad image block: %v", img)
+	}
+	if _, ok := img["text"]; ok {
+		t.Fatalf("image block should not carry text: %v", img)
+	}
+	res := content[1].(map[string]any)
+	if res["type"] != "resource" {
+		t.Fatalf("bad resource block: %v", res)
+	}
+	embedded := res["resource"].(map[string]any)
+	if embedded["blob"] != wantB64 || embedded["uri"] != "blob://a" {
+		t.Fatalf("bad embedded resource: %v", embedded)
+	}
+
+	// Binary resource read emits {uri, mimeType, blob} with no text field.
+	m = mustResult(t, call(t, s, "resources/read", `{"uri":"bin://x"}`))
+	first := m["contents"].([]any)[0].(map[string]any)
+	if first["blob"] != wantB64 || first["mimeType"] != "application/octet-stream" {
+		t.Fatalf("bad blob resource read: %v", first)
+	}
+	if _, ok := first["text"]; ok {
+		t.Fatalf("blob resource should not carry an empty text field: %v", first)
+	}
+}
