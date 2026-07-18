@@ -13,11 +13,12 @@ across a network roam, is **policy-gated** by the receiver's firewall, and is
 asks "does this WireGuard key prove who they are, and may they do this?" — and writes
 down the answer.
 
-> Air is mostly a coherent face over primitives meshmcp already ships (`peers`, `drop`,
-> `push`, `fetch`, `approvals`). The **discover / drop / push / fetch / approve** verbs
-> exist today; **steer** and **launch** need a small set of new primitives, specified in
-> [docs/AIR-STEER.md](AIR-STEER.md) and marked clearly throughout. See
-> [§6](#6--whats-real-today-vs-proposed).
+> Air is a coherent face over primitives meshmcp already ships (`peers`, `drop`, `push`,
+> `fetch`, `approvals`) plus the **steer** and **launch** primitives built on top — the agent
+> steer inbox, session enumeration + a line-safe session steer, `tasks/steer`, the gateway
+> control endpoint, and the `meshmcp air` CLI. All seven verbs ship today; see
+> [docs/AIR-STEER.md](AIR-STEER.md) for how steer/launch are built and
+> [§6](#6--whats-real-today-vs-proposed) for the full real-vs-proposed table.
 
 ---
 
@@ -34,8 +35,8 @@ the consumer-facing product of that one fact.
 | **Drop** — send files | `drop.go` (`sendFiles`, `session` client) | Resumable, E2E-encrypted, sender-ACL gated, content-hash audited. |
 | **Push** — send clipboard / a task | `push.go` (`sendData`) | A small stdin payload to a peer's resumable inbox, by identity. |
 | **Fetch** — pull by content hash | `cas.go` · `fetch` | Zero-exposure content-addressed retrieval from a peer's store. |
-| **Steer** — drive live work | *proposed* — [AIR-STEER.md](AIR-STEER.md) | Send/cancel/nudge/broadcast to an agent, session, or task — the seam is real (`endpoint.Send`, `tasks/cancel`), the endpoints are new. |
-| **Launch** — spawn agent / workflow | *proposed* — [AIR-STEER.md](AIR-STEER.md) | Start a new agent (`roleScripts`) or a declarative workflow as its own mesh identity. |
+| **Steer** — drive live work | `agent.go` · `session/server.go` · `mcp/tasks.go` · `aircontrol.go` | Send/cancel/nudge to an agent (steer inbox), a session (line-safe server→client notify), or a task (`tasks/steer`). |
+| **Launch** — spawn agent / workflow | `air.go` · `airworkflow.go` | Start a new agent (`roleScripts`) or run a declarative workflow as its own mesh identity. |
 | **Approve** — co-sign a held call | `approvals.go` · `policy.FilePending` | The phone is the human identity the firewall was waiting for. |
 | **Prove** — receipts | `audit.go` · `policy/` | Every Air action lands in the hash-chained (optionally signed) ledger. |
 
@@ -43,8 +44,7 @@ the consumer-facing product of that one fact.
 
 ## 2 · The verbs, grounded
 
-Each Air verb maps to a command that runs **today** (steer/launch are proposed, and marked
-so). Air is the surface that makes them
+Each Air verb maps to a command that runs **today**. Air is the surface that makes them
 feel like one thing.
 
 ### Discover
@@ -82,7 +82,7 @@ meshmcp fetch 100.x.y.z:9101 <sha256>      # pull a blob by content hash from a 
 Content-addressed and zero-exposure: you ask for a hash, the peer's store answers over
 the mesh (`cas.go`). Nothing is published; the corpus never leaves its owner's boundary.
 
-### Steer — address and drive live work *(task steer + session core shipped; agent inbox + gateway exposure proposed — [AIR-STEER.md](AIR-STEER.md))*
+### Steer — address and drive live work *(shipped — [AIR-STEER.md](AIR-STEER.md))*
 
 `push` hands a payload to a passive **inbox**; **Steer** addresses **live work** and acts
 on it. Three target types, one vocabulary:
@@ -108,23 +108,22 @@ transports (bidirectional MCP `Server.Request`, MCP Tasks) **already exist**. **
 the **session core** (`SessionStore.List`, `Server.Sessions`, line-safe `Server.Steer`), the
 **gateway control endpoint** (`/v1/sessions`+`/v1/steer`, identity-gated + audited), the
 `air_*` assistant tools, and the **`meshmcp air` CLI** (`sessions` · `steer` · `launch`).
-**Still proposed:** the agent steer inbox (so `air steer` can also target an agent by name) and
-declarative workflow files. Every steer is deny-by-default, identity-attributed, and audited —
+All of this ships today. Every steer is deny-by-default, identity-attributed, and audited —
 it cannot bypass the firewall. See [AIR-STEER.md](AIR-STEER.md) for the spec.
 
-### Launch — spawn an agent or a workflow *(proposed — [AIR-STEER.md](AIR-STEER.md))*
+### Launch — spawn an agent or a workflow
 
 ```bash
 meshmcp air launch --role reader 100.x.y.z:9101          # spawn a new agent identity
-meshmcp air launch --workflow air-workflow.yaml           # run a declarative multi-step workflow (example file proposed)
+meshmcp air workflow examples/air-workflow.yaml          # run a declarative multi-step workflow
 ```
 
-An agent launch reuses `roleScripts` (`agent.go`) with a fresh `--nb-config`, so the new
-worker joins as its own WireGuard key and immediately shows up in `discover` and the
-sessions view. A **workflow** is a small declarative file (launch these agents, steer these
-tasks, call these tools — sequential or parallel), run by a runner that reuses the
-orchestrator/router fan-out shape. Each launch is audited; the spawned identity is subject
-to the same firewall as any caller.
+An agent launch child-execs `meshmcp agent` (reusing `roleScripts`) with a fresh
+`--nb-config`, so the new worker joins as its own WireGuard key and immediately shows up in
+`discover` and the sessions view. A **workflow** is a small declarative file (launch these
+agents, steer these sessions, call these tools — run in order), run by `airworkflow.go` which
+reuses the orchestrator's dial→`CallTool` shape. Each launch is audited; the spawned identity
+is subject to the same firewall as any caller.
 
 ### Approve
 ```bash
@@ -174,18 +173,19 @@ deliverable. It reuses:
 `meshmcp mcp` already runs meshmcp as an MCP server so an assistant can operate the
 mesh as governed tool calls (`mcpapp.go`, [docs/MCP-APP.md](MCP-APP.md)). It already
 exposes the Air-shaped tools **`drop_file`**, **`network`**, **`pending_approvals`**,
-and **`approve`/`deny`**. The proposed additions round out the five verbs by wrapping
-the existing commands the same way `drop_file` wraps `drop`:
+and **`approve`/`deny`**. The **shipped** Air tools (pass `--control <gateway-ip:port>` for
+the session ones) wrap the same commands the way `drop_file` wraps `drop`:
 
-| Proposed tool | Wraps | Assistant can say |
-|---|---|---|
-| `air_peers` | `peers.go` / `client.Status()` | "Who's on the mesh right now?" |
-| `air_push` | `push.go` (`sendData`) | "Push this task to the analyst agent." |
-| `air_fetch` | `cas.go` / `fetch` | "Pull blob `<sha256>` from the vault." |
-| `air_sessions` | `Server.Sessions()` (P2, [AIR-STEER.md](AIR-STEER.md)) | "List the live sessions." |
-| `air_tasks` | `mcpclient.ListTasks` | "What tasks are running on the analyst?" |
-| `air_steer` | agent inbox · `Server.Steer` · `tasks/steer`/`cancel` | "Nudge the summarize task to focus on the API." / "Cancel task 9f2a." |
-| `air_launch` | `roleScripts` · workflow runner (P4) | "Launch a reader agent against the fs backend." |
+| Tool | Status | Wraps | Assistant can say |
+|---|---|---|---|
+| `air_sessions` | ships | `GET /v1/sessions` → `Server.Sessions()` | "List the live sessions." |
+| `air_steer` | ships | `POST /v1/steer` → `Server.Steer` | "Steer session 9f2a on fs to re-read customer 42." |
+| `air_tasks` | ships | `mcpclient.ListTasks` | "What tasks are running on the analyst?" |
+| `air_task_steer` | ships | `mcpclient.SteerTask` → `tasks/steer` | "Nudge task-17 to focus on the API." |
+| `air_peers` · `air_push` · `air_fetch` | proposed | `peers`/`push`/`fetch` | "Who's on the mesh?" / "Push this task." |
+
+Agent-target steer and launch are CLI verbs (`meshmcp air agent-steer`, `air launch`), not
+assistant tools — an assistant that exec-spawns processes is a deliberate separate step.
 
 Config is unchanged from the existing app:
 ```jsonc
@@ -197,8 +197,8 @@ Config is unchanged from the existing app:
 } } }
 ```
 Then, in the assistant: *"AirDrop report.pdf to Rey's phone"* → `drop_file`;
-*"who's on the mesh?"* → `air_peers`; *"steer the analyst to re-read customer 42"* →
-`air_steer`; *"launch a reader agent against the fs backend"* → `air_launch`;
+*"list the live sessions"* → `air_sessions`; *"steer session 9f2a on fs to re-read customer
+42"* → `air_steer`; *"nudge task-17 to focus on the API"* → `air_task_steer`;
 *"approve the transfer for billing.mesh"* → `approve`. Every one is a governed mesh
 client — audited, firewalled, never a backdoor.
 
@@ -280,16 +280,11 @@ Honesty about the seam, so nobody mistakes the mockup for shipped product:
 | Assistant Air tools `drop_file` · `network` · `pending_approvals` · `approve`/`deny` | **Ships now** | `mcpapp.go` · [MCP-APP.md](MCP-APP.md) |
 | Phone-first web over the mesh (approver + room) | **Ships now** | `approvals.go` · `room.go` |
 | `site/air.html` unified Air mockup | **This change** (mockup only) | `site/air.html` |
-| `meshmcp air` umbrella command (one page serving the verbs) | **Proposed** | would wrap the commands above |
-| Assistant tools `air_peers` · `air_push` · `air_fetch` | **Proposed** | thin wrappers in `mcpapp.go`, like `drop_file` |
-| **Steer** — task augment (`tasks/steer`, cancel-symmetric) | **Ships now** | `mcp/tasks.go` · `mcp/server.go` · `mcpclient/tasks.go` · `TestTaskSteer` (P3) |
-| **Steer** — session core: `List` · `Sessions` · line-safe `Steer` | **Ships now** | `session/store.go` · `session/server.go` · `TestSteerLineFraming` (P2) |
-| **Steer** — gateway exposure: `/v1/sessions`+`/v1/steer` endpoint · `air_sessions`/`air_steer`/`air_tasks`/`air_task_steer` tools | **Ships now** | `config.go` · `serve.go` · `aircontrol.go` · `mcpapp.go` · `aircontrol_test.go` |
-| **Steer/Launch** — the `meshmcp air` CLI (`sessions` · `steer` · `launch` · `agent-steer`) | **Ships now** | `air.go` · `main.go` |
-| **Steer** — agent steer inbox (P1): `--steer-port` + `air agent-steer` | **Ships now** | `steerenvelope.go` · `steerinbox.go` · `agent.go` |
-| **Launch** — declarative workflow files (P4) | **Proposed** | code-ready spec — [AIR-STEER.md](AIR-STEER.md) |
-| **Launch** — spawn agent / run workflow | **Proposed** | [AIR-STEER.md](AIR-STEER.md) P4 · `examples/air-workflow.yaml` |
-| Assistant tools `air_sessions` · `air_tasks` · `air_steer` · `air_launch` | **Proposed** | [AIR-STEER.md §6](AIR-STEER.md) |
+| **Steer** — P3 task augment · P2 session core · P1 agent inbox | **Ships now** | `mcp/tasks.go` · `session/server.go` · `agent.go` · `steerinbox.go` (+ tests) |
+| **Steer** — gateway `/v1/sessions`+`/v1/steer` endpoint · `air_sessions`/`air_steer`/`air_tasks`/`air_task_steer` tools | **Ships now** | `config.go` · `serve.go` · `aircontrol.go` · `mcpapp.go` · `aircontrol_test.go` |
+| **Steer/Launch** — the `meshmcp air` CLI (`sessions` · `steer` · `launch` · `agent-steer` · `workflow`) + P4 runner | **Ships now** | `air.go` · `airworkflow.go` · `examples/air-workflow.yaml` |
+| Assistant tools `air_peers` · `air_push` · `air_fetch`; an `air_launch` tool | **Proposed** | thin `mcpapp.go` wrappers (launch stays a CLI verb by design) |
+| A served `meshmcp air` web page (the mockup, over a mesh port) | **Proposed** | reuse the `approvals`/`room` serving pattern |
 | Push-wake (buzz the phone on a new pending) | **Proposed** | the "push seam" — [MOBILE.md §4](MOBILE.md) |
 | Native mobile app (gomobile) | **Proposed** | binding surface — [MOBILE.md §3](MOBILE.md) |
 
@@ -302,18 +297,16 @@ the default**.
 
 Mirrors the staged path in [docs/MOBILE.md §7](MOBILE.md), Air-branded:
 
-1. **Now — Air from the CLI and the assistant.** `peers` + `drop` + `push` + `fetch` +
-   `approvals`, and the existing `meshmcp mcp` tools. Nothing new to build to *use* Air.
-2. **Next — one Air page.** A `meshmcp air` command that serves the five verbs on a mesh
-   port (the mockup, made real), reusing the `approvals`/`room` serving pattern, plus the
+1. **Done — the full Air surface.** `discover` / `drop` / `push` / `fetch` / `approve`, and
+   **Steer/Launch**: the P1–P4 primitives ([AIR-STEER.md](AIR-STEER.md)), the gateway control
+   endpoint, the `air_*` assistant tools, and the `meshmcp air` CLI (`sessions` · `steer` ·
+   `launch` · `agent-steer` · `workflow`). Usable end-to-end today.
+2. **Next — a served Air page + the remaining wrapper tools.** A `meshmcp air` command that
+   serves the mockup on a mesh port (reusing the `approvals`/`room` pattern), plus the
    `air_peers`/`air_push`/`air_fetch` assistant tools.
-3. **Then — Steer + Launch.** The four primitives in [AIR-STEER.md](AIR-STEER.md): a
-   task-steer channel (P3), session `List()`+inject (P2), the agent inbox (P1), and
-   launch/workflow (P4) — plus the `air_sessions`/`air_tasks`/`air_steer`/`air_launch`
-   tools and the Steer tab. Build order: P3 → P2 → P1 → P4.
-4. **Then — push-wake.** The device-registration + APNs/FCM notify seam so a phone
-   *buzzes* on a pending drop, approval, or steer instead of polling ([MOBILE.md §4](MOBILE.md)).
-5. **Later — the native Air app.** `gomobile`-bound identity + resumable sessions, Face-ID
+3. **Then — push-wake.** The device-registration + APNs/FCM notify seam so a phone *buzzes*
+   on a pending drop, approval, or steer instead of polling ([MOBILE.md §4](MOBILE.md)).
+4. **Later — the native Air app.** `gomobile`-bound identity + resumable sessions, Face-ID
    approvals, receive/share sheets ([MOBILE.md §3](MOBILE.md)).
 
 ## Reference points

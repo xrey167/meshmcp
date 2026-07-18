@@ -1,14 +1,15 @@
 # Air · Steer — build spec
 
-**Status: P1 · P2 · P3 + gateway exposure + CLI shipped · P4 (workflow files) proposed.**
-This is the design for the *Steer* capability of [Air](AIR.md): address and drive **live
-work** — an **agent** (by name), a **session** (by id), or a **task/subagent** (by id) — and
-act on it (**send** · **cancel** · **nudge** · **launch**). Implemented and tested: **P3**
-task steer/augment ([§4](#4--p3--task-steer--augment)), the **P2** session core
-([§3](#3--p2--session-enumeration--injection)), **P1** the agent steer inbox
-([§2](#2--p1--steerable-agent-the-receive-path)), the **gateway control endpoint** + `air_*`
-tools ([§6](#6--assistant-facing-mcp-tools)), and the **`meshmcp air` CLI**. Only **P4**
-declarative workflow files remain. Each primitive names the exact seam it reuses.
+**Status: shipped — P1 · P2 · P3 · P4, the gateway control endpoint, the `air_*` tools, and
+the `meshmcp air` CLI.** This is the design for the *Steer* capability of [Air](AIR.md):
+address and drive **live work** — an **agent** (by name), a **session** (by id), or a
+**task/subagent** (by id) — and act on it (**send** · **cancel** · **nudge** · **launch**).
+All four primitives are implemented and tested: **P1** the agent steer inbox
+([§2](#2--p1--steerable-agent-the-receive-path)), **P2** the session core
+([§3](#3--p2--session-enumeration--injection)), **P3** task steer/augment
+([§4](#4--p3--task-steer--augment)), **P4** launch + the workflow runner
+([§5](#5--p4--launch-spawn-an-agent-or-a-workflow)) — plus the gateway control endpoint and
+`air_*` tools ([§6](#6--assistant-facing-mcp-tools)) and the CLI. Each names the seam it reuses.
 
 > Air's `push` already delivers a payload *to a passive `drop` inbox* — there is no
 > consumer that acts on it, and no way to reach a running session or task. Steer closes
@@ -126,9 +127,9 @@ listens for steers.
 Implemented in `session/store.go` (`SessionStore.List` + `MemStore`/`FileStore`) and
 `session/server.go` (`serverSession` gained `meta`/`createdAt`, a line-aware backend→peer
 pump, `SessionInfo`, `Server.Sessions`, and `Server.Steer`), with `TestStoreList`,
-`TestSteerLineFraming`, and `TestSteerUnknownSession`. The **gateway exposure** (a
-`/v1/sessions`+`/v1/steer` control endpoint, the `air_sessions`/`air_steer` tools, the CLI)
-is the remaining, still-proposed part. The sketch below is what landed.
+`TestSteerLineFraming`, and `TestSteerUnknownSession`. The **gateway exposure** (the
+`/v1/sessions`+`/v1/steer` control endpoint, the `air_sessions`/`air_steer` tools, and the
+CLI) also shipped — see [§6](#6--assistant-facing-mcp-tools). The sketch below is what landed.
 
 **Problem.** Sessions have durable, resumable ids, but there was **no `List()`** anywhere
 (only `Server.Count()`, `session/server.go`), no metadata retained to describe a live
@@ -173,10 +174,11 @@ func (s *Server) Steer(id, method string, params any) error {  // shipped
   the steer method to *act*; the transport is generic, the semantics opt-in.
 - **`Sessions()` retains just what the session layer knows** — id, peer FQDN, age (from the new
   `createdAt`); a gateway can enrich with a backend label it holds elsewhere.
-- **Governance/audit live at the gateway (still proposed).** The session layer is mechanism
-  only. Exposure via `control/control.go` — `GET /v1/sessions`, `POST /v1/steer` gated by
-  control-plane auth and audited — plus the `air_sessions`/`air_steer` tools (§6) is the next
-  increment, not yet built.
+- **Governance/audit live at the gateway (shipped).** The session layer is mechanism only;
+  `aircontrol.go` serves `GET /v1/sessions` + `POST /v1/steer` on a mesh port
+  (`config.go` `ControlConfig`, wired in `serve.go`), gated by the caller's WireGuard identity
+  + an `allow` ACL and audited into the shared ledger, with the `air_sessions`/`air_steer`
+  tools (§6) and the `meshmcp air` CLI on top.
 
 ---
 
@@ -229,17 +231,21 @@ func (c *Client) SteerTask(ctx context.Context, id string, payload json.RawMessa
 
 ---
 
-## 5 · P4 — Launch (spawn an agent or a workflow)
+## 5 · P4 — Launch (spawn an agent or a workflow)  ✅ *shipped*
 
-**Problem.** There is no first-class "start new work on the mesh" verb; agents are launched
-by hand and there is no parent→children workflow object.
+Implemented: `air launch` reuses `spawnAgent` (`air.go`) to child-exec `meshmcp agent`; the
+declarative runner is `airworkflow.go` (`loadAirWorkflow` + `runWorkflowStep`:
+launch/steer/call), with `examples/air-workflow.yaml` and `airworkflow_test.go`.
+
+**Problem.** There was no first-class "start new work on the mesh" verb; agents were launched
+by hand and there was no parent→children workflow object.
 
 **Design.**
 
 - **Launch an agent:** `air launch --role <role> <gateway>` spawns a new agent identity by
-  reusing `cmdAgent` / `roleScripts` (`agent.go:25-96`) with a fresh `--nb-config`, so it
-  joins as its own WireGuard key and immediately appears in `peers` and in the gateway's
-  sessions view. With P1 it also opens a steer port.
+  child-exec of `meshmcp agent` (`spawnAgent`, reusing `roleScripts`) with a fresh
+  `--nb-config`, so it joins as its own WireGuard key and immediately appears in `peers` and
+  in the gateway's sessions view. Add `--steer-port` to the child for a steer inbox (P1).
 - **Launch a workflow:** a declarative `examples/air-workflow.yaml` — a list of steps
   (`launch` agents, `steer` tasks, `call` tools), sequential or parallel — run by a small
   runner that reuses the orchestrator's dial-and-call shape (`orchestrate.go:91-145`) and,
@@ -247,7 +253,7 @@ by hand and there is no parent→children workflow object.
   identity; each step is an audited call.
 
 ```yaml
-# examples/air-workflow.yaml  (proposed)
+# examples/air-workflow.yaml  (ships — run with: meshmcp air workflow <file>)
 name: nightly-scan
 steps:
   - launch: { role: reader,  gateway: 100.64.0.2:9101 }
@@ -282,7 +288,8 @@ gated by the caller's WireGuard identity + an `allow` ACL and audited into the s
 So an assistant can say: *"list the live sessions"* → `air_sessions`; *"steer session 9f2a on
 fs to re-read customer 42"* → `air_steer`; *"what tasks are running on the analyst?"* →
 `air_tasks`; *"nudge task-17 to focus on the API"* → `air_task_steer` — each a governed,
-audited mesh call, never a backdoor. (Agent-target steer + `air_launch` land with P1/P4.)
+audited mesh call, never a backdoor. (Agent-target steer and launch are CLI verbs —
+`meshmcp air agent-steer` and `air launch` — rather than assistant tools.)
 
 ---
 
@@ -317,15 +324,17 @@ audited mesh call, never a backdoor. (Agent-target steer + `air_launch` land wit
 
 1. **P3 tasks/steer** — ✅ **done.** Cancel-symmetric augmentation in `mcp/tasks.go` +
    `mcp/server.go` + `mcpclient/tasks.go`, with `TestTaskSteer` in `mcp/tasks_test.go`.
-2. **P2 session List + Steer** — ✅ **session core done.** `SessionStore.List`,
-   `Server.Sessions`, and the line-safe `Server.Steer` in `session/store.go` + `session/server.go`,
-   with `TestStoreList`/`TestSteerLineFraming`/`TestSteerUnknownSession`. Gateway exposure
-   (control endpoint + tools + CLI) still to do.
+2. **P2 session List + Steer** — ✅ **done.** `SessionStore.List`, `Server.Sessions`, and the
+   line-safe `Server.Steer` in `session/store.go` + `session/server.go`, with
+   `TestStoreList`/`TestSteerLineFraming`/`TestSteerUnknownSession`.
 3. **P1 steerable agent** — ✅ **done.** `--steer-port` inbox on `agent.go` (`steerenvelope.go`,
    `steerinbox.go`) + `air agent-steer` sender, with `TestRunAgentLoopSteerTask`/`TestRecvEnvelopes`.
-4. **P4 launch + workflow** — the runner + a new `examples/air-workflow.yaml` (proposed file).
-5. **Air surface** — `air_sessions`/`air_tasks`/`air_steer`/`air_launch` in `mcpapp.go`;
-   the Steer tab in `site/air.html`; the `air steer`/`air launch` CLI verbs.
+4. **P4 launch + workflow** — ✅ **done.** `air launch` (`spawnAgent`) + the `airworkflow.go`
+   runner + `examples/air-workflow.yaml`, with `airworkflow_test.go`.
+5. **Air surface** — ✅ **done.** The gateway control endpoint (`aircontrol.go`), the
+   `air_sessions`/`air_steer`/`air_tasks`/`air_task_steer` tools in `mcpapp.go`, and the
+   `meshmcp air` CLI (`air.go`). The Steer tab in `site/air.html` remains a visual mockup.
 
-Each step is independently shippable and independently governed. Until they land, the
-[Steer tab in `site/air.html`](../site/air.html) is a visual mockup only.
+All four primitives and the surface ship; each is independently governed. Remaining Air ideas
+(the `air_peers`/`air_push`/`air_fetch` wrapper tools, an `air_launch` tool, a served web page)
+are tracked in [AIR.md §6](AIR.md#6--whats-real-today-vs-proposed).

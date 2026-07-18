@@ -39,10 +39,12 @@ func cmdAir(args []string) error {
 		return cmdAirLaunch(args[1:])
 	case "agent-steer":
 		return cmdAirAgentSteer(args[1:])
+	case "workflow":
+		return cmdAirWorkflow(args[1:])
 	case "-h", "--help", "help":
 		return airUsage()
 	default:
-		return fmt.Errorf("meshmcp air: unknown subcommand %q (want sessions | steer | launch | agent-steer)", args[0])
+		return fmt.Errorf("meshmcp air: unknown subcommand %q (want sessions | steer | launch | agent-steer | workflow)", args[0])
 	}
 }
 
@@ -56,6 +58,7 @@ func airUsage() error {
                                                           spawn a new agent identity
   air agent-steer <agent-ip:port> --type task|nudge|cancel [--tool t --arg k=v | --text s]
                                                           send an instruction to an agent's steer inbox
+  air workflow [--dry-run] <file.yaml>                   run a declarative launch/steer/call workflow
 
 Shared mesh flags apply (see "meshmcp air <sub> -h").
 `)
@@ -175,41 +178,53 @@ func cmdAirLaunch(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if _, ok := roleScripts[*role]; !ok {
-		return fmt.Errorf("meshmcp air launch: --role must be one of: %s", roleNames())
-	}
 	if fs.NArg() != 1 {
 		return fmt.Errorf("usage: meshmcp air launch --role <%s> [--nb-config dir] <gateway-ip:port>", roleNames())
 	}
-	gateway := fs.Arg(0)
+	var extra []string
+	if *interval != "" {
+		extra = append(extra, "--interval", *interval)
+	}
+	pid, identity, err := spawnAgent(*role, *nbConfig, fs.Arg(0), extra...)
+	if err != nil {
+		return fmt.Errorf("air launch: %w", err)
+	}
+	fmt.Printf("launched agent role=%s pid=%d identity=%s -> %s\n", *role, pid, identity, fs.Arg(0))
+	return nil
+}
 
-	cfgPath := *nbConfig
-	if cfgPath == "" {
+// spawnAgent starts `meshmcp agent` as a child process with its own mesh
+// identity (a fresh --nb-config when none is given), returning its pid and the
+// identity path. Reused by `air launch` and workflow launch steps.
+func spawnAgent(role, nbConfig, gateway string, extra ...string) (pid int, identity string, err error) {
+	if _, ok := roleScripts[role]; !ok {
+		return 0, "", fmt.Errorf("--role must be one of: %s", roleNames())
+	}
+	if gateway == "" {
+		return 0, "", fmt.Errorf("gateway is required")
+	}
+	identity = nbConfig
+	if identity == "" {
 		dir, err := os.MkdirTemp("", "air-agent-*")
 		if err != nil {
-			return fmt.Errorf("air launch: temp identity dir: %w", err)
+			return 0, "", fmt.Errorf("temp identity dir: %w", err)
 		}
-		cfgPath = filepath.Join(dir, "nb.json")
+		identity = filepath.Join(dir, "nb.json")
 	}
 	exe, err := os.Executable()
 	if err != nil {
-		return fmt.Errorf("air launch: locate meshmcp binary: %w", err)
+		return 0, "", fmt.Errorf("locate meshmcp binary: %w", err)
 	}
-	childArgs := []string{"agent", "--role", *role, "--nb-config", cfgPath}
-	if *interval != "" {
-		childArgs = append(childArgs, "--interval", *interval)
-	}
+	childArgs := append([]string{"agent", "--role", role, "--nb-config", identity}, extra...)
 	childArgs = append(childArgs, gateway)
-
 	cmd := exec.Command(exe, childArgs...)
 	cmd.Env = os.Environ() // inherits NB_SETUP_KEY / NB_MANAGEMENT_URL
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("air launch: start agent: %w", err)
+		return 0, "", fmt.Errorf("start agent: %w", err)
 	}
-	fmt.Printf("launched agent role=%s pid=%d identity=%s -> %s\n", *role, cmd.Process.Pid, cfgPath, gateway)
-	return nil
+	return cmd.Process.Pid, identity, nil
 }
 
 // cmdAirAgentSteer sends one steer envelope to an agent's steer inbox (P1),
