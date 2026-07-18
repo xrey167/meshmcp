@@ -25,12 +25,17 @@ const maxCapLifetime = 24 * time.Hour
 // binds to the caller's transport-proven WireGuard key (Subject), one backend
 // (Audience), tool globs, and a validity window.
 type CapabilityClaims struct {
-	Version   int      `json:"v"`
-	ID        string   `json:"id"`
-	Issuer    string   `json:"iss"`
-	Subject   string   `json:"sub"` // caller WireGuard public key (as reported by the transport)
-	Audience  string   `json:"aud"` // backend name
-	Tools     []string `json:"tools"`
+	Version  int      `json:"v"`
+	ID       string   `json:"id"`
+	Issuer   string   `json:"iss"`
+	Subject  string   `json:"sub"` // caller WireGuard public key (as reported by the transport)
+	Audience string   `json:"aud"` // backend name
+	Tools    []string `json:"tools"`
+	// Corpora optionally scopes a knowledge grant: which RAG corpora / KG
+	// subgraphs this capability may query (globs; empty = no corpus restriction).
+	// Auto-signed (signingBytes marshals the whole struct); a knowledge backend
+	// checks it with AllowsCorpus in addition to the tool-glob check.
+	Corpora   []string `json:"corpora,omitempty"`
 	IssuedAt  int64    `json:"iat"`
 	NotBefore int64    `json:"nbf,omitempty"`
 	ExpiresAt int64    `json:"exp"`
@@ -163,6 +168,16 @@ func (v *CapabilityVerifier) Verify(token, peerKey, backend, tool string) (Capab
 		return CapabilityClaims{}, fmt.Errorf("capability has been revoked")
 	}
 	return c, nil
+}
+
+// AllowsCorpus reports whether this capability may query the named corpus /
+// subgraph. An empty Corpora list places no corpus restriction (the tool globs
+// still apply). A knowledge backend calls this after Verify to gate a query.
+func (c CapabilityClaims) AllowsCorpus(name string) bool {
+	if len(c.Corpora) == 0 {
+		return true
+	}
+	return matchAnyGlob(c.Corpora, name)
 }
 
 func matchAnyGlob(patterns []string, v string) bool {

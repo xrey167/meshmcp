@@ -65,6 +65,8 @@ func capabilityIssue(args []string) error {
 	notBefore := fs.Duration("not-before", 0, "delay before the grant becomes valid")
 	var tools stringList
 	fs.Var(&tools, "tool", "tool-name glob the grant covers (repeatable) (required)")
+	var corpora stringList
+	fs.Var(&corpora, "corpus", "corpus/subgraph glob the grant may query (repeatable; knowledge capabilities)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -81,6 +83,7 @@ func capabilityIssue(args []string) error {
 		Subject:   *subject,
 		Audience:  *audience,
 		Tools:     tools,
+		Corpora:   corpora,
 		ExpiresAt: now.Add(*ttl).Unix(),
 	}
 	if *notBefore > 0 {

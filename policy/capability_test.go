@@ -35,9 +35,9 @@ func TestCapabilityIssueAndVerify(t *testing.T) {
 	}
 	// Rejections.
 	cases := []struct {
-		name              string
-		token             string
-		peer, aud, tool   string
+		name            string
+		token           string
+		peer, aud, tool string
 	}{
 		{"wrong subject", tok, "OTHER", "finance", "read_invoice"},
 		{"wrong audience", tok, "KEY", "hr", "read_invoice"},
