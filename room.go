@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -21,6 +24,34 @@ import (
 	"meshmcp/policy"
 )
 
+// randToken returns a 32-byte hex bearer token for the control room's actuator
+// endpoints.
+func randToken() (string, error) {
+	var b [32]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
+// requireToken gates an actuator handler behind the startup bearer token,
+// accepted in the X-Room-Token header or a ?token= query parameter. The compare
+// is constant-time. This holds even on a loopback bind, so a co-resident
+// process cannot drive the room without the token the operator was handed.
+func (rs *roomServer) requireToken(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		got := r.Header.Get("X-Room-Token")
+		if got == "" {
+			got = r.URL.Query().Get("token")
+		}
+		if rs.token == "" || subtle.ConstantTimeCompare([]byte(got), []byte(rs.token)) != 1 {
+			http.Error(w, "forbidden: missing or invalid room token", http.StatusForbidden)
+			return
+		}
+		next(w, r)
+	}
+}
+
 // roomServer backs the interactive Control Room. It reads the audit log for the
 // live view and — when joined to the mesh — dials backends to drive them, so an
 // operator can list and call tools and run a governed terminal, all as an
@@ -31,6 +62,7 @@ type roomServer struct {
 	title      string
 	mesh       *embed.Client // nil = view-only (no mesh creds)
 	localShell bool
+	token      string // bearer required by the actuator endpoints (call/shell)
 
 	mu   sync.Mutex
 	pool map[string]*mcpclient.Client // target -> reused MCP client over the mesh
@@ -58,8 +90,12 @@ func cmdRoom(args []string) error {
 		return fmt.Errorf("--local-shell requires a loopback --addr (got %q); a raw shell must not be reachable remotely", *addr)
 	}
 
+	tok, err := randToken()
+	if err != nil {
+		return fmt.Errorf("generate room token: %w", err)
+	}
 	rs := &roomServer{auditPath: *auditPath, recent: *recent, title: *title,
-		localShell: *localShell, pool: map[string]*mcpclient.Client{}}
+		localShell: *localShell, token: tok, pool: map[string]*mcpclient.Client{}}
 
 	// Join the mesh only if credentials are available; otherwise stay view-only.
 	if o.SetupKey != "" {
@@ -84,18 +120,32 @@ func cmdRoom(args []string) error {
 	mux.HandleFunc("/api/room", rs.handleRoom)
 	mux.HandleFunc("/api/caps", rs.handleCaps)
 	mux.HandleFunc("/api/ls", rs.handleLs)
-	mux.HandleFunc("/api/call", rs.handleCall)
-	mux.HandleFunc("/api/shell", rs.handleShell)
+	// The actuator endpoints (drive a backend, run a command/shell) require the
+	// startup token, so even a local process that slips past the loopback and
+	// rebinding guards cannot act without the token the operator was handed.
+	mux.HandleFunc("/api/call", rs.requireToken(rs.handleCall))
+	mux.HandleFunc("/api/shell", rs.requireToken(rs.handleShell))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
 			return
 		}
+		// Bake the token into the page only when the caller already presents it
+		// (in the URL the operator opened) — so the server never hands the
+		// actuator token to a blind GET /.
+		injected := ""
+		if q := r.URL.Query().Get("token"); q != "" &&
+			subtle.ConstantTimeCompare([]byte(q), []byte(rs.token)) == 1 {
+			b, _ := json.Marshal(rs.token)
+			injected = "window.__ROOM_TOKEN=" + string(b) + ";"
+		}
+		page := strings.Replace(roomHTML, "/*__ROOM_TOKEN__*/", injected, 1)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write([]byte(roomHTML))
+		_, _ = w.Write([]byte(page))
 	})
 
 	fmt.Fprintf(os.Stderr, "meshmcp control room on http://%s (audit: %s)\n", *addr, *auditPath)
+	fmt.Fprintf(os.Stderr, "open the room with this token-bearing URL (keep it secret):\n  http://%s/?token=%s\n", *addr, tok)
 	return http.ListenAndServe(*addr, guardLoopback(mux, *addr))
 }
 
@@ -411,6 +461,7 @@ main{display:grid;grid-template-columns:1.5fr 1fr;gap:14px;padding:16px 20px}
   </div>
 </div>
 <script>
+/*__ROOM_TOKEN__*/
 var $=function(id){return document.getElementById(id)};
 function esc(s){return (s==null?'':String(s)).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
 function hue(s){var h=0;for(var i=0;i<s.length;i++)h=(h*31+s.charCodeAt(i))%360;return h}
@@ -466,7 +517,7 @@ function tick(){
 var curTarget='';var history=[];var hIdx=0;
 function pr(text,cls){var o=$('out');o.appendChild(el('div','ln '+(cls||''),text));o.scrollTop=o.scrollHeight}
 function setTarget(t){curTarget=t;$('target-lbl').textContent=t?('→ '+t):'';}
-function post(path,body){return fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(r){return r.json()})}
+function post(path,body){var h={'Content-Type':'application/json'};if(window.__ROOM_TOKEN)h['X-Room-Token']=window.__ROOM_TOKEN;return fetch(path,{method:'POST',headers:h,body:JSON.stringify(body)}).then(function(r){return r.json()})}
 function textOf(res){ // extract content[].text if present, else pretty JSON
   try{if(res&&res.content&&res.content.length){return res.content.map(function(c){return c.text!=null?c.text:JSON.stringify(c)}).join('\n')}}catch(e){}
   return JSON.stringify(res,null,2);
@@ -527,4 +578,3 @@ fetch('/api/caps').then(function(r){return r.json()}).then(function(c){
 }).catch(function(){});
 tick();setInterval(tick,1500);
 </script></body></html>`
-

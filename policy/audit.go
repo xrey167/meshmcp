@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"sync"
 )
@@ -55,7 +56,21 @@ type AuditLog struct {
 	cp       *Checkpointer // optional: signed Merkle checkpoints
 	lastSeq  int
 	lastHash string
+
+	failClosed bool // when set, a failed write is surfaced to deny the call
 }
+
+// WithFailClosed makes the log a hard control: when the underlying sink cannot
+// accept a record (a full disk, an I/O error), the enforcement point denies the
+// call rather than letting it proceed unrecorded. Off by default so existing
+// deployments keep best-effort behavior until they opt in.
+func (a *AuditLog) WithFailClosed(on bool) *AuditLog {
+	a.failClosed = on
+	return a
+}
+
+// FailClosed reports whether a write failure should deny the call.
+func (a *AuditLog) FailClosed() bool { return a != nil && a.failClosed }
 
 // WithCheckpointer attaches a signed-checkpoint sink: the log periodically
 // emits an Ed25519-signed Merkle commitment over its records, making it
@@ -107,36 +122,53 @@ func chainHash(rec AuditRecord) (string, []byte, error) {
 
 // Append writes one audit record, extending the hash chain. It is the public
 // entry point for code outside the filter (e.g. the control plane) that needs
-// to contribute to the same tamper-evident log.
-func (a *AuditLog) Append(rec AuditRecord) { a.write(rec) }
+// to contribute to the same tamper-evident log. The returned error is nil on a
+// nil/no-op log; callers that treat audit as a control should propagate it.
+func (a *AuditLog) Append(rec AuditRecord) error { return a.write(rec) }
 
-func (a *AuditLog) write(rec AuditRecord) {
+// write emits one record and extends the hash chain. The sequence number and
+// PrevHash cursor advance ONLY after the record's bytes are successfully
+// written, so a marshal or I/O failure leaves no gap in the chain (which
+// verification would otherwise report as tamper) and does not silently drop a
+// record while claiming a higher sequence. The returned error lets the
+// enforcement point fail closed ("audit is a control, not best-effort").
+func (a *AuditLog) write(rec AuditRecord) error {
 	if a == nil || a.w == nil {
-		return
+		return nil
 	}
 	rec.Time = a.nowf()
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	a.seq++
-	rec.Seq = a.seq
+	// Build the candidate record against the NEXT sequence without committing
+	// the cursor yet.
+	nextSeq := a.seq + 1
+	rec.Seq = nextSeq
 	rec.PrevHash = a.prev
 	h, _, err := chainHash(rec)
 	if err != nil {
-		return
+		return fmt.Errorf("audit: hash record: %w", err)
 	}
 	rec.Hash = h
 	b, err := json.Marshal(rec)
 	if err != nil {
-		return
+		return fmt.Errorf("audit: marshal record: %w", err)
 	}
-	a.prev = h
-	a.w.Write(b)
-	a.w.Write([]byte{'\n'})
+	b = append(b, '\n')
+	if n, err := a.w.Write(b); err != nil || n != len(b) {
+		if err == nil {
+			err = io.ErrShortWrite
+		}
+		return fmt.Errorf("audit: write record: %w", err)
+	}
 
+	// Commit: the record is durably queued, so advance the chain cursor.
+	a.seq = nextSeq
+	a.prev = h
 	a.lastSeq, a.lastHash = rec.Seq, h
 	if a.cp != nil {
 		a.cp.add(rec.Seq, h)
 	}
+	return nil
 }

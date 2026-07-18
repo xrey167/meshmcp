@@ -83,11 +83,12 @@ func cmdServe(args []string) error {
 	// so a unified live view reads a single, verifiable stream.
 	var sharedAudit *policy.AuditLog
 	if cfg.AuditLog != "" {
-		f, err := os.OpenFile(cfg.AuditLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		f, err := os.OpenFile(cfg.AuditLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 		if err != nil {
 			return fmt.Errorf("open shared audit log %s: %w", cfg.AuditLog, err)
 		}
-		sharedAudit = policy.NewAuditLog(f, func() string { return time.Now().UTC().Format(time.RFC3339) })
+		sharedAudit = policy.NewAuditLog(f, func() string { return time.Now().UTC().Format(time.RFC3339) }).
+			WithFailClosed(cfg.AuditFailClosed)
 		auditLogs = append(auditLogs, sharedAudit)
 		log.Printf("shared audit ledger: %s", cfg.AuditLog)
 	}
@@ -371,7 +372,8 @@ func buildTracer(cfg *TraceConfig) (*policy.Tracer, error) {
 	if cfg == nil || cfg.Log == "" {
 		return nil, nil
 	}
-	f, err := os.OpenFile(cfg.Log, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	// 0600: a trace with payloads carries full request/response bodies.
+	f, err := os.OpenFile(cfg.Log, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open trace log %s: %w", cfg.Log, err)
 	}
@@ -389,14 +391,14 @@ func auditSink(b *Backend) (*policy.AuditLog, error) {
 	}
 	var w io.Writer = os.Stderr
 	if b.AuditLog != "" {
-		f, err := os.OpenFile(b.AuditLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		f, err := os.OpenFile(b.AuditLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 		if err != nil {
 			return nil, fmt.Errorf("backend %q: open audit log %s: %w", b.Name, b.AuditLog, err)
 		}
 		w = f
 	}
 	now := func() string { return time.Now().UTC().Format(time.RFC3339) }
-	audit := policy.NewAuditLog(w, now)
+	audit := policy.NewAuditLog(w, now).WithFailClosed(b.AuditFailClosed)
 
 	if b.AuditCheckpoints != "" {
 		cp, err := checkpointer(b, now)
@@ -415,12 +417,21 @@ func checkpointer(b *Backend, now func() string) (*policy.Checkpointer, error) {
 		return nil, fmt.Errorf("backend %q: audit_checkpoints requires audit_signing_key", b.Name)
 	}
 	var signer *policy.Signer
-	if _, err := os.Stat(b.AuditSigningKey); err == nil {
+	if _, statErr := os.Stat(b.AuditSigningKey); statErr == nil {
+		var err error
 		signer, err = policy.LoadSigner(b.AuditSigningKey)
 		if err != nil {
 			return nil, fmt.Errorf("backend %q: load signing key: %w", b.Name, err)
 		}
-	} else {
+	} else if os.IsNotExist(statErr) {
+		// A missing signing key is fatal unless the operator explicitly opted
+		// into autogen: silently minting a new key would let anyone who can
+		// delete the file force a fresh signing identity that an unpinned
+		// verifier would then trust.
+		if !b.AuditSigningKeyAutogen {
+			return nil, fmt.Errorf("backend %q: audit signing key %s does not exist — run 'meshmcp audit keygen --out %s' (or set audit_signing_key_autogen: true to create it on start)", b.Name, b.AuditSigningKey, b.AuditSigningKey)
+		}
+		var err error
 		signer, err = policy.GenerateSigner()
 		if err != nil {
 			return nil, err
@@ -429,6 +440,8 @@ func checkpointer(b *Backend, now func() string) (*policy.Checkpointer, error) {
 			return nil, fmt.Errorf("backend %q: save signing key: %w", b.Name, err)
 		}
 		log.Printf("backend %q: generated audit signing key %s (public %s)", b.Name, b.AuditSigningKey, signer.PubKeyHex())
+	} else {
+		return nil, fmt.Errorf("backend %q: stat signing key %s: %w", b.Name, b.AuditSigningKey, statErr)
 	}
 
 	f, err := os.OpenFile(b.AuditCheckpoints, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)

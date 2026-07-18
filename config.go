@@ -28,15 +28,18 @@ type SecretsConfig struct {
 
 // Config is the meshmcp serve configuration.
 type Config struct {
-	Mesh MeshConfig   `yaml:"mesh"`
+	Mesh MeshConfig `yaml:"mesh"`
 	// AuditLog, when set, is a single gateway-wide tamper-evident audit ledger
 	// shared by every policy-enabled backend — one hash chain for the whole
 	// gateway, which is what a unified live view (dash / room) reads. When
 	// empty, each backend uses its own audit_log.
-	AuditLog string       `yaml:"audit_log"`
-	Trace    *TraceConfig `yaml:"trace"`
-	Registry string       `yaml:"registry"` // dir: register backends for router discovery
-	Backends []*Backend   `yaml:"backends"`
+	AuditLog string `yaml:"audit_log"`
+	// AuditFailClosed makes the gateway-wide shared ledger a hard control:
+	// a record that cannot be written denies the call. Off by default.
+	AuditFailClosed bool         `yaml:"audit_fail_closed"`
+	Trace           *TraceConfig `yaml:"trace"`
+	Registry        string       `yaml:"registry"` // dir: register backends for router discovery
+	Backends        []*Backend   `yaml:"backends"`
 }
 
 // TraceConfig turns on a gateway-wide trace of every MCP message (both
@@ -106,13 +109,23 @@ type Backend struct {
 	// "meshmcp audit verify <log> --checkpoints <f> --pubkey <hex>".
 	AuditCheckpoints string `yaml:"audit_checkpoints"`
 	// AuditSigningKey is the gateway Ed25519 key file (created by
-	// "meshmcp audit keygen"). If it does not exist it is generated on start.
+	// "meshmcp audit keygen"). A missing file is fatal unless
+	// audit_signing_key_autogen is set (see below).
 	AuditSigningKey string `yaml:"audit_signing_key"`
 	// AuditCheckpointEvery is how many records per checkpoint (default 128).
 	AuditCheckpointEvery int `yaml:"audit_checkpoint_every"`
 	// AuditAnchor is an append-only file where each checkpoint is also written
 	// as an external witness (the transparency-log seam).
 	AuditAnchor string `yaml:"audit_anchor"`
+	// AuditFailClosed makes this backend's audit sink a hard control: when a
+	// record cannot be written (full disk, I/O error), the call is denied
+	// rather than proceeding unrecorded. Off by default (best-effort).
+	AuditFailClosed bool `yaml:"audit_fail_closed"`
+	// AuditSigningKeyAutogen permits generating audit_signing_key when the file
+	// is absent. Off by default: a missing key is fatal, so an attacker cannot
+	// force a fresh signing identity by deleting the file. Run
+	// "meshmcp audit keygen --out <path>" to create one explicitly.
+	AuditSigningKeyAutogen bool `yaml:"audit_signing_key_autogen"`
 	// CosignStore is a shared directory holding human co-sign approvals for
 	// rules with require_cosign. A human identity grants approvals with
 	// "meshmcp approve". Only meaningful with a policy.

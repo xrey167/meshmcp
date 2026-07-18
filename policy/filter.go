@@ -165,7 +165,7 @@ func (f *Filter) handleLine(line []byte) error {
 	// forward blind.
 	if trimmed[0] == '[' {
 		if f.eng != nil {
-			f.audit.write(f.record("<batch>", "", "", Decision{RuleID: -1, Reason: "batches unsupported"}))
+			_ = f.audit.write(f.record("<batch>", "", "", Decision{RuleID: -1, Reason: "batches unsupported"}))
 			f.traceLine("c2s", trimmed, "deny")
 			f.writeDenial(json.RawMessage("null"), "JSON-RPC batches are not supported by the mesh policy filter")
 			return nil
@@ -221,7 +221,16 @@ func (f *Filter) handleToolCall(line []byte, msg rpcPeek, capToken string) error
 		dec = f.applyCapability(dec, capToken, tool)
 	}
 	rec := f.record(msg.Method, tool, string(msg.ID), dec)
-	f.audit.write(rec)
+	if err := f.audit.write(rec); err != nil {
+		// Audit is a control: if the tamper-evident record cannot be written
+		// and the log is fail-closed, deny the call rather than let it reach
+		// the backend unrecorded.
+		if f.audit.FailClosed() {
+			f.traceLine("c2s", line, "deny")
+			f.writeDenial(msg.ID, fmt.Sprintf("tool %q blocked: audit sink unavailable (fail-closed)", tool))
+			return nil
+		}
+	}
 	f.traceLine("c2s", line, rec.Decision)
 
 	switch dec.Outcome {
@@ -274,9 +283,13 @@ func (f *Filter) handleMethod(line []byte, msg rpcPeek) error {
 		_, werr := f.inner.Write(line)
 		return werr
 	}
-	f.audit.write(f.record(msg.Method, "", string(msg.ID), dec))
+	auditErr := f.audit.write(f.record(msg.Method, "", string(msg.ID), dec))
 	f.traceLine("c2s", line, decisionStr(dec.Allow))
 	if dec.Allow {
+		if auditErr != nil && f.audit.FailClosed() {
+			f.writeDenial(msg.ID, fmt.Sprintf("method %q blocked: audit sink unavailable (fail-closed)", msg.Method))
+			return nil
+		}
 		_, werr := f.inner.Write(line)
 		return werr
 	}
@@ -294,10 +307,13 @@ func (f *Filter) handleNotification(line []byte, method string) error {
 		_, werr := f.inner.Write(line)
 		return werr
 	}
-	f.audit.write(f.record(method, "", "", dec))
+	auditErr := f.audit.write(f.record(method, "", "", dec))
 	f.traceLine("c2s", line, decisionStr(dec.Allow))
 	if !dec.Allow {
 		return nil // drop
+	}
+	if auditErr != nil && f.audit.FailClosed() {
+		return nil // fail closed: drop an unaudited (would-be-allowed) notification
 	}
 	_, werr := f.inner.Write(line)
 	return werr
