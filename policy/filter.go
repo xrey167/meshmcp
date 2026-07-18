@@ -86,6 +86,13 @@ func (f *Filter) SetEventHook(h EventHook) { f.hook = h }
 
 // audited writes a decision to the audit log and forwards it to the event hook
 // (if any). The hook is fire-and-forget: it never blocks or fails the caller.
+//
+// Every decision is recorded — including denials and rate-limit blocks. That is
+// deliberate and differs from the pub/sub broker (which drops rate-limited
+// attempts unaudited): the gateway's tool-call ledger is the non-repudiable
+// security record, and denied/blocked attempts are precisely what a security
+// audit must retain. Flood protection is the policy engine's per-rule rate
+// limits plus operational log rotation, not silence about denials.
 func (f *Filter) audited(rec AuditRecord) {
 	f.audit.write(rec)
 	if f.hook != nil {

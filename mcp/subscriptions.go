@@ -29,6 +29,7 @@ const (
 	// one connection from exhausting server memory.
 	maxSubscriptions         = 256
 	maxResourceSubsPerListen = 512
+	maxResourceURILen        = 2048
 )
 
 // SubscriptionFilter selects which notification types a subscription delivers.
@@ -66,6 +67,10 @@ func (s *Server) handleListen(req request, sess *Session) response {
 	}
 	uris := make(map[string]bool, len(p.Notifications.ResourceSubscriptions))
 	for _, u := range p.Notifications.ResourceSubscriptions {
+		if len(u) > maxResourceURILen {
+			return response{JSONRPC: "2.0", ID: req.ID,
+				Error: &rpcError{Code: codeInvalidParams, Message: "resource URI too long"}}
+		}
 		uris[u] = true
 	}
 	sub := &subscription{id: req.ID, sess: sess, filter: p.Notifications, uris: uris}

@@ -78,7 +78,7 @@ func TestDropRoundTrip(t *testing.T) {
 	go func() { pw.CloseWithError(sendFiles(pw, paths)) }()
 
 	got := map[string]recvInfo{}
-	if err := recvFiles(pr, dirPlacer(dst), 0, func(fi recvInfo) { got[fi.Name] = fi }); err != nil {
+	if err := recvFiles(pr, dirPlacer(dst), dropLimits{}, func(fi recvInfo) { got[fi.Name] = fi }); err != nil {
 		t.Fatalf("recvFiles: %v", err)
 	}
 
@@ -129,7 +129,7 @@ func TestDropDirectory(t *testing.T) {
 	go func() { pw.CloseWithError(sendFiles(pw, []string{filepath.Join(src, "photos")})) }()
 
 	got := map[string]recvInfo{}
-	if err := recvFiles(pr, dirPlacer(dst), 0, func(fi recvInfo) { got[fi.Name] = fi }); err != nil {
+	if err := recvFiles(pr, dirPlacer(dst), dropLimits{}, func(fi recvInfo) { got[fi.Name] = fi }); err != nil {
 		t.Fatalf("recvFiles: %v", err)
 	}
 	if len(got) != len(tree) {
@@ -159,7 +159,7 @@ func TestPushPayload(t *testing.T) {
 	go func() { pw.CloseWithError(sendData(pw, "clip.txt", payload)) }()
 
 	var got recvInfo
-	if err := recvFiles(pr, dirPlacer(dst), 0, func(fi recvInfo) { got = fi }); err != nil {
+	if err := recvFiles(pr, dirPlacer(dst), dropLimits{}, func(fi recvInfo) { got = fi }); err != nil {
 		t.Fatalf("recvFiles: %v", err)
 	}
 	if got.SHA256 != sha(payload) {
@@ -196,7 +196,7 @@ func TestDropDetectsCorruption(t *testing.T) {
 	buf.WriteString("abc")
 	buf.WriteString(`{"sha256":"deadbeef"}` + "\n")
 
-	err := recvFiles(&buf, dirPlacer(dst), 0, nil)
+	err := recvFiles(&buf, dirPlacer(dst), dropLimits{}, nil)
 	if err == nil || !strings.Contains(err.Error(), "hash mismatch") {
 		t.Fatalf("expected hash mismatch error, got %v", err)
 	}
@@ -211,8 +211,36 @@ func TestDropEnforcesMaxBytes(t *testing.T) {
 	p := writeTemp(t, src, "big.dat", bytes.Repeat([]byte{7}, 4096))
 	pr, pw := io.Pipe()
 	go func() { pw.CloseWithError(sendFiles(pw, []string{p})) }()
-	if err := recvFiles(pr, dirPlacer(dst), 1024, nil); err == nil || !strings.Contains(err.Error(), "over the") {
+	if err := recvFiles(pr, dirPlacer(dst), dropLimits{PerFile: 1024}, nil); err == nil || !strings.Contains(err.Error(), "over the") {
 		t.Fatalf("expected size-limit error, got %v", err)
+	}
+}
+
+// TestDropBoundsFramingLine ensures an oversized header line (a sender that
+// never sends a newline) is rejected instead of buffered unboundedly.
+func TestDropBoundsFramingLine(t *testing.T) {
+	dst := t.TempDir()
+	var buf bytes.Buffer
+	buf.Write(bytes.Repeat([]byte("A"), maxDropFrameLine+16)) // no newline: an unbounded "header"
+	err := recvFiles(&buf, dirPlacer(dst), dropLimits{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "framing line exceeds") {
+		t.Fatalf("expected framing-line bound error, got %v", err)
+	}
+}
+
+// TestDropEnforcesFileCount ensures a transfer is refused once it exceeds the
+// file-count cap.
+func TestDropEnforcesFileCount(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	var paths []string
+	for i := 0; i < 5; i++ {
+		paths = append(paths, writeTemp(t, src, "f"+string(rune('a'+i))+".txt", []byte("x")))
+	}
+	pr, pw := io.Pipe()
+	go func() { pw.CloseWithError(sendFiles(pw, paths)) }()
+	err := recvFiles(pr, dirPlacer(dst), dropLimits{MaxFiles: 3}, nil)
+	if err == nil || !strings.Contains(err.Error(), "file limit") {
+		t.Fatalf("expected file-count limit error, got %v", err)
 	}
 }
 
@@ -232,7 +260,7 @@ func TestDropOverSession(t *testing.T) {
 		t.Fatalf("listen: %v", err)
 	}
 	defer ln.Close()
-	srv := session.NewServer(newDropFactory(dirPlacer(dst), 0, audit), 2*time.Minute, nil)
+	srv := session.NewServer(newDropFactory(dirPlacer(dst), dropLimits{}, audit), 2*time.Minute, nil)
 	go func() {
 		for {
 			conn, err := ln.Accept()

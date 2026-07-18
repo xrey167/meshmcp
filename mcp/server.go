@@ -281,6 +281,9 @@ func (s *Server) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 1<<20), 8<<20)
 	conn := &outConn{bw: bufio.NewWriter(w)}
+	if wd, ok := w.(writeDeadliner); ok {
+		conn.wd = wd // bound writes on transports that support deadlines (net.Conn)
+	}
 	sess := &Session{conn: conn}
 	s.mu.Lock()
 	s.sess = sess
