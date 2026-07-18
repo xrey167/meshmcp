@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"sync"
 )
 
@@ -216,4 +217,34 @@ func (s *store) head() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.seq
+}
+
+// mergeRecords reconciles records from any number of replicas into the
+// converged set of active triples — an OR-set with tombstones (S8): a triple
+// id is active iff some replica asserted it and none deleted it. Merging is
+// commutative and idempotent (the result is sorted by id, independent of input
+// order), so peers that edit the graph offline and sync in any order converge
+// to the same knowledge. Each replica then appends the reconciled triples it
+// lacked to its own hash-chained log, so the reconciliation stays audited.
+func mergeRecords(logs ...[]record) []record {
+	deleted := map[string]bool{}
+	asserts := map[string]record{}
+	for _, log := range logs {
+		for _, r := range log {
+			switch r.Op {
+			case "delete":
+				deleted[r.ID] = true
+			case "assert":
+				asserts[r.ID] = r
+			}
+		}
+	}
+	out := make([]record, 0, len(asserts))
+	for id, r := range asserts {
+		if !deleted[id] {
+			out = append(out, r)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
 }
