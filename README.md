@@ -284,6 +284,7 @@ examples/    ready-to-adapt configs        docs/  design docs + open specs
 - **[docs/MOBILE.md](docs/MOBILE.md)** — how the whole stack could reach phones (a phone is a human identity on the mesh — the natural co-sign approver).
 - **[examples/hitl/](examples/hitl/)** — route any agent framework's approval hook (e.g. OpenAI Agents SDK `ShellTool.on_approval`) to the mesh approver — approve from your phone, identity-attributed and audited.
 - **[docs/HA-TOOLMESH.md](docs/HA-TOOLMESH.md)** · **[docs/reference.md](docs/reference.md)** · **[docs/VISION.md](docs/VISION.md)** — HA design, full reference, roadmap.
+- **[docs/IDEAS.md](docs/IDEAS.md)** — revolutionary enhancement ideas: KG, RAG, `meshmcp drop` (AirDrop across instances), and 19 more, each grounded in the existing primitives.
 
 ## Build & test
 
