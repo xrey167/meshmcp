@@ -48,3 +48,4 @@ audit-signing-key.json
 /memory
 /bus
 /scheduler
+/vault
