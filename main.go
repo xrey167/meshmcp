@@ -41,6 +41,8 @@ Usage:
   meshmcp audit keygen [--out f]                generate a gateway signing key for audit checkpoints
   meshmcp capability keygen [--out f]           generate an Ed25519 authority key backends pin as a trust root
   meshmcp capability issue [flags]              sign a short-lived, subject-bound tool grant (--subject/--audience/--tool)
+  meshmcp capability revoke --store <d> <id>    revoke a capability id (fails closed at every gateway sharing the store)
+  meshmcp capability list --store <d>           list revoked capability ids
   meshmcp approve [flags] <peer-fqdn> <tool>    co-sign a require_cosign tool call for a peer
   meshmcp approvals --store <dir>               serve the co-sign approver (phone-friendly) over the mesh
   meshmcp secrets check --config <file>         validate the credential broker config (never prints values)

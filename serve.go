@@ -306,6 +306,11 @@ func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer) s
 		if err != nil {
 			log.Fatalf("backend %q: capabilities: %v", b.Name, err)
 		}
+		if b.Capabilities.RevocationStore != "" {
+			rev := policy.FileRevocation{Dir: b.Capabilities.RevocationStore}
+			v = v.WithRevocation(rev.IsRevoked)
+			log.Printf("backend %q: capability revocation store: %s", b.Name, b.Capabilities.RevocationStore)
+		}
 		capVerifier = v
 	}
 	// Held-request registry lives in the cosign directory, so an approver

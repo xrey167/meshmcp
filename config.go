@@ -153,6 +153,10 @@ type CapabilitiesConfig struct {
 	// TrustedPublicKeys are the hex Ed25519 authority keys the gateway pins;
 	// a token never supplies its own trust root.
 	TrustedPublicKeys []string `yaml:"trusted_public_keys"`
+	// RevocationStore is a directory of revoked capability ids. When set, a
+	// token whose id was revoked ("meshmcp capability revoke") fails closed at
+	// the enforcement point even before it expires.
+	RevocationStore string `yaml:"revocation_store"`
 }
 
 func (b *Backend) kind() string {
