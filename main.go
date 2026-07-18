@@ -27,6 +27,8 @@ Usage:
   meshmcp agent --role <r> [flags] <peer:port>  run a demo agent app (reader/fetcher/billing/analyst) with its own identity
   meshmcp connect [flags] <peer-ip:port>        bridge stdio <-> remote stdio backend
   meshmcp forward [flags] <local> <peer:port>   forward a local TCP port to a mesh peer
+  meshmcp drop [flags] <peer:port> <file...>    AirDrop files to a mesh peer (resumable, audited); --config runs a receiver
+  meshmcp peers [flags]                          list mesh peers you can reach (identities you can drop to)
   meshmcp probe [flags] <peer-ip:port>          run an MCP handshake against a backend
   meshmcp ls [flags] <peer-ip:port>             list a backend's tools/resources/prompts
   meshmcp call [flags] <peer:port> <tool>       call a tool (--arg k=v, --json, --task, --capability @file)
@@ -69,6 +71,10 @@ func main() {
 		err = cmdConnect(os.Args[2:])
 	case "forward":
 		err = cmdForward(os.Args[2:])
+	case "drop":
+		err = cmdDrop(os.Args[2:])
+	case "peers":
+		err = cmdPeers(os.Args[2:])
 	case "probe":
 		err = cmdProbe(os.Args[2:])
 	case "ls":
