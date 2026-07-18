@@ -2,6 +2,7 @@ package pubsub
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,51 @@ import (
 
 	"meshmcp/policy"
 )
+
+// TestRetainedMessages verifies a retained publish becomes the topic's
+// last-value, delivered to a subscriber that connects afterward.
+func TestRetainedMessages(t *testing.T) {
+	b := New(Options{Authorizer: AllowAll{}})
+	defer b.Close()
+
+	b.PublishOpts(id("p"), "state.temp", json.RawMessage(`21`), PublishOptions{Retain: true})
+	b.Publish(id("p"), "state.temp", json.RawMessage(`22`), nil) // not retained: doesn't update last-value
+	b.PublishOpts(id("p"), "state.temp", json.RawMessage(`23`), PublishOptions{Retain: true})
+
+	sub, err := b.Subscribe(id("s"), SubOptions{Topics: []string{"state.*"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sub.Close()
+	if ev := recv(t, sub); string(ev.Payload) != "23" {
+		t.Fatalf("retained value = %s, want 23 (latest retained)", ev.Payload)
+	}
+}
+
+// TestBinaryPayload verifies a base64-encoded binary payload round-trips with
+// its encoding hint.
+func TestBinaryPayload(t *testing.T) {
+	b := New(Options{Authorizer: AllowAll{}})
+	defer b.Close()
+	sub, _ := b.Subscribe(id("s"), SubOptions{Topics: []string{"blob"}})
+	defer sub.Close()
+
+	raw := []byte{0x00, 0x01, 0x02, 0xff, 0xfe}
+	b64, _ := json.Marshal(base64.StdEncoding.EncodeToString(raw))
+	if _, err := b.PublishOpts(id("p"), "blob", b64, PublishOptions{Encoding: "base64"}); err != nil {
+		t.Fatal(err)
+	}
+	got := recv(t, sub)
+	if got.Enc != "base64" {
+		t.Fatalf("encoding hint = %q, want base64", got.Enc)
+	}
+	var s string
+	json.Unmarshal(got.Payload, &s)
+	dec, _ := base64.StdEncoding.DecodeString(s)
+	if !bytes.Equal(dec, raw) {
+		t.Fatal("binary payload did not round-trip")
+	}
+}
 
 // fakeClock is a settable clock for deterministic time-dependent tests.
 type fakeClock struct {

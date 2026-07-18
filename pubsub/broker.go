@@ -135,7 +135,8 @@ type Broker struct {
 	seq       uint64
 	prev      string // hash of the last published event ("" before genesis)
 	subs      map[uint64]*Subscription
-	perPeer   map[string]int // active subscription count per identity key
+	perPeer   map[string]int    // active subscription count per identity key
+	retained  map[string]*Event // last-value per topic (retained messages)
 	nextSubID uint64
 	ring      *ring
 	dropped   uint64 // aggregate events dropped by backpressure across all subs
@@ -182,9 +183,10 @@ func New(opts Options) *Broker {
 		now:     now,
 		lim:     newLimiter(lm.PublishRate, lm.PublishBurst, now),
 		lm:      lm,
-		subs:    map[uint64]*Subscription{},
-		perPeer: map[string]int{},
-		ring:    newRing(lm.Retain),
+		subs:     map[uint64]*Subscription{},
+		perPeer:  map[string]int{},
+		retained: map[string]*Event{},
+		ring:     newRing(lm.Retain),
 	}
 	// Resume from a persisted stream: continue the sequence and hash chain from
 	// its last event, and preload the retention ring's tail so --since replay
@@ -229,21 +231,36 @@ func (b *Broker) capAllows(id Identity, topic, token string) bool {
 	return err == nil
 }
 
-// Publish authorizes and emits an event to topic (see PublishCap for the
-// capability-carrying form). extraLabels are additional data-flow labels the
-// publisher declares; they are unioned with the authorizer's emit labels (a
-// publisher may add containment, never remove it).
+// PublishOptions carries the optional facets of a publish beyond the payload.
+type PublishOptions struct {
+	// Labels are additional data-flow labels the publisher declares; unioned
+	// with the authorizer's emit labels (a publisher may add containment).
+	Labels []string
+	// Capability is a signed token that can upgrade a default-deny to allow.
+	Capability string
+	// Retain stores this event as the topic's last-value, delivered to future
+	// subscribers of the topic (MQTT-style retained message).
+	Retain bool
+	// Encoding is an opaque payload-encoding hint stamped onto the event
+	// (e.g. "base64" for a binary payload carried as a JSON string).
+	Encoding string
+}
+
+// Publish authorizes and emits an event to topic (see PublishOpts for the full
+// form). extraLabels are unioned with the authorizer's emit labels.
 func (b *Broker) Publish(id Identity, topic string, payload json.RawMessage, extraLabels []string) (*Event, error) {
-	return b.publish(id, topic, payload, extraLabels, "")
+	return b.PublishOpts(id, topic, payload, PublishOptions{Labels: extraLabels})
 }
 
 // PublishCap is Publish with a signed capability token that can upgrade a
 // default-deny on the topic to allow.
 func (b *Broker) PublishCap(id Identity, topic string, payload json.RawMessage, extraLabels []string, capToken string) (*Event, error) {
-	return b.publish(id, topic, payload, extraLabels, capToken)
+	return b.PublishOpts(id, topic, payload, PublishOptions{Labels: extraLabels, Capability: capToken})
 }
 
-func (b *Broker) publish(id Identity, topic string, payload json.RawMessage, extraLabels []string, capToken string) (*Event, error) {
+// PublishOpts is the full publish entry point.
+func (b *Broker) PublishOpts(id Identity, topic string, payload json.RawMessage, o PublishOptions) (*Event, error) {
+	extraLabels, capToken := o.Labels, o.Capability
 	// Identity is cryptographic, never claimed: a caller whose WireGuard key
 	// the transport could not prove has no identity to authorize. Fail closed
 	// before anything else, so an unproven caller can never match a rule with
@@ -307,6 +324,7 @@ func (b *Broker) publish(id Identity, topic string, payload json.RawMessage, ext
 		Publisher: id.Key,
 		PubFQDN:   id.FQDN,
 		Labels:    labels,
+		Enc:       o.Encoding,
 		Payload:   payload,
 		PrevHash:  b.prev,
 	}
@@ -318,6 +336,9 @@ func (b *Broker) publish(id Identity, topic string, payload json.RawMessage, ext
 	ev.Hash = h
 	b.prev = h
 	b.ring.add(*ev)
+	if o.Retain {
+		b.retained[topic] = ev // last-value for this exact topic
+	}
 	// Persist the sealed event in sequence order (best-effort per-event, like
 	// the audit ledger; a failed append degrades durability but never blocks
 	// delivery). Held under b.mu so the on-disk order matches the chain.
@@ -501,6 +522,19 @@ func (b *Broker) Subscribe(id Identity, opts SubOptions) (*Subscription, error) 
 			}
 			if _, ok := b.subs[s.ID]; !ok {
 				break // disconnected by backpressure mid-replay
+			}
+		}
+	}
+	// Deliver the current retained (last-value) event for each matching topic,
+	// so a new subscriber immediately learns the current state. Skip events
+	// already covered by the --since replay above to avoid a duplicate.
+	if _, ok := b.subs[s.ID]; ok {
+		for _, ev := range b.retained {
+			if ev.Seq > opts.Since && s.accepts(ev) {
+				b.deliverLocked(s, ev)
+				if _, ok := b.subs[s.ID]; !ok {
+					break
+				}
 			}
 		}
 	}

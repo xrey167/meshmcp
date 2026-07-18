@@ -43,6 +43,8 @@ type helloFrame struct {
 type pubFrame struct {
 	Topic   string          `json:"topic"`
 	Labels  []string        `json:"labels,omitempty"`
+	Retain  bool            `json:"retain,omitempty"`
+	Enc     string          `json:"enc,omitempty"` // payload encoding hint (e.g. "base64")
 	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
@@ -196,7 +198,12 @@ func (bb *brokerBackend) servePub(sc *bufio.Scanner, capToken string) {
 			}
 			continue
 		}
-		ev, err := bb.broker.PublishCap(bb.ident, pf.Topic, pf.Payload, pf.Labels, capToken)
+		ev, err := bb.broker.PublishOpts(bb.ident, pf.Topic, pf.Payload, pubsub.PublishOptions{
+			Labels:     pf.Labels,
+			Capability: capToken,
+			Retain:     pf.Retain,
+			Encoding:   pf.Enc,
+		})
 		if err != nil {
 			if bb.writeAck(ackFrame{Error: err.Error()}) != nil {
 				return

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -334,6 +335,8 @@ func cmdPublish(args []string) error {
 	data := fs.String("data", "", "payload (default: read from stdin)")
 	rawJSON := fs.Bool("json", false, "treat the payload as raw JSON (default: wrap it as a JSON string)")
 	streamMode := fs.Bool("stream", false, "publish one event per stdin line over a single session (a producer feed)")
+	retainFlag := fs.Bool("retain", false, "store this event as the topic's retained last-value (new subscribers receive it)")
+	fileFlag := fs.String("file", "", "publish a file's bytes as a base64 (binary) payload")
 	maxBytes := fs.Int64("max-bytes", 1<<20, "reject a payload larger than this (the broker enforces its own cap too)")
 	capFlag := fs.String("capability", "", "present a signed capability grant; @file reads the token from a file")
 	var labels stringList
@@ -351,36 +354,49 @@ func cmdPublish(args []string) error {
 	}
 
 	if *streamMode {
-		return streamPublish(o, target, topic, labels, *rawJSON, *maxBytes, capToken)
-	}
-
-	var body []byte
-	if *data != "" {
-		body = []byte(*data)
-	} else {
-		b, err := io.ReadAll(io.LimitReader(os.Stdin, *maxBytes+1))
-		if err != nil {
-			return fmt.Errorf("read stdin: %w", err)
-		}
-		body = b
-	}
-	if int64(len(body)) > *maxBytes {
-		return fmt.Errorf("payload exceeds %d bytes", *maxBytes)
+		return streamPublish(o, target, topic, labels, *rawJSON, *maxBytes, capToken, *retainFlag)
 	}
 
 	var payload json.RawMessage
-	if *rawJSON {
-		if !json.Valid(body) {
-			return errors.New("--json set but payload is not valid JSON")
+	enc := ""
+	if *fileFlag != "" {
+		raw, err := os.ReadFile(*fileFlag)
+		if err != nil {
+			return fmt.Errorf("read --file: %w", err)
 		}
-		payload = json.RawMessage(body)
+		if int64(len(raw)) > *maxBytes {
+			return fmt.Errorf("file exceeds %d bytes", *maxBytes)
+		}
+		b64, _ := json.Marshal(base64.StdEncoding.EncodeToString(raw))
+		payload = b64
+		enc = "base64"
 	} else {
-		enc, _ := json.Marshal(string(body))
-		payload = enc
+		var body []byte
+		if *data != "" {
+			body = []byte(*data)
+		} else {
+			b, err := io.ReadAll(io.LimitReader(os.Stdin, *maxBytes+1))
+			if err != nil {
+				return fmt.Errorf("read stdin: %w", err)
+			}
+			body = b
+		}
+		if int64(len(body)) > *maxBytes {
+			return fmt.Errorf("payload exceeds %d bytes", *maxBytes)
+		}
+		if *rawJSON {
+			if !json.Valid(body) {
+				return errors.New("--json set but payload is not valid JSON")
+			}
+			payload = json.RawMessage(body)
+		} else {
+			wrapped, _ := json.Marshal(string(body))
+			payload = wrapped
+		}
 	}
 
 	hello, _ := json.Marshal(helloFrame{Role: "pub", Capability: capToken})
-	pub, _ := json.Marshal(pubFrame{Topic: topic, Labels: labels, Payload: payload})
+	pub, _ := json.Marshal(pubFrame{Topic: topic, Labels: labels, Retain: *retainFlag, Enc: enc, Payload: payload})
 	preamble := append(append(hello, '\n'), append(pub, '\n')...)
 
 	// ack/gotAck are written in the session inbound goroutine (via onLine) and
@@ -430,7 +446,7 @@ func cmdPublish(args []string) error {
 // streamPublish is the producer path: it reads stdin line by line and publishes
 // each line as one event over a single session (one mesh join, one broker
 // connection), so a continuous feed does not pay the join cost per event.
-func streamPublish(o *meshOptions, target, topic string, labels stringList, rawJSON bool, maxBytes int64, capToken string) error {
+func streamPublish(o *meshOptions, target, topic string, labels stringList, rawJSON bool, maxBytes int64, capToken string, retain bool) error {
 	o.BlockInbound = true
 	client, err := startMesh(o, os.Stderr)
 	if err != nil {
@@ -464,7 +480,7 @@ func streamPublish(o *meshOptions, target, topic string, labels stringList, rawJ
 				enc, _ := json.Marshal(string(line))
 				payload = enc
 			}
-			pf, _ := json.Marshal(pubFrame{Topic: topic, Labels: labels, Payload: payload})
+			pf, _ := json.Marshal(pubFrame{Topic: topic, Labels: labels, Retain: retain, Payload: payload})
 			if _, err := pw.Write(append(pf, '\n')); err != nil {
 				return
 			}

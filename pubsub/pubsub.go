@@ -57,6 +57,7 @@ type Event struct {
 	Publisher string          `json:"publisher,omitempty"`      // WireGuard pubkey
 	PubFQDN   string          `json:"publisher_fqdn,omitempty"` // mesh FQDN
 	Labels    []string        `json:"labels,omitempty"`         // data-flow labels (e.g. "tainted", "pii")
+	Enc       string          `json:"enc,omitempty"`            // payload encoding hint (e.g. "base64" for binary); opaque to the broker
 	Payload   json.RawMessage `json:"payload,omitempty"`
 
 	PrevHash string `json:"prev_hash"`

@@ -50,6 +50,16 @@ single session (one mesh join for the whole feed), instead of one event per run:
 tail -F app.log | meshmcp publish --stream 100.x.y.z:9120 logs.app
 ```
 
+`--retain` stores the event as the topic's **last-value**, so a subscriber that
+connects later immediately receives the current state (MQTT-style retain).
+`--file` publishes a file's bytes as a **base64 binary payload** (the event
+carries `"enc":"base64"` so consumers know to decode):
+
+```sh
+meshmcp publish --retain 100.x.y.z:9120 state.thermostat --data '{"c":21}'
+meshmcp publish --file model.bin 100.x.y.z:9120 artifacts.model
+```
+
 Subscribe streams matching events as newline-delimited JSON and blocks until
 Ctrl-C. Topics are globs; `--since` replays retained events first:
 
