@@ -474,7 +474,11 @@ func checkpointer(b *Backend, now func() string) (*policy.Checkpointer, error) {
 		}
 		anchor = &policy.FileAnchor{W: af}
 	}
-	return policy.NewCheckpointer(signer, f, b.AuditCheckpointEvery, now, anchor), nil
+	name := b.Name
+	return policy.NewCheckpointer(signer, f, b.AuditCheckpointEvery, now, anchor).
+		WithErrorHandler(func(err error) {
+			log.Printf("backend %q: AUDIT CHECKPOINT ERROR: %v", name, err)
+		}), nil
 }
 
 func allowWord(allow bool) string {

@@ -3,6 +3,7 @@ package policy
 import (
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"sync"
 )
@@ -41,11 +42,12 @@ func (a *FileAnchor) Anchor(c Checkpoint) error {
 // Checkpointer batches record hashes and, every N records (and on Flush),
 // emits a signed Merkle checkpoint to its sink and optional anchor.
 type Checkpointer struct {
-	signer *Signer
-	w      io.Writer
-	anchor Anchor
-	every  int
-	now    func() string
+	signer  *Signer
+	w       io.Writer
+	anchor  Anchor
+	every   int
+	now     func() string
+	onError func(error) // optional: surface a checkpoint/anchor I/O failure
 
 	mu      sync.Mutex
 	leaves  [][]byte
@@ -64,6 +66,20 @@ func NewCheckpointer(signer *Signer, w io.Writer, every int, now func() string, 
 		now = func() string { return "" }
 	}
 	return &Checkpointer{signer: signer, w: w, anchor: anchor, every: every, now: now}
+}
+
+// WithErrorHandler surfaces checkpoint/anchor I/O failures (otherwise swallowed)
+// so a caller can log or alert on them — the anchor is the one control that
+// defends against an insider, so a silent anchor failure is dangerous.
+func (c *Checkpointer) WithErrorHandler(fn func(error)) *Checkpointer {
+	c.onError = fn
+	return c
+}
+
+func (c *Checkpointer) reportErr(err error) {
+	if err != nil && c.onError != nil {
+		c.onError(err)
+	}
 }
 
 // add records a leaf (a record's hash bytes) at seq; it flushes a checkpoint
@@ -117,12 +133,21 @@ func (c *Checkpointer) flushLocked(toSeq int, chainHead string) {
 	}
 	cp = c.signer.sign(cp)
 	b, err := json.Marshal(cp)
-	if err == nil {
-		c.w.Write(b)
-		c.w.Write([]byte{'\n'})
+	if err != nil {
+		c.reportErr(fmt.Errorf("checkpoint marshal: %w", err))
+	} else {
+		b = append(b, '\n')
+		if n, werr := c.w.Write(b); werr != nil || n != len(b) {
+			if werr == nil {
+				werr = io.ErrShortWrite
+			}
+			c.reportErr(fmt.Errorf("checkpoint write: %w", werr))
+		}
 	}
 	if c.anchor != nil {
-		_ = c.anchor.Anchor(cp)
+		if aerr := c.anchor.Anchor(cp); aerr != nil {
+			c.reportErr(fmt.Errorf("checkpoint anchor: %w", aerr))
+		}
 	}
 	c.prevCP = cp.Hash()
 	c.leaves = c.leaves[:0]
