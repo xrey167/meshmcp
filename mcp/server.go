@@ -377,6 +377,8 @@ func (s *Server) dispatch(ctx context.Context, req request, sess *Session) respo
 		return s.taskResult(req, ok, fail)
 	case "tasks/cancel":
 		return s.taskCancel(req, ok, fail)
+	case "tasks/steer":
+		return s.taskSteer(req, ok, fail)
 	default:
 		return fail(codeMethodNotFound, "method not found: "+req.Method)
 	}
@@ -522,6 +524,38 @@ func (s *Server) taskCancel(req request, ok func(any) response, fail func(int, s
 	}
 	t.cancel()
 	return ok(map[string]any{"taskId": id, "status": StatusCancelled})
+}
+
+// taskSteer delivers mid-flight guidance to a working task (Air · Steer, P3).
+// Symmetric with taskCancel: the interrupt stops a task, the steer augments it.
+// It is a normal MCP method, so a policy `methods:` rule governs it exactly as
+// it governs tasks/cancel. Delivery is cooperative — only a handler selecting on
+// SteerChan(ctx) reacts; the payload is the caller's params.payload (or {}).
+func (s *Server) taskSteer(req request, ok func(any) response, fail func(int, string) response) response {
+	var p struct {
+		TaskID  string          `json:"taskId"`
+		Payload json.RawMessage `json:"payload"`
+	}
+	if err := json.Unmarshal(req.Params, &p); err != nil {
+		return fail(codeInvalidParams, "invalid params: "+err.Error())
+	}
+	if p.TaskID == "" {
+		return fail(codeInvalidParams, "taskId is required")
+	}
+	payload := p.Payload
+	if len(payload) == 0 {
+		payload = json.RawMessage(`{}`)
+	}
+	switch s.tasks.steer(p.TaskID, payload) {
+	case steerDelivered:
+		return ok(map[string]any{"taskId": p.TaskID, "status": StatusWorking, "steered": true})
+	case steerBusy:
+		return fail(codeTaskState, "task busy (steer buffer full): "+p.TaskID)
+	case steerNotReady:
+		return fail(codeTaskState, "task not steerable (not working): "+p.TaskID)
+	default: // steerUnknown
+		return fail(codeInvalidParams, "unknown task: "+p.TaskID)
+	}
 }
 
 func taskID(params json.RawMessage) (string, error) {

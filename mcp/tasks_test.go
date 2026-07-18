@@ -97,7 +97,9 @@ func taskServer() *Server {
 	s.AddTool(Tool{
 		Name: "count",
 		Handler: func(ctx context.Context, args json.RawMessage) (ToolResult, error) {
-			var a struct{ N int `json:"n"` }
+			var a struct {
+				N int `json:"n"`
+			}
 			_ = json.Unmarshal(args, &a)
 			sess := SessionFrom(ctx)
 			for i := 1; i <= a.N; i++ {
@@ -114,6 +116,21 @@ func taskServer() *Server {
 		Handler: func(ctx context.Context, _ json.RawMessage) (ToolResult, error) {
 			<-ctx.Done()
 			return ToolResult{}, ctx.Err()
+		},
+	})
+	// steerable blocks until a tasks/steer payload arrives (or cancel/timeout),
+	// then returns it — so a test can prove mid-flight guidance is delivered.
+	s.AddTool(Tool{
+		Name: "steerable",
+		Handler: func(ctx context.Context, _ json.RawMessage) (ToolResult, error) {
+			select {
+			case p := <-SteerChan(ctx):
+				return ToolResult{Content: []Content{Text("steered: " + string(p))}}, nil
+			case <-ctx.Done():
+				return ToolResult{}, ctx.Err()
+			case <-time.After(5 * time.Second):
+				return ToolResult{}, fmt.Errorf("no steer arrived")
+			}
 		},
 	})
 	return s
@@ -162,13 +179,72 @@ func TestTaskRunsWithProgressAndResult(t *testing.T) {
 	}
 }
 
+func TestTaskSteer(t *testing.T) {
+	h := startHarness(t, taskServer())
+
+	// Start a task that waits for mid-flight guidance.
+	h.send(t, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"steerable","task":true}}`)
+	resp := h.waitResponse(t, 1)
+	var handle struct {
+		Task struct {
+			TaskID string `json:"taskId"`
+		} `json:"task"`
+	}
+	_ = json.Unmarshal(resp.Result, &handle)
+	id := handle.Task.TaskID
+	if id == "" {
+		t.Fatalf("no task id: %s", resp.Result)
+	}
+
+	// Steer it — governed exactly like tasks/cancel, since it's a real method.
+	h.send(t, fmt.Sprintf(`{"jsonrpc":"2.0","id":2,"method":"tasks/steer","params":{"taskId":%q,"payload":{"focus":"api"}}}`, id))
+	sres := h.waitResponse(t, 2)
+	if sres.Error != nil {
+		t.Fatalf("tasks/steer error: %s", sres.Error)
+	}
+	var sh struct {
+		Steered bool   `json:"steered"`
+		Status  string `json:"status"`
+	}
+	_ = json.Unmarshal(sres.Result, &sh)
+	if !sh.Steered || sh.Status != StatusWorking {
+		t.Fatalf("expected steered working handle, got %s", sres.Result)
+	}
+
+	// The handler received the guidance and completed with it.
+	st := h.waitNotification(t, "notifications/tasks/status")
+	var stp struct {
+		Status string `json:"status"`
+	}
+	_ = json.Unmarshal(st.Params, &stp)
+	if stp.Status != StatusCompleted {
+		t.Fatalf("expected completed after steer, got %s", st.Params)
+	}
+	h.send(t, fmt.Sprintf(`{"jsonrpc":"2.0","id":3,"method":"tasks/result","params":{"taskId":%q}}`, id))
+	res := h.waitResponse(t, 3)
+	var tr ToolResult
+	_ = json.Unmarshal(res.Result, &tr)
+	if len(tr.Content) == 0 || tr.Content[0].Text != `steered: {"focus":"api"}` {
+		t.Fatalf("handler did not receive the steer payload: %s", res.Result)
+	}
+
+	// Steering an unknown task is an error, not a silent no-op.
+	h.send(t, `{"jsonrpc":"2.0","id":4,"method":"tasks/steer","params":{"taskId":"task-999"}}`)
+	un := h.waitResponse(t, 4)
+	if un.Error == nil {
+		t.Fatalf("expected error steering unknown task, got %s", un.Result)
+	}
+}
+
 func TestTaskCancellation(t *testing.T) {
 	h := startHarness(t, taskServer())
 
 	h.send(t, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"block","task":true}}`)
 	resp := h.waitResponse(t, 1)
 	var handle struct {
-		Task struct{ TaskID string `json:"taskId"` } `json:"task"`
+		Task struct {
+			TaskID string `json:"taskId"`
+		} `json:"task"`
 	}
 	_ = json.Unmarshal(resp.Result, &handle)
 	id := handle.Task.TaskID
@@ -179,7 +255,9 @@ func TestTaskCancellation(t *testing.T) {
 	// Cancel via the standard cancelled notification (maps to the task).
 	h.send(t, fmt.Sprintf(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"taskId":%q}}`, id))
 	st := h.waitNotification(t, "notifications/tasks/status")
-	var stp struct{ Status string `json:"status"` }
+	var stp struct {
+		Status string `json:"status"`
+	}
 	_ = json.Unmarshal(st.Params, &stp)
 	if stp.Status != StatusCancelled {
 		t.Fatalf("expected cancelled, got %s", st.Params)
@@ -190,7 +268,9 @@ func TestTaskCancellation(t *testing.T) {
 	if got.Error != nil {
 		t.Fatalf("tasks/get error: %s", got.Error)
 	}
-	var gs struct{ Status string `json:"status"` }
+	var gs struct {
+		Status string `json:"status"`
+	}
 	_ = json.Unmarshal(got.Result, &gs)
 	if gs.Status != StatusCancelled {
 		t.Fatalf("expected cancelled status, got %s", got.Result)

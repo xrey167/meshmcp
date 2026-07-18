@@ -1,10 +1,12 @@
 # Air · Steer — build spec
 
-**Status: proposed.** This is a code-ready design for the *Steer* capability of
-[Air](AIR.md): address and drive **live work** — an **agent** (by name), a **session**
-(by id), or a **task/subagent** (by id) — and act on it (**send** · **cancel** ·
-**nudge** · **broadcast** · **launch**). Nothing here ships yet; each primitive names
-the exact existing seam it reuses so the diff stays small and idiomatic.
+**Status: P3 (`tasks/steer`) shipped · P1 · P2 · P4 proposed.** This is a code-ready
+design for the *Steer* capability of [Air](AIR.md): address and drive **live work** — an
+**agent** (by name), a **session** (by id), or a **task/subagent** (by id) — and act on it
+(**send** · **cancel** · **nudge** · **broadcast** · **launch**). The first primitive,
+task steer/augment (**P3**, [§4](#4--p3--task-steer--augment)), is **implemented and
+tested**; P1/P2/P4 remain proposed. Each primitive names the exact existing seam it reuses
+so the diff stays small and idiomatic.
 
 > Air's `push` already delivers a payload *to a passive `drop` inbox* — there is no
 > consumer that acts on it, and no way to reach a running session or task. Steer closes
@@ -165,7 +167,12 @@ func (s *Server) Steer(id string, method string, params any) error { // NEW
 
 ---
 
-## 4 · P3 — Task steer / augment
+## 4 · P3 — Task steer / augment  ✅ *shipped*
+
+Implemented in `mcp/tasks.go` (`task.steer` channel, `SteerChan(ctx)`, `taskManager.steer`),
+`mcp/server.go` (`tasks/steer` dispatch + `taskSteer`), `mcpclient/tasks.go`
+(`Client.SteerTask`), with `TestTaskSteer` in `mcp/tasks_test.go`. The sketch below is what
+landed.
 
 **Problem.** A task is **immutable once started** — `tasks/cancel` exists (the JSON-RPC
 method is dispatched at `mcp/server.go:378-379` and handled by `taskCancel`,
@@ -289,9 +296,8 @@ mesh call, never a backdoor.
 
 ## 8 · Build order
 
-1. **P3 tasks/steer** — smallest, self-contained (`mcp/tasks.go` + `mcp/server.go` +
-   `mcpclient/tasks.go`), lands cancel-symmetric augmentation with tests beside
-   `mcp/tasks_test.go`. **Start here** — it's the strongest and genuinely cancel-symmetric.
+1. **P3 tasks/steer** — ✅ **done.** Cancel-symmetric augmentation in `mcp/tasks.go` +
+   `mcp/server.go` + `mcpclient/tasks.go`, with `TestTaskSteer` in `mcp/tasks_test.go`.
 2. **P2 session List + Steer** — `List()` is small, but budget the `serverSession` fields
    `Sessions()` needs and the **server→client notify** steer path (not `endpoint.Send`).
 3. **P1 steerable agent** — the listener-role addition (inbound + ACL + audit) on `agent.go`.
