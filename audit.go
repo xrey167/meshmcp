@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bufio"
+	"encoding/csv"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"meshmcp/policy"
@@ -12,16 +16,59 @@ import (
 // cmdAudit implements "meshmcp audit <subcommand>".
 func cmdAudit(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: meshmcp audit <verify|keygen> ...")
+		return fmt.Errorf("usage: meshmcp audit <verify|keygen|export> ...")
 	}
 	switch args[0] {
 	case "verify":
 		return auditVerify(args[1:])
 	case "keygen":
 		return auditKeygen(args[1:])
+	case "export":
+		return auditExport(args[1:])
 	default:
-		return fmt.Errorf("meshmcp audit: unknown subcommand %q (want: verify, keygen)", args[0])
+		return fmt.Errorf("meshmcp audit: unknown subcommand %q (want: verify, keygen, export)", args[0])
 	}
+}
+
+// auditExport converts an audit JSONL ledger to CSV on stdout for BI tools /
+// spreadsheets. It reads the same records the verifier does; it does not verify
+// the chain (use `audit verify` for that).
+func auditExport(args []string) error {
+	fs := flag.NewFlagSet("audit export", flag.ContinueOnError)
+	in := fs.String("in", "", "audit log (JSONL) to export (required)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *in == "" {
+		return fmt.Errorf("usage: meshmcp audit export --in <file> > out.csv")
+	}
+	f, err := os.Open(*in)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	w := csv.NewWriter(os.Stdout)
+	defer w.Flush()
+	_ = w.Write([]string{"seq", "time", "backend", "peer", "peer_key", "method", "tool", "decision", "reason", "rule"})
+
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		var r policy.AuditRecord
+		if json.Unmarshal([]byte(line), &r) != nil {
+			continue
+		}
+		_ = w.Write([]string{
+			strconv.Itoa(r.Seq), r.Time, r.Backend, r.Peer, r.PeerKey,
+			r.Method, r.Tool, r.Decision, r.Reason, strconv.Itoa(r.Rule),
+		})
+	}
+	return sc.Err()
 }
 
 // auditKeygen generates a gateway Ed25519 signing key for audit checkpoints and
