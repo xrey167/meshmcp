@@ -26,6 +26,7 @@ Usage:
   meshmcp control [flags]                        run the managed control plane (enroll, registry, policy)
   meshmcp federate --config <file>               run a cross-org federation boundary (granted tools only, audited)
   meshmcp agent --role <r> [flags] <peer:port>  run a demo agent app (reader/fetcher/billing/analyst) with its own identity
+  meshmcp air <sessions|steer|launch> [flags]   drive live work: list/steer a gateway's sessions, launch an agent
   meshmcp connect [flags] <peer-ip:port>        bridge stdio <-> remote stdio backend
   meshmcp forward [flags] <local> <peer:port>   forward a local TCP port to a mesh peer
   meshmcp drop [flags] <peer:port> <file...>    AirDrop files to a mesh peer (resumable, audited); --config runs a receiver
@@ -116,6 +117,8 @@ func main() {
 		err = cmdApprovals(os.Args[2:])
 	case "agent":
 		err = cmdAgent(os.Args[2:])
+	case "air":
+		err = cmdAir(os.Args[2:])
 	case "secrets":
 		err = cmdSecrets(os.Args[2:])
 	case "dash":

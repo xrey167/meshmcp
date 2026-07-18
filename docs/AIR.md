@@ -103,14 +103,14 @@ meshmcp air steer group:reader         --pause                           # broad
 ```
 
 The addressing (`peers`, registry, `<name>.<tool>` namespacing, origin `_meta`) and the
-transports (bidirectional MCP `Server.Request`, MCP Tasks) **already exist**. **Shipped so
-far:** the `tasks/steer` method + `Client.SteerTask` (task augment, the counterpart to
-`tasks/cancel`), and the **session core** — `SessionStore.List`, `Server.Sessions`, and a
-line-safe `Server.Steer` server→client notification. **Still proposed:** the agent inbox, and
-the gateway exposure that turns these into user-facing verbs (a `/v1/sessions`+`/v1/steer`
-control endpoint, the `air_*` tools, and the `meshmcp air steer` CLI shown above). Every steer
-is deny-by-default, identity-attributed, and audited — it cannot bypass the firewall. See
-[AIR-STEER.md](AIR-STEER.md) for the code-ready spec.
+transports (bidirectional MCP `Server.Request`, MCP Tasks) **already exist**. **Shipped:** the
+`tasks/steer` method + `Client.SteerTask` (task augment, the counterpart to `tasks/cancel`),
+the **session core** (`SessionStore.List`, `Server.Sessions`, line-safe `Server.Steer`), the
+**gateway control endpoint** (`/v1/sessions`+`/v1/steer`, identity-gated + audited), the
+`air_*` assistant tools, and the **`meshmcp air` CLI** (`sessions` · `steer` · `launch`).
+**Still proposed:** the agent steer inbox (so `air steer` can also target an agent by name) and
+declarative workflow files. Every steer is deny-by-default, identity-attributed, and audited —
+it cannot bypass the firewall. See [AIR-STEER.md](AIR-STEER.md) for the spec.
 
 ### Launch — spawn an agent or a workflow *(proposed — [AIR-STEER.md](AIR-STEER.md))*
 
@@ -285,7 +285,8 @@ Honesty about the seam, so nobody mistakes the mockup for shipped product:
 | **Steer** — task augment (`tasks/steer`, cancel-symmetric) | **Ships now** | `mcp/tasks.go` · `mcp/server.go` · `mcpclient/tasks.go` · `TestTaskSteer` (P3) |
 | **Steer** — session core: `List` · `Sessions` · line-safe `Steer` | **Ships now** | `session/store.go` · `session/server.go` · `TestSteerLineFraming` (P2) |
 | **Steer** — gateway exposure: `/v1/sessions`+`/v1/steer` endpoint · `air_sessions`/`air_steer`/`air_tasks`/`air_task_steer` tools | **Ships now** | `config.go` · `serve.go` · `aircontrol.go` · `mcpapp.go` · `aircontrol_test.go` |
-| **Steer** — agent inbox (P1) · the `meshmcp air` CLI | **Proposed** | code-ready spec — [AIR-STEER.md](AIR-STEER.md) |
+| **Steer/Launch** — the `meshmcp air` CLI (`sessions` · `steer` · `launch`) | **Ships now** | `air.go` · `main.go` |
+| **Steer** — agent inbox (P1) · workflow files (P4) | **Proposed** | code-ready spec — [AIR-STEER.md](AIR-STEER.md) |
 | **Launch** — spawn agent / run workflow | **Proposed** | [AIR-STEER.md](AIR-STEER.md) P4 · `examples/air-workflow.yaml` |
 | Assistant tools `air_sessions` · `air_tasks` · `air_steer` · `air_launch` | **Proposed** | [AIR-STEER.md §6](AIR-STEER.md) |
 | Push-wake (buzz the phone on a new pending) | **Proposed** | the "push seam" — [MOBILE.md §4](MOBILE.md) |
