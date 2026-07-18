@@ -102,39 +102,19 @@ func cmdPubsub(args []string) error {
 	})
 	defer broker.Close()
 
-	ln, err := client.ListenTCP(fmt.Sprintf(":%d", cfg.ListenPort))
+	// One admission path, shared with the gateway hook bus (identity proof +
+	// ACL + session handoff).
+	ln, err := serveBrokerOn(client, broker, cfg.ListenPort, cfg.Allow, log.Printf)
 	if err != nil {
-		return fmt.Errorf("listen on mesh port %d: %w", cfg.ListenPort, err)
+		return err
 	}
-	checker := newACL(cfg.Allow)
+	defer ln.Close()
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt)
-	go func() { <-sig; ln.Close() }()
-
-	srv := session.NewServer(func(meta session.Meta) (session.Backend, error) {
-		return newBrokerBackend(broker, meta, log.Printf), nil
-	}, 2*time.Minute, log.Printf)
-
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			log.Println("pubsub broker shutting down")
-			return nil
-		}
-		pubKey, fqdn := peerIdentity(client, conn.RemoteAddr())
-		if pubKey == "" {
-			log.Printf("pubsub session DENIED from %s: identity could not be proven", conn.RemoteAddr())
-			conn.Close()
-			continue
-		}
-		if !checker.allows(pubKey, fqdn) {
-			log.Printf("pubsub session DENIED from %s (%s): not in allow list", fqdn, shortKey(pubKey))
-			conn.Close()
-			continue
-		}
-		go srv.Handle(conn, session.Meta{PeerFQDN: fqdn, PeerAddr: conn.RemoteAddr().String(), PeerKey: pubKey})
-	}
+	<-sig
+	log.Println("pubsub broker shutting down")
+	return nil
 }
 
 // cmdPublish publishes one event to a broker.

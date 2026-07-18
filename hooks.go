@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"sync"
@@ -92,8 +93,11 @@ type gatewayHooks struct {
 	webhookHdr string
 	httpc      *http.Client
 
-	ch      chan hookMessage
-	dropped uint64 // atomic
+	// The bus and webhook sinks each have their own queue + worker so a slow
+	// webhook can never throttle local bus fan-out (and vice versa).
+	ch      chan hookMessage // to the bus worker (nil if no bus)
+	whch    chan hookMessage // to the webhook worker (nil if no webhook)
+	dropped uint64           // atomic
 
 	quit      chan struct{}
 	wg        sync.WaitGroup
@@ -125,7 +129,6 @@ func newGatewayHooks(cfg *HooksConfig, client *embed.Client, audit *policy.Audit
 	h := &gatewayHooks{
 		events: events,
 		prefix: prefix,
-		ch:     make(chan hookMessage, qsize),
 		quit:   make(chan struct{}),
 	}
 
@@ -135,11 +138,14 @@ func newGatewayHooks(cfg *HooksConfig, client *embed.Client, audit *policy.Audit
 		}
 		policyCopy := cfg.Bus.Policy
 		h.broker = pubsub.New(pubsub.Options{Authorizer: &policyCopy, Audit: audit, Limits: cfg.Bus.Limits})
-		ln, err := serveBrokerOn(client, h.broker, cfg.Bus.ListenPort, cfg.Bus.Allow)
+		ln, err := serveBrokerOn(client, h.broker, cfg.Bus.ListenPort, cfg.Bus.Allow, log.Printf)
 		if err != nil {
 			return nil, fmt.Errorf("hooks bus: %w", err)
 		}
 		h.listeners = append(h.listeners, ln)
+		h.ch = make(chan hookMessage, qsize)
+		h.wg.Add(1)
+		go h.busWorker()
 	}
 	if cfg.Webhook != nil && cfg.Webhook.URL != "" {
 		to := time.Duration(cfg.Webhook.TimeoutSeconds) * time.Second
@@ -155,10 +161,10 @@ func newGatewayHooks(cfg *HooksConfig, client *embed.Client, audit *policy.Audit
 			// a different host than the operator configured.
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		}
+		h.whch = make(chan hookMessage, qsize)
+		h.wg.Add(1)
+		go h.webhookWorker()
 	}
-
-	h.wg.Add(1)
-	go h.worker()
 	return h, nil
 }
 
@@ -182,27 +188,49 @@ func (h *gatewayHooks) Emit(rec policy.AuditRecord) {
 	if err != nil {
 		return
 	}
-	select {
-	case h.ch <- hookMessage{topic: h.prefix + "." + rec.Decision, body: body}:
-	default:
-		atomic.AddUint64(&h.dropped, 1)
+	m := hookMessage{topic: h.prefix + "." + rec.Decision, body: body}
+	// Enqueue to each sink independently and non-blockingly; a full queue drops
+	// (counted) rather than delaying enforcement.
+	if h.ch != nil {
+		select {
+		case h.ch <- m:
+		default:
+			atomic.AddUint64(&h.dropped, 1)
+		}
+	}
+	if h.whch != nil {
+		select {
+		case h.whch <- m:
+		default:
+			atomic.AddUint64(&h.dropped, 1)
+		}
 	}
 }
 
 // Dropped reports how many hook events were dropped due to a full queue.
 func (h *gatewayHooks) Dropped() uint64 { return atomic.LoadUint64(&h.dropped) }
 
-func (h *gatewayHooks) worker() {
+// busWorker emits queued events onto the local bus (fast, in-process).
+func (h *gatewayHooks) busWorker() {
 	defer h.wg.Done()
 	for {
 		select {
 		case m := <-h.ch:
-			if h.broker != nil {
-				_, _ = h.broker.EmitInternal("gateway", m.topic, json.RawMessage(m.body), nil)
-			}
-			if h.webhookURL != "" {
-				h.postWebhook(m)
-			}
+			_, _ = h.broker.EmitInternal("gateway", m.topic, json.RawMessage(m.body), nil)
+		case <-h.quit:
+			return
+		}
+	}
+}
+
+// webhookWorker POSTs queued events to the webhook. It is isolated from the bus
+// worker so its (remote, possibly slow) latency never throttles bus fan-out.
+func (h *gatewayHooks) webhookWorker() {
+	defer h.wg.Done()
+	for {
+		select {
+		case m := <-h.whch:
+			h.postWebhook(m)
 		case <-h.quit:
 			return
 		}
@@ -230,8 +258,9 @@ func (h *gatewayHooks) postWebhook(m hookMessage) {
 	resp.Body.Close()
 }
 
-// Close stops the worker and the embedded bus, draining outstanding events
-// best-effort.
+// Close stops the workers and the embedded bus, draining outstanding events
+// best-effort. If any events were dropped under load, it logs the count so the
+// operator learns the hook queue saturated.
 func (h *gatewayHooks) Close() {
 	h.closeOnce.Do(func() {
 		for _, ln := range h.listeners {
@@ -242,29 +271,46 @@ func (h *gatewayHooks) Close() {
 		if h.broker != nil {
 			h.broker.Close()
 		}
+		if d := h.Dropped(); d > 0 {
+			log.Printf("gateway hooks: %d event(s) dropped under load (queue saturated)", d)
+		}
 	})
 }
 
 // serveBrokerOn listens on a mesh port and serves a pub/sub broker to admitted
-// peers. It returns the listener (the caller closes it to stop). Shared by the
-// standalone `pubsub` daemon and the gateway hook bus.
-func serveBrokerOn(client *embed.Client, broker *pubsub.Broker, port int, allow []string) (net.Listener, error) {
+// peers, returning the listener (the caller closes it to stop). It is the
+// single admission path shared by the standalone `pubsub` daemon and the
+// gateway hook bus: prove the caller's WireGuard identity, apply the ACL, then
+// hand the session to the broker. logf may be nil (silent).
+func serveBrokerOn(client *embed.Client, broker *pubsub.Broker, port int, allow []string, logf func(string, ...any)) (net.Listener, error) {
 	ln, err := client.ListenTCP(fmt.Sprintf(":%d", port))
 	if err != nil {
 		return nil, fmt.Errorf("listen on mesh port %d: %w", port, err)
 	}
+	logln := func(format string, a ...any) {
+		if logf != nil {
+			logf(format, a...)
+		}
+	}
 	checker := newACL(allow)
 	srv := session.NewServer(func(meta session.Meta) (session.Backend, error) {
-		return newBrokerBackend(broker, meta, nil), nil
-	}, 2*time.Minute, nil)
+		return newBrokerBackend(broker, meta), nil
+	}, 2*time.Minute, logf)
 	go func() {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
+				logln("pubsub broker: listener closed")
 				return
 			}
 			pubKey, fqdn := peerIdentity(client, conn.RemoteAddr())
-			if pubKey == "" || !checker.allows(pubKey, fqdn) {
+			if pubKey == "" {
+				logln("pubsub session DENIED from %s: identity could not be proven", conn.RemoteAddr())
+				conn.Close()
+				continue
+			}
+			if !checker.allows(pubKey, fqdn) {
+				logln("pubsub session DENIED from %s (%s): not in allow list", fqdn, shortKey(pubKey))
 				conn.Close()
 				continue
 			}

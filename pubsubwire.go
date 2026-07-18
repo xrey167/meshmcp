@@ -56,7 +56,6 @@ type ackFrame struct {
 type brokerBackend struct {
 	broker *pubsub.Broker
 	ident  pubsub.Identity
-	logf   func(string, ...any)
 
 	inR  *io.PipeReader // peer -> broker (fed by Write)
 	inW  *io.PipeWriter
@@ -70,13 +69,12 @@ type brokerBackend struct {
 	done      chan struct{}
 }
 
-func newBrokerBackend(b *pubsub.Broker, meta session.Meta, logf func(string, ...any)) *brokerBackend {
+func newBrokerBackend(b *pubsub.Broker, meta session.Meta) *brokerBackend {
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
 	bb := &brokerBackend{
 		broker: b,
 		ident:  pubsub.Identity{Key: meta.PeerKey, FQDN: meta.PeerFQDN, Addr: meta.PeerAddr},
-		logf:   logf,
 		inR:    inR, inW: inW,
 		outR: outR, outW: outW,
 		done: make(chan struct{}),
@@ -226,10 +224,6 @@ type clientStream struct {
 
 	done      chan struct{}
 	closeOnce sync.Once
-}
-
-func newClientStream(preamble []byte, onLine func([]byte)) *clientStream {
-	return &clientStream{out: preamble, onLine: onLine, done: make(chan struct{})}
 }
 
 func (s *clientStream) Read(p []byte) (int, error) {

@@ -9,7 +9,48 @@ import (
 	"time"
 
 	"meshmcp/policy"
+	"meshmcp/pubsub"
 )
+
+// TestGatewayHooksBusEndToEnd drives the full bus path: a gateway decision goes
+// through Emit -> bus worker -> Broker.EmitInternal -> a subscriber. This is the
+// headline "the firewall as a stream" chain, minus the mesh transport.
+func TestGatewayHooksBusEndToEnd(t *testing.T) {
+	broker := pubsub.New(pubsub.Options{Authorizer: pubsub.AllowAll{}})
+	sub, err := broker.Subscribe(pubsub.Identity{Key: "soc"}, pubsub.SubOptions{Topics: []string{"gateway.*"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h := &gatewayHooks{
+		events: map[string]bool{"deny": true},
+		prefix: "gateway",
+		broker: broker,
+		ch:     make(chan hookMessage, 16),
+		quit:   make(chan struct{}),
+	}
+	h.wg.Add(1)
+	go h.busWorker()
+	defer h.Close() // closes quit, joins the worker, closes the broker (and the sub)
+
+	h.Emit(policy.AuditRecord{Decision: "deny", Backend: "kg", Tool: "delete_all", Reason: "blocked", Rule: 2, Seq: 9})
+
+	select {
+	case ev := <-sub.C():
+		if ev.Topic != "gateway.deny" || ev.Publisher != "gateway" {
+			t.Fatalf("unexpected bus event: %+v", ev)
+		}
+		var p hookPayload
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			t.Fatal(err)
+		}
+		if p.Event != "deny" || p.Tool != "delete_all" || p.AuditSeq != 9 {
+			t.Fatalf("unexpected decision payload: %+v", p)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("bus subscriber did not receive the gateway decision event")
+	}
+}
 
 // TestGatewayHooksWebhook verifies the hook sink POSTs selected decisions to a
 // webhook, filters out unselected outcomes, and carries the right metadata.

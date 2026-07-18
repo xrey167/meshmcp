@@ -96,12 +96,14 @@ func cmdServe(args []string) error {
 	// event bus and/or a webhook. Kept as a nil interface when disabled so the
 	// filter never invokes it.
 	var hookSink policy.EventHook
+	var gatewayHookSink *gatewayHooks
 	if cfg.Hooks != nil {
 		gh, err := newGatewayHooks(cfg.Hooks, client, sharedAudit)
 		if err != nil {
 			return fmt.Errorf("hooks: %w", err)
 		}
-		defer gh.Close()
+		gatewayHookSink = gh
+		defer gh.Close() // safety net; also closed explicitly before the audit flush
 		hookSink = gh
 		note := []string{}
 		if cfg.Hooks.Bus != nil {
@@ -183,6 +185,12 @@ func cmdServe(args []string) error {
 		ln.Close()
 	}
 	wg.Wait()
+	// Close the hook bus before sealing the ledger: its broker writes subscribe
+	// records into the shared audit, so it must stop before the final flush or a
+	// last-moment bus session could land records after the sealed checkpoint.
+	if gatewayHookSink != nil {
+		gatewayHookSink.Close()
+	}
 	// Seal the final partial checkpoint batch so no audit records are left
 	// uncommitted by a clean shutdown.
 	for _, a := range auditLogs {

@@ -11,8 +11,6 @@ import (
 	"meshmcp/session"
 )
 
-func nolog(string, ...any) {}
-
 // readLines drains a brokerBackend's broker->peer side into a channel of
 // trimmed JSON lines.
 func readLines(t *testing.T, bb *brokerBackend) <-chan string {
@@ -55,7 +53,7 @@ func TestBrokerBackendEndToEnd(t *testing.T) {
 	b := pubsub.New(pubsub.Options{Authorizer: pubsub.AllowAll{}})
 	defer b.Close()
 
-	sub := newBrokerBackend(b, session.Meta{PeerKey: "s", PeerFQDN: "s.netbird.cloud"}, nolog)
+	sub := newBrokerBackend(b, session.Meta{PeerKey: "s", PeerFQDN: "s.netbird.cloud"})
 	defer sub.Close()
 	subLines := readLines(t, sub)
 
@@ -70,7 +68,7 @@ func TestBrokerBackendEndToEnd(t *testing.T) {
 	}
 
 	// Publisher session.
-	pub := newBrokerBackend(b, session.Meta{PeerKey: "p", PeerFQDN: "p.netbird.cloud"}, nolog)
+	pub := newBrokerBackend(b, session.Meta{PeerKey: "p", PeerFQDN: "p.netbird.cloud"})
 	defer pub.Close()
 	pubLines := readLines(t, pub)
 
@@ -102,7 +100,7 @@ func TestBrokerBackendDenied(t *testing.T) {
 	b := pubsub.New(pubsub.Options{Authorizer: auth})
 	defer b.Close()
 
-	pub := newBrokerBackend(b, session.Meta{PeerKey: "p", PeerFQDN: "p.netbird.cloud"}, nolog)
+	pub := newBrokerBackend(b, session.Meta{PeerKey: "p", PeerFQDN: "p.netbird.cloud"})
 	defer pub.Close()
 	lines := readLines(t, pub)
 
@@ -124,7 +122,7 @@ func TestBrokerBackendCloseUnblocks(t *testing.T) {
 	b := pubsub.New(pubsub.Options{Authorizer: pubsub.AllowAll{}, Limits: pubsub.Limits{SubQueue: 2}})
 	defer b.Close()
 
-	bb := newBrokerBackend(b, session.Meta{PeerKey: "s", PeerFQDN: "s.netbird.cloud"}, nolog)
+	bb := newBrokerBackend(b, session.Meta{PeerKey: "s", PeerFQDN: "s.netbird.cloud"})
 	hello, _ := json.Marshal(helloFrame{Role: "sub", Topics: []string{"t"}})
 	if _, err := bb.Write(append(hello, '\n')); err != nil {
 		t.Fatal(err)
