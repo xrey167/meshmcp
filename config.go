@@ -252,6 +252,14 @@ func loadConfig(path string) (*Config, error) {
 			if b.Secrets.File == "" && b.Secrets.EnvPrefix == "" {
 				return nil, fmt.Errorf("backend %q: secrets needs a file or env_prefix store", b.Name)
 			}
+			// A grant with no peers would inject a credential for ANY mesh peer.
+			// Require an explicit identity list so a secret is never granted to
+			// everyone by omission.
+			for gi, g := range b.Secrets.Grants {
+				if len(g.Peers) == 0 {
+					return nil, fmt.Errorf("backend %q: secret grant #%d must list peers (an empty peers list would grant the secret to every mesh peer)", b.Name, gi+1)
+				}
+			}
 		}
 		if hasHTTP {
 			u, err := url.Parse(b.HTTP)

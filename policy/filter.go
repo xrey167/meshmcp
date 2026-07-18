@@ -3,6 +3,7 @@ package policy
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -21,6 +22,14 @@ type Caller struct {
 // denied tools/call requests are answered with a JSON-RPC error and never
 // reach the backend. Reads (backend -> peer) pass through, interleaved
 // with any synthetic denial responses on whole-line boundaries.
+// maxLineBytes caps a single reassembled client->backend JSON-RPC line, so a
+// peer that never sends a newline cannot grow the filter's buffer without
+// bound. Matches the audit/verify line cap.
+const maxLineBytes = 16 << 20 // 16 MiB
+
+// errLineTooLong tears down a connection whose pending line exceeds maxLineBytes.
+var errLineTooLong = errors.New("policy: client line exceeds maximum length")
+
 type Filter struct {
 	inner       io.ReadWriteCloser
 	eng         *Engine
@@ -120,6 +129,13 @@ func (f *Filter) Write(p []byte) (int, error) {
 		return f.inner.Write(p)
 	}
 	f.wbuf = append(f.wbuf, p...)
+	// A peer streaming bytes with no newline would grow this reassembly buffer
+	// without bound — a memory-DoS on the enforcement path. Cap the pending
+	// line and tear the connection down when it is exceeded.
+	if len(f.wbuf) > maxLineBytes {
+		f.wbuf = nil
+		return 0, errLineTooLong
+	}
 	for {
 		i := bytes.IndexByte(f.wbuf, '\n')
 		if i < 0 {
@@ -178,7 +194,16 @@ func (f *Filter) handleLine(line []byte) error {
 	}
 	var msg rpcPeek
 	if err := json.Unmarshal(trimmed, &msg); err != nil {
-		// Unparseable single message: trace and pass through untouched.
+		// Under enforcement, an unparseable line must not reach the backend: a
+		// parser differential (bytes this strict peek rejects but the backend
+		// accepts) could smuggle a call past policy, exactly as a batch could.
+		if f.eng != nil {
+			_ = f.audit.write(f.record("<unparseable>", "", "", Decision{RuleID: -1, Reason: "unparseable JSON-RPC"}))
+			f.traceLine("c2s", trimmed, "deny")
+			f.writeDenial(json.RawMessage("null"), "unparseable JSON-RPC line rejected by mesh policy")
+			return nil
+		}
+		// Tracing-only (or pure passthrough): forward untouched.
 		f.traceLine("c2s", trimmed, "")
 		_, werr := f.inner.Write(line)
 		return werr

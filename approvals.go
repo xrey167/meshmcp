@@ -39,7 +39,7 @@ func cmdApprovals(args []string) error {
 	if *addr != "" {
 		h := approvalsHandler(ps, func(*http.Request) string { return "operator@local" }, time.Now)
 		log.Printf("approvals on http://%s (LOCAL — approver is 'operator@local')", *addr)
-		return http.ListenAndServe(*addr, h)
+		return newLocalHTTPServer(*addr, h).ListenAndServe()
 	}
 
 	// Mesh mode: the approver is the caller's cryptographic mesh identity.
@@ -62,7 +62,8 @@ func cmdApprovals(args []string) error {
 	}
 	defer ln.Close()
 	log.Printf("approvals on mesh port %d (open it from a phone on the mesh; approver = your mesh identity)", *port)
-	return http.Serve(ln, approvalsHandler(ps, approver, time.Now))
+	srv := newLocalHTTPServer("", approvalsHandler(ps, approver, time.Now))
+	return srv.Serve(ln)
 }
 
 // approvalsHandler builds the approver HTTP surface. approver resolves the
@@ -89,6 +90,7 @@ func approvalsHandler(ps *policy.FilePending, approver func(*http.Request) strin
 				http.Error(w, "POST only", http.StatusMethodNotAllowed)
 				return
 			}
+			r.Body = http.MaxBytesReader(w, r.Body, 64<<10) // bound the request body
 			var body struct{ Peer, Tool string }
 			if json.NewDecoder(r.Body).Decode(&body) != nil || body.Peer == "" || body.Tool == "" {
 				http.Error(w, "peer and tool are required", http.StatusBadRequest)
