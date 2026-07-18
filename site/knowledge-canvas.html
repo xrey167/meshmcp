@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>meshmcp · Knowledge Canvas</title>
+<style>
+  :root {
+    --ink: #0c0f16; --panel: #141a25; --line: #26303f; --text: #dbe4f0; --muted: #8593a8;
+    --crimson: #e8546b; --cyan: #3ad6c6; --amber: #e0a558;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--ink); color: var(--text); font-family: var(--sans); display: flex; flex-direction: column; }
+  header { padding: 12px 18px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+  header h1 .m { font-family: var(--mono); color: var(--cyan); }
+  header .sub { color: var(--muted); font-size: 12.5px; }
+  header .spacer { flex: 1; }
+  button, label.btn {
+    font-family: var(--mono); font-size: 12px; color: var(--text); background: var(--panel);
+    border: 1px solid var(--line); border-radius: 7px; padding: 7px 12px; cursor: pointer;
+  }
+  button:hover, label.btn:hover { border-color: var(--cyan); }
+  main { flex: 1; position: relative; overflow: hidden; }
+  canvas { display: block; width: 100%; height: 100%; }
+  #tip {
+    position: absolute; pointer-events: none; z-index: 5; display: none;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 11px;
+    font-size: 12px; max-width: 320px; box-shadow: 0 12px 30px -14px rgba(0,0,0,.8);
+  }
+  #tip .p { font-family: var(--mono); font-size: 10.5px; color: var(--crimson); word-break: break-all; }
+  #tip .r { color: var(--text); }
+  #drop {
+    position: absolute; left: 0; right: 0; bottom: 0; z-index: 4;
+    border-top: 1px dashed var(--line); background: color-mix(in srgb, var(--panel) 80%, transparent);
+    padding: 10px 18px; font-size: 12.5px; color: var(--muted); transition: background .15s;
+  }
+  #drop.hot { background: color-mix(in srgb, var(--crimson) 22%, var(--panel)); color: var(--text); border-top-color: var(--crimson); }
+  #drop code { font-family: var(--mono); color: var(--cyan); background: var(--ink); padding: 2px 6px; border-radius: 5px; }
+  #empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 14px; text-align: center; padding: 24px; }
+  #empty code { font-family: var(--mono); color: var(--cyan); }
+</style>
+</head>
+<body>
+<header>
+  <h1>🕸️ <span class="m">meshmcp</span> · Knowledge Canvas</h1>
+  <span class="sub">provenance-native knowledge graph — every fact is signed by the identity that asserted it</span>
+  <span class="spacer"></span>
+  <label class="btn">Load kg.jsonl<input id="file" type="file" accept=".jsonl,.json,.txt" hidden></label>
+  <button id="sample">Load sample</button>
+</header>
+<main>
+  <canvas id="c"></canvas>
+  <div id="tip"></div>
+  <div id="empty">Load a knowledge-graph export (<code>kg.jsonl</code>) to explore it.<br>Each node is an entity; each edge a signed assertion. Hover an edge for its provenance.</div>
+  <div id="drop">Drag a file here to see the <code>meshmcp drop</code> command that AirDrops it to a mesh peer.</div>
+</main>
+<script>
+(function () {
+  "use strict";
+  var canvas = document.getElementById("c"), ctx = canvas.getContext("2d");
+  var tip = document.getElementById("tip"), emptyEl = document.getElementById("empty");
+  var nodes = new Map(), edges = [], W = 0, H = 0, DPR = 1;
+
+  function esc(s) { return String(s).replace(/[&<>"']/g, function (c) {
+    return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]; }); }
+
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = canvas.clientWidth; H = canvas.clientHeight;
+    canvas.width = W * DPR; canvas.height = H * DPR; ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+  window.addEventListener("resize", function () { resize(); });
+
+  // Parse a kg.jsonl export (one record per line) into nodes + edges.
+  function load(text) {
+    nodes = new Map(); edges = [];
+    var deleted = new Set(), asserts = new Map();
+    text.split(/\r?\n/).forEach(function (line) {
+      if (!line.trim()) return;
+      var r; try { r = JSON.parse(line); } catch (e) { return; }
+      if (r.op === "delete") deleted.add(r.id);
+      else if (r.op === "assert" || (r.s && r.p && r.o)) asserts.set(r.id || (r.s + r.p + r.o), r);
+    });
+    asserts.forEach(function (r, id) {
+      if (deleted.has(id)) return;
+      ensureNode(r.s); ensureNode(r.o);
+      edges.push({ s: r.s, o: r.o, p: r.p, peer: r.peer || "", seq: r.seq || 0 });
+    });
+    layout();
+    emptyEl.style.display = nodes.size ? "none" : "";
+  }
+  function ensureNode(name) {
+    if (!name || nodes.has(name)) return;
+    nodes.set(name, { name: name, x: Math.random() * (W || 800), y: Math.random() * (H || 600), vx: 0, vy: 0 });
+  }
+
+  // A few iterations of a simple force layout (repulsion + edge springs).
+  function layout() {
+    var arr = Array.from(nodes.values());
+    for (var it = 0; it < 220; it++) {
+      for (var i = 0; i < arr.length; i++) {
+        var a = arr[i]; a.vx *= 0.85; a.vy *= 0.85;
+        for (var j = i + 1; j < arr.length; j++) {
+          var b = arr[j], dx = a.x - b.x, dy = a.y - b.y, d2 = dx * dx + dy * dy || 1;
+          var f = 1600 / d2; a.vx += dx * f * 0.02; a.vy += dy * f * 0.02; b.vx -= dx * f * 0.02; b.vy -= dy * f * 0.02;
+        }
+      }
+      edges.forEach(function (e) {
+        var a = nodes.get(e.s), b = nodes.get(e.o); if (!a || !b) return;
+        var dx = b.x - a.x, dy = b.y - a.y, d = Math.sqrt(dx * dx + dy * dy) || 1, k = (d - 120) * 0.01;
+        a.vx += dx / d * k; a.vy += dy / d * k; b.vx -= dx / d * k; b.vy -= dy / d * k;
+      });
+      arr.forEach(function (n) {
+        n.x += Math.max(-6, Math.min(6, n.vx)); n.y += Math.max(-6, Math.min(6, n.vy));
+        n.x = Math.max(40, Math.min((W || 800) - 40, n.x)); n.y = Math.max(60, Math.min((H || 600) - 60, n.y));
+      });
+    }
+  }
+
+  var hover = null;
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    edges.forEach(function (e) {
+      var a = nodes.get(e.s), b = nodes.get(e.o); if (!a || !b) return;
+      ctx.strokeStyle = e === hover ? "#e8546b" : "rgba(58,214,198,0.32)";
+      ctx.lineWidth = e === hover ? 2 : 1;
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+      var mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+      ctx.fillStyle = "rgba(219,228,240,0.5)"; ctx.font = "10px ui-monospace, monospace";
+      ctx.fillText(e.p, mx + 4, my - 3);
+    });
+    nodes.forEach(function (n) {
+      ctx.fillStyle = "#141a25"; ctx.strokeStyle = "#3ad6c6"; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(n.x, n.y, 6, 0, 6.2832); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = "#dbe4f0"; ctx.font = "12px system-ui";
+      ctx.fillText(n.name, n.x + 10, n.y + 4);
+    });
+    requestAnimationFrame(draw);
+  }
+
+  // Hover an edge near the cursor to show its signed provenance.
+  canvas.addEventListener("mousemove", function (ev) {
+    var r = canvas.getBoundingClientRect(), mx = ev.clientX - r.left, my = ev.clientY - r.top, best = null, bd = 12;
+    edges.forEach(function (e) {
+      var a = nodes.get(e.s), b = nodes.get(e.o); if (!a || !b) return;
+      var d = distToSeg(mx, my, a.x, a.y, b.x, b.y); if (d < bd) { bd = d; best = e; }
+    });
+    hover = best;
+    if (best) {
+      tip.style.display = "block"; tip.style.left = (ev.clientX + 14) + "px"; tip.style.top = (ev.clientY + 14) + "px";
+      tip.innerHTML = '<div class="r">(' + esc(best.s) + " <b>" + esc(best.p) + "</b> " + esc(best.o) + ")</div>" +
+        '<div class="p">asserted by ' + (best.peer ? esc(best.peer) : "&lt;unsigned&gt;") + " · seq " + esc(best.seq) + "</div>";
+    } else { tip.style.display = "none"; }
+  });
+
+  function distToSeg(px, py, x1, y1, x2, y2) {
+    var dx = x2 - x1, dy = y2 - y1, l2 = dx * dx + dy * dy || 1;
+    var t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / l2));
+    var qx = x1 + t * dx, qy = y1 + t * dy; return Math.hypot(px - qx, py - qy);
+  }
+
+  document.getElementById("file").addEventListener("change", function (ev) {
+    var f = ev.target.files[0]; if (!f) return; var rd = new FileReader();
+    rd.onload = function () { load(String(rd.result)); }; rd.readAsText(f);
+  });
+  document.getElementById("sample").addEventListener("click", function () {
+    load([
+      '{"op":"assert","id":"t1","s":"alice","p":"leads","o":"payments","peer":"AGENT_KEY_A1","seq":1}',
+      '{"op":"assert","id":"t2","s":"alice","p":"knows","o":"bob","peer":"AGENT_KEY_A1","seq":2}',
+      '{"op":"assert","id":"t3","s":"bob","p":"maintains","o":"ledger","peer":"AGENT_KEY_B7","seq":3}',
+      '{"op":"assert","id":"t4","s":"payments","p":"depends_on","o":"ledger","peer":"AGENT_KEY_A1","seq":4}',
+      '{"op":"assert","id":"t5","s":"carol","p":"reviews","o":"payments","peer":"AGENT_KEY_C3","seq":5}'
+    ].join("\n"));
+  });
+
+  // Drag-to-AirDrop: dropping a file surfaces the exact `meshmcp drop` command.
+  var dz = document.getElementById("drop");
+  ["dragover", "dragenter"].forEach(function (t) { dz.addEventListener(t, function (e) { e.preventDefault(); dz.classList.add("hot"); }); });
+  ["dragleave", "drop"].forEach(function (t) { dz.addEventListener(t, function (e) { e.preventDefault(); dz.classList.remove("hot"); }); });
+  dz.addEventListener("drop", function (e) {
+    var f = e.dataTransfer.files[0]; if (!f) return;
+    dz.innerHTML = "AirDrop <b>" + esc(f.name) + "</b> to a peer: <code>meshmcp drop &lt;peer-ip&gt;:9110 " + esc(f.name) + "</code>";
+  });
+
+  resize(); draw();
+})();
+</script>
+</body>
+</html>
