@@ -2,11 +2,13 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/csv"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 
@@ -25,9 +27,86 @@ func cmdAudit(args []string) error {
 		return auditKeygen(args[1:])
 	case "export":
 		return auditExport(args[1:])
+	case "receipt":
+		return auditReceipt(args[1:])
 	default:
-		return fmt.Errorf("meshmcp audit: unknown subcommand %q (want: verify, keygen, export)", args[0])
+		return fmt.Errorf("meshmcp audit: unknown subcommand %q (want: verify, keygen, export, receipt)", args[0])
 	}
+}
+
+// auditReceipt emits a verifiable provenance receipt: the provenance-bearing
+// records (tool + content hashes) a session/peer produced, together with the
+// hash-chain verdict and head. Because those records are committed in the
+// tamper-evident chain (and signed checkpoints, if configured), a third party
+// can independently confirm the receipt with `meshmcp audit verify` and match
+// the head — "prove what this session's tools did/produced." Extends F6 to the
+// client-hook layer (the PostToolUse hook stamps each result's content hash).
+func auditReceipt(args []string) error {
+	fs := flag.NewFlagSet("audit receipt", flag.ContinueOnError)
+	in := fs.String("in", "", "audit log (JSONL) to build the receipt from (required)")
+	session := fs.String("peer", "", "restrict to this peer/session identity (optional)")
+	toolGlob := fs.String("tool", "", "restrict to tools matching this glob (optional)")
+	all := fs.Bool("all", false, "include records without provenance hashes too")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *in == "" {
+		return fmt.Errorf("usage: meshmcp audit receipt --in <file> [--peer <id>] [--tool <glob>] > receipt.json")
+	}
+	data, err := os.ReadFile(*in)
+	if err != nil {
+		return err
+	}
+	chain, _ := policy.VerifyChain(bytes.NewReader(data))
+
+	type entry struct {
+		Seq        int      `json:"seq"`
+		Time       string   `json:"time,omitempty"`
+		Peer       string   `json:"peer,omitempty"`
+		Tool       string   `json:"tool,omitempty"`
+		Decision   string   `json:"decision,omitempty"`
+		Provenance []string `json:"provenance,omitempty"`
+	}
+	var entries []entry
+	sc := bufio.NewScanner(bytes.NewReader(data))
+	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		var r policy.AuditRecord
+		if json.Unmarshal([]byte(line), &r) != nil {
+			continue
+		}
+		if !*all && len(r.Provenance) == 0 {
+			continue
+		}
+		if *session != "" && r.Peer != *session && r.PeerKey != *session {
+			continue
+		}
+		if *toolGlob != "" {
+			if ok, _ := path.Match(*toolGlob, r.Tool); !ok {
+				continue
+			}
+		}
+		entries = append(entries, entry{Seq: r.Seq, Time: r.Time, Peer: r.Peer, Tool: r.Tool, Decision: r.Decision, Provenance: r.Provenance})
+	}
+
+	receipt := map[string]any{
+		"source": *in,
+		"chain": map[string]any{
+			"ok":        chain.OK,
+			"count":     chain.Count,
+			"break_seq": chain.BreakSeq,
+		},
+		"filter":  map[string]any{"peer": *session, "tool": *toolGlob, "all": *all},
+		"records": entries,
+		"note":    "verify with: meshmcp audit verify " + *in + " (optionally --checkpoints --pubkey); the records above are committed in that chain",
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(receipt)
 }
 
 // auditExport converts an audit JSONL ledger to CSV on stdout for BI tools /
