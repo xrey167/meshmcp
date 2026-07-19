@@ -15,6 +15,7 @@ type Subscription struct {
 	topics   []string        // topic globs
 	clearAll bool            // cleared for every label
 	clear    map[string]bool // labels this subscription may receive (when !clearAll)
+	group    string          // consumer group ("" = ungrouped: receives every matching event)
 	bp       Backpressure
 	ch       chan *Event
 	closed   chan struct{}

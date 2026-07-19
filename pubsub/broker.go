@@ -148,6 +148,8 @@ type Broker struct {
 	subs      map[uint64]*Subscription
 	perPeer   map[string]int    // active subscription count per identity key
 	retained  map[string]*Event // last-value per topic (retained messages)
+	groupRR   map[string]uint64 // round-robin cursor per consumer group
+	groupN    map[string]int    // live member count per consumer group (for cursor GC)
 	nextSubID uint64
 	ring      *ring
 	dropped   uint64 // aggregate events dropped by backpressure across all subs
@@ -197,6 +199,8 @@ func New(opts Options) *Broker {
 		subs:     map[uint64]*Subscription{},
 		perPeer:  map[string]int{},
 		retained: map[string]*Event{},
+		groupRR:  map[string]uint64{},
+		groupN:   map[string]int{},
 		ring:     newRing(lm.Retain),
 	}
 	// Resume from a persisted stream: continue the sequence and hash chain from
@@ -367,15 +371,41 @@ func (b *Broker) PublishOpts(id Identity, topic string, payload json.RawMessage,
 	if b.events != nil {
 		_ = b.events.append(*ev)
 	}
-	for _, s := range b.subs {
-		if s.accepts(ev) {
-			b.deliverLocked(s, ev)
-		}
-	}
+	b.fanoutLocked(ev)
 	b.mu.Unlock()
 
 	b.record(id, "pubsub/publish", topic, "allow", dec.Reason, ev.Labels)
 	return ev, nil
+}
+
+// fanoutLocked delivers ev to every accepting subscription, with consumer-group
+// semantics: an ungrouped subscription receives its own copy, while grouped
+// subscriptions form a competing-consumer set — exactly one member of each
+// group receives the event, chosen round-robin among the members that accept it
+// (topic match *and* label clearance). Delivery is non-blocking. Must hold b.mu.
+func (b *Broker) fanoutLocked(ev *Event) {
+	var groups map[string][]*Subscription
+	for _, s := range b.subs {
+		if !s.accepts(ev) {
+			continue
+		}
+		if s.group == "" {
+			b.deliverLocked(s, ev)
+			continue
+		}
+		if groups == nil {
+			groups = make(map[string][]*Subscription)
+		}
+		groups[s.group] = append(groups[s.group], s)
+	}
+	// One copy per group to a round-robin member. Sort members by ID so the
+	// rotation is deterministic regardless of map iteration order.
+	for name, members := range groups {
+		sort.Slice(members, func(i, j int) bool { return members[i].ID < members[j].ID })
+		idx := b.groupRR[name] % uint64(len(members))
+		b.groupRR[name]++
+		b.deliverLocked(members[idx], ev)
+	}
 }
 
 // EmitInternal publishes a system event from the broker operator itself — e.g.
@@ -456,11 +486,7 @@ func (b *Broker) emitTrusted(topic string, payload json.RawMessage, labels []str
 	if b.events != nil {
 		_ = b.events.append(*ev)
 	}
-	for _, s := range b.subs {
-		if s.accepts(ev) {
-			b.deliverLocked(s, ev)
-		}
-	}
+	b.fanoutLocked(ev)
 	b.mu.Unlock()
 
 	// Trusted emission is not audited here: internal events derive from
@@ -479,6 +505,15 @@ type SubOptions struct {
 	// (it receives only unlabeled events) — the grant conveys access, not taint
 	// clearance.
 	Capability string
+	// Group, if non-empty, joins this subscription to a named consumer group: a
+	// live event matching the topics is delivered to exactly ONE member of the
+	// group (round-robin), so a group of subscribers shares the load instead of
+	// each receiving every event. Ungrouped subscriptions (the default) each get
+	// their own copy. A group is scoped to this broker; retained state and
+	// --since replay are per-connection and not supported with a group (Since>0
+	// with a Group is refused), since replaying a window to every competing
+	// consumer would duplicate it.
+	Group string
 }
 
 // Subscribe authorizes and opens a subscription. Every topic is authorized
@@ -499,6 +534,18 @@ func (b *Broker) Subscribe(id Identity, opts SubOptions) (*Subscription, error) 
 	}
 	if len(opts.Topics) > b.lm.MaxTopicsPerSub {
 		return nil, fmt.Errorf("%w: %d topics exceeds max %d", ErrTooMany, len(opts.Topics), b.lm.MaxTopicsPerSub)
+	}
+	if opts.Group != "" {
+		// A group name is bounded like a topic (length + no control chars). Group
+		// membership is capped implicitly by MaxSubs (each sub joins ≤1 group).
+		if err := validateTopic(opts.Group, b.lm.MaxTopicLen); err != nil {
+			return nil, fmt.Errorf("group: %w", err)
+		}
+		// Replay to a competing-consumer group would duplicate the window across
+		// members; a group is live-only. Durable per-group cursors are future work.
+		if opts.Since > 0 {
+			return nil, fmt.Errorf("%w: --since replay is not supported with a consumer group", ErrBadTopic)
+		}
 	}
 
 	clearAll := true
@@ -535,6 +582,7 @@ func (b *Broker) Subscribe(id Identity, opts SubOptions) (*Subscription, error) 
 		topics:   append([]string(nil), opts.Topics...),
 		clearAll: clearAll,
 		clear:    clear,
+		group:    opts.Group,
 		bp:       opts.Backpressure,
 		ch:       make(chan *Event, b.lm.SubQueue),
 		closed:   make(chan struct{}),
@@ -559,6 +607,9 @@ func (b *Broker) Subscribe(id Identity, opts SubOptions) (*Subscription, error) 
 	b.nextSubID++
 	s.ID = b.nextSubID
 	b.perPeer[id.Key]++
+	if s.group != "" {
+		b.groupN[s.group]++
+	}
 	// Register before replay so backpressure (Disconnect) during replay is
 	// handled by the normal close path instead of leaving a closed
 	// subscription in the map.
@@ -579,8 +630,10 @@ func (b *Broker) Subscribe(id Identity, opts SubOptions) (*Subscription, error) 
 	// A fresh subscriber (no --since) receives the current retained last-value
 	// for each matching topic, in sequence order. A resuming subscriber
 	// (Since>0) instead relies on --since replay, which already covers those
-	// events, so retained is skipped there to avoid duplicates.
-	if opts.Since == 0 {
+	// events, so retained is skipped there to avoid duplicates. Grouped
+	// (competing-consumer) subscribers are skipped too: retained state fanned to
+	// every joining member would duplicate it across the group.
+	if opts.Since == 0 && s.group == "" {
 		if _, ok := b.subs[s.ID]; ok {
 			retained := make([]*Event, 0, len(b.retained))
 			for _, ev := range b.retained {
@@ -665,6 +718,16 @@ func (b *Broker) closeSubLocked(s *Subscription) {
 	} else {
 		b.perPeer[s.ident.Key] = n
 	}
+	if s.group != "" {
+		if n := b.groupN[s.group] - 1; n <= 0 {
+			// Last member left: drop the group's round-robin cursor so group
+			// state stays bounded to live groups.
+			delete(b.groupN, s.group)
+			delete(b.groupRR, s.group)
+		} else {
+			b.groupN[s.group] = n
+		}
+	}
 	s.closeOnce.Do(func() { close(s.ch); close(s.closed) })
 }
 
@@ -682,6 +745,8 @@ func (b *Broker) Close() {
 		s.closeOnce.Do(func() { close(s.ch); close(s.closed) })
 	}
 	b.perPeer = map[string]int{}
+	b.groupN = map[string]int{}
+	b.groupRR = map[string]uint64{}
 }
 
 // Seq returns the sequence number of the last published event.

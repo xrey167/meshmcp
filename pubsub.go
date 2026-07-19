@@ -683,6 +683,7 @@ func cmdSubscribe(args []string) error {
 	bp := fs.String("backpressure", "drop_oldest", "buffer-full policy: drop_oldest or disconnect")
 	capFlag := fs.String("capability", "", "present a signed capability grant; @file reads the token from a file")
 	durable := fs.String("durable", "", "persist the last-seen sequence to this file and resume from it (at-least-once across restarts)")
+	group := fs.String("group", "", "join a named consumer group: each event goes to exactly one member (load balancing across subscribers)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -691,6 +692,9 @@ func cmdSubscribe(args []string) error {
 	}
 	if _, err := pubsub.ParseBackpressure(*bp); err != nil {
 		return err
+	}
+	if *group != "" && (*since > 0 || *durable != "") {
+		return errors.New("--group cannot be combined with --since or --durable (a consumer group is live-only)")
 	}
 	capToken, err := readCapabilityToken(*capFlag)
 	if err != nil {
@@ -708,7 +712,7 @@ func cmdSubscribe(args []string) error {
 		}
 	}
 
-	hello, _ := json.Marshal(helloFrame{Role: "sub", Topics: topics, Since: effectiveSince, Backpressure: *bp, Capability: capToken})
+	hello, _ := json.Marshal(helloFrame{Role: "sub", Topics: topics, Since: effectiveSince, Backpressure: *bp, Capability: capToken, Group: *group})
 	preamble := append(hello, '\n')
 
 	out := os.Stdout

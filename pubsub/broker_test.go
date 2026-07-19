@@ -202,6 +202,200 @@ func hasLabel(labels []string, want string) bool {
 	return false
 }
 
+// TestConsumerGroupLoadBalance verifies a named consumer group is a competing-
+// consumer set: each live event is delivered to exactly one member, the members
+// share the load (round-robin), and together they see every event with no
+// duplicates.
+func TestConsumerGroupLoadBalance(t *testing.T) {
+	b := New(Options{Authorizer: AllowAll{}, Limits: Limits{SubQueue: 64}})
+	defer b.Close()
+
+	a, err := b.Subscribe(id("a"), SubOptions{Topics: []string{"work"}, Group: "g"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	c, err := b.Subscribe(id("c"), SubOptions{Topics: []string{"work"}, Group: "g"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	const n = 20
+	for i := 0; i < n; i++ {
+		if _, err := b.Publish(id("p"), "work", json.RawMessage(fmt.Sprintf("%d", i)), nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	seen := map[string]int{}
+	drain := func(s *Subscription) int {
+		got := 0
+		for {
+			select {
+			case ev := <-s.C():
+				seen[string(ev.Payload)]++
+				got++
+			default:
+				return got
+			}
+		}
+	}
+	ga, gc := drain(a), drain(c)
+	if ga+gc != n {
+		t.Fatalf("group saw %d events (a=%d c=%d), want %d total", ga+gc, ga, gc, n)
+	}
+	if ga == 0 || gc == 0 {
+		t.Fatalf("load not shared: a=%d c=%d", ga, gc)
+	}
+	for i := 0; i < n; i++ {
+		k := fmt.Sprintf("%d", i)
+		if seen[k] != 1 {
+			t.Fatalf("event %s delivered %d times, want exactly once", k, seen[k])
+		}
+	}
+}
+
+// TestConsumerGroupWithStandalone verifies grouped and ungrouped subscribers
+// coexist: an ungrouped subscriber receives every event, while a group splits
+// the same events across its members (each event: one group copy + one standalone
+// copy).
+func TestConsumerGroupWithStandalone(t *testing.T) {
+	b := New(Options{Authorizer: AllowAll{}, Limits: Limits{SubQueue: 64}})
+	defer b.Close()
+
+	solo, _ := b.Subscribe(id("solo"), SubOptions{Topics: []string{"t"}})
+	defer solo.Close()
+	g1, _ := b.Subscribe(id("g1"), SubOptions{Topics: []string{"t"}, Group: "grp"})
+	defer g1.Close()
+	g2, _ := b.Subscribe(id("g2"), SubOptions{Topics: []string{"t"}, Group: "grp"})
+	defer g2.Close()
+
+	const n = 10
+	for i := 0; i < n; i++ {
+		b.Publish(id("p"), "t", json.RawMessage(fmt.Sprintf("%d", i)), nil)
+	}
+	count := func(s *Subscription) int {
+		got := 0
+		for {
+			select {
+			case <-s.C():
+				got++
+			default:
+				return got
+			}
+		}
+	}
+	if c := count(solo); c != n {
+		t.Fatalf("standalone subscriber saw %d, want all %d", c, n)
+	}
+	if c := count(g1) + count(g2); c != n {
+		t.Fatalf("group saw %d total, want %d (one copy per event)", c, n)
+	}
+}
+
+// TestConsumerGroupTaintContainment verifies group delivery still honors label
+// clearance: a tainted event is only ever routed to a group member cleared for
+// it, never to an uncleared member (containment is applied before group
+// selection).
+func TestConsumerGroupTaintContainment(t *testing.T) {
+	// web.* is tainted; "cleared" is cleared for it, "blind" is not. Both join
+	// the same group.
+	auth := &RuleAuthorizer{Rules: []TopicRule{
+		{Peers: []string{"pubkey:pub"}, Topics: []string{"web.*"}, Allow: true, Taint: true},
+		{Peers: []string{"pubkey:cleared"}, Topics: []string{"web.*"}, Allow: true, ClearTaint: true},
+		{Peers: []string{"pubkey:blind"}, Topics: []string{"web.*"}, Allow: true}, // not cleared
+	}}
+	b := New(Options{Authorizer: auth})
+	defer b.Close()
+
+	cleared, err := b.Subscribe(Identity{Key: "cleared", FQDN: "cleared.x"}, SubOptions{Topics: []string{"web.*"}, Group: "g"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleared.Close()
+	blind, err := b.Subscribe(Identity{Key: "blind", FQDN: "blind.x"}, SubOptions{Topics: []string{"web.*"}, Group: "g"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blind.Close()
+
+	const n = 8
+	for i := 0; i < n; i++ {
+		b.Publish(Identity{Key: "pub", FQDN: "pub.x"}, "web.page", json.RawMessage(`1`), nil)
+	}
+	// Every tainted event must land on the cleared member; the blind member,
+	// though in the group, is never a valid target for a tainted event.
+	got := 0
+	for {
+		select {
+		case <-cleared.C():
+			got++
+			continue
+		default:
+		}
+		break
+	}
+	if got != n {
+		t.Fatalf("cleared member saw %d tainted events, want all %d routed to it", got, n)
+	}
+	select {
+	case ev := <-blind.C():
+		t.Fatalf("uncleared group member received a tainted event: %+v", ev)
+	default:
+	}
+}
+
+// TestConsumerGroupMemberLeave verifies that after a member leaves, all events
+// route to the remaining member (and the group's cursor state is reclaimed once
+// empty).
+func TestConsumerGroupMemberLeave(t *testing.T) {
+	b := New(Options{Authorizer: AllowAll{}, Limits: Limits{SubQueue: 32}})
+	defer b.Close()
+
+	a, _ := b.Subscribe(id("a"), SubOptions{Topics: []string{"t"}, Group: "g"})
+	c, _ := b.Subscribe(id("c"), SubOptions{Topics: []string{"t"}, Group: "g"})
+	a.Close()
+
+	const n = 6
+	for i := 0; i < n; i++ {
+		b.Publish(id("p"), "t", json.RawMessage(`1`), nil)
+	}
+	got := 0
+	for {
+		select {
+		case <-c.C():
+			got++
+			continue
+		default:
+		}
+		break
+	}
+	if got != n {
+		t.Fatalf("remaining member saw %d, want all %d after peer left", got, n)
+	}
+	c.Close()
+	// After all members leave, the group's cursor/count are reclaimed.
+	b.mu.Lock()
+	_, hasRR := b.groupRR["g"]
+	_, hasN := b.groupN["g"]
+	b.mu.Unlock()
+	if hasRR || hasN {
+		t.Fatal("group state not reclaimed after last member left")
+	}
+}
+
+// TestConsumerGroupRejectsSince verifies --since replay is refused with a group
+// (a group is live-only; replaying a window to every competing consumer would
+// duplicate it).
+func TestConsumerGroupRejectsSince(t *testing.T) {
+	b := New(Options{Authorizer: AllowAll{}})
+	defer b.Close()
+	if _, err := b.Subscribe(id("a"), SubOptions{Topics: []string{"t"}, Group: "g", Since: 1}); !errors.Is(err, ErrBadTopic) {
+		t.Fatalf("group + since: got %v, want ErrBadTopic", err)
+	}
+}
+
 // fakeClock is a settable clock for deterministic time-dependent tests.
 type fakeClock struct {
 	mu sync.Mutex

@@ -68,6 +68,22 @@ meshmcp subscribe 100.x.y.z:9120 'alerts.*' 'ops.*'
 meshmcp subscribe --since 41 100.x.y.z:9120 'alerts.prod'
 ```
 
+`--group <name>` joins a **consumer group**: each event is delivered to exactly
+one member of the group instead of to every subscriber, so a pool of workers
+shares the load (competing consumers). Ungrouped subscribers still each get their
+own copy:
+
+```sh
+# three workers share the jobs.* stream; each event goes to one of them
+meshmcp subscribe --group workers 100.x.y.z:9120 'jobs.*'   # run on each worker
+```
+
+A group is live-only and scoped to one broker: taint containment still holds (an
+event is only ever routed to a member cleared for its labels), but `--since`
+replay and `--durable` cursors are not combined with `--group` (replaying a
+window to every competing consumer would duplicate it). For durable load
+sharing, run one `--durable` subscriber per shard instead.
+
 `--durable <file>` makes a subscriber **at-least-once**: it persists the
 last-seen sequence to the file and resumes from it, so with a broker `event_log:`
 no events are missed across a disconnect or a broker restart (a duplicate is

@@ -38,6 +38,9 @@ type helloFrame struct {
 	// Capability is an optional signed token granting topics beyond the
 	// broker's default-deny policy, for the whole session.
 	Capability string `json:"capability,omitempty"`
+	// Group, if set, joins this subscription to a named consumer group: each
+	// matching event goes to exactly one member of the group (load balancing).
+	Group string `json:"group,omitempty"`
 }
 
 type pubFrame struct {
@@ -155,6 +158,7 @@ func (bb *brokerBackend) serveSub(hello helloFrame, sc *bufio.Scanner) {
 		Since:        hello.Since,
 		Backpressure: bp,
 		Capability:   hello.Capability,
+		Group:        hello.Group,
 	})
 	if err != nil {
 		bb.writeAck(ackFrame{Error: err.Error()})
