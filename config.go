@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 
@@ -44,7 +45,10 @@ type Config struct {
 	AuditWebhookAll bool         `yaml:"audit_webhook_all"`
 	Trace           *TraceConfig `yaml:"trace"`
 	Registry        string       `yaml:"registry"` // dir: register backends for router discovery
-	Backends        []*Backend   `yaml:"backends"`
+	// Groups maps a group name to member patterns (pubkey:<key> or FQDN glob)
+	// so policy rules can match `group:<name>` (F17). Shared by all backends.
+	Groups   map[string][]string `yaml:"groups"`
+	Backends []*Backend          `yaml:"backends"`
 }
 
 // TraceConfig turns on a gateway-wide trace of every MCP message (both
@@ -159,6 +163,7 @@ type Backend struct {
 	ShadowPolicy *policy.Policy `yaml:"shadow_policy"`
 
 	httpURL *url.URL
+	groups  map[string][]string // resolved from Config.Groups at load
 }
 
 // CapabilitiesConfig configures signed-capability admission for a backend.
@@ -208,6 +213,7 @@ func loadConfig(path string) (*Config, error) {
 	}
 	seen := map[int]string{}
 	for i, b := range cfg.Backends {
+		b.groups = cfg.Groups
 		if b.Name == "" {
 			return nil, fmt.Errorf("backend #%d: name is required", i+1)
 		}
@@ -231,6 +237,16 @@ func loadConfig(path string) (*Config, error) {
 		if b.Policy != nil {
 			if err := b.Policy.Validate(); err != nil {
 				return nil, fmt.Errorf("backend %q: policy: %w", b.Name, err)
+			}
+			// A group:<name> peer must reference a defined group (F17).
+			for ri, r := range b.Policy.Rules {
+				for _, p := range r.Peers {
+					if g, ok := strings.CutPrefix(p, "group:"); ok {
+						if _, defined := cfg.Groups[g]; !defined {
+							return nil, fmt.Errorf("backend %q rule #%d: peer group %q is not defined in the top-level groups map", b.Name, ri+1, g)
+						}
+					}
+				}
 			}
 		}
 		switch b.SessionStoreMode {

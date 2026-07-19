@@ -2,6 +2,7 @@ package policy
 
 import (
 	"fmt"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -159,9 +160,44 @@ type Engine struct {
 	pol    *Policy
 	now    func() time.Time
 	cosign CosignStore
+	groups GroupResolver // optional: resolves group:<name> peer patterns (F17)
 
 	mu      sync.Mutex
 	buckets map[string]*bucket // key: ruleID|peerKey
+}
+
+// SetGroupResolver attaches a group resolver so rules may match `group:<name>`
+// peers (nil disables group matching — such patterns then never match).
+func (e *Engine) SetGroupResolver(g GroupResolver) { e.groups = g }
+
+// peerMatches reports whether rule r applies to this caller, handling
+// `group:<name>` patterns via the resolver in addition to the pubkey/FQDN forms
+// the pure Rule matcher understands.
+func (e *Engine) peerMatches(r Rule, fqdn, key string) bool {
+	if len(r.Peers) == 0 {
+		return true
+	}
+	for _, p := range r.Peers {
+		if g, ok := strings.CutPrefix(p, "group:"); ok {
+			if e.groups != nil && e.groups.InGroup(key, fqdn, g) {
+				return true
+			}
+			continue
+		}
+		if k, ok := strings.CutPrefix(p, "pubkey:"); ok {
+			if k == key {
+				return true
+			}
+			continue
+		}
+		if p == "*" || fqdn == p {
+			return true
+		}
+		if ok, _ := path.Match(p, fqdn); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // NewEngine wraps pol. now defaults to time.Now; cosign may be nil (then
@@ -186,7 +222,7 @@ func (e *Engine) DecideToolCall(peerFQDN, peerKey, tool string, labels map[strin
 		if len(r.Methods) > 0 {
 			continue
 		}
-		if !r.matchesPeer(peerFQDN, peerKey) || !r.matchesTool(tool) {
+		if !e.peerMatches(r, peerFQDN, peerKey) || !r.matchesTool(tool) {
 			continue
 		}
 		// A window-gated rule only applies inside its window; otherwise fall

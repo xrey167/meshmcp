@@ -36,6 +36,9 @@ func newHTTPEnforcer(b *Backend, audit *policy.AuditLog) *httpEnforcer {
 		pending = &policy.FilePending{Dir: b.CosignStore, TTL: ttl}
 	}
 	eng := policy.NewEngine(b.Policy, func() time.Time { return time.Now() }, cosign)
+	if len(b.groups) > 0 {
+		eng.SetGroupResolver(policy.StaticGroups(b.groups))
+	}
 	return &httpEnforcer{eng: eng, audit: audit, pending: pending, backend: b.Name}
 }
 

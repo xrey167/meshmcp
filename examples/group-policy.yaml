@@ -1,0 +1,27 @@
+# Group-based policy (F17): authorize by role/group instead of individual keys.
+# Groups are defined once (members are pubkeys or FQDN globs) and referenced in
+# rules as `group:<name>`. A config-driven resolver works today; a NetBird
+# management-API resolver is a drop-in for the same GroupResolver interface.
+mesh:
+  device_name: meshmcp-groups
+  setup_key_env: NB_SETUP_KEY
+  config_path: ./groups-gw.json
+
+groups:
+  admins:   ["pubkey:<alice-key>", "ops-*.netbird.cloud"]
+  readers:  ["*"]
+
+backends:
+  - name: tools
+    port: 9170
+    stdio: ["./cmd/mcpserver/mcpserver.exe"]
+    audit_log: ./groups-audit.jsonl
+    policy:
+      default_allow: false
+      rules:
+        - peers: ["group:readers"]
+          tools: ["read_*", "search"]
+          allow: true
+        - peers: ["group:admins"]
+          tools: ["deploy", "write_*"]
+          allow: true

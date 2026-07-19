@@ -50,12 +50,12 @@ Shipped in this branch (tested, `CGO_ENABLED=1 go build/vet/test ./... -race` gr
   (fail-closed audit mode), **F23** (identity-bound sessions), **F24** (shadow policy — live
   canary), **F26** (mesh secrets vault — `cmd/vault`), **F27** (governed scheduler — `cmd/scheduler`),
   **F28** (governed event bus — `cmd/bus`), **F29** (cost & budget governance — `meshmcp budget`),
-  **F32** (compliance & attestation pack — `audit attest`), **F33** (client hook adapters — govern
-  every LLM tool call; + `audit receipt` provenance).
+  **F17** (group-based policy — `group:<name>` peers), **F32** (compliance & attestation pack —
+  `audit attest`), **F33** (client hook adapters — govern every LLM tool call; + `audit receipt`).
 - Minors: **S11–S18, S20, S22–S43, S47–S48, S52** (plus `config validate`, `status`, `doctor`,
   `audit export`, `audit receipt`).
 
-Forward backlog: flagships **F14, F17, F19, F25, F30, F31** and minors **S19, S21, S33, S44–S46,
+Forward backlog: flagships **F14, F19, F25, F30, F31** and minors **S19, S21, S33, S44–S46,
 S49–S51, S53–S60**.
 
 ---

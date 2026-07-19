@@ -311,6 +311,10 @@ func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer) s
 	} else if b.Capabilities != nil {
 		eng = policy.NewEngine(&policy.Policy{DefaultAllow: false}, func() time.Time { return time.Now() }, nil)
 	}
+	// Attach the group resolver (F17) so rules can match group:<name> peers.
+	if eng != nil && len(b.groups) > 0 {
+		eng.SetGroupResolver(policy.StaticGroups(b.groups))
+	}
 	// Capability verifier: pins the backend's trusted authority keys.
 	var capVerifier *policy.CapabilityVerifier
 	if b.Capabilities != nil {
