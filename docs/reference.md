@@ -124,6 +124,7 @@ resources, and prompts against a live backend.
 | `meshmcp peers [flags]` | List reachable mesh identities |
 | `meshmcp fetch [flags] <peer:port> <sha256>` | Fetch a blob by content hash from a peer's store |
 | `meshmcp air <sessions\|steer\|launch\|agent-steer\|workflow\|serve>` | **Air · Steer** — list/steer live sessions, steer/launch agents, run a workflow, or serve the live web page (see [AIR.md](AIR.md)) |
+| `meshmcp pubsub --config <f>` · `publish` · `subscribe <peer:port> <topic>` | Identity-gated, audited **event bus** on the mesh — durable + resumable (see [PUBSUB.md](PUBSUB.md)) |
 | `meshmcp mcp [flags]` | Run meshmcp **as an MCP server** for Claude Code / Codex (see [MCP-APP.md](MCP-APP.md)) |
 | `meshmcp approvals --store <dir>` | Serve the co-sign approver (`--devices <dir>` enables push-wake) |
 

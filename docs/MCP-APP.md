@@ -68,6 +68,8 @@ Air — move payloads and drive live work ([AIR.md](AIR.md), [AIR-STEER.md](AIR-
 | `air_tasks` | List a backend's running/finished tasks. `{target}` |
 | `air_task_steer` | Augment a running task in-flight. `{target, task_id, payload}` |
 | `air_launch` | Spawn a new agent (opt-in `--allow-launch`). `{role, gateway}` |
+| `pubsub_publish` | Publish an event to a broker topic. `{target, topic, data, json?, retain?}` |
+| `pubsub_stats` | Query a running broker's snapshot (subscribers, sequence, drops). `{target}` |
 
 ## What it feels like
 
