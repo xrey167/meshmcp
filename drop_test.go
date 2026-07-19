@@ -78,7 +78,7 @@ func TestDropRoundTrip(t *testing.T) {
 	go func() { pw.CloseWithError(sendFiles(pw, paths)) }()
 
 	got := map[string]recvInfo{}
-	if err := recvFiles(pr, dirPlacer(dst), 0, func(fi recvInfo) { got[fi.Name] = fi }); err != nil {
+	if err := recvFiles(pr, dirPlacer(dst), dropLimits{}, func(fi recvInfo) { got[fi.Name] = fi }); err != nil {
 		t.Fatalf("recvFiles: %v", err)
 	}
 
@@ -103,6 +103,52 @@ func TestDropRoundTrip(t *testing.T) {
 	}
 }
 
+// TestDropDirectory streams a directory tree and verifies the structure is
+// reproduced on the receiver with relative paths preserved.
+func TestDropDirectory(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+
+	// Build a small tree: photos/a.txt, photos/sub/b.txt, plus a top-level file.
+	tree := map[string][]byte{
+		"photos/a.txt":     []byte("alpha"),
+		"photos/sub/b.txt": []byte("bravo"),
+		"photos/c.bin":     {0x00, 0xff, 0x01},
+	}
+	for rel, data := range tree {
+		full := filepath.Join(src, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	pr, pw := io.Pipe()
+	go func() { pw.CloseWithError(sendFiles(pw, []string{filepath.Join(src, "photos")})) }()
+
+	got := map[string]recvInfo{}
+	if err := recvFiles(pr, dirPlacer(dst), dropLimits{}, func(fi recvInfo) { got[fi.Name] = fi }); err != nil {
+		t.Fatalf("recvFiles: %v", err)
+	}
+	if len(got) != len(tree) {
+		t.Fatalf("received %d files, want %d: %v", len(got), len(tree), got)
+	}
+	for rel, data := range tree {
+		if fi, ok := got[rel]; !ok || fi.SHA256 != sha(data) {
+			t.Fatalf("file %q: ok=%v info=%+v", rel, ok, fi)
+		}
+		onDisk, err := os.ReadFile(filepath.Join(dst, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatalf("read received %q: %v", rel, err)
+		}
+		if !bytes.Equal(onDisk, data) {
+			t.Errorf("%q: content mismatch", rel)
+		}
+	}
+}
+
 // TestPushPayload verifies a stdin-style payload (sendData) is received and
 // verified like any drop — the universal-clipboard path.
 func TestPushPayload(t *testing.T) {
@@ -113,7 +159,7 @@ func TestPushPayload(t *testing.T) {
 	go func() { pw.CloseWithError(sendData(pw, "clip.txt", payload)) }()
 
 	var got recvInfo
-	if err := recvFiles(pr, dirPlacer(dst), 0, func(fi recvInfo) { got = fi }); err != nil {
+	if err := recvFiles(pr, dirPlacer(dst), dropLimits{}, func(fi recvInfo) { got = fi }); err != nil {
 		t.Fatalf("recvFiles: %v", err)
 	}
 	if got.SHA256 != sha(payload) {
@@ -150,7 +196,7 @@ func TestDropDetectsCorruption(t *testing.T) {
 	buf.WriteString("abc")
 	buf.WriteString(`{"sha256":"deadbeef"}` + "\n")
 
-	err := recvFiles(&buf, dirPlacer(dst), 0, nil)
+	err := recvFiles(&buf, dirPlacer(dst), dropLimits{}, nil)
 	if err == nil || !strings.Contains(err.Error(), "hash mismatch") {
 		t.Fatalf("expected hash mismatch error, got %v", err)
 	}
@@ -165,8 +211,36 @@ func TestDropEnforcesMaxBytes(t *testing.T) {
 	p := writeTemp(t, src, "big.dat", bytes.Repeat([]byte{7}, 4096))
 	pr, pw := io.Pipe()
 	go func() { pw.CloseWithError(sendFiles(pw, []string{p})) }()
-	if err := recvFiles(pr, dirPlacer(dst), 1024, nil); err == nil || !strings.Contains(err.Error(), "over the") {
+	if err := recvFiles(pr, dirPlacer(dst), dropLimits{PerFile: 1024}, nil); err == nil || !strings.Contains(err.Error(), "over the") {
 		t.Fatalf("expected size-limit error, got %v", err)
+	}
+}
+
+// TestDropBoundsFramingLine ensures an oversized header line (a sender that
+// never sends a newline) is rejected instead of buffered unboundedly.
+func TestDropBoundsFramingLine(t *testing.T) {
+	dst := t.TempDir()
+	var buf bytes.Buffer
+	buf.Write(bytes.Repeat([]byte("A"), maxDropFrameLine+16)) // no newline: an unbounded "header"
+	err := recvFiles(&buf, dirPlacer(dst), dropLimits{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "framing line exceeds") {
+		t.Fatalf("expected framing-line bound error, got %v", err)
+	}
+}
+
+// TestDropEnforcesFileCount ensures a transfer is refused once it exceeds the
+// file-count cap.
+func TestDropEnforcesFileCount(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	var paths []string
+	for i := 0; i < 5; i++ {
+		paths = append(paths, writeTemp(t, src, "f"+string(rune('a'+i))+".txt", []byte("x")))
+	}
+	pr, pw := io.Pipe()
+	go func() { pw.CloseWithError(sendFiles(pw, paths)) }()
+	err := recvFiles(pr, dirPlacer(dst), dropLimits{MaxFiles: 3}, nil)
+	if err == nil || !strings.Contains(err.Error(), "file limit") {
+		t.Fatalf("expected file-count limit error, got %v", err)
 	}
 }
 
@@ -186,7 +260,7 @@ func TestDropOverSession(t *testing.T) {
 		t.Fatalf("listen: %v", err)
 	}
 	defer ln.Close()
-	srv := session.NewServer(newDropFactory(dirPlacer(dst), 0, audit), 2*time.Minute, nil)
+	srv := session.NewServer(newDropFactory(dirPlacer(dst), dropLimits{}, audit), 2*time.Minute, nil)
 	go func() {
 		for {
 			conn, err := ln.Accept()
@@ -204,15 +278,17 @@ func TestDropOverSession(t *testing.T) {
 	go func() { pw.CloseWithError(sendFiles(pw, []string{p})) }()
 
 	sc := session.NewClient(dial, nil)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := sc.Run(ctx, sendStream{r: pr}); err != nil {
 		t.Fatalf("session run: %v", err)
 	}
 
-	// The receiver finalizes asynchronously; wait for the installed file.
+	// The receiver finalizes asynchronously; wait for the installed file. The
+	// deadline is generous so the test never false-fails under a loaded -race
+	// run (it normally completes in tens of milliseconds).
 	dstFile := filepath.Join(dst, "report.bin")
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(20 * time.Second)
 	for {
 		if b, err := os.ReadFile(dstFile); err == nil {
 			if !bytes.Equal(b, payload) {

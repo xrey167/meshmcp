@@ -6,10 +6,23 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
 	"sort"
 	"strings"
 	"time"
+
+	"meshmcp/mcpclient"
+	"meshmcp/session"
 )
+
+// multiFlag collects repeatable string flags (e.g. --steer-allow a --steer-allow b).
+type multiFlag []string
+
+func (m *multiFlag) String() string { return strings.Join(*m, ",") }
+func (m *multiFlag) Set(s string) error {
+	*m = append(*m, s)
+	return nil
+}
 
 // agentStep is one scripted tool call an agent app makes.
 type agentStep struct {
@@ -62,6 +75,9 @@ func cmdAgent(args []string) error {
 	role := fs.String("role", "", "agent role: "+roleNames())
 	interval := fs.Duration("interval", 2*time.Second, "delay between calls")
 	count := fs.Int("count", 0, "total calls to make (0 = run until stopped)")
+	steerPort := fs.Int("steer-port", 0, "if >0, also listen on this mesh port for steer instructions (Air · Steer, P1)")
+	steerAllow := multiFlag{}
+	fs.Var(&steerAllow, "steer-allow", "identity permitted to steer this agent (FQDN glob or pubkey:<key>); repeatable; empty = any mesh peer")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -79,14 +95,75 @@ func cmdAgent(args []string) error {
 	if o.DeviceName == "" {
 		o.DeviceName = "agent-" + *role
 	}
+	logf := func(format string, a ...any) { log.Printf("["+*role+"] "+format, a...) }
+
+	// Steer-enabled agents must also accept inbound mesh connections (the
+	// default dialMCP path is outbound-only), so they join the mesh directly.
+	if *steerPort > 0 {
+		return runSteerableAgent(o, target, steps, *count, *interval, *steerPort, steerAllow, logf)
+	}
+
 	mc, cleanup, err := dialMCP(o, target)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
+	return runAgentLoop(context.Background(), mc, steps, *count, *interval, nil, logf)
+}
 
-	logf := func(format string, a ...any) { log.Printf("["+*role+"] "+format, a...) }
-	return runAgentLoop(context.Background(), mc, steps, *count, *interval, logf)
+// runSteerableAgent joins the mesh with inbound enabled, dials the backend, and
+// runs a steer inbox alongside the scripted loop: instructions arriving on the
+// steer port are delivered into the loop's select between steps.
+func runSteerableAgent(o *meshOptions, target string, steps []agentStep, count int, interval time.Duration, steerPort int, allow []string, logf func(string, ...any)) error {
+	o.BlockInbound = false
+	client, err := startMesh(o, os.Stderr)
+	if err != nil {
+		return err
+	}
+	defer stopMesh(client)
+
+	conn, err := client.Dial(context.Background(), "tcp", target)
+	if err != nil {
+		return fmt.Errorf("dial %s over mesh: %w", target, err)
+	}
+	mc := mcpclient.New(conn, func(method string, params json.RawMessage) {
+		logf("notify: %s %s", method, string(params))
+	})
+	if _, err := mc.Initialize(context.Background(), "meshmcp-agent"); err != nil {
+		mc.Close()
+		return fmt.Errorf("initialize: %w", err)
+	}
+	defer mc.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	steer := make(chan steerEnvelope, 16)
+	ln, err := client.ListenTCP(fmt.Sprintf(":%d", steerPort))
+	if err != nil {
+		return fmt.Errorf("listen on steer port %d: %w", steerPort, err)
+	}
+	defer ln.Close()
+	checker := newACL(allow)
+	srv := session.NewServer(newSteerFactory(ctx, steer, nil), 2*time.Minute, log.Printf)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			pubKey, fqdn := peerIdentity(client, c.RemoteAddr())
+			if !checker.allows(pubKey, fqdn) {
+				logf("steer DENIED from %s (%s)", fqdn, shortKey(pubKey))
+				c.Close()
+				continue
+			}
+			go srv.Handle(c, session.Meta{PeerFQDN: fqdn, PeerAddr: c.RemoteAddr().String(), PeerKey: pubKey})
+		}
+	}()
+	logf("steer inbox on mesh port %d", steerPort)
+
+	return runAgentLoop(ctx, mc, steps, count, interval, steer, logf)
 }
 
 // toolCaller is the slice of mcpclient.Client the agent loop needs (so the loop
@@ -97,7 +174,12 @@ type toolCaller interface {
 
 // runAgentLoop cycles through steps, issuing each call and logging whether it
 // was allowed (a result) or blocked/held (a JSON-RPC error from the gateway).
-func runAgentLoop(ctx context.Context, mc toolCaller, steps []agentStep, count int, interval time.Duration, logf func(string, ...any)) error {
+// runAgentLoop cycles through steps, and — when steer is non-nil — also reacts
+// to steer instructions arriving between steps: a "task" runs an extra call, a
+// "nudge" logs guidance, and a "cancel" stops the agent. A nil steer channel
+// disables that select case (a receive on nil blocks forever), so a plain agent
+// is unaffected.
+func runAgentLoop(ctx context.Context, mc toolCaller, steps []agentStep, count int, interval time.Duration, steer <-chan steerEnvelope, logf func(string, ...any)) error {
 	made := 0
 	for i := 0; count == 0 || made < count; i++ {
 		step := steps[i%len(steps)]
@@ -114,10 +196,39 @@ func runAgentLoop(ctx context.Context, mc toolCaller, steps []agentStep, count i
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case env := <-steer:
+			if stop := applySteer(ctx, mc, env, logf); stop {
+				return nil
+			}
 		case <-time.After(interval):
 		}
 	}
 	return nil
+}
+
+// applySteer handles one steer instruction. It returns true when the agent
+// should stop (a "cancel").
+func applySteer(ctx context.Context, mc toolCaller, env steerEnvelope, logf func(string, ...any)) (stop bool) {
+	switch env.Type {
+	case "cancel":
+		logf("steer: cancel — stopping")
+		return true
+	case "nudge":
+		logf("steer: nudge %q", env.Text)
+	case "task":
+		var args any = map[string]any{}
+		if len(env.Args) > 0 {
+			args = env.Args
+		}
+		if _, err := mc.CallTool(ctx, env.Tool, args, false); err != nil {
+			logf("%-16s ✗ %s (steered)", env.Tool, blockedReason(err))
+		} else {
+			logf("%-16s ✓ ok (steered)", env.Tool)
+		}
+	default:
+		logf("steer: unknown type %q", env.Type)
+	}
+	return false
 }
 
 // blockedReason trims a JSON-RPC error to its human message for the log.

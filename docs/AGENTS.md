@@ -12,6 +12,7 @@ Design documentation and open specifications for meshmcp. Human-facing narrative
 | `AGENT-FIREWALL.md` | The policy engine, signed audit, dashboard, replay, control plane, federation. |
 | `INSIGHT.md` | The firewall's read side: observe → recommend → simulate → detect. |
 | `SECRETS.md` | The credential broker: identity-gated secret injection. |
+| `PUBSUB.md` | The identity-native event fabric: `pubsub`/`publish`/`subscribe`, per-topic deny-by-default authz, taint containment, hash-chained events. |
 | `EXTENSIONS.md` | Signed capabilities, server middleware, typed function/task client (and why the external "fabric" pack was not merged). |
 | `MCP-APP.md` | Adding meshmcp to Claude Code / Codex as an MCP app. |
 | `MOBILE.md` | How the stack reaches phones (a phone as a human identity / co-sign approver). |

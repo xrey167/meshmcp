@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -48,6 +49,9 @@ type SessionStore interface {
 	// so a reaper on a gateway that has been superseded does not delete a
 	// session another gateway resumed.
 	DeleteIfOwner(id, owner string) error
+	// List returns every persisted session (in unspecified order) — the
+	// enumeration behind Air's "who is on the mesh, in a session" view.
+	List() ([]PersistedSession, error)
 }
 
 // MemStore is an in-memory SessionStore (tests, single-process).
@@ -79,6 +83,16 @@ func (s *MemStore) DeleteIfOwner(id, owner string) error {
 		delete(s.m, id)
 	}
 	return nil
+}
+
+func (s *MemStore) List() ([]PersistedSession, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]PersistedSession, 0, len(s.m))
+	for _, ps := range s.m {
+		out = append(out, ps)
+	}
+	return out, nil
 }
 
 // FileStore persists sessions as JSON files in a shared directory, so two
@@ -185,6 +199,34 @@ func (s *FileStore) DeleteIfOwner(id, owner string) error {
 		return nil
 	}
 	return err
+}
+
+// List scans the store directory and loads every persisted session. Files that
+// have vanished (a concurrent DeleteIfOwner) or fail to parse are skipped, so a
+// racing reaper never turns enumeration into an error.
+func (s *FileStore) List() ([]PersistedSession, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return nil, err
+	}
+	var out []PersistedSession
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".tmp") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(s.dir, name))
+		if err != nil {
+			continue // vanished between ReadDir and here
+		}
+		var ps PersistedSession
+		if json.Unmarshal(b, &ps) == nil && ps.ID != "" {
+			out = append(out, ps)
+		}
+	}
+	return out, nil
 }
 
 // snapshot exports the endpoint's resumable state.

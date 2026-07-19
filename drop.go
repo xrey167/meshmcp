@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net"
 	"os"
@@ -31,7 +32,7 @@ import (
 // mid-transfer), gated by the receiver's sender ACL, and audited (a content
 // hash of every received file lands in the ledger). No cloud, no open ports.
 //
-//	meshmcp drop <peer-ip:port> <file...>     send files to a peer
+//	meshmcp drop <peer-ip:port> <path...>     send files or directories to a peer
 //	meshmcp drop --config drop.yaml           run a drop receiver
 //
 // The transfer wire is a stream of per-file records:
@@ -64,42 +65,83 @@ type recvInfo struct {
 	Path   string // where it was installed on disk
 }
 
-// sendFiles streams each path to w as header + content + trailer records.
+// sendFiles streams each path to w as header + content + trailer records. A
+// path that is a directory is walked recursively; each file is sent with a
+// name relative to the directory's parent, so the tree (e.g. "photos/a.jpg")
+// is reproduced on the receiver. The receiver already creates parent
+// directories and rejects path traversal (see sanitizeDest / recvOne).
 func sendFiles(w io.Writer, paths []string) error {
 	bw := bufio.NewWriter(w)
 	for _, p := range paths {
+		p = filepath.Clean(p)
 		fi, err := os.Stat(p)
 		if err != nil {
 			return fmt.Errorf("stat %s: %w", p, err)
 		}
 		if fi.IsDir() {
-			return fmt.Errorf("%s is a directory (directory drops are not yet supported)", p)
+			if err := sendDir(bw, p); err != nil {
+				return err
+			}
+			continue
 		}
-		f, err := os.Open(p)
-		if err != nil {
-			return fmt.Errorf("open %s: %w", p, err)
-		}
-		hdr := dropHeader{Name: filepath.Base(p), Size: fi.Size(), Mode: uint32(fi.Mode().Perm())}
-		hb, _ := json.Marshal(hdr)
-		if _, err := bw.Write(append(hb, '\n')); err != nil {
-			f.Close()
-			return err
-		}
-		h := sha256.New()
-		n, err := io.CopyN(io.MultiWriter(bw, h), f, fi.Size())
-		f.Close()
-		if err != nil {
-			return fmt.Errorf("read %s: %w", p, err)
-		}
-		if n != fi.Size() {
-			return fmt.Errorf("%s: short read (%d of %d bytes)", p, n, fi.Size())
-		}
-		tb, _ := json.Marshal(dropTrailer{SHA256: hex.EncodeToString(h.Sum(nil))})
-		if _, err := bw.Write(append(tb, '\n')); err != nil {
+		if err := sendOneFile(bw, p, filepath.Base(p), fi); err != nil {
 			return err
 		}
 	}
 	return bw.Flush()
+}
+
+// sendDir walks dir and streams every regular file under it, naming each by
+// its path relative to dir's parent so the directory name is preserved.
+// Non-regular entries (symlinks, devices) are skipped, so a drop never follows
+// a link out of the tree.
+func sendDir(bw *bufio.Writer, dir string) error {
+	root := filepath.Dir(dir)
+	return filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !d.Type().IsRegular() {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		fi, err := d.Info()
+		if err != nil {
+			return err
+		}
+		return sendOneFile(bw, path, filepath.ToSlash(rel), fi)
+	})
+}
+
+// sendOneFile writes one file's header + content + trailer to bw under the
+// given wire name.
+func sendOneFile(bw *bufio.Writer, path, name string, fi os.FileInfo) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", path, err)
+	}
+	defer f.Close()
+	hdr := dropHeader{Name: name, Size: fi.Size(), Mode: uint32(fi.Mode().Perm())}
+	hb, _ := json.Marshal(hdr)
+	if _, err := bw.Write(append(hb, '\n')); err != nil {
+		return err
+	}
+	h := sha256.New()
+	n, err := io.CopyN(io.MultiWriter(bw, h), f, fi.Size())
+	if err != nil {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	if n != fi.Size() {
+		return fmt.Errorf("%s: short read (%d of %d bytes)", path, n, fi.Size())
+	}
+	tb, _ := json.Marshal(dropTrailer{SHA256: hex.EncodeToString(h.Sum(nil))})
+	if _, err := bw.Write(append(tb, '\n')); err != nil {
+		return err
+	}
+	return nil
 }
 
 // placer decides the final on-disk path for a received file given its header
@@ -112,12 +154,50 @@ func dirPlacer(dir string) placer {
 	return func(hdr dropHeader, _ string) (string, error) { return sanitizeDest(dir, hdr.Name) }
 }
 
-// recvFiles parses the stream on r, writing verified files via place. maxBytes
-// (>0) caps any single file. onFile is called once per received file.
-func recvFiles(r io.Reader, place placer, maxBytes int64, onFile func(recvInfo)) error {
-	br := bufio.NewReader(r)
+// maxDropFrameLine bounds a single header/trailer framing line. These are tiny
+// JSON objects, so a hard cap costs nothing and stops a sender from forcing
+// unbounded buffering by streaming bytes without a newline (an OOM vector,
+// since ReadBytes accumulates until the delimiter regardless of buffer size).
+const maxDropFrameLine = 64 << 10 // 64 KiB
+
+// dropLimits bounds a single transfer. A zero field means "unlimited" (used by
+// tests); the receiver daemon fills in defaults (see loadDropConfig).
+type dropLimits struct {
+	PerFile  int64 // per-file byte cap
+	MaxFiles int   // maximum files in one transfer
+	MaxTotal int64 // maximum aggregate bytes in one transfer
+}
+
+// readDropLine reads one newline-terminated framing line, bounded by
+// maxDropFrameLine so a missing newline cannot exhaust memory. The returned
+// slice includes the trailing '\n' on success (matching bufio.ReadBytes); on a
+// clean end of stream it returns an empty slice with io.EOF.
+func readDropLine(br *bufio.Reader) ([]byte, error) {
+	var buf []byte
 	for {
-		line, err := br.ReadBytes('\n')
+		b, err := br.ReadByte()
+		if err != nil {
+			return buf, err
+		}
+		buf = append(buf, b)
+		if b == '\n' {
+			return buf, nil
+		}
+		if len(buf) > maxDropFrameLine {
+			return buf, fmt.Errorf("drop framing line exceeds %d bytes", maxDropFrameLine)
+		}
+	}
+}
+
+// recvFiles parses the stream on r, writing verified files via place. lim
+// bounds the transfer (per-file, file count, and aggregate bytes). onFile is
+// called once per received file.
+func recvFiles(r io.Reader, place placer, lim dropLimits, onFile func(recvInfo)) error {
+	br := bufio.NewReader(r)
+	var files int
+	var total int64
+	for {
+		line, err := readDropLine(br)
 		if len(line) == 0 && errors.Is(err, io.EOF) {
 			return nil // clean end of stream
 		}
@@ -131,8 +211,16 @@ func recvFiles(r io.Reader, place placer, maxBytes int64, onFile func(recvInfo))
 		if hdr.Size < 0 {
 			return fmt.Errorf("bad file size %d", hdr.Size)
 		}
-		if maxBytes > 0 && hdr.Size > maxBytes {
-			return fmt.Errorf("file %q is %d bytes, over the %d-byte limit", hdr.Name, hdr.Size, maxBytes)
+		if lim.PerFile > 0 && hdr.Size > lim.PerFile {
+			return fmt.Errorf("file %q is %d bytes, over the %d-byte limit", hdr.Name, hdr.Size, lim.PerFile)
+		}
+		files++
+		if lim.MaxFiles > 0 && files > lim.MaxFiles {
+			return fmt.Errorf("transfer exceeds the %d-file limit", lim.MaxFiles)
+		}
+		total += hdr.Size
+		if lim.MaxTotal > 0 && total > lim.MaxTotal {
+			return fmt.Errorf("transfer exceeds the %d-byte aggregate limit", lim.MaxTotal)
 		}
 		info, err := recvOne(br, place, hdr)
 		if err != nil {
@@ -163,7 +251,7 @@ func recvOne(br *bufio.Reader, place placer, hdr dropHeader) (recvInfo, error) {
 		return recvInfo{}, err
 	}
 
-	line, err := br.ReadBytes('\n')
+	line, err := readDropLine(br)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return recvInfo{}, fmt.Errorf("read trailer: %w", err)
 	}
@@ -350,7 +438,7 @@ func dropReceive(cfgPath string) error {
 			}
 		}
 	}
-	srv := session.NewServer(newDropFactory(place, cfg.MaxBytes, audit), 2*time.Minute, log.Printf)
+	srv := session.NewServer(newDropFactory(place, cfg.limits(), audit), 2*time.Minute, log.Printf)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -369,12 +457,12 @@ func dropReceive(cfgPath string) error {
 
 // newDropFactory returns a session backend factory whose backends receive a
 // dropped file stream, verify each hash, place each file via place, and audit.
-func newDropFactory(place placer, maxBytes int64, audit *policy.AuditLog) session.BackendFactory {
+func newDropFactory(place placer, lim dropLimits, audit *policy.AuditLog) session.BackendFactory {
 	return func(meta session.Meta) (session.Backend, error) {
 		pr, pw := io.Pipe()
 		d := &dropSink{pw: pw, done: make(chan struct{})}
 		go func() {
-			err := recvFiles(pr, place, maxBytes, func(fi recvInfo) {
+			err := recvFiles(pr, place, lim, func(fi recvInfo) {
 				log.Printf("received %q (%d bytes, sha256 %s) from %s", fi.Name, fi.Bytes, fi.SHA256, meta.PeerFQDN)
 				if audit != nil {
 					audit.Append(policy.AuditRecord{
@@ -445,10 +533,25 @@ type DropConfig struct {
 	ListenPort int        `yaml:"listen_port"`
 	Dir        string     `yaml:"dir"`       // destination directory for received files
 	Allow      []string   `yaml:"allow"`     // sender ACL: FQDN globs or "pubkey:<key>"; empty = any mesh peer
-	AuditLog   string     `yaml:"audit_log"` // JSONL hash-chained log; one record per received file
-	MaxBytes   int64      `yaml:"max_bytes"` // per-file size cap (0 = unlimited)
-	CAS        bool       `yaml:"cas"`       // store received files by content hash (dedup) and serve `fetch`
-	FetchPort  int        `yaml:"fetch_port"` // if >0 and cas, serve fetch-by-hash on this mesh port
+	AuditLog     string   `yaml:"audit_log"`      // JSONL hash-chained log; one record per received file
+	MaxBytes     int64    `yaml:"max_bytes"`      // per-file size cap (0 = unlimited)
+	MaxFiles     int      `yaml:"max_files"`      // files per transfer (<=0 = default)
+	MaxTotalBytes int64   `yaml:"max_total_bytes"` // aggregate bytes per transfer (<=0 = default)
+	CAS          bool     `yaml:"cas"`            // store received files by content hash (dedup) and serve `fetch`
+	FetchPort    int      `yaml:"fetch_port"`     // if >0 and cas, serve fetch-by-hash on this mesh port
+}
+
+// limits returns the effective per-transfer bounds, applying defaults so a
+// receiver daemon is never unbounded on file count or aggregate size.
+func (c *DropConfig) limits() dropLimits {
+	lim := dropLimits{PerFile: c.MaxBytes, MaxFiles: c.MaxFiles, MaxTotal: c.MaxTotalBytes}
+	if lim.MaxFiles <= 0 {
+		lim.MaxFiles = 100_000
+	}
+	if lim.MaxTotal <= 0 {
+		lim.MaxTotal = 100 << 30 // 100 GiB
+	}
+	return lim
 }
 
 func loadDropConfig(path string) (*DropConfig, error) {

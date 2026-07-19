@@ -25,13 +25,20 @@ meshmcp is an **identity-native control plane for agent-to-tool (MCP) traffic**.
 | `capabilitycmd.go` | `capability keygen` / `capability issue` — mint authority keys and short-lived signed tool grants. |
 | `secretscmd.go` | `secrets check` — validate the credential broker config (never prints values). |
 | `insight.go` | `insight profile/recommend/simulate/detect` — the firewall's read side (delegates to `insight/`). |
-| `mcpapp.go` | `mcp` — run meshmcp *itself* as an MCP stdio server so Claude Code / Codex can operate the mesh. |
+| `mcpapp.go` | `mcp` — run meshmcp *itself* as an MCP stdio server so Claude Code / Codex can operate the mesh (incl. the `air_*` tools). |
 | `hookcmd.go` | `hook` — the client-hook firewall (F33): a PreToolUse/PostToolUse/prompt adapter for Claude Code / Cursor / Codex that governs *every* local tool call by policy + DLP + taint + audit (`hook install` prints the settings snippet). |
 | `httppolicy.go` | `httpEnforcer` — per-tool policy + audit for HTTP backends (F16), reusing `policy.Engine`. |
 | `budgetcmd.go` · `statuscmd.go` · `doctorcmd.go` · `configcmd.go` | `budget` / `status` / `doctor` / `config validate` — observability + pre-flight over the audit ledger and config. |
 | `commands.go` · `auditsink.go` · `httpserve.go` | Plugin subcommand registry (`plugins`, F13/S40); webhook `AuditSink` (F15/S42); hardened loopback HTTP server (S25/S27). |
-| `agent.go` | `agent --role …` — demo agent apps (reader/fetcher/billing/analyst) each with their own mesh identity. |
+| `agent.go` | `agent --role …` — demo agent apps (reader/fetcher/billing/analyst) each with their own mesh identity; `--steer-port` adds a steer inbox (P1). |
+| `air.go` · `airserve.go` · `airworkflow.go` | **Air · Steer** CLI: `air sessions/steer/launch/agent-steer/workflow/serve` — drive live work over the mesh (see `docs/AIR.md`, `docs/AIR-STEER.md`). |
+| `aircontrol.go` | The gateway Air control endpoint (`/v1/sessions`, `/v1/steer`) served by `serve` when a `control:` block is set. |
+| `steerenvelope.go` · `steerinbox.go` | The agent steer inbox: envelope wire type + the drop-receiver-style factory that feeds `runAgentLoop`. |
+| `pushwake.go` | Push-wake seam: device registry + `Notifier` (vendor APNs/FCM pluggable), wired into `approvals`. |
+| `drop.go` · `push.go` · `cas.go` · `peers.go` | AirDrop payload layer: `drop` / `push` / `fetch` / `peers`, resumable + audited. |
 | `probe.go` · `replay.go` | `probe` (handshake diagnostic) and `replay` (re-issue a traced session and diff). |
+| `pubsub.go` · `pubsubwire.go` | `pubsub` (identity-gated event-bus daemon), `publish`, `subscribe`; the wire protocol + `session.Backend` adapter over the `pubsub/` core. |
+| `hooks.go` | Gateway event hooks: publishes each policy decision (`policy.EventHook`) onto an embedded event bus and/or a webhook — observability, decoupled from enforcement (never blocks a decision). |
 | `README.md` · `LICENSE` | Project overview; proprietary license (© Rey Darius). |
 | `index.html` | Published GitHub Pages site, merged to the code root (Pages still deploys from the `gh-pages` branch). |
 
@@ -44,9 +51,11 @@ meshmcp is an **identity-native control plane for agent-to-tool (MCP) traffic**.
 | `session/` | Resumable, exactly-once session layer that survives roaming and gateway failover (see `session/AGENTS.md`). |
 | `secrets/` | Identity-gated credential broker (`{{secret:NAME}}` injection) (see `secrets/AGENTS.md`). |
 | `insight/` | Audit → policy: observe, recommend, simulate, detect (see `insight/AGENTS.md`). |
+| `pubsub/` | The identity-native event fabric: deny-by-default topic ACL, taint containment, hash-chained events, bounded fan-out (see `pubsub/AGENTS.md`). |
 | `control/` | Managed control plane: enrollment, policy store (see `control/AGENTS.md`). |
 | `federation/` | Cross-org tool bridging with identity mapping (see `federation/AGENTS.md`). |
 | `registry/` | File-based service registry for router discovery (see `registry/AGENTS.md`). |
+| `mobile/` | gomobile-bindable `Mesh`/`Conn`/`Approvals` surface for an iOS/Android app (`gomobile bind ./mobile`). |
 | `cmd/` | Standalone MCP servers used as backends: demo (mcpserver/echo/http), payload (kg, vectors, memory), and the Wave-2 dark backends `vault` (F26), `scheduler` (F27), `bus` (F28) (see `cmd/AGENTS.md`). |
 | `docs/` | Design docs and open specs (see `docs/AGENTS.md`). |
 | `examples/` | Ready-to-adapt gateway configs and the HITL bridge (see `examples/AGENTS.md`). |

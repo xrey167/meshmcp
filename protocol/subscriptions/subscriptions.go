@@ -4,7 +4,9 @@
 // stream endpoint.
 //
 // This is a draft-era pattern and is NOT part of the 2025-06-18 schema.ts the
-// protocol/* base models are generated from.
+// protocol/* base models are generated from. The dependency-free server
+// framework in mcp/ serves this pattern (see mcp/subscriptions.go); these
+// types are the canonical wire model it mirrors.
 package subscriptions
 
 import "meshmcp/protocol/base"

@@ -79,6 +79,11 @@ func cmdServe(args []string) error {
 	var listeners []net.Listener
 	var auditLogs []*policy.AuditLog
 
+	// Live resumable session servers by backend name — the Air control endpoint
+	// (Sessions/Steer) reads this. Registered as each resumable backend starts.
+	servers := map[string]*session.Server{}
+	var serversMu sync.Mutex
+
 	// A gateway-wide shared audit ledger (one hash chain across all backends),
 	// so a unified live view reads a single, verifiable stream.
 	var sharedAudit *policy.AuditLog
@@ -95,6 +100,29 @@ func cmdServe(args []string) error {
 		}
 		auditLogs = append(auditLogs, sharedAudit)
 		log.Printf("shared audit ledger: %s", cfg.AuditLog)
+	}
+
+	// Optional gateway event hooks: publish every policy decision onto the
+	// event bus and/or a webhook. Kept as a nil interface when disabled so the
+	// filter never invokes it.
+	var hookSink policy.EventHook
+	var gatewayHookSink *gatewayHooks
+	if cfg.Hooks != nil {
+		gh, err := newGatewayHooks(cfg.Hooks, client, sharedAudit)
+		if err != nil {
+			return fmt.Errorf("hooks: %w", err)
+		}
+		gatewayHookSink = gh
+		defer gh.Close() // safety net; also closed explicitly before the audit flush
+		hookSink = gh
+		note := []string{}
+		if cfg.Hooks.Bus != nil {
+			note = append(note, fmt.Sprintf("bus on port %d", cfg.Hooks.Bus.ListenPort))
+		}
+		if cfg.Hooks.Webhook != nil && cfg.Hooks.Webhook.URL != "" {
+			note = append(note, "webhook")
+		}
+		log.Printf("gateway hooks enabled (%s)", strings.Join(note, ", "))
 	}
 
 	for _, b := range cfg.Backends {
@@ -145,7 +173,7 @@ func cmdServe(args []string) error {
 		var factory session.BackendFactory
 		var httpEnf *httpEnforcer
 		if b.HTTP == "" {
-			factory = backendFactory(b, audit, tracer)
+			factory = backendFactory(b, audit, tracer, hookSink)
 		} else if b.Policy != nil {
 			httpEnf = newHTTPEnforcer(b, audit)
 			log.Printf("backend %q: HTTP policy enforcement on (%d rules)", b.Name, len(b.Policy.Rules))
@@ -158,11 +186,37 @@ func cmdServe(args []string) error {
 			case b.HTTP != "":
 				serveHTTP(client, b, ln, httpEnf)
 			case b.Resumable:
-				serveResumable(client, b, ln, shutdown, factory)
+				serveResumable(client, b, ln, shutdown, factory, func(srv *session.Server) {
+					serversMu.Lock()
+					servers[b.Name] = srv
+					serversMu.Unlock()
+				})
 			default:
 				serveStdio(client, b, ln, shutdown, factory)
 			}
 		}(b, ln, factory, httpEnf)
+	}
+
+	// Optionally serve the Air control endpoint: list and steer live sessions
+	// across all resumable backends, gated by identity and audited.
+	if cfg.Control != nil && cfg.Control.Port > 0 {
+		ln, err := client.ListenTCP(fmt.Sprintf(":%d", cfg.Control.Port))
+		if err != nil {
+			close(shutdown)
+			for _, l := range listeners {
+				l.Close()
+			}
+			wg.Wait()
+			return fmt.Errorf("control: listen on mesh port %d: %w", cfg.Control.Port, err)
+		}
+		listeners = append(listeners, ln)
+		ctl := &gatewayAirControl{servers: servers, mu: &serversMu}
+		identify := func(r *http.Request) (string, string) { return peerIdentityStr(client, r.RemoteAddr) }
+		allow := newACL(cfg.Control.Allow)
+		h := airControlHandler(ctl, identify, allow, airAuditFunc(sharedAudit))
+		log.Printf("Air control endpoint on mesh port %d (GET /v1/sessions · POST /v1/steer)", cfg.Control.Port)
+		wg.Add(1)
+		go func() { defer wg.Done(); _ = http.Serve(ln, h) }()
 	}
 
 	sig := make(chan os.Signal, 1)
@@ -175,6 +229,12 @@ func cmdServe(args []string) error {
 		ln.Close()
 	}
 	wg.Wait()
+	// Close the hook bus before sealing the ledger: its broker writes subscribe
+	// records into the shared audit, so it must stop before the final flush or a
+	// last-moment bus session could land records after the sealed checkpoint.
+	if gatewayHookSink != nil {
+		gatewayHookSink.Close()
+	}
 	// Seal the final partial checkpoint batch so no audit records are left
 	// uncommitted by a clean shutdown.
 	for _, a := range auditLogs {
@@ -224,7 +284,10 @@ func serveStdio(client *embed.Client, b *Backend, ln net.Listener, shutdown <-ch
 // backend subprocess is kept alive across client reconnects and missed
 // messages are replayed, so the logical MCP session survives the mesh
 // connection dropping (peer roaming, sleep/wake, relay switch).
-func serveResumable(client *embed.Client, b *Backend, ln net.Listener, shutdown <-chan struct{}, factory session.BackendFactory) {
+// serveResumable runs the resumable accept loop until the listener closes. If
+// register is non-nil it is called with the *session.Server before the loop
+// starts, so the caller can wire it into the Air control endpoint (Sessions/Steer).
+func serveResumable(client *embed.Client, b *Backend, ln net.Listener, shutdown <-chan struct{}, factory session.BackendFactory, register func(*session.Server)) {
 	checker := newACL(b.Allow)
 	ttl := time.Duration(b.SessionTTLSeconds) * time.Second
 	srv := session.NewServer(factory, ttl, func(format string, a ...any) {
@@ -249,6 +312,9 @@ func serveResumable(client *embed.Client, b *Backend, ln net.Listener, shutdown 
 			}
 			log.Printf("backend %q: session migration enabled via %s (mode=%s)", b.Name, b.SessionStore, modeName)
 		}
+	}
+	if register != nil {
+		register(srv)
 	}
 
 	for {
@@ -289,7 +355,7 @@ func bridgeConn(conn net.Conn, backend session.Backend) {
 // backendFactory builds the per-session backend for a stdio backend. It
 // wraps the subprocess with the inspection filter when a policy is set OR a
 // tracer is configured; with neither, the raw subprocess is used.
-func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer) session.BackendFactory {
+func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer, hook policy.EventHook) session.BackendFactory {
 	exec := session.ExecBackendFactory(b.Stdio[0], b.Stdio[1:], os.Environ())
 	if b.Policy == nil && tracer == nil && b.Capabilities == nil {
 		return exec
@@ -392,6 +458,9 @@ func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer) s
 		}
 		if shadowHook != nil {
 			f.AddDecisionHook(shadowHook)
+		}
+		if hook != nil {
+			f.SetEventHook(hook)
 		}
 		return f, nil
 	}

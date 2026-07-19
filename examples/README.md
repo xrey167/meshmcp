@@ -19,6 +19,7 @@ files are relative to the directory you run `meshmcp` from.
 | `router.yaml` | `router` | Aggregate upstreams into one namespaced endpoint; one upstream is a replica set (load-balanced + failover). |
 | `router-failover.yaml` | `router` | An upstream with a dead replica first — the router discovers + routes via failover. |
 | `orchestrate.yaml` | `orchestrate` | A server-to-server node whose `research` tool calls another server's tools over the mesh. |
+| `air-workflow.yaml` | `air workflow` | An [Air](../docs/AIR.md) declarative workflow: launch agents, steer a session, call a tool — run in order, governed + audited. |
 
 ## Quick start
 
@@ -64,6 +65,22 @@ meshmcp insight detect    ./today.jsonl --baseline ./last-week.jsonl # drift →
 
 # Run the managed control plane (enrollment, registry, policy distribution)
 meshmcp control --registry ./registry --policies ./policies --enroll-key <key>
+```
+
+## Air · Steer — drive live work
+
+```bash
+# In the gateway config, add a `control:` block to enable the session endpoint:
+#   control: { port: 9600 }
+# then, from any mesh peer:
+meshmcp air sessions 100.x.y.z:9600                 # list live resumable sessions
+meshmcp air steer    100.x.y.z:9600 --backend fs --session <id> --param text="focus"
+meshmcp air launch   --role reader 100.x.y.z:9101   # spawn a new agent identity
+meshmcp air workflow --dry-run examples/air-workflow.yaml   # validate a workflow
+meshmcp air serve    --port 9800 --control 100.x.y.z:9600   # the live Air web page
+
+# Steer a running agent that opted into an inbox (meshmcp agent --steer-port 9120 ...)
+meshmcp air agent-steer 100.x.y.z:9120 --type nudge --text "prioritize the API"
 ```
 
 See the top-level `README.md` for the full command reference,

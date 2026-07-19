@@ -28,6 +28,7 @@ properties at once.
 | Authorization | Per-tool + per-method ACLs by identity, denied inline | Live: `echo` denied for a peer, others pass |
 | Accountability | Structured per-call audit + full both-directions trace | Live: JSONL deny record; trace with payloads |
 | Aggregation | One endpoint = namespaced union; LB, failover, discovery, bidirectional MCP | `-race` tests + live router routing/failover |
+| Payload + Steer (Air) | AirDrop files, push, fetch; **steer** a live agent/session/task; launch/workflow | `-race` tests: `tasks/steer`, line-safe session steer, agent inbox; see [AIR.md](AIR.md) |
 
 ## Where it goes — grounded
 

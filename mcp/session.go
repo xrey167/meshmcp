@@ -5,13 +5,26 @@ import (
 	"context"
 	"encoding/json"
 	"sync"
+	"time"
 )
+
+// writeTimeout bounds a single client write. Without it, a client that stops
+// reading (TCP zero-window) would block a Flush forever while holding the
+// connection mutex, stalling the request loop and any notification fan-out. On
+// transports that support deadlines (net.Conn) a stalled write fails and the
+// connection is torn down; on pipes/stdio (no deadline support) this is a no-op.
+const writeTimeout = 15 * time.Second
+
+type writeDeadliner interface {
+	SetWriteDeadline(time.Time) error
+}
 
 // outConn serializes all writes to the client stream (responses and
 // server-initiated notifications from any goroutine) behind one mutex.
 type outConn struct {
 	mu sync.Mutex
 	bw *bufio.Writer
+	wd writeDeadliner // nil when the transport has no deadline support
 }
 
 func (c *outConn) send(v any) error {
@@ -21,6 +34,10 @@ func (c *outConn) send(v any) error {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.wd != nil {
+		_ = c.wd.SetWriteDeadline(time.Now().Add(writeTimeout))
+		defer func() { _ = c.wd.SetWriteDeadline(time.Time{}) }()
+	}
 	if _, err := c.bw.Write(b); err != nil {
 		return err
 	}

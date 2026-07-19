@@ -103,6 +103,23 @@ func (c *Checkpointer) add(seq int, hashHex string) {
 	}
 }
 
+// Add records a record's hash (hex) at seq into the current checkpoint batch,
+// emitting a signed checkpoint when the batch reaches the interval. It is the
+// exported entry point for hash-chained logs outside this package — e.g. the
+// pubsub event log — that want the same signed Merkle checkpoints.
+func (c *Checkpointer) Add(seq int, hashHex string) { c.add(seq, hashHex) }
+
+// SeedFrom resumes a checkpoint chain after a restart: the next emitted
+// checkpoint takes ordinal cpSeq+1 and links to prevCPHash. Seed it from the
+// tail of an existing checkpoints file so restarts continue one verifiable
+// chain of checkpoints.
+func (c *Checkpointer) SeedFrom(cpSeq int, prevCPHash string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cpSeq = cpSeq
+	c.prevCP = prevCPHash
+}
+
 // Flush emits a checkpoint for any buffered records. lastSeq/lastHash identify
 // the final record; if nothing is buffered it is a no-op.
 func (c *Checkpointer) Flush(lastSeq int, lastHash string) {
