@@ -297,19 +297,20 @@ the default**.
 
 ## 7 · Roadmap
 
-Mirrors the staged path in [docs/MOBILE.md §7](MOBILE.md), Air-branded:
+The Air surface is built. What's left is genuinely external — it needs credentials or a
+device this repo can't exercise:
 
 1. **Done — the full Air surface.** `discover` / `drop` / `push` / `fetch` / `approve`, and
    **Steer/Launch**: the P1–P4 primitives ([AIR-STEER.md](AIR-STEER.md)), the gateway control
-   endpoint, the `air_*` assistant tools, and the `meshmcp air` CLI (`sessions` · `steer` ·
-   `launch` · `agent-steer` · `workflow`). Usable end-to-end today.
-2. **Next — a served Air page + the remaining wrapper tools.** A `meshmcp air` command that
-   serves the mockup on a mesh port (reusing the `approvals`/`room` pattern), plus the
-   `air_peers`/`air_push`/`air_fetch` assistant tools.
-3. **Then — push-wake.** The device-registration + APNs/FCM notify seam so a phone *buzzes*
-   on a pending drop, approval, or steer instead of polling ([MOBILE.md §4](MOBILE.md)).
-4. **Later — the native Air app.** `gomobile`-bound identity + resumable sessions, Face-ID
-   approvals, receive/share sheets ([MOBILE.md §3](MOBILE.md)).
+   endpoint, the `air_*` assistant tools, the `meshmcp air` CLI (`sessions` · `steer` ·
+   `launch` · `agent-steer` · `workflow` · `serve`), the served live web page, the push-wake
+   seam, and the `mobile/` binding package. Usable end-to-end today.
+2. **External — vendor push delivery.** Implement the `Notifier` interface with the APNs/FCM
+   HTTP call (needs Apple/Google credentials) and pass it instead of `logNotifier`
+   ([MOBILE.md §4](MOBILE.md)). Everything up to the delivery already runs.
+3. **External — the shipped mobile app.** `gomobile bind ./mobile` → an iOS `.xcframework` /
+   Android `.aar`, then a thin native shell (Face-ID approve, receive/share sheets). Needs the
+   mobile toolchain + a device ([MOBILE.md §3](MOBILE.md)).
 
 ## Reference points
 
