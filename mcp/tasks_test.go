@@ -21,8 +21,9 @@ type msg struct {
 
 // serverHarness drives a Server over pipes and collects its output.
 type serverHarness struct {
-	in   *io.PipeWriter
-	msgs chan msg
+	in      *io.PipeWriter
+	msgs    chan msg
+	pending []msg // messages a wait passed over, kept for a later wait
 }
 
 func startHarness(t *testing.T, s *Server) *serverHarness {
@@ -53,43 +54,51 @@ func (h *serverHarness) send(t *testing.T, s string) {
 	}
 }
 
-// waitResponse returns the response whose id equals the given number.
-func (h *serverHarness) waitResponse(t *testing.T, id int) msg {
+// match returns the first message (from the buffer, then the live stream)
+// satisfying pred, retaining every message it passes over so a later wait can
+// still find it. A response and a notification can be written in either order
+// (the server serializes writes but does not order them across goroutines), so
+// a waiter must not discard the message another waiter is about to ask for.
+func (h *serverHarness) match(t *testing.T, what string, pred func(msg) bool) msg {
 	t.Helper()
-	want := fmt.Sprintf("%d", id)
+	for i, m := range h.pending {
+		if pred(m) {
+			h.pending = append(h.pending[:i], h.pending[i+1:]...)
+			return m
+		}
+	}
 	deadline := time.After(5 * time.Second)
 	for {
 		select {
 		case m, ok := <-h.msgs:
 			if !ok {
-				t.Fatalf("stream closed waiting for response %d", id)
+				t.Fatalf("stream closed waiting for %s", what)
 			}
-			if len(m.ID) > 0 && string(m.ID) == want {
+			if pred(m) {
 				return m
 			}
+			h.pending = append(h.pending, m) // keep it for a later wait
 		case <-deadline:
-			t.Fatalf("timed out waiting for response %d", id)
+			t.Fatalf("timed out waiting for %s", what)
 		}
 	}
+}
+
+// waitResponse returns the response whose id equals the given number.
+func (h *serverHarness) waitResponse(t *testing.T, id int) msg {
+	t.Helper()
+	want := fmt.Sprintf("%d", id)
+	return h.match(t, "response "+want, func(m msg) bool {
+		return len(m.ID) > 0 && string(m.ID) == want
+	})
 }
 
 // waitNotification returns the next notification with the given method.
 func (h *serverHarness) waitNotification(t *testing.T, method string) msg {
 	t.Helper()
-	deadline := time.After(5 * time.Second)
-	for {
-		select {
-		case m, ok := <-h.msgs:
-			if !ok {
-				t.Fatalf("stream closed waiting for %s", method)
-			}
-			if len(m.ID) == 0 && m.Method == method {
-				return m
-			}
-		case <-deadline:
-			t.Fatalf("timed out waiting for notification %s", method)
-		}
-	}
+	return h.match(t, "notification "+method, func(m msg) bool {
+		return len(m.ID) == 0 && m.Method == method
+	})
 }
 
 func taskServer() *Server {
