@@ -26,6 +26,10 @@ meshmcp is an **identity-native control plane for agent-to-tool (MCP) traffic**.
 | `secretscmd.go` | `secrets check` — validate the credential broker config (never prints values). |
 | `insight.go` | `insight profile/recommend/simulate/detect` — the firewall's read side (delegates to `insight/`). |
 | `mcpapp.go` | `mcp` — run meshmcp *itself* as an MCP stdio server so Claude Code / Codex can operate the mesh. |
+| `hookcmd.go` | `hook` — the client-hook firewall (F33): a PreToolUse/PostToolUse/prompt adapter for Claude Code / Cursor / Codex that governs *every* local tool call by policy + DLP + taint + audit (`hook install` prints the settings snippet). |
+| `httppolicy.go` | `httpEnforcer` — per-tool policy + audit for HTTP backends (F16), reusing `policy.Engine`. |
+| `budgetcmd.go` · `statuscmd.go` · `doctorcmd.go` · `configcmd.go` | `budget` / `status` / `doctor` / `config validate` — observability + pre-flight over the audit ledger and config. |
+| `commands.go` · `auditsink.go` · `httpserve.go` | Plugin subcommand registry (`plugins`, F13/S40); webhook `AuditSink` (F15/S42); hardened loopback HTTP server (S25/S27). |
 | `agent.go` | `agent --role …` — demo agent apps (reader/fetcher/billing/analyst) each with their own mesh identity. |
 | `probe.go` · `replay.go` | `probe` (handshake diagnostic) and `replay` (re-issue a traced session and diff). |
 | `README.md` · `LICENSE` | Project overview; proprietary license (© Rey Darius). |
@@ -43,7 +47,7 @@ meshmcp is an **identity-native control plane for agent-to-tool (MCP) traffic**.
 | `control/` | Managed control plane: enrollment, policy store (see `control/AGENTS.md`). |
 | `federation/` | Cross-org tool bridging with identity mapping (see `federation/AGENTS.md`). |
 | `registry/` | File-based service registry for router discovery (see `registry/AGENTS.md`). |
-| `cmd/` | Small standalone MCP servers used as test/demo backends (see `cmd/AGENTS.md`). |
+| `cmd/` | Standalone MCP servers used as backends: demo (mcpserver/echo/http), payload (kg, vectors, memory), and the Wave-2 dark backends `vault` (F26), `scheduler` (F27), `bus` (F28) (see `cmd/AGENTS.md`). |
 | `docs/` | Design docs and open specs (see `docs/AGENTS.md`). |
 | `examples/` | Ready-to-adapt gateway configs and the HITL bridge (see `examples/AGENTS.md`). |
 | `demo/` | Live-demo run scripts (see `demo/AGENTS.md`). |

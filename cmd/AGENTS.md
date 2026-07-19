@@ -12,6 +12,10 @@ Standalone MCP servers used as **test and demo backends** behind the gateway. Th
 | `mcpecho/` | Minimal resumable-test stdio MCP server (see `mcpecho/AGENTS.md`). |
 | `mcphttp/` | Minimal Streamable-HTTP-style MCP server (see `mcphttp/AGENTS.md`). |
 | `mcpserver/` | The full demo stdio server, built to `mcpserver.exe` (see `mcpserver/AGENTS.md`). |
+| `kg/` · `vectors/` · `memory/` | The payload backends: provenance knowledge graph, zero-exposure RAG, agent-memory fabric. |
+| `vault/` | **F26** — mesh secrets vault: set/rotate/delete/list secrets into the broker's store; no `get` tool (see `vault/AGENTS.md`). |
+| `scheduler/` | **F27** — governed scheduler/cron: identity-attributed scheduled tool calls, drained by a worker (see `scheduler/AGENTS.md`). |
+| `bus/` | **F28** — governed event bus: identity-stamped pub/sub with a global cursor (see `bus/AGENTS.md`). |
 
 ## For AI Agents
 

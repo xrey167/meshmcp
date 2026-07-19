@@ -20,7 +20,13 @@ The enforcement core. `policy` turns the gateway into an MCP-aware firewall: it 
 | `merkle.go` · `sign.go` · `checkpoint.go` · `verify_signed.go` | RFC-6962-style Merkle tree, Ed25519 `Checkpoint` signing, external `Anchor` witness, and signed-log verification — the non-repudiation layer. |
 | `trace.go` | `TraceOptions` + tracer: gateway-wide JSON trace of every message (both directions). |
 | `replay.go` | Reconstruct client→server requests from a trace (`ReplayReq`) for `meshmcp replay`. |
-| `analyze.go` | `PeerStat` aggregation over an audit log (feeds `insight/` and the dashboard). |
+| `analyze.go` | `PeerStat` aggregation over an audit log (feeds `insight/`, the dashboard, `status`/`budget`). |
+| `hook.go` | `DecisionHook` — the plugin decision seam (F13/S39): hooks refine a decision *after* the rule pipeline, **tighten-only** (deny / co-sign / labels, never widen). `applyDecisionHooks` composes them. |
+| `dlp.go` | `PatternDLPHook` — regex DLP as a `DecisionHook` (F18): deny or emit a label on a content match in tool arguments. |
+| `shadow.go` | `ShadowHook` — a candidate policy evaluated alongside the enforced one; logs divergences without changing enforcement (F24). |
+| `revocation.go` | `FileRevocation` — a directory-backed capability revocation store (F21); plugs into `CapabilityVerifier.WithRevocation`. |
+| `validate.go` | `Policy.Validate()` — compiles every glob, parses every duration/window/TZ, rejects `rate.max<=0` at config load (S16/S17/S28). |
+| `sink` (in `audit.go`) | `AuditSink` — observer sinks (SIEM/webhook/OTel) that see each committed record; the chain stays the control (F13/S38, F15). |
 
 ## For AI Agents
 

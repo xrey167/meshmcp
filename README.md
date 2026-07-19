@@ -230,13 +230,19 @@ Watch it live with `meshmcp dash --audit audit.jsonl`; re-run a past session wit
 | `ls · call · read · prompt <peer:port>` | Drive tools / resources / prompts from the terminal. |
 | `insight profile·recommend·simulate·detect` | Turn the audit stream into policy; detect drift. |
 | `mcp [flags]` | Run meshmcp **as an MCP server** — add it to Claude Code / Codex to operate the mesh (network, call tools, run, approve). |
+| `hook --client <c> --config <f>` | **Client-hook firewall** (F33): govern *every* local tool call in Claude Code / Cursor / Codex by policy + DLP + taint + audit — `hook install` prints the settings snippet. |
 | `audit verify <f> [--checkpoints --pubkey]` | Verify a log: hash chain, or signatures + Merkle. |
 | `audit keygen [--out f]` | Generate a gateway Ed25519 signing key. |
+| `audit export --in <f>` · `audit receipt --in <f>` | Export the ledger to CSV; emit a verifiable provenance receipt (what a session's tools produced). |
 | `capability keygen [--out f]` | Generate an Ed25519 authority key backends pin as a trust root. |
 | `capability issue --subject --audience --tool [--ttl]` | Sign a short-lived, subject-bound tool grant (present it with `call --capability @file`). |
+| `capability revoke·list --store <d>` | Revoke a capability id (fails closed everywhere) / list revoked ids. |
 | `approve --store <d> <peer> <tool>` | Human co-sign a held `require_cosign` call from the CLI. |
-| `approvals --store <d>` | Serve the phone-friendly co-sign approver over the mesh (approver = your mesh identity). |
+| `approvals --store <d> [--approver <id>]` | Serve the phone-friendly co-sign approver over the mesh (`--approver` restricts who may approve). |
 | `secrets check --config <f>` | Validate the credential broker config (never prints values). |
+| `status --audit <f>` · `budget --audit <f>` | Roll up a ledger (per-peer/tool/backend + chain verdict); total cost/quota per identity (FinOps). |
+| `config validate --config <f>` · `doctor --config <f>` | Validate a config (globs/windows/enums/DLP) / run pre-flight readiness checks. |
+| `plugins` | List the extensions compiled into this build (F13). |
 | `dash --audit <f>` | Serve the live control dashboard. |
 | `room --audit <f>` | Serve the interactive **Control Room** — live network (servers, agents, decision feed) **plus a console**: list/call tools over the mesh, a governed `run_command` terminal, and (opt-in `--local-shell`) a raw shell. |
 | `agent --role <r> <peer:port>` | Run a demo agent app (reader/fetcher/billing/analyst) with its own mesh identity. |
