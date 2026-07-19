@@ -3,7 +3,9 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"encoding/csv"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -29,8 +31,10 @@ func cmdAudit(args []string) error {
 		return auditExport(args[1:])
 	case "receipt":
 		return auditReceipt(args[1:])
+	case "attest":
+		return auditAttest(args[1:])
 	default:
-		return fmt.Errorf("meshmcp audit: unknown subcommand %q (want: verify, keygen, export, receipt)", args[0])
+		return fmt.Errorf("meshmcp audit: unknown subcommand %q (want: verify, keygen, export, receipt, attest)", args[0])
 	}
 }
 
@@ -237,4 +241,119 @@ func auditVerifySigned(logPath, cpPath, pubkey string) error {
 	fmt.Fprintf(os.Stderr, "FAILED  %d records, %d checkpoint(s) read\n", res.Records, res.Checkpoints)
 	fmt.Fprintf(os.Stderr, "        %s\n", res.Reason)
 	return fmt.Errorf("audit log %s failed signed verification", logPath)
+}
+
+// auditAttest builds a compliance & attestation pack (F32): a single
+// self-describing JSON bundle that references and hashes the constituent
+// evidence — the audit log, its signed checkpoints, the effective policy — and
+// records the verification verdict (signed Merkle when checkpoints+pubkey are
+// given, else the hash chain). Because every artifact is hashed and the chain
+// head is included, the bundle is independently verifiable with
+// `meshmcp audit verify` and the public key alone — "prove what the fleet did,
+// to an auditor, with math."
+func auditAttest(args []string) error {
+	fs := flag.NewFlagSet("audit attest", flag.ContinueOnError)
+	auditPath := fs.String("audit", "", "audit log (JSONL) (required)")
+	cpPath := fs.String("checkpoints", "", "signed checkpoint file (enables signed verification)")
+	pubkey := fs.String("pubkey", "", "expected signer public key (hex) to pin against")
+	policyPath := fs.String("policy", "", "effective policy file to include by hash (optional)")
+	out := fs.String("out", "", "write the attestation JSON here (default stdout)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *auditPath == "" {
+		return fmt.Errorf("usage: meshmcp audit attest --audit <file> [--checkpoints <f> --pubkey <hex>] [--policy <f>] [--out <f>]")
+	}
+
+	artifact := func(path string) (map[string]any, error) {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		sum := sha256.Sum256(b)
+		return map[string]any{"path": path, "sha256": hex.EncodeToString(sum[:]), "bytes": len(b)}, nil
+	}
+
+	auditArt, err := artifact(*auditPath)
+	if err != nil {
+		return err
+	}
+
+	// Verify: signed Merkle when checkpoints+pubkey are present, else hash chain.
+	verdict := map[string]any{}
+	if *cpPath != "" {
+		lf, err := os.Open(*auditPath)
+		if err != nil {
+			return err
+		}
+		defer lf.Close()
+		cf, err := os.Open(*cpPath)
+		if err != nil {
+			return err
+		}
+		defer cf.Close()
+		res, verr := policy.VerifySigned(lf, cf, *pubkey)
+		if verr != nil {
+			return fmt.Errorf("verify signed: %w", verr)
+		}
+		verdict = map[string]any{
+			"mode": "signed-merkle", "ok": res.OK, "records": res.Records,
+			"checkpoints": res.Checkpoints, "covered_records": res.CoveredRecords,
+			"signer_pubkey": res.SignerPub, "reason": res.Reason,
+		}
+		cpArt, err := artifact(*cpPath)
+		if err != nil {
+			return err
+		}
+		verdict["checkpoints_artifact"] = cpArt
+	} else {
+		data, err := os.ReadFile(*auditPath)
+		if err != nil {
+			return err
+		}
+		res, _ := policy.VerifyChain(bytes.NewReader(data))
+		verdict = map[string]any{
+			"mode": "hash-chain", "ok": res.OK, "records": res.Count,
+			"head": res.LastHash, "break_seq": res.BreakSeq,
+		}
+	}
+
+	att := map[string]any{
+		"kind":       "meshmcp/attestation",
+		"version":    1,
+		"audit":      auditArt,
+		"verdict":    verdict,
+		"verify_cmd": "meshmcp audit verify " + *auditPath + verifyHint(*cpPath, *pubkey),
+		"note":       "each artifact is hashed; re-verify independently with the command above and match the sha256 values",
+	}
+	if *policyPath != "" {
+		polArt, err := artifact(*policyPath)
+		if err != nil {
+			return err
+		}
+		att["policy"] = polArt
+	}
+
+	b, _ := json.MarshalIndent(att, "", "  ")
+	b = append(b, '\n')
+	if *out == "" {
+		_, err := os.Stdout.Write(b)
+		return err
+	}
+	if err := os.WriteFile(*out, b, 0o644); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "wrote attestation to %s\n", *out)
+	return nil
+}
+
+func verifyHint(cp, pub string) string {
+	if cp == "" {
+		return ""
+	}
+	s := " --checkpoints " + cp
+	if pub != "" {
+		s += " --pubkey " + pub
+	}
+	return s
 }

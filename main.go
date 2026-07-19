@@ -41,6 +41,7 @@ Usage:
   meshmcp audit keygen [--out f]                generate a gateway signing key for audit checkpoints
   meshmcp audit export --in <file>              export an audit ledger to CSV on stdout (for BI/spreadsheets)
   meshmcp audit receipt --in <file> [--peer]    emit a verifiable provenance receipt (what a session's tools produced)
+  meshmcp audit attest --audit <f> [--checkpoints --pubkey --policy]  build a verifiable compliance/attestation bundle
   meshmcp capability keygen [--out f]           generate an Ed25519 authority key backends pin as a trust root
   meshmcp capability issue [flags]              sign a short-lived, subject-bound tool grant (--subject/--audience/--tool)
   meshmcp capability revoke --store <d> <id>    revoke a capability id (fails closed at every gateway sharing the store)
