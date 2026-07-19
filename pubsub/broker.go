@@ -3,6 +3,7 @@ package pubsub
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -11,35 +12,42 @@ import (
 	"meshmcp/policy"
 )
 
+// maxEncodingLen bounds the per-event encoding hint (e.g. "base64"). It is a
+// small enum-like tag, retained and hashed, so it is capped like a label rather
+// than trusting the wire length.
+const maxEncodingLen = 32
+
 // Limits are the resource caps that keep one peer from exhausting the broker.
 // Every cap is a hard bound checked before any allocation, so a hostile or
 // buggy peer cannot drive the broker to unbounded memory or CPU.
 type Limits struct {
-	SubQueue        int     `yaml:"sub_queue"`         // per-subscription delivery buffer (events)
-	MaxSubs         int     `yaml:"max_subs"`          // maximum concurrent subscriptions
-	MaxTopicsPerSub int     `yaml:"max_topics_per_sub"` // maximum topic patterns in one subscription
-	MaxTopicLen     int     `yaml:"max_topic_len"`      // maximum topic/pattern length in bytes
-	MaxPayloadBytes int     `yaml:"max_payload_bytes"`  // maximum event payload size in bytes
-	MaxLabels       int     `yaml:"max_labels"`         // maximum data-flow labels per event
-	MaxSubsPerPeer  int     `yaml:"max_subs_per_peer"`  // maximum concurrent subscriptions per identity
-	Retain          int     `yaml:"retain"`             // events kept for replay-from-sequence
-	PublishRate     float64 `yaml:"publish_rate"`       // per-peer publish+subscribe requests/second (0 = default, <0 = unlimited)
-	PublishBurst    int     `yaml:"publish_burst"`      // per-peer burst ceiling
+	SubQueue          int     `yaml:"sub_queue"`           // per-subscription delivery buffer (events)
+	MaxSubs           int     `yaml:"max_subs"`            // maximum concurrent subscriptions
+	MaxTopicsPerSub   int     `yaml:"max_topics_per_sub"`  // maximum topic patterns in one subscription
+	MaxTopicLen       int     `yaml:"max_topic_len"`       // maximum topic/pattern length in bytes
+	MaxPayloadBytes   int     `yaml:"max_payload_bytes"`   // maximum event payload size in bytes
+	MaxLabels         int     `yaml:"max_labels"`          // maximum data-flow labels per event
+	MaxSubsPerPeer    int     `yaml:"max_subs_per_peer"`   // maximum concurrent subscriptions per identity
+	MaxRetainedTopics int     `yaml:"max_retained_topics"` // maximum distinct topics holding a retained last-value
+	Retain            int     `yaml:"retain"`              // events kept for replay-from-sequence
+	PublishRate       float64 `yaml:"publish_rate"`        // per-peer publish+subscribe requests/second (0 = default, <0 = unlimited)
+	PublishBurst      int     `yaml:"publish_burst"`       // per-peer burst ceiling
 }
 
 // DefaultLimits are conservative caps suitable for a small trusted mesh.
 func DefaultLimits() Limits {
 	return Limits{
-		SubQueue:        256,
-		MaxSubs:         1024,
-		MaxTopicsPerSub: 64,
-		MaxTopicLen:     256,
-		MaxPayloadBytes: 1 << 20, // 1 MiB
-		MaxLabels:       32,
-		MaxSubsPerPeer:  128,
-		Retain:          1024,
-		PublishRate:     200, // per-peer publish+subscribe requests/second; bounded by default
-		PublishBurst:    400,
+		SubQueue:          256,
+		MaxSubs:           1024,
+		MaxTopicsPerSub:   64,
+		MaxTopicLen:       256,
+		MaxPayloadBytes:   1 << 20, // 1 MiB
+		MaxLabels:         32,
+		MaxSubsPerPeer:    128,
+		MaxRetainedTopics: 4096,
+		Retain:            1024,
+		PublishRate:       200, // per-peer publish+subscribe requests/second; bounded by default
+		PublishBurst:      400,
 	}
 }
 
@@ -65,6 +73,9 @@ func (l Limits) withDefaults() Limits {
 	}
 	if l.MaxSubsPerPeer <= 0 {
 		l.MaxSubsPerPeer = d.MaxSubsPerPeer
+	}
+	if l.MaxRetainedTopics <= 0 {
+		l.MaxRetainedTopics = d.MaxRetainedTopics
 	}
 	if l.Retain < 0 {
 		l.Retain = 0
@@ -175,14 +186,14 @@ func New(opts Options) *Broker {
 		auth = denyAll{}
 	}
 	b := &Broker{
-		auth:    auth,
-		audit:   opts.Audit,
-		events:  opts.Events,
-		name:    opts.Name,
-		caps:    opts.Capabilities,
-		now:     now,
-		lim:     newLimiter(lm.PublishRate, lm.PublishBurst, now),
-		lm:      lm,
+		auth:     auth,
+		audit:    opts.Audit,
+		events:   opts.Events,
+		name:     opts.Name,
+		caps:     opts.Capabilities,
+		now:      now,
+		lim:      newLimiter(lm.PublishRate, lm.PublishBurst, now),
+		lm:       lm,
 		subs:     map[uint64]*Subscription{},
 		perPeer:  map[string]int{},
 		retained: map[string]*Event{},
@@ -285,6 +296,12 @@ func (b *Broker) PublishOpts(id Identity, topic string, payload json.RawMessage,
 		b.record(id, "pubsub/publish", topic, "deny", "payload too large", nil)
 		return nil, fmt.Errorf("%w: %d bytes exceeds max %d", ErrPayloadTooLarge, len(payload), b.lm.MaxPayloadBytes)
 	}
+	// The encoding hint is a tiny enum-like string ("base64"); it is retained and
+	// hashed, so bound it like a label rather than trusting the wire length.
+	if len(o.Encoding) > maxEncodingLen {
+		b.record(id, "pubsub/publish", topic, "deny", "encoding hint too long", nil)
+		return nil, fmt.Errorf("%w: encoding hint exceeds %d bytes", ErrBadTopic, maxEncodingLen)
+	}
 	dec := b.auth.Publish(id, topic)
 	if !dec.Allow {
 		// A signed capability may upgrade a DEFAULT deny (never an explicit
@@ -337,7 +354,12 @@ func (b *Broker) PublishOpts(id Identity, topic string, payload json.RawMessage,
 	b.prev = h
 	b.ring.add(*ev)
 	if o.Retain {
-		b.retained[topic] = ev // last-value for this exact topic
+		// Bound the retained map: a new topic is only retained while under the
+		// cap (an existing topic always updates). Prevents unbounded growth from
+		// a publisher retaining to an unbounded topic space.
+		if _, exists := b.retained[topic]; exists || len(b.retained) < b.lm.MaxRetainedTopics {
+			b.retained[topic] = ev
+		}
 	}
 	// Persist the sealed event in sequence order (best-effort per-event, like
 	// the audit ledger; a failed append degrades durability but never blocks
@@ -372,6 +394,24 @@ func (b *Broker) EmitInternal(source, topic string, payload json.RawMessage, lab
 // source broker so the event is never re-mirrored (loop prevention across a
 // federation mesh). Like EmitInternal, it is a trusted operator path.
 func (b *Broker) EmitFederated(topic string, payload json.RawMessage, labels []string, publisher, origin string) (*Event, error) {
+	// Rate-limit federated ingestion per origin peer, so a compromised or lax
+	// upstream cannot flood this broker (federated events otherwise bypass the
+	// per-publisher token bucket).
+	if !b.lim.allow("federation:" + origin) {
+		return nil, fmt.Errorf("%w: federation from %s", ErrRateLimited, origin)
+	}
+	// Re-apply THIS broker's labeling and authorization for the topic, so an
+	// untrustworthy upstream cannot launder taint (by omitting a label) or
+	// smuggle past an explicit local deny. Evaluated as a "federation"
+	// principal; the local emit labels are unioned in (never removing the
+	// peer's), and an explicit local deny drops the mirror. The peer-asserted
+	// publisher is preserved for attribution but the event carries Origin, so a
+	// consumer knows Publisher is federated (peer-asserted), not locally proven.
+	dec := b.auth.Publish(Identity{Key: "federation", FQDN: origin}, topic)
+	if dec.Explicit && !dec.Allow {
+		return nil, fmt.Errorf("%w: federated topic %q denied by local policy", ErrDenied, topic)
+	}
+	labels = unionLabels(labels, dec.Labels)
 	return b.emitTrusted(topic, payload, labels, publisher, origin)
 }
 
@@ -536,12 +576,20 @@ func (b *Broker) Subscribe(id Identity, opts SubOptions) (*Subscription, error) 
 			}
 		}
 	}
-	// Deliver the current retained (last-value) event for each matching topic,
-	// so a new subscriber immediately learns the current state. Skip events
-	// already covered by the --since replay above to avoid a duplicate.
-	if _, ok := b.subs[s.ID]; ok {
-		for _, ev := range b.retained {
-			if ev.Seq > opts.Since && s.accepts(ev) {
+	// A fresh subscriber (no --since) receives the current retained last-value
+	// for each matching topic, in sequence order. A resuming subscriber
+	// (Since>0) instead relies on --since replay, which already covers those
+	// events, so retained is skipped there to avoid duplicates.
+	if opts.Since == 0 {
+		if _, ok := b.subs[s.ID]; ok {
+			retained := make([]*Event, 0, len(b.retained))
+			for _, ev := range b.retained {
+				if s.accepts(ev) {
+					retained = append(retained, ev)
+				}
+			}
+			sort.Slice(retained, func(i, j int) bool { return retained[i].Seq < retained[j].Seq })
+			for _, ev := range retained {
 				b.deliverLocked(s, ev)
 				if _, ok := b.subs[s.ID]; !ok {
 					break

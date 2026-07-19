@@ -72,6 +72,7 @@ limits:
   max_labels: 32                       # max data-flow labels per event
   max_subs_per_peer: 128               # one identity cannot pin every global slot
   retain: 4096                         # events kept for --since replay
+  max_retained_topics: 4096            # distinct topics that may hold a --retain last-value (bounds retained-map memory)
   publish_rate: 50                     # per-peer publish+subscribe requests/second; 0 = default (200), -1 = unlimited
   publish_burst: 100                   # per-peer burst ceiling
 

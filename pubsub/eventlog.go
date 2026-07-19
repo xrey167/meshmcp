@@ -114,6 +114,12 @@ func VerifyCheckpoints(events []Event, checkpointR io.Reader, expectPub string) 
 		if cp.FromSeq != prevTo+1 {
 			return n, fmt.Errorf("checkpoint %d coverage gap (starts %d, previous ended %d)", cp.Seq, cp.FromSeq, prevTo)
 		}
+		// The coverage span comes from the (untrusted) checkpoints file — bound
+		// it before allocating, so a hostile file can't cause a negative-cap
+		// panic or a huge allocation.
+		if cp.ToSeq < cp.FromSeq || cp.ToSeq-cp.FromSeq+1 > len(events) {
+			return n, fmt.Errorf("checkpoint %d: implausible coverage span [%d,%d]", cp.Seq, cp.FromSeq, cp.ToSeq)
+		}
 		leaves := make([][]byte, 0, cp.ToSeq-cp.FromSeq+1)
 		for s := cp.FromSeq; s <= cp.ToSeq; s++ {
 			h, ok := hashBySeq[s]

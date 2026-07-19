@@ -41,11 +41,11 @@ import (
 
 // PubsubConfig configures a broker daemon.
 type PubsubConfig struct {
-	Mesh       MeshConfig            `yaml:"mesh"`
-	ListenPort int                   `yaml:"listen_port"`
-	Allow      []string              `yaml:"allow"`     // connection ACL: who may open a session at all
-	AuditLog   string                `yaml:"audit_log"` // hash-chained JSONL decision log
-	EventLog   string                `yaml:"event_log"` // durable append-only event stream (resumable + verifiable)
+	Mesh       MeshConfig `yaml:"mesh"`
+	ListenPort int        `yaml:"listen_port"`
+	Allow      []string   `yaml:"allow"`     // connection ACL: who may open a session at all
+	AuditLog   string     `yaml:"audit_log"` // hash-chained JSONL decision log
+	EventLog   string     `yaml:"event_log"` // durable append-only event stream (resumable + verifiable)
 	// Signed Merkle checkpoints over the event stream (non-repudiation). Enable
 	// by setting a signing key (from `meshmcp audit keygen`) and a checkpoints
 	// file; every N events (default 128) a signed checkpoint is emitted.
@@ -123,6 +123,9 @@ func cmdPubsubVerify(args []string) error {
 		n, err := pubsub.VerifyCheckpoints(events, cf, *pubkey)
 		if err != nil {
 			return fmt.Errorf("checkpoint verification failed: %w", err)
+		}
+		if n == 0 {
+			return fmt.Errorf("checkpoint verification failed: no checkpoints found in %s", *cps)
 		}
 		fmt.Printf("OK: %d event(s), hash chain + %d signed checkpoint(s) verified (through seq %d)\n", len(events), n, lastSeq)
 		return nil
@@ -269,10 +272,20 @@ func cmdPubsub(args []string) error {
 			defer cpf.Close()
 			cp := policy.NewCheckpointer(signer, cpf, cfg.EventCheckpointEvery,
 				func() string { return time.Now().UTC().Format(time.RFC3339) }, nil)
-			// Continue the checkpoint chain across restarts from the existing file.
+			// Continue the checkpoint chain across restarts from the existing
+			// file, and re-feed any events published after the last checkpoint
+			// (a crash before the final Flush) so checkpoint coverage stays
+			// contiguous and offline --checkpoints verification still passes.
+			lastCPToSeq := 0
 			if data, err := os.ReadFile(cfg.EventCheckpoints); err == nil {
-				if seq, hash, ok := lastCheckpoint(data); ok {
-					cp.SeedFrom(seq, hash)
+				if last, ok := lastCheckpoint(data); ok {
+					cp.SeedFrom(last.Seq, last.Hash())
+					lastCPToSeq = last.ToSeq
+				}
+			}
+			for i := range seed {
+				if int(seed[i].Seq) > lastCPToSeq {
+					cp.Add(int(seed[i].Seq), seed[i].Hash)
 				}
 			}
 			eventLog = eventLog.WithCheckpointer(cp)
@@ -284,6 +297,9 @@ func cmdPubsub(args []string) error {
 	// out-of-band, without editing the broker policy).
 	var capVerifier *policy.CapabilityVerifier
 	if len(cfg.TrustedKeys) > 0 {
+		if cfg.Name == "" {
+			return errors.New("capabilities require a broker `name` (the audience tokens are bound to); refusing an empty audience")
+		}
 		v, err := policy.NewCapabilityVerifier(cfg.TrustedKeys, func() time.Time { return time.Now() })
 		if err != nil {
 			return fmt.Errorf("capabilities: %w", err)
@@ -390,19 +406,19 @@ func runFederation(mesh *embed.Client, local *pubsub.Broker, peer string, topics
 
 // lastCheckpoint parses the last checkpoint line from a checkpoints file, so a
 // restart can continue the checkpoint chain from it.
-func lastCheckpoint(data []byte) (seq int, hash string, ok bool) {
+func lastCheckpoint(data []byte) (cp policy.Checkpoint, ok bool) {
 	lines := bytes.Split(bytes.TrimRight(data, "\n"), []byte("\n"))
 	for i := len(lines) - 1; i >= 0; i-- {
 		if len(bytes.TrimSpace(lines[i])) == 0 {
 			continue
 		}
-		var cp policy.Checkpoint
-		if json.Unmarshal(lines[i], &cp) == nil {
-			return cp.Seq, cp.Hash(), true
+		var c policy.Checkpoint
+		if json.Unmarshal(lines[i], &c) == nil {
+			return c, true
 		}
-		return 0, "", false
+		return policy.Checkpoint{}, false
 	}
-	return 0, "", false
+	return policy.Checkpoint{}, false
 }
 
 // cmdPublish publishes one event to a broker.
@@ -640,6 +656,10 @@ func readCursor(path string) (seq uint64, ok bool) {
 	}
 	n, err := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
 	if err != nil {
+		// The file exists but is not a sequence number — a truncated or
+		// corrupted cursor. Warn rather than silently restarting from zero
+		// (which would re-replay the entire retention window).
+		log.Printf("warning: durable cursor %s is corrupt (%v); starting from --since", path, err)
 		return 0, false
 	}
 	return n, true
@@ -697,6 +717,11 @@ func cmdSubscribe(args []string) error {
 	var mu sync.Mutex
 	var subErr error
 	firstLine := true
+	// The durable cursor must only advance: retained last-values are delivered
+	// out of sequence order on connect, and a resumed stream can re-see events,
+	// so writing every seq blindly could move the cursor backwards and re-replay
+	// on the next run. Track the high-water mark and only persist forward.
+	lastCursor := effectiveSince
 	stream := &clientStream{out: preamble, done: make(chan struct{})}
 	stream.onLine = func(line []byte) {
 		if firstLine {
@@ -721,7 +746,8 @@ func cmdSubscribe(args []string) error {
 			var ev struct {
 				Seq uint64 `json:"seq"`
 			}
-			if json.Unmarshal(line, &ev) == nil && ev.Seq > 0 {
+			if json.Unmarshal(line, &ev) == nil && ev.Seq > lastCursor {
+				lastCursor = ev.Seq
 				_ = writeCursor(*durable, ev.Seq)
 			}
 		}

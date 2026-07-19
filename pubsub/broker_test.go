@@ -88,6 +88,120 @@ func TestBinaryPayload(t *testing.T) {
 	}
 }
 
+// TestRetainedMapBounded verifies the retained last-value map cannot grow
+// without bound: once MaxRetainedTopics distinct topics are retained, a new
+// topic is not added (but an existing topic still updates). Prevents a publisher
+// from exhausting memory by retaining across an unbounded topic space.
+func TestRetainedMapBounded(t *testing.T) {
+	b := New(Options{Authorizer: AllowAll{}, Limits: Limits{MaxRetainedTopics: 3}})
+	defer b.Close()
+
+	for i := 0; i < 10; i++ {
+		b.PublishOpts(id("p"), fmt.Sprintf("topic.%d", i), json.RawMessage(`1`), PublishOptions{Retain: true})
+	}
+	b.mu.Lock()
+	n := len(b.retained)
+	b.mu.Unlock()
+	if n != 3 {
+		t.Fatalf("retained map holds %d topics, want it capped at 3", n)
+	}
+
+	// An already-retained topic still updates in place (does not count as new).
+	b.PublishOpts(id("p"), "topic.0", json.RawMessage(`99`), PublishOptions{Retain: true})
+	b.mu.Lock()
+	ev, ok := b.retained["topic.0"]
+	n = len(b.retained)
+	b.mu.Unlock()
+	if !ok || string(ev.Payload) != "99" || n != 3 {
+		t.Fatalf("existing retained topic must update in place; map=%d ev=%v", n, ev)
+	}
+}
+
+// TestRetainedDeliveredInSeqOrder verifies retained last-values are delivered to
+// a fresh subscriber in ascending sequence order (not the map's random order),
+// so a consumer that reconstructs state sees a deterministic ordering.
+func TestRetainedDeliveredInSeqOrder(t *testing.T) {
+	b := New(Options{Authorizer: AllowAll{}})
+	defer b.Close()
+	// Retain several topics; their sequences increase in publish order.
+	for i := 0; i < 8; i++ {
+		b.PublishOpts(id("p"), fmt.Sprintf("s.%d", i), json.RawMessage(`1`), PublishOptions{Retain: true})
+	}
+	sub, err := b.Subscribe(id("s"), SubOptions{Topics: []string{"s.*"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sub.Close()
+	var last uint64
+	for i := 0; i < 8; i++ {
+		ev := recv(t, sub)
+		if ev.Seq <= last {
+			t.Fatalf("retained delivered out of order: seq %d after %d", ev.Seq, last)
+		}
+		last = ev.Seq
+	}
+}
+
+// TestEncodingHintBounded verifies the per-event encoding hint is length-capped
+// like a label — it is retained and hashed, so an unbounded hint would bypass
+// the payload×retain memory bound.
+func TestEncodingHintBounded(t *testing.T) {
+	b := New(Options{Authorizer: AllowAll{}})
+	defer b.Close()
+	long := strings.Repeat("x", maxEncodingLen+1)
+	if _, err := b.PublishOpts(id("p"), "t", json.RawMessage(`1`), PublishOptions{Encoding: long}); !errors.Is(err, ErrBadTopic) {
+		t.Fatalf("over-long encoding hint: got %v, want ErrBadTopic", err)
+	}
+	// A normal-length hint is accepted.
+	if _, err := b.PublishOpts(id("p"), "t", json.RawMessage(`1`), PublishOptions{Encoding: "base64"}); err != nil {
+		t.Fatalf("valid encoding hint rejected: %v", err)
+	}
+}
+
+// TestFederationRespectsLocalPolicy verifies a mirrored event is re-authorized
+// against THIS broker's policy: an explicit local deny drops the mirror (an
+// untrustworthy upstream cannot smuggle past a local deny), and the local emit
+// labels are unioned in (an upstream cannot launder taint by omitting a label).
+func TestFederationRespectsLocalPolicy(t *testing.T) {
+	auth := &RuleAuthorizer{Rules: []TopicRule{
+		{Topics: []string{"secret.*"}, Allow: false},                          // explicit local deny
+		{Topics: []string{"web.*"}, Allow: true, Taint: true, ClearAll: true}, // local taint on web.*, subscriber cleared
+	}}
+	b := New(Options{Authorizer: auth})
+	defer b.Close()
+
+	// A federated event on an explicitly-denied topic is refused.
+	if _, err := b.EmitFederated("secret.keys", json.RawMessage(`1`), nil, "up-key", "broker-B"); !errors.Is(err, ErrDenied) {
+		t.Fatalf("federated event on locally-denied topic: got %v, want ErrDenied", err)
+	}
+
+	// A federated event on web.* is accepted and carries the LOCAL taint label,
+	// even though the upstream asserted none.
+	sub, _ := b.Subscribe(id("s"), SubOptions{Topics: []string{"web.*"}})
+	defer sub.Close()
+	ev, err := b.EmitFederated("web.page", json.RawMessage(`1`), nil, "up-key", "broker-B")
+	if err != nil {
+		t.Fatalf("federated web.* event should pass: %v", err)
+	}
+	if !hasLabel(ev.Labels, "tainted") {
+		t.Fatalf("local taint not applied to federated event: labels=%v", ev.Labels)
+	}
+	got := recv(t, sub)
+	if got.Origin != "broker-B" {
+		t.Fatalf("federated event Origin = %q, want broker-B", got.Origin)
+	}
+}
+
+// hasLabel reports whether labels contains want.
+func hasLabel(labels []string, want string) bool {
+	for _, l := range labels {
+		if l == want {
+			return true
+		}
+	}
+	return false
+}
+
 // fakeClock is a settable clock for deterministic time-dependent tests.
 type fakeClock struct {
 	mu sync.Mutex

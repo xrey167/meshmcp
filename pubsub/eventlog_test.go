@@ -54,6 +54,39 @@ func TestEventCheckpoints(t *testing.T) {
 	}
 }
 
+// TestVerifyCheckpointsRejectsHostileSpan verifies the coverage-span bound: a
+// validly-signed checkpoint whose [FromSeq,ToSeq] span is implausibly large is
+// rejected before it can drive a huge allocation (make of ~1e9 leaves) or index
+// past the loaded events. Defense-in-depth against a crafted or corrupt file.
+func TestVerifyCheckpointsRejectsHostileSpan(t *testing.T) {
+	signer, err := policy.GenerateSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cps bytes.Buffer
+	cp := policy.NewCheckpointer(signer, &cps, 1000, func() string { return "t" }, nil)
+	leaf := strings.Repeat("ab", 32) // 64 hex chars, a valid hash leaf
+	cp.Add(1, leaf)
+	cp.Flush(1_000_000_000, leaf) // ToSeq far beyond any real event count
+
+	// The checkpoint is legitimately signed, so it passes signature verification;
+	// the span bound must then reject it rather than allocating ~1e9 entries.
+	if _, err := VerifyCheckpoints([]Event{}, bytes.NewReader(cps.Bytes()), signer.PubKeyHex()); err == nil {
+		t.Fatal("hostile coverage span should be rejected, not verified")
+	}
+}
+
+// TestVerifyCheckpointsEmpty documents the core contract: an empty checkpoints
+// stream verifies zero checkpoints without error (the CLI layer treats n==0 as
+// "no proof" and errors there, so a --checkpoints file can't silently prove
+// nothing).
+func TestVerifyCheckpointsEmpty(t *testing.T) {
+	n, err := VerifyCheckpoints(nil, strings.NewReader(""), "")
+	if err != nil || n != 0 {
+		t.Fatalf("empty checkpoints: n=%d err=%v, want 0/nil", n, err)
+	}
+}
+
 // TestEventLogRoundTrip persists a published stream and reloads it, verifying
 // the chain survives the file boundary.
 func TestEventLogRoundTrip(t *testing.T) {
