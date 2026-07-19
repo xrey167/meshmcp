@@ -119,8 +119,15 @@ resources, and prompts against a live backend.
 | `meshmcp call [flags] <peer:port> <tool>` | Call a tool: `--arg k=v` (JSON-coerced), `--json '{...}'`, `--task` |
 | `meshmcp read [flags] <peer:port> <uri>` | Read a resource |
 | `meshmcp prompt [flags] <peer:port> <name>` | Render a prompt: `--arg k=v` |
+| `meshmcp drop [flags] <peer:port> <file...>` | AirDrop files to a peer (`--config` runs a receiver) |
+| `meshmcp push [flags] <peer:port>` | Push a stdin payload to a peer's inbox |
+| `meshmcp peers [flags]` | List reachable mesh identities |
+| `meshmcp fetch [flags] <peer:port> <sha256>` | Fetch a blob by content hash from a peer's store |
+| `meshmcp air <sessions\|steer\|launch\|agent-steer\|workflow\|serve>` | **Air · Steer** — list/steer live sessions, steer/launch agents, run a workflow, or serve the live web page (see [AIR.md](AIR.md)) |
+| `meshmcp mcp [flags]` | Run meshmcp **as an MCP server** for Claude Code / Codex (see [MCP-APP.md](MCP-APP.md)) |
+| `meshmcp approvals --store <dir>` | Serve the co-sign approver (`--devices <dir>` enables push-wake) |
 
-Shared mesh flags for `connect`/`forward`/`probe`/`ls`/`call`/`read`/`prompt`: `--setup-key` (or `$NB_SETUP_KEY`),
+Shared mesh flags for `connect`/`forward`/`probe`/`ls`/`call`/`read`/`prompt`/`drop`/`push`/`peers`/`fetch`/`air`: `--setup-key` (or `$NB_SETUP_KEY`),
 `--management-url` (or `$NB_MANAGEMENT_URL`), `--device-name`, `--nb-config`
 (persist identity — reuse the same peer/IP across runs; without it every run
 registers a fresh peer), `--log-level`, `--start-timeout`.
@@ -160,6 +167,16 @@ policy:
 Method governance is opt-in: a method is only restricted when a `methods` rule matches
 it, so `initialize`, `tools/list`, and ungoverned `tasks/*` always pass. Denied requests
 get a JSON-RPC error; denied notifications are dropped (no id to answer).
+
+An optional top-level `control:` block enables the [Air](AIR.md) session-control endpoint —
+`GET /v1/sessions` and `POST /v1/steer` on a mesh port, identity-gated + audited — so live
+resumable sessions can be listed and steered:
+
+```yaml
+control:
+  port: 9600
+  allow: ["laptop-*.netbird.cloud"]   # empty = any mesh peer
+```
 
 ## Security notes
 

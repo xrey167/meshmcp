@@ -18,8 +18,8 @@ meshmcp is a stack; putting it on a phone is a question per layer.
 | Layer | On a phone | Status |
 |---|---|---|
 | **1 · Connectivity** (WireGuard / NetBird) | iOS `NetworkExtension` (Packet Tunnel Provider) · Android `VpnService` | **Exists** — NetBird ships iOS + Android clients; WireGuard on mobile is mature. |
-| **2 · Session + identity + client** (`session/`, `mcpclient/`, `client/embed`) | pure Go → a mobile framework via `gomobile bind` | **Buildable** — the code is pure Go; NetBird itself binds Go for its mobile clients. |
-| **3 · The app** (approver UI / agent / monitor) | native, Flutter, or a web page served over the mesh | **Partly done** — the approver web app ships now; a native SDK is the next milestone. |
+| **2 · Session + identity + client** (`session/`, `mcpclient/`, `client/embed`) | the `mobile/` package → a framework via `gomobile bind` | **Package ships** — `mobile/` binds `Mesh`/`Conn`/`Approvals`; only the `gomobile bind` step (mobile toolchain) is external. |
+| **3 · The app** (approver UI / agent / monitor) | native, Flutter, or a web page served over the mesh | **Web ships** — the approver, the Control Room, and the live Air page (`meshmcp air serve`) all serve over the mesh; a native shell is the remaining external step. |
 
 The key realization: **a phone joining the mesh gets its own WireGuard key → its
 own cryptographic identity → policy and audit already distinguish it.** To
@@ -100,9 +100,10 @@ meshmcp approvals --store ./demo/cosign          # serves on a mesh port
 This reuses `approve` / `cosign_store` / the audit verbatim — the phone is just
 the identity that signs the approval.
 
-**What's still missing for a *great* UX: push.** Today the page polls. To have the
-phone *buzz* when an approval is waiting, the gateway must notify APNs/FCM — see
-§4. Everything else is done.
+**Push, for a *great* UX.** The page can poll; to have the phone *buzz*, the
+push-wake seam now ships (§4) — device registration + a `Notifier` hook, wired
+into the approver. Only the vendor APNs/FCM delivery call (which needs Apple/Google
+credentials) is left to plug into the interface. Everything else is done.
 
 ---
 
@@ -232,15 +233,18 @@ agent* peer can't approve its own calls.
 
 ## 7 · Recommended path (updated to what exists)
 
-1. **Now — approver + monitor, no native app.** A phone on the mesh (NetBird app)
-   opens `meshmcp approvals` and the `room` (both responsive) in the browser.
-   Co-sign from your pocket, watch the fabric — **shipping today**, zero new code.
-2. **Next — push + a wrapper app.** Add the device-registration + APNs/FCM notify
-   seam (§4), and a thin native/Flutter shell that registers for push, deep-links
-   into the approver, and gates approval behind Face ID.
-3. **Then — the `gomobile` client SDK (§3).** Bind `embed` + `session` +
-   `mcpclient` so apps get mesh identity and roaming-proof sessions without the
-   separate VPN app. This is the real "meshmcp on mobile" milestone.
+1. **Now — approver + monitor + live Air page, no native app.** ✅ A phone on the
+   mesh (NetBird app) opens `meshmcp approvals`, the `room`, and `meshmcp air serve`
+   (all responsive) in the browser. Co-sign from your pocket, watch the fabric,
+   list/steer live sessions — **shipping today**, zero new code.
+2. **Now — push seam + the client SDK.** ✅ The device-registration + notify seam
+   ships (§4; enable with `approvals --devices`), and the `mobile/` package (§3)
+   binds `embed` + `mcpclient` into a gomobile-ready surface. What's left is
+   external: the APNs/FCM `Notifier` impl (vendor credentials) and `gomobile bind`
+   (mobile toolchain).
+3. **Next — the native shell.** `gomobile bind ./mobile` → an iOS `.xcframework` /
+   Android `.aar`, wrapped in a thin app that registers for push, deep-links into
+   the approver, and gates approval behind Face ID.
 4. **Later — phone as a backend.** Expose on-device capabilities (camera,
    location, secure-enclave signing) as an MCP server reachable only over the
    mesh, push-woken, request/response.

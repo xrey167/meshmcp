@@ -15,6 +15,14 @@ trace:
 # discover them dynamically (see docs/HA-TOOLMESH.md and docs/NETWORK-PLAN.md).
 # registry: ./registry
 
+# Optional: the Air session-control endpoint (see docs/AIR.md, docs/AIR-STEER.md).
+# Serves GET /v1/sessions + POST /v1/steer on a mesh port so live resumable
+# sessions can be listed and steered — identity-gated, ACL'd, and audited.
+# Reach it with `meshmcp air sessions <mesh-ip>:9600` or the air_sessions tool.
+# control:
+#   port: 9600
+#   allow: ["laptop-*.netbird.cloud"]   # empty = any mesh peer
+
 mesh:
   device_name: meshmcp-gw          # peer name shown in the NetBird dashboard
   # management_url: https://api.netbird.io:443   # default; set for self-hosted

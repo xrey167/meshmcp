@@ -25,8 +25,13 @@ meshmcp is an **identity-native control plane for agent-to-tool (MCP) traffic**.
 | `capabilitycmd.go` | `capability keygen` / `capability issue` — mint authority keys and short-lived signed tool grants. |
 | `secretscmd.go` | `secrets check` — validate the credential broker config (never prints values). |
 | `insight.go` | `insight profile/recommend/simulate/detect` — the firewall's read side (delegates to `insight/`). |
-| `mcpapp.go` | `mcp` — run meshmcp *itself* as an MCP stdio server so Claude Code / Codex can operate the mesh. |
-| `agent.go` | `agent --role …` — demo agent apps (reader/fetcher/billing/analyst) each with their own mesh identity. |
+| `mcpapp.go` | `mcp` — run meshmcp *itself* as an MCP stdio server so Claude Code / Codex can operate the mesh (incl. the `air_*` tools). |
+| `agent.go` | `agent --role …` — demo agent apps (reader/fetcher/billing/analyst); `--steer-port` adds a steer inbox (P1). |
+| `air.go` · `airserve.go` · `airworkflow.go` | **Air · Steer** CLI: `air sessions/steer/launch/agent-steer/workflow/serve` — drive live work over the mesh (see `docs/AIR.md`, `docs/AIR-STEER.md`). |
+| `aircontrol.go` | The gateway Air control endpoint (`/v1/sessions`, `/v1/steer`) served by `serve` when a `control:` block is set. |
+| `steerenvelope.go` · `steerinbox.go` | The agent steer inbox: envelope wire type + the drop-receiver-style factory that feeds `runAgentLoop`. |
+| `pushwake.go` | Push-wake seam: device registry + `Notifier` (vendor APNs/FCM pluggable), wired into `approvals`. |
+| `drop.go` · `push.go` · `cas.go` · `peers.go` | AirDrop payload layer: `drop` / `push` / `fetch` / `peers`, resumable + audited. |
 | `probe.go` · `replay.go` | `probe` (handshake diagnostic) and `replay` (re-issue a traced session and diff). |
 | `README.md` · `LICENSE` | Project overview; proprietary license (© Rey Darius). |
 | `index.html` | Published GitHub Pages site, merged to the code root (Pages still deploys from the `gh-pages` branch). |
@@ -43,6 +48,7 @@ meshmcp is an **identity-native control plane for agent-to-tool (MCP) traffic**.
 | `control/` | Managed control plane: enrollment, policy store (see `control/AGENTS.md`). |
 | `federation/` | Cross-org tool bridging with identity mapping (see `federation/AGENTS.md`). |
 | `registry/` | File-based service registry for router discovery (see `registry/AGENTS.md`). |
+| `mobile/` | gomobile-bindable `Mesh`/`Conn`/`Approvals` surface for an iOS/Android app (`gomobile bind ./mobile`). |
 | `cmd/` | Small standalone MCP servers used as test/demo backends (see `cmd/AGENTS.md`). |
 | `docs/` | Design docs and open specs (see `docs/AGENTS.md`). |
 | `examples/` | Ready-to-adapt gateway configs and the HITL bridge (see `examples/AGENTS.md`). |

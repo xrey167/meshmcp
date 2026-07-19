@@ -271,8 +271,10 @@ mcpclient/   MCP client over any transport (used by the router, orchestrator, CL
 protocol/    granular Go models for the MCP wire protocol — one package per domain (2025-06-18 base · draft · extensions · client helpers)
 registry/    file-based discovery registry
 embed/       local, deterministic text embedder (shared by RAG + semantic policy)
+mobile/      gomobile-bindable Mesh/Conn/Approvals surface for an iOS/Android app
 cmd/         mcpserver (demo) · mcpecho · mcphttp · kg (provenance knowledge graph) · vectors (zero-exposure RAG) · memory (agent-memory fabric)
 *.go         the meshmcp binary: serve · router · orchestrate · control · federate · insight · … · CLI
+             Air · Steer: air.go · airserve.go · airworkflow.go · aircontrol.go · steerinbox.go · pushwake.go
 examples/    ready-to-adapt configs        docs/  design docs + open specs
 ```
 
