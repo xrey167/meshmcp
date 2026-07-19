@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>meshmcp · Air (live)</title>
+<style>
+  :root {
+    --ink:#0c0f16; --panel:#141a25; --panel2:#0f141d; --line:#26303f; --text:#dbe4f0; --muted:#8593a8;
+    --crimson:#e8546b; --cyan:#3ad6c6; --amber:#e0a558; --green:#2ea043;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace; --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  }
+  *{box-sizing:border-box} html,body{margin:0;height:100%}
+  body{background:var(--ink);color:var(--text);font-family:var(--sans)}
+  header{padding:12px 18px;border-bottom:1px solid var(--line);display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+  header h1{font-size:15px;margin:0;font-weight:600}
+  header h1 .m{font-family:var(--mono);color:var(--cyan)}
+  header .sub{color:var(--muted);font-size:12.5px}
+  header .spacer{flex:1}
+  header button{font-family:var(--mono);font-size:12px;color:var(--text);background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:6px 11px;cursor:pointer}
+  header button:hover{border-color:var(--cyan)}
+  main{max-width:900px;margin:0 auto;padding:20px 18px 60px}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:26px 0 10px}
+  .row{display:flex;align-items:center;gap:11px;padding:10px 12px;border:1px solid var(--line);border-radius:11px;background:var(--panel);margin-bottom:8px}
+  .row .av{width:32px;height:32px;border-radius:9px;flex:0 0 auto;display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:12px;font-weight:700;color:#05070c}
+  .row .meta{min-width:0;flex:1}
+  .row .nm{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .row .sub2{font-family:var(--mono);font-size:10px;color:var(--muted)}
+  .row .st{font-family:var(--mono);font-size:9.5px;padding:3px 8px;border-radius:20px;white-space:nowrap}
+  .st.up{color:var(--green);background:color-mix(in srgb,var(--green) 16%,transparent)}
+  .st.other{color:var(--amber);background:color-mix(in srgb,var(--amber) 16%,transparent)}
+  .row button{font-family:var(--mono);font-size:11px;color:#05070c;font-weight:700;background:var(--cyan);border:none;border-radius:8px;padding:7px 12px;cursor:pointer}
+  .empty{color:var(--muted);font-size:12.5px;padding:14px 2px}
+  .err{color:var(--crimson);font-size:12px;font-family:var(--mono);padding:8px 2px}
+  dialog{background:var(--panel);color:var(--text);border:1px solid var(--cyan);border-radius:14px;padding:18px;width:min(420px,92vw)}
+  dialog::backdrop{background:rgba(4,6,10,.7)}
+  dialog h3{margin:0 0 4px;font-size:15px}
+  dialog .to{font-family:var(--mono);font-size:11px;color:var(--muted);margin-bottom:12px}
+  dialog label{display:block;font-size:11px;color:var(--muted);margin:10px 0 4px}
+  dialog input,dialog textarea{width:100%;background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:9px;padding:9px;font-family:var(--sans);font-size:13px}
+  dialog input{font-family:var(--mono);font-size:12px}
+  dialog .acts{display:flex;gap:8px;margin-top:14px}
+  dialog .acts button{flex:1;font-family:var(--mono);font-size:12px;border-radius:9px;padding:9px;cursor:pointer;border:1px solid var(--line);background:var(--panel2);color:var(--text)}
+  dialog .acts .go{background:var(--cyan);color:#05070c;border:none;font-weight:700}
+  #steerOut{font-size:11px;font-family:var(--mono);color:var(--green);margin-top:8px;min-height:14px}
+</style>
+</head>
+<body>
+<header>
+  <h1>🕸️ <span class="m">meshmcp</span> · Air <span class="sub">live</span></h1>
+  <span class="sub">served over the mesh · identity-gated · audited</span>
+  <span class="spacer"></span>
+  <button id="refresh">Refresh</button>
+</header>
+<main>
+  <h2>Nearby</h2>
+  <div id="peers"><div class="empty">loading…</div></div>
+  <h2>Live sessions</h2>
+  <div id="sessions"><div class="empty">loading…</div></div>
+</main>
+
+<dialog id="steerDlg">
+  <h3>Steer session</h3>
+  <div class="to" id="steerTo"></div>
+  <label>method</label>
+  <input id="steerMethod" value="notifications/air/steer">
+  <label>guidance (text)</label>
+  <textarea id="steerText" rows="3" placeholder="re-read customer 42 and summarize"></textarea>
+  <div id="steerOut"></div>
+  <div class="acts">
+    <button id="steerCancel">Cancel</button>
+    <button class="go" id="steerSend">Send</button>
+  </div>
+</dialog>
+
+<script>
+(function(){
+  "use strict";
+  var esc=function(s){return String(s).replace(/[&<>"']/g,function(c){return({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]})};
+  var PAL=["#3ad6c6","#e8546b","#e0a558","#7c9cf5","#6ad39f","#c98be0"];
+  function color(k){var h=0;k=k||"";for(var i=0;i<k.length;i++)h=(h*31+k.charCodeAt(i))>>>0;return PAL[h%PAL.length]}
+  function ini(s){return String(s||"?").replace(/\..*/,"").slice(0,2).toUpperCase()}
+
+  async function getJSON(u){var r=await fetch(u);if(!r.ok)throw new Error(r.status+" "+(await r.text()));return r.json()}
+
+  async function loadPeers(){
+    var el=document.getElementById("peers");
+    try{
+      var d=await getJSON("api/peers");var ps=d.peers||[];
+      if(!ps.length){el.innerHTML='<div class="empty">no peers reachable</div>';return}
+      el.innerHTML=ps.map(function(p){
+        var up=p.status==="connected";
+        return '<div class="row"><div class="av" style="background:'+color(p.pubkey)+'">'+ini(p.fqdn)+'</div>'+
+          '<div class="meta"><div class="nm">'+esc(p.fqdn||p.ip)+'</div><div class="sub2">'+esc(p.ip)+' · '+esc(p.pubkey||"")+'</div></div>'+
+          '<div class="st '+(up?"up":"other")+'">'+esc(p.status)+'</div></div>';
+      }).join("");
+    }catch(e){el.innerHTML='<div class="err">'+esc(e.message)+'</div>'}
+  }
+
+  async function loadSessions(){
+    var el=document.getElementById("sessions");
+    try{
+      var d=await getJSON("api/sessions");var ss=d.sessions||[];
+      if(!ss.length){el.innerHTML='<div class="empty">no live sessions</div>';return}
+      el.innerHTML=ss.map(function(s,i){
+        return '<div class="row"><div class="av" style="background:'+color(s.id)+'">'+esc((s.backend||"").slice(0,2).toUpperCase())+'</div>'+
+          '<div class="meta"><div class="nm">'+esc(s.backend)+' · '+esc(s.id)+'</div><div class="sub2">peer '+esc(s.peer||"?")+' · '+esc(s.age_sec||0)+'s</div></div>'+
+          '<button data-i="'+i+'">Steer</button></div>';
+      }).join("");
+      [].forEach.call(el.querySelectorAll("button"),function(b){b.onclick=function(){openSteer(ss[+b.dataset.i])}});
+    }catch(e){el.innerHTML='<div class="err">'+esc(e.message)+' — is --control set?</div>'}
+  }
+
+  var dlg=document.getElementById("steerDlg"),cur=null;
+  function openSteer(s){
+    cur=s;
+    document.getElementById("steerTo").textContent=s.backend+" / "+s.id;
+    document.getElementById("steerText").value="";
+    document.getElementById("steerOut").textContent="";
+    dlg.showModal();
+  }
+  document.getElementById("steerCancel").onclick=function(){dlg.close()};
+  document.getElementById("steerSend").onclick=async function(){
+    var out=document.getElementById("steerOut");out.style.color="var(--green)";out.textContent="steering…";
+    try{
+      var body={backend:cur.backend,id:cur.id,method:document.getElementById("steerMethod").value,params:{text:document.getElementById("steerText").value}};
+      var r=await fetch("api/steer",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+      var t=await r.text();
+      if(!r.ok)throw new Error(r.status+" "+t);
+      out.textContent="✓ "+t;
+      setTimeout(function(){dlg.close()},900);
+    }catch(e){out.style.color="var(--crimson)";out.textContent=e.message}
+  };
+
+  function refresh(){loadPeers();loadSessions()}
+  document.getElementById("refresh").onclick=refresh;
+  refresh();
+  setInterval(refresh,10000);
+})();
+</script>
+</body>
+</html>

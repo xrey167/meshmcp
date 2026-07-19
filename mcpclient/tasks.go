@@ -80,6 +80,19 @@ func (c *Client) CancelTask(ctx context.Context, taskID string) (Task, error) {
 	return t, json.Unmarshal(raw, &t)
 }
 
+// SteerTask delivers mid-flight guidance to a working task (Air · Steer, P3) —
+// the augment counterpart to CancelTask's interrupt. The payload is arbitrary
+// JSON the task's handler interprets; only a handler cooperating with steers
+// reacts. Returns the task's post-steer handle.
+func (c *Client) SteerTask(ctx context.Context, taskID string, payload json.RawMessage) (Task, error) {
+	raw, err := c.Call(ctx, "tasks/steer", map[string]any{"taskId": taskID, "payload": payload})
+	if err != nil {
+		return Task{}, err
+	}
+	var t Task
+	return t, json.Unmarshal(raw, &t)
+}
+
 // TaskResult fetches a completed task's result. A tool that reported
 // isError:true comes back as a *ToolExecutionError.
 func (c *Client) TaskResult(ctx context.Context, taskID string) (ToolCallResult, error) {

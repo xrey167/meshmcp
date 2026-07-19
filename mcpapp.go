@@ -2,13 +2,16 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,11 +37,13 @@ func cmdMCP(args []string) error {
 	o := meshFlags(fs)
 	auditPath := fs.String("audit", "", "audit log to read for the network view / verify")
 	cosignDir := fs.String("cosign-store", "", "co-sign store directory (for approvals)")
+	control := fs.String("control", "", "gateway Air control endpoint (mesh-ip:port) for air_sessions / air_steer")
+	allowLaunch := fs.Bool("allow-launch", false, "allow the air_launch tool to spawn agent processes (opt-in, like the Control Room's --local-shell)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
-	app := &meshApp{auditPath: *auditPath, cosignDir: *cosignDir, pool: map[string]*mcpclient.Client{}}
+	app := &meshApp{auditPath: *auditPath, cosignDir: *cosignDir, control: *control, allowLaunch: *allowLaunch, pool: map[string]*mcpclient.Client{}}
 	// Join the mesh only if credentials are available; the read-only tools
 	// (network, pending, verify) work without it.
 	if o.SetupKey != "" {
@@ -59,12 +64,38 @@ func cmdMCP(args []string) error {
 
 // meshApp exposes mesh control operations as MCP tools.
 type meshApp struct {
-	mesh      *embed.Client
-	auditPath string
-	cosignDir string
+	mesh        *embed.Client
+	auditPath   string
+	cosignDir   string
+	control     string // gateway Air control endpoint (mesh-ip:port), for air_sessions/air_steer
+	allowLaunch bool   // opt-in: enable the air_launch tool to spawn agent processes
 
-	mu   sync.Mutex
-	pool map[string]*mcpclient.Client
+	mu     sync.Mutex
+	pool   map[string]*mcpclient.Client
+	hcOnce sync.Once
+	hc     *http.Client // HTTP client that dials the control endpoint over the mesh
+}
+
+// controlClient returns an http.Client whose every request is dialed to the
+// configured control endpoint over the mesh, regardless of the URL host.
+func (a *meshApp) controlClient() (*http.Client, error) {
+	if a.mesh == nil {
+		return nil, fmt.Errorf("not joined to the mesh (set NB_SETUP_KEY)")
+	}
+	if a.control == "" {
+		return nil, fmt.Errorf("no --control endpoint configured")
+	}
+	a.hcOnce.Do(func() {
+		a.hc = &http.Client{
+			Timeout: 20 * time.Second,
+			Transport: &http.Transport{
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					return a.mesh.Dial(ctx, "tcp", a.control)
+				},
+			},
+		}
+	})
+	return a.hc, nil
 }
 
 func (a *meshApp) client(target string) (*mcpclient.Client, error) {
@@ -203,6 +234,74 @@ func (a *meshApp) register(s *mcp.Server) {
 		Handler: a.toolDropFile,
 	})
 	s.AddTool(mcp.Tool{
+		Name:        "air_sessions",
+		Description: "List live resumable sessions across the gateway's backends (Air · Steer). Requires --control. Returns backend, session id, caller, age.",
+		InputSchema: appObj(nil),
+		Handler:     a.toolAirSessions,
+	})
+	s.AddTool(mcp.Tool{
+		Name:        "air_steer",
+		Description: "Steer a live session: deliver a server→client MCP notification to the agent driving it (Air · Steer). Requires --control.",
+		InputSchema: appObj(map[string]any{
+			"backend": appStr("backend name the session belongs to (from air_sessions)"),
+			"id":      appStr("session id (from air_sessions)"),
+			"method":  appStr("notification method, e.g. notifications/air/steer"),
+			"params":  appAnyObj("notification params object (guidance for the agent)"),
+		}, "backend", "id", "method"),
+		Handler: a.toolAirSteer,
+	})
+	s.AddTool(mcp.Tool{
+		Name:        "air_tasks",
+		Description: "List the running/finished async tasks a mesh backend is tracking (Air · Steer). target is peer-ip:port.",
+		InputSchema: appObj(map[string]any{"target": appStr("backend mesh address")}, "target"),
+		Handler:     a.toolAirTasks,
+	})
+	s.AddTool(mcp.Tool{
+		Name:        "air_task_steer",
+		Description: "Augment a running task in-flight with guidance (tasks/steer) — the non-restart counterpart to cancel. target is peer-ip:port.",
+		InputSchema: appObj(map[string]any{
+			"target":  appStr("backend mesh address"),
+			"task_id": appStr("task id (from air_tasks)"),
+			"payload": appAnyObj("guidance payload delivered to the task"),
+		}, "target", "task_id"),
+		Handler: a.toolAirTaskSteer,
+	})
+	s.AddTool(mcp.Tool{
+		Name:        "air_peers",
+		Description: "List reachable mesh identities (the 'who can I drop/steer to' view). Each is a WireGuard key + FQDN.",
+		InputSchema: appObj(nil),
+		Handler:     a.toolAirPeers,
+	})
+	s.AddTool(mcp.Tool{
+		Name:        "air_push",
+		Description: "Push a small text payload (clipboard / a task) to a peer's inbox over the resumable mesh channel. target is peer-ip:port.",
+		InputSchema: appObj(map[string]any{
+			"target": appStr("peer inbox mesh address, e.g. 100.64.0.5:9110"),
+			"text":   appStr("the payload text to push"),
+			"name":   appStr("optional name for the payload (default clip.txt)"),
+		}, "target", "text"),
+		Handler: a.toolAirPush,
+	})
+	s.AddTool(mcp.Tool{
+		Name:        "air_fetch",
+		Description: "Fetch a blob by sha256 content hash from a peer's content-addressed store, writing it locally. target is peer-ip:port.",
+		InputSchema: appObj(map[string]any{
+			"target": appStr("peer mesh address hosting the CAS"),
+			"hash":   appStr("sha256 hex hash of the blob"),
+			"out":    appStr("optional local path to write to (default: the hash)"),
+		}, "target", "hash"),
+		Handler: a.toolAirFetch,
+	})
+	s.AddTool(mcp.Tool{
+		Name:        "air_launch",
+		Description: "Spawn a new agent (its own mesh identity) against a gateway. Disabled unless the app was started with --allow-launch.",
+		InputSchema: appObj(map[string]any{
+			"role":    appStr("agent role: reader | fetcher | billing | analyst"),
+			"gateway": appStr("gateway backend mesh address the agent drives"),
+		}, "role", "gateway"),
+		Handler: a.toolAirLaunch,
+	})
+	s.AddTool(mcp.Tool{
 		Name:        "show_retrievals",
 		Description: "Show retrieval receipts from the audit log: which documents/triples produced answers (provenance), newest first. Answers 'what did the agent read?'.",
 		InputSchema: appObj(map[string]any{"limit": appNum("max receipts to show (default 20)")}),
@@ -336,6 +435,194 @@ func (a *meshApp) toolDropFile(ctx context.Context, args json.RawMessage) (mcp.T
 		return errTxt("drop to %s failed: %v", p.Target, err), nil
 	}
 	return txt(fmt.Sprintf("dropped %s to %s", p.Path, p.Target)), nil
+}
+
+// toolAirSessions lists live sessions via the gateway control endpoint.
+func (a *meshApp) toolAirSessions(ctx context.Context, _ json.RawMessage) (mcp.ToolResult, error) {
+	hc, err := a.controlClient()
+	if err != nil {
+		return errTxt("%v", err), nil
+	}
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://air-control/v1/sessions", nil)
+	resp, err := hc.Do(req)
+	if err != nil {
+		return errTxt("air_sessions: %v", err), nil
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		return errTxt("air_sessions: %s: %s", resp.Status, string(body)), nil
+	}
+	return txt(string(body)), nil
+}
+
+// toolAirSteer steers a live session via the gateway control endpoint.
+func (a *meshApp) toolAirSteer(ctx context.Context, args json.RawMessage) (mcp.ToolResult, error) {
+	var p struct {
+		Backend string          `json:"backend"`
+		ID      string          `json:"id"`
+		Method  string          `json:"method"`
+		Params  json.RawMessage `json:"params"`
+	}
+	if json.Unmarshal(args, &p) != nil || p.Backend == "" || p.ID == "" || p.Method == "" {
+		return errTxt("backend, id and method are required"), nil
+	}
+	hc, err := a.controlClient()
+	if err != nil {
+		return errTxt("%v", err), nil
+	}
+	reqBody, _ := json.Marshal(p)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "http://air-control/v1/steer", bytes.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := hc.Do(req)
+	if err != nil {
+		return errTxt("air_steer: %v", err), nil
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		return errTxt("air_steer: %s: %s", resp.Status, string(body)), nil
+	}
+	return txt(string(body)), nil
+}
+
+// toolAirTasks lists the async tasks a backend is tracking.
+func (a *meshApp) toolAirTasks(ctx context.Context, args json.RawMessage) (mcp.ToolResult, error) {
+	var p struct{ Target string }
+	_ = json.Unmarshal(args, &p)
+	c, err := a.client(p.Target)
+	if err != nil {
+		return errTxt("%v", err), nil
+	}
+	tasks, err := c.ListTasks(ctx)
+	if err != nil {
+		a.drop(p.Target)
+		return errTxt("air_tasks: %v", err), nil
+	}
+	return jsonTxt(map[string]any{"tasks": tasks}), nil
+}
+
+// toolAirTaskSteer augments a running task in-flight (tasks/steer).
+func (a *meshApp) toolAirTaskSteer(ctx context.Context, args json.RawMessage) (mcp.ToolResult, error) {
+	var p struct {
+		Target  string          `json:"target"`
+		TaskID  string          `json:"task_id"`
+		Payload json.RawMessage `json:"payload"`
+	}
+	if json.Unmarshal(args, &p) != nil || p.Target == "" || p.TaskID == "" {
+		return errTxt("target and task_id are required"), nil
+	}
+	c, err := a.client(p.Target)
+	if err != nil {
+		return errTxt("%v", err), nil
+	}
+	payload := p.Payload
+	if len(payload) == 0 {
+		payload = json.RawMessage(`{}`)
+	}
+	t, err := c.SteerTask(ctx, p.TaskID, payload)
+	if err != nil {
+		a.drop(p.Target)
+		return errTxt("air_task_steer: %v", err), nil
+	}
+	return jsonTxt(t), nil
+}
+
+// toolAirPeers lists reachable mesh identities.
+func (a *meshApp) toolAirPeers(_ context.Context, _ json.RawMessage) (mcp.ToolResult, error) {
+	if a.mesh == nil {
+		return errTxt("not joined to the mesh (set NB_SETUP_KEY)"), nil
+	}
+	st, err := a.mesh.Status()
+	if err != nil {
+		return errTxt("mesh status: %v", err), nil
+	}
+	type row struct{ Status, IP, FQDN, PubKey string }
+	peers := []row{}
+	for _, p := range st.Peers {
+		connected := strings.EqualFold(fmt.Sprint(p.ConnStatus), "Connected")
+		status := "connected"
+		if !connected {
+			status = strings.ToLower(fmt.Sprint(p.ConnStatus))
+		}
+		peers = append(peers, row{
+			Status: status,
+			IP:     strings.SplitN(p.IP, "/", 2)[0],
+			FQDN:   p.FQDN,
+			PubKey: shortKey(p.PubKey),
+		})
+	}
+	return jsonTxt(map[string]any{"peers": peers}), nil
+}
+
+// toolAirPush pushes a small text payload to a peer's inbox over the mesh.
+func (a *meshApp) toolAirPush(ctx context.Context, args json.RawMessage) (mcp.ToolResult, error) {
+	var p struct{ Target, Text, Name string }
+	if json.Unmarshal(args, &p) != nil || p.Target == "" || p.Text == "" {
+		return errTxt("target and text are required"), nil
+	}
+	if a.mesh == nil {
+		return errTxt("not joined to the mesh (set NB_SETUP_KEY)"), nil
+	}
+	name := p.Name
+	if name == "" {
+		name = "clip.txt"
+	}
+	pr, pw := io.Pipe()
+	go func() { pw.CloseWithError(sendData(pw, name, []byte(p.Text))) }()
+	dial := func(ctx context.Context) (net.Conn, error) { return a.mesh.Dial(ctx, "tcp", p.Target) }
+	if err := session.NewClient(dial, nil).Run(ctx, sendStream{r: pr}); err != nil {
+		return errTxt("push to %s failed: %v", p.Target, err), nil
+	}
+	return txt(fmt.Sprintf("pushed %d bytes (%q) to %s", len(p.Text), name, p.Target)), nil
+}
+
+// toolAirFetch fetches a blob by content hash from a peer's CAS.
+func (a *meshApp) toolAirFetch(ctx context.Context, args json.RawMessage) (mcp.ToolResult, error) {
+	var p struct{ Target, Hash, Out string }
+	if json.Unmarshal(args, &p) != nil || p.Target == "" || p.Hash == "" {
+		return errTxt("target and hash are required"), nil
+	}
+	hash := strings.ToLower(p.Hash)
+	if len(hash) != 64 || !isHex(hash) {
+		return errTxt("%q is not a sha256 hash", p.Hash), nil
+	}
+	if a.mesh == nil {
+		return errTxt("not joined to the mesh (set NB_SETUP_KEY)"), nil
+	}
+	dest := p.Out
+	if dest == "" {
+		dest = hash
+	}
+	conn, err := a.mesh.Dial(ctx, "tcp", p.Target)
+	if err != nil {
+		return errTxt("dial %s: %v", p.Target, err), nil
+	}
+	defer conn.Close()
+	if err := json.NewEncoder(conn).Encode(fetchReq{Hash: hash}); err != nil {
+		return errTxt("send request: %v", err), nil
+	}
+	got, err := fetchBlob(conn, hash, dest)
+	if err != nil {
+		return errTxt("fetch: %v", err), nil
+	}
+	return txt(fmt.Sprintf("fetched %s (%d bytes) -> %s", hash, got, dest)), nil
+}
+
+// toolAirLaunch spawns a new agent — opt-in, since it starts a process.
+func (a *meshApp) toolAirLaunch(_ context.Context, args json.RawMessage) (mcp.ToolResult, error) {
+	if !a.allowLaunch {
+		return errTxt("air_launch is disabled — start `meshmcp mcp` with --allow-launch to permit spawning agents"), nil
+	}
+	var p struct{ Role, Gateway string }
+	if json.Unmarshal(args, &p) != nil || p.Role == "" || p.Gateway == "" {
+		return errTxt("role and gateway are required"), nil
+	}
+	pid, identity, err := spawnAgent(p.Role, "", p.Gateway)
+	if err != nil {
+		return errTxt("air_launch: %v", err), nil
+	}
+	return txt(fmt.Sprintf("launched agent role=%s pid=%d identity=%s -> %s", p.Role, pid, identity, p.Gateway)), nil
 }
 
 // toolShowRetrievals surfaces provenance receipts from the audit log.

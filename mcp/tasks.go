@@ -25,12 +25,33 @@ type task struct {
 	result ToolResult
 	errMsg string
 	cancel context.CancelFunc
+	steer  chan json.RawMessage // buffered; mid-flight guidance for a cooperative handler
 }
 
 func (t *task) snapshot() (status, errMsg string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.status, t.errMsg
+}
+
+// steerBuffer bounds a task's pending steer payloads. A non-blocking send drops
+// (and taskManager.steer reports "busy") once this many are unconsumed, so a
+// steer call can never block on a handler that isn't reading.
+const steerBuffer = 8
+
+type steerKey struct{}
+
+func withSteer(ctx context.Context, ch <-chan json.RawMessage) context.Context {
+	return context.WithValue(ctx, steerKey{}, ch)
+}
+
+// SteerChan returns the channel of steer payloads delivered to the current task
+// via tasks/steer, or nil for a synchronous (non-task) call. A cooperative
+// handler selects on it to receive mid-flight guidance; a receive on the nil
+// channel blocks forever, so a handler that never expects a steer is unaffected.
+func SteerChan(ctx context.Context) <-chan json.RawMessage {
+	ch, _ := ctx.Value(steerKey{}).(<-chan json.RawMessage)
+	return ch
 }
 
 type taskManager struct {
@@ -54,7 +75,8 @@ func (m *taskManager) start(sess *Session, reqID json.RawMessage, toolName strin
 	m.seq++
 	id := fmt.Sprintf("task-%d", m.seq)
 	ctx, cancel := context.WithCancel(context.Background())
-	t := &task{id: id, tool: toolName, status: StatusWorking, cancel: cancel}
+	steer := make(chan json.RawMessage, steerBuffer)
+	t := &task{id: id, tool: toolName, status: StatusWorking, cancel: cancel, steer: steer}
 	m.tasks[id] = t
 	m.order = append(m.order, id)
 	m.mu.Unlock()
@@ -67,7 +89,7 @@ func (m *taskManager) start(sess *Session, reqID json.RawMessage, toolName strin
 	})
 
 	go func() {
-		tctx := withToolCall(WithSession(ctx, sess), ToolCallInfo{Tool: toolName, RequestID: reqID, Meta: meta})
+		tctx := withSteer(withToolCall(WithSession(ctx, sess), ToolCallInfo{Tool: toolName, RequestID: reqID, Meta: meta}), steer)
 		res, err := handler(tctx, args)
 		t.mu.Lock()
 		switch {
@@ -92,6 +114,38 @@ func (m *taskManager) get(id string) (*task, bool) {
 	defer m.mu.Unlock()
 	t, ok := m.tasks[id]
 	return t, ok
+}
+
+// steerResult reports how a tasks/steer delivery landed.
+type steerResult int
+
+const (
+	steerUnknown   steerResult = iota // no such task
+	steerNotReady                     // task exists but is not in the working state
+	steerBusy                         // working, but its steer buffer is full
+	steerDelivered                    // guidance queued for the handler
+)
+
+// steer queues one guidance payload for a working task, non-blocking. Only a
+// task that is still working and whose buffer has room accepts it, so a steer
+// call never blocks on (or wakes) a handler that isn't reading.
+func (m *taskManager) steer(id string, payload json.RawMessage) steerResult {
+	t, ok := m.get(id)
+	if !ok {
+		return steerUnknown
+	}
+	t.mu.Lock()
+	working, ch := t.status == StatusWorking, t.steer
+	t.mu.Unlock()
+	if !working || ch == nil {
+		return steerNotReady
+	}
+	select {
+	case ch <- payload:
+		return steerDelivered
+	default:
+		return steerBusy
+	}
 }
 
 func (m *taskManager) list() []map[string]any {

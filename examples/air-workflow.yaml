@@ -1,0 +1,39 @@
+# Air workflow — a declarative launch/steer/call sequence run over one mesh
+# membership (Air · Steer, P4).
+#
+#   meshmcp air workflow examples/air-workflow.yaml            # run it
+#   meshmcp air workflow examples/air-workflow.yaml --dry-run  # parse + print the plan
+#
+# Each step is exactly one of: launch (spawn an agent), steer (a live session
+# via a gateway control endpoint), or call (a tool on a backend over the mesh).
+# Every action is governed by the same firewall as any caller and audited.
+
+name: nightly-scan
+
+steps:
+  # 1. Spawn a fresh reader agent with its own WireGuard identity.
+  - launch:
+      role: reader
+      gateway: 100.64.0.2:9101
+
+  # 2. Spawn an analyst agent too.
+  - launch:
+      role: analyst
+      gateway: 100.64.0.2:9101
+
+  # 3. Steer a live session on the gateway's fs backend (session id comes from
+  #    `meshmcp air sessions <control>`), nudging the agent driving it.
+  - steer:
+      control: 100.64.0.2:9600      # gateway control endpoint (config: control.port)
+      backend: fs
+      session: REPLACE_WITH_SESSION_ID
+      method: notifications/air/steer
+      params:
+        text: "focus on customer 42"
+
+  # 4. Call a tool on a backend over the mesh and log its result.
+  - call:
+      target: 100.64.0.2:9101
+      tool: summarize
+      args:
+        topic: "nightly scan"

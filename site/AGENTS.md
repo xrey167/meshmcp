@@ -10,6 +10,9 @@ Source of the published showcase page for meshmcp. This is the human-facing mark
 | File | Description |
 |------|-------------|
 | `index.html` | Self-contained showcase page (the meshmcp fabric overview, scenario cards, diagrams). |
+| `knowledge-canvas.html` | Interactive provenance knowledge-graph canvas (drag-to-AirDrop demo). |
+| `air.html` | Self-contained **Air** concept mockup (phone UI: Nearby / Drop / Push / Steer / Approve / Ledger). Static sample data. |
+| `air-live.html` | The **functional** Air page served by `meshmcp air serve` — fetches `/api/peers` + `/api/sessions`, POSTs `/api/steer`. |
 
 ## For AI Agents
 
