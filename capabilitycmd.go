@@ -28,9 +28,57 @@ func cmdCapability(args []string) error {
 		return capabilityKeygen(args[1:])
 	case "issue":
 		return capabilityIssue(args[1:])
+	case "revoke":
+		return capabilityRevoke(args[1:])
+	case "list":
+		return capabilityList(args[1:])
 	default:
-		return fmt.Errorf("meshmcp capability: unknown subcommand %q (want: keygen, issue)", args[0])
+		return fmt.Errorf("meshmcp capability: unknown subcommand %q (want: keygen, issue, revoke, list)", args[0])
 	}
+}
+
+// capabilityRevoke marks a capability id as revoked in a store the gateway
+// pins via capabilities.revocation_store, so the token fails closed even before
+// it expires.
+func capabilityRevoke(args []string) error {
+	fs := flag.NewFlagSet("capability revoke", flag.ContinueOnError)
+	store := fs.String("store", "", "revocation store directory (matches the backend's revocation_store)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *store == "" || fs.NArg() != 1 {
+		return fmt.Errorf("usage: meshmcp capability revoke --store <dir> <cap-id>")
+	}
+	id := fs.Arg(0)
+	if err := (policy.FileRevocation{Dir: *store}).Revoke(id); err != nil {
+		return fmt.Errorf("revoke %s: %w", id, err)
+	}
+	fmt.Printf("revoked capability %s (it will now fail closed at every gateway sharing %s)\n", id, *store)
+	return nil
+}
+
+// capabilityList prints the revoked capability ids in a store.
+func capabilityList(args []string) error {
+	fs := flag.NewFlagSet("capability list", flag.ContinueOnError)
+	store := fs.String("store", "", "revocation store directory")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *store == "" {
+		return fmt.Errorf("usage: meshmcp capability list --store <dir>")
+	}
+	ids, err := (policy.FileRevocation{Dir: *store}).List()
+	if err != nil {
+		return err
+	}
+	if len(ids) == 0 {
+		fmt.Println("no revoked capabilities")
+		return nil
+	}
+	for _, id := range ids {
+		fmt.Println(id)
+	}
+	return nil
 }
 
 // capabilityKeygen generates an Ed25519 authority key and prints its public key

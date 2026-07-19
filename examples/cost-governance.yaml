@@ -1,0 +1,28 @@
+# Cost & budget governance (F29): weight each tool with a cost, cap per-identity
+# spend with a cost-weighted rate limit, and read the running total with
+#   meshmcp budget --audit ./cost-audit.jsonl [--by-tool]
+# A call over budget is denied inline — the same mechanism as any policy deny.
+mesh:
+  device_name: meshmcp-cost
+  setup_key_env: NB_SETUP_KEY
+  config_path: ./cost-gw.json
+
+backends:
+  - name: llm-tools
+    port: 9160
+    stdio: ["./cmd/mcpserver/mcpserver.exe"]
+    audit_log: ./cost-audit.jsonl
+    policy:
+      default_allow: false
+      rules:
+        # A cheap read: 1 unit each, 1000/day.
+        - peers: ["*"]
+          tools: ["read_*", "search"]
+          allow: true
+          rate: { max: 1000, per: "24h", cost: 1 }
+        # An expensive LLM-backed tool: 25 units each; the same 1000/day budget
+        # means ~40 calls/day, denied-by-budget after that.
+        - peers: ["*"]
+          tools: ["summarize", "generate"]
+          allow: true
+          rate: { max: 1000, per: "24h", cost: 25 }

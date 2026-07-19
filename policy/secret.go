@@ -20,3 +20,13 @@ func (f *Filter) SetSecretResolver(r SecretResolver) { f.secrets = r }
 // SetPendingStore attaches a held-request registry so a co-sign outcome is
 // recorded for a human approver (e.g. a phone on the mesh) to act on.
 func (f *Filter) SetPendingStore(p PendingStore) { f.pending = p }
+
+// AddDecisionHook appends a plugin decision hook. Hooks run after the rule
+// engine and any capability upgrade, in registration order, and may only
+// tighten the outcome (deny / co-sign) or add data-flow labels — never widen a
+// deny into an allow (enforced by applyDecisionHooks).
+func (f *Filter) AddDecisionHook(h DecisionHook) {
+	if h != nil {
+		f.hooks = append(f.hooks, h)
+	}
+}

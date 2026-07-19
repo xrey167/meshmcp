@@ -1,0 +1,34 @@
+# Content-aware DLP at the network layer (F18). The `dlp` block is a plugin
+# decision hook: it scans every tools/call's arguments and either denies the
+# call outright or tags the session with a data-flow label that a later
+# block_labels rule enforces — below the model, where no jailbreak can talk
+# past it. Compose it with the ordinary policy engine.
+mesh:
+  device_name: meshmcp-dlp
+  setup_key_env: NB_SETUP_KEY
+  config_path: ./dlp-gw.json
+
+backends:
+  - name: agent-tools
+    port: 9110
+    stdio: ["./cmd/mcpserver/mcpserver.exe"]
+    audit_log: ./dlp-audit.jsonl
+    policy:
+      default_allow: false
+      rules:
+        - peers: ["*"]
+          tools: ["read_*", "write_file", "post_external"]
+          allow: true
+        # PII may never leave the mesh: an egress tool blocks a session that
+        # DLP has tagged "pii".
+        - peers: ["*"]
+          tools: ["post_external"]
+          allow: true
+          block_labels: ["pii"]
+    dlp:
+      # A hard-coded cloud key in tool arguments is denied outright.
+      - patterns: ['AKIA[0-9A-Z]{16}', '-----BEGIN [A-Z ]*PRIVATE KEY-----']
+        deny: true
+      # An SSN-shaped value tags the session "pii" (blocked at post_external above).
+      - patterns: ['\b\d{3}-\d{2}-\d{4}\b']
+        label: pii

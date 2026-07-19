@@ -27,6 +27,8 @@ func cmdApprovals(args []string) error {
 	port := fs.Int("port", 9700, "mesh port to serve on")
 	addr := fs.String("addr", "", "bind a plain local address instead of the mesh (dev/testing)")
 	ttlSec := fs.Int("ttl", 0, "drop pending requests older than this many seconds (0 = never)")
+	var approvers stringList
+	fs.Var(&approvers, "approver", "identity allowed to approve (FQDN glob or 'pubkey:<key>'); repeatable; empty = any mesh peer")
 	devices := fs.String("devices", "", "directory to persist push-wake device tokens (enables /v1/devices + notify on new pendings)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -44,9 +46,9 @@ func cmdApprovals(args []string) error {
 
 	// Local/dev mode: no mesh, a fixed approver identity.
 	if *addr != "" {
-		h := approvalsHandler(ps, func(*http.Request) string { return "operator@local" }, time.Now, opts...)
+		h := approvalsHandler(ps, func(*http.Request) string { return "operator@local" }, nil, time.Now, opts...)
 		log.Printf("approvals on http://%s (LOCAL — approver is 'operator@local')", *addr)
-		return http.ListenAndServe(*addr, h)
+		return newLocalHTTPServer(*addr, h).ListenAndServe()
 	}
 
 	// Mesh mode: the approver is the caller's cryptographic mesh identity.
@@ -63,13 +65,26 @@ func cmdApprovals(args []string) error {
 		}
 		return fqdn
 	}
+	// Operator allowlist: when --approver entries are given, only those
+	// identities may approve/deny — so a low-privilege agent on the mesh cannot
+	// self-authorize its own held call. Empty = any mesh peer (prior behavior).
+	var authorized func(*http.Request) bool
+	if len(approvers) > 0 {
+		allow := newACL(approvers)
+		authorized = func(r *http.Request) bool {
+			pub, fqdn := peerIdentityStr(client, r.RemoteAddr)
+			return allow.allows(pub, fqdn)
+		}
+		log.Printf("approvals: operator allowlist active (%v)", []string(approvers))
+	}
 	ln, err := client.ListenTCP(fmt.Sprintf(":%d", *port))
 	if err != nil {
 		return fmt.Errorf("listen on mesh port %d: %w", *port, err)
 	}
 	defer ln.Close()
 	log.Printf("approvals on mesh port %d (open it from a phone on the mesh; approver = your mesh identity)", *port)
-	return http.Serve(ln, approvalsHandler(ps, approver, time.Now, opts...))
+	srv := newLocalHTTPServer("", approvalsHandler(ps, approver, authorized, time.Now, opts...))
+	return srv.Serve(ln)
 }
 
 // approvalsOpts are optional add-ons for approvalsHandler (push-wake).
@@ -90,7 +105,7 @@ func withPushWake(d *DeviceStore, n Notifier) approvalsOption {
 // approvalsHandler builds the approver HTTP surface. approver resolves the
 // caller identity for a request; now supplies grant timestamps. Split out so it
 // is unit-testable with a fixed approver via httptest.
-func approvalsHandler(ps *policy.FilePending, approver func(*http.Request) string, now func() time.Time, options ...approvalsOption) http.Handler {
+func approvalsHandler(ps *policy.FilePending, approver func(*http.Request) string, authorized func(*http.Request) bool, now func() time.Time, options ...approvalsOption) http.Handler {
 	var opt approvalsOpts
 	for _, o := range options {
 		o(&opt)
@@ -115,6 +130,11 @@ func approvalsHandler(ps *policy.FilePending, approver func(*http.Request) strin
 				http.Error(w, "POST only", http.StatusMethodNotAllowed)
 				return
 			}
+			if authorized != nil && !authorized(r) {
+				http.Error(w, "forbidden: not an authorized approver", http.StatusForbidden)
+				return
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, 64<<10) // bound the request body
 			var body struct{ Peer, Tool string }
 			if json.NewDecoder(r.Body).Decode(&body) != nil || body.Peer == "" || body.Tool == "" {
 				http.Error(w, "peer and tool are required", http.StatusBadRequest)

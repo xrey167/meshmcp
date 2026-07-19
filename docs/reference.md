@@ -286,10 +286,14 @@ migration with lease); per-tool + per-method policy with audit and a full both-d
 trace; aggregating router with replica LB, health-based failover, dynamic discovery
 registry, and bidirectional MCP; stdio + HTTP backends; a CLI (`ls/call/read/prompt`).
 
-**Open (mostly deployment/control-plane):**
-- **Capability tokens:** short-lived signed grants ("agent X may call `read_*` until 15:00").
-- **Rate & cost governance:** per-identity quotas and LLM-cost accounting at the gateway.
-- **`meshmcp status`:** live session counts, peers, and per-tool call rates.
-- **Federation:** peer selected backends across orgs with policy at the trust seam.
-- **Replicated store backend:** Redis/etcd behind the `SessionStore` interface for
-  multi-datacenter HA.
+**Shipped since (Wave 2 — see [ROADMAP-HARDENING.md](ROADMAP-HARDENING.md)):**
+- **Capability tokens** — short-lived signed grants, plus a **revocation store** (`capability revoke/list`, F21).
+- **Rate & cost governance** — per-identity quotas and cost accounting; `meshmcp budget` totals spend (F29).
+- **`meshmcp status`** — per-peer/tool/backend call rollup + chain verdict (F15); `budget`, `doctor`, `config validate`, `audit export/receipt`.
+- **Federation** — cross-org boundary with policy at the trust seam (already built; F31 SSO mapping is open).
+- **HTTP-backend policy parity** (F16), a **plugin platform** (F13), **fail-closed audit** (F22), **identity-bound sessions** (F23),
+  a **client-hook firewall** for Claude Code / Cursor / Codex (F33), and new dark backends **vault/scheduler/bus** (F26–F28).
+
+**Still open:**
+- **Replicated store backend:** Redis/etcd behind the `SessionStore` interface for multi-datacenter HA.
+- Flagships F14 (plugin marketplace), F17 (group-based policy), F19 (Mesh Spotlight), F25 (multi-tenant), F30–F32.

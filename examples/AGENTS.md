@@ -16,7 +16,10 @@ Ready-to-adapt gateway configurations, one per feature, plus the human-in-the-lo
 | `live-task.yaml` | Async tool tasks. |
 | `demo-backends.yaml` · `demo-mesh.yaml` · `demo-trace.yaml` | The multi-backend live showcase and gateway-wide tracing. |
 | `router.yaml` · `router-failover.yaml` | Aggregating router: discovery, load-balance, failover. |
-| `orchestrate.yaml` · `federate.yaml` · `http-backend.yaml` | Server-to-server orchestration, cross-org federation, HTTP backend proxy. |
+| `orchestrate.yaml` · `federate.yaml` · `http-backend.yaml` | Server-to-server orchestration, cross-org federation, HTTP backend proxy (now with a per-tool policy — F16). |
+| `dlp-firewall.yaml` · `cost-governance.yaml` | Content DLP as a decision hook (F18); cost-weighted budgets (F29). |
+| `vault.yaml` · `scheduler.yaml` · `bus.yaml` | The Wave-2 dark backends: secrets vault (F26), scheduler (F27), event bus (F28). |
+| `hook-policy.yaml` | Policy for the client-hook firewall (`meshmcp hook`, F33) — governs an LLM client's local tools. |
 | `README.md` | Index of the examples. |
 
 ## Subdirectories

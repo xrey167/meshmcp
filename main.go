@@ -45,16 +45,28 @@ Usage:
   meshmcp prompt [flags] <peer:port> <name>     render a prompt (--arg k=v)
   meshmcp audit verify <file> [--checkpoints f] verify an audit log (hash chain; +signatures with --checkpoints)
   meshmcp audit keygen [--out f]                generate a gateway signing key for audit checkpoints
+  meshmcp audit export --in <file>              export an audit ledger to CSV on stdout (for BI/spreadsheets)
+  meshmcp audit receipt --in <file> [--peer]    emit a verifiable provenance receipt (what a session's tools produced)
+  meshmcp audit attest --audit <f> [--checkpoints --pubkey --policy]  build a verifiable compliance/attestation bundle
   meshmcp capability keygen [--out f]           generate an Ed25519 authority key backends pin as a trust root
   meshmcp capability issue [flags]              sign a short-lived, subject-bound tool grant (--subject/--audience/--tool)
+  meshmcp capability revoke --store <d> <id>    revoke a capability id (fails closed at every gateway sharing the store)
+  meshmcp capability list --store <d>           list revoked capability ids
   meshmcp approve [flags] <peer-fqdn> <tool>    co-sign a require_cosign tool call for a peer
-  meshmcp approvals --store <dir>               serve the co-sign approver (phone-friendly) over the mesh
+  meshmcp approvals --store <dir> [--approver <id>]  serve the co-sign approver over the mesh (--approver restricts who may approve)
   meshmcp secrets check --config <file>         validate the credential broker config (never prints values)
   meshmcp dash [flags]                          serve the mesh control dashboard over audit/trace logs
   meshmcp room --audit <file>                   serve the live Control Room (server tiles, apps, decision feed)
   meshmcp mcp [flags]                            run meshmcp AS an MCP server (add it to Claude Code / Codex to operate the mesh)
   meshmcp insight <profile|recommend|simulate|detect>  turn the audit stream into policy (the firewall's read side)
   meshmcp replay [flags] <trace> <peer:port>    replay a traced session against a backend and diff
+  meshmcp config validate --config <file>       validate a config (policy globs, windows, enums, DLP) without joining the mesh
+  meshmcp status --audit <file> [--json]        roll up an audit ledger: per-peer/tool/backend calls + chain verdict
+  meshmcp budget --audit <file> [--by-tool]     sum cost/quota units consumed per identity (FinOps for the fleet)
+  meshmcp doctor --config <file>                pre-flight checks: config valid, commands present, dirs writable, secret perms
+  meshmcp hook --client <c> --config <file>     PreToolUse hook adapter: govern EVERY tool call in Claude Code/Cursor/Codex by policy+audit
+  meshmcp hook install --client <c>             print the hook config to add to a client's settings
+  meshmcp plugins                                list extensions compiled into this build
   meshmcp version
 
 Mesh credentials come from flags, config, or $NB_SETUP_KEY / $NB_MANAGEMENT_URL.
@@ -142,14 +154,32 @@ func main() {
 		err = cmdInsight(os.Args[2:])
 	case "replay":
 		err = cmdReplay(os.Args[2:])
+	case "config":
+		err = cmdConfig(os.Args[2:])
+	case "status":
+		err = cmdStatus(os.Args[2:])
+	case "budget":
+		err = cmdBudget(os.Args[2:])
+	case "doctor":
+		err = cmdDoctor(os.Args[2:])
+	case "hook":
+		err = cmdHook(os.Args[2:])
+	case "plugins":
+		err = cmdPlugins(os.Args[2:])
 	case "version":
 		fmt.Println(version)
 	case "-h", "--help", "help":
 		usage()
 	default:
-		fmt.Fprintf(os.Stderr, "meshmcp: unknown command %q\n\n", os.Args[1])
-		usage()
-		os.Exit(2)
+		// Fall through to the plugin subcommand registry before giving up, so a
+		// compiled-in extension can add a verb without editing this switch.
+		if handled, perr := dispatchPlugin(os.Args[1], os.Args[2:]); handled {
+			err = perr
+		} else {
+			fmt.Fprintf(os.Stderr, "meshmcp: unknown command %q\n\n", os.Args[1])
+			usage()
+			os.Exit(2)
+		}
 	}
 	if err != nil {
 		log.Fatal(err)

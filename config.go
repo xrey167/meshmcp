@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 
@@ -33,12 +34,23 @@ type Config struct {
 	// shared by every policy-enabled backend — one hash chain for the whole
 	// gateway, which is what a unified live view (dash / room) reads. When
 	// empty, each backend uses its own audit_log.
-	AuditLog string         `yaml:"audit_log"`
-	Trace    *TraceConfig   `yaml:"trace"`
-	Registry string         `yaml:"registry"` // dir: register backends for router discovery
-	Control  *ControlConfig `yaml:"control"`  // optional: Air session-control endpoint
-	Hooks    *HooksConfig   `yaml:"hooks"`    // publish policy decisions to the event bus and/or a webhook
-	Backends []*Backend     `yaml:"backends"`
+	AuditLog string `yaml:"audit_log"`
+	// AuditFailClosed makes the gateway-wide shared ledger a hard control:
+	// a record that cannot be written denies the call. Off by default.
+	AuditFailClosed bool `yaml:"audit_fail_closed"`
+	// AuditWebhook POSTs audit records to an external URL (SIEM / Slack /
+	// PagerDuty) via a best-effort observer sink. AuditWebhookAll forwards every
+	// record; by default only deny/cosign records are sent.
+	AuditWebhook    string       `yaml:"audit_webhook"`
+	AuditWebhookAll bool         `yaml:"audit_webhook_all"`
+	Trace           *TraceConfig `yaml:"trace"`
+	Registry        string       `yaml:"registry"` // dir: register backends for router discovery
+	// Groups maps a group name to member patterns (pubkey:<key> or FQDN glob)
+	// so policy rules can match `group:<name>` (F17). Shared by all backends.
+	Groups   map[string][]string `yaml:"groups"`
+	Control  *ControlConfig      `yaml:"control"` // optional: Air session-control endpoint
+	Hooks    *HooksConfig        `yaml:"hooks"`   // publish policy decisions to the event bus and/or a webhook
+	Backends []*Backend          `yaml:"backends"`
 }
 
 // ControlConfig enables the Air session-control endpoint: a mesh HTTP surface
@@ -104,8 +116,10 @@ type Backend struct {
 	// client->backend log, idempotent backends), or "backend" (the backend
 	// restores its own state from MESHMCP_SESSION_ID).
 	SessionStoreMode string `yaml:"session_store_mode"`
-	// Policy authorizes individual tools/call requests by caller identity.
-	// Only valid for stdio backends (the gateway parses their JSON-RPC).
+	// Policy authorizes individual tools/call requests by caller identity. For
+	// stdio backends the gateway parses the JSON-RPC stream; for HTTP backends
+	// it parses each request body (F16). Rate limits, time windows, co-sign,
+	// and audit apply to both; taint/secret injection/capabilities are stdio.
 	Policy *policy.Policy `yaml:"policy"`
 	// AuditLog is a file path for JSONL tool-call audit records. Empty
 	// sends audit records to stderr. The log is a tamper-evident hash chain
@@ -117,13 +131,23 @@ type Backend struct {
 	// "meshmcp audit verify <log> --checkpoints <f> --pubkey <hex>".
 	AuditCheckpoints string `yaml:"audit_checkpoints"`
 	// AuditSigningKey is the gateway Ed25519 key file (created by
-	// "meshmcp audit keygen"). If it does not exist it is generated on start.
+	// "meshmcp audit keygen"). A missing file is fatal unless
+	// audit_signing_key_autogen is set (see below).
 	AuditSigningKey string `yaml:"audit_signing_key"`
 	// AuditCheckpointEvery is how many records per checkpoint (default 128).
 	AuditCheckpointEvery int `yaml:"audit_checkpoint_every"`
 	// AuditAnchor is an append-only file where each checkpoint is also written
 	// as an external witness (the transparency-log seam).
 	AuditAnchor string `yaml:"audit_anchor"`
+	// AuditFailClosed makes this backend's audit sink a hard control: when a
+	// record cannot be written (full disk, I/O error), the call is denied
+	// rather than proceeding unrecorded. Off by default (best-effort).
+	AuditFailClosed bool `yaml:"audit_fail_closed"`
+	// AuditSigningKeyAutogen permits generating audit_signing_key when the file
+	// is absent. Off by default: a missing key is fatal, so an attacker cannot
+	// force a fresh signing identity by deleting the file. Run
+	// "meshmcp audit keygen --out <path>" to create one explicitly.
+	AuditSigningKeyAutogen bool `yaml:"audit_signing_key_autogen"`
 	// CosignStore is a shared directory holding human co-sign approvals for
 	// rules with require_cosign. A human identity grants approvals with
 	// "meshmcp approve". Only meaningful with a policy.
@@ -140,8 +164,17 @@ type Backend struct {
 	// capability upgrades a policy-default-deny call to allow; required:true
 	// makes the backend a capability-only surface. Only valid for stdio.
 	Capabilities *CapabilitiesConfig `yaml:"capabilities"`
+	// DLP declares content rules scanned against every tools/call's arguments:
+	// a match can deny the call or emit a data-flow label (F18). Implemented as
+	// a plugin decision hook; only valid for stdio backends with a policy.
+	DLP []policy.DLPSpec `yaml:"dlp"`
+	// ShadowPolicy is a CANDIDATE policy evaluated alongside the enforced one:
+	// where the two disagree, the divergence is logged, but enforcement is
+	// unchanged (F24). A live canary for a policy change. Stdio + a policy.
+	ShadowPolicy *policy.Policy `yaml:"shadow_policy"`
 
 	httpURL *url.URL
+	groups  map[string][]string // resolved from Config.Groups at load
 }
 
 // CapabilitiesConfig configures signed-capability admission for a backend.
@@ -151,6 +184,10 @@ type CapabilitiesConfig struct {
 	// TrustedPublicKeys are the hex Ed25519 authority keys the gateway pins;
 	// a token never supplies its own trust root.
 	TrustedPublicKeys []string `yaml:"trusted_public_keys"`
+	// RevocationStore is a directory of revoked capability ids. When set, a
+	// token whose id was revoked ("meshmcp capability revoke") fails closed at
+	// the enforcement point even before it expires.
+	RevocationStore string `yaml:"revocation_store"`
 }
 
 func (b *Backend) kind() string {
@@ -163,6 +200,15 @@ func (b *Backend) kind() string {
 	return fmt.Sprintf("stdio -> %v", b.Stdio)
 }
 
+// loadConfig parses and validates a gateway config.
+//
+// Trust model: the config file is TRUSTED operator input (it names the backend
+// commands the gateway will exec, the pinned trust roots, and the audit sinks).
+// It is not attacker-controlled, so YAML alias/anchor expansion is not a
+// hardening concern here. If a deployment ever renders configs from less-trusted
+// input, template them into a fixed schema rather than unmarshalling them
+// directly. Everything the config *governs* (peers, tool calls) remains
+// untrusted and is enforced at request time.
 func loadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -178,6 +224,7 @@ func loadConfig(path string) (*Config, error) {
 	}
 	seen := map[int]string{}
 	for i, b := range cfg.Backends {
+		b.groups = cfg.Groups
 		if b.Name == "" {
 			return nil, fmt.Errorf("backend #%d: name is required", i+1)
 		}
@@ -198,8 +245,41 @@ func loadConfig(path string) (*Config, error) {
 		if b.SessionStore != "" && !b.Resumable {
 			return nil, fmt.Errorf("backend %q: session_store requires resumable: true", b.Name)
 		}
-		if b.Policy != nil && !hasStdio {
-			return nil, fmt.Errorf("backend %q: policy is only valid for stdio backends", b.Name)
+		if b.Policy != nil {
+			if err := b.Policy.Validate(); err != nil {
+				return nil, fmt.Errorf("backend %q: policy: %w", b.Name, err)
+			}
+			// A group:<name> peer must reference a defined group (F17).
+			for ri, r := range b.Policy.Rules {
+				for _, p := range r.Peers {
+					if g, ok := strings.CutPrefix(p, "group:"); ok {
+						if _, defined := cfg.Groups[g]; !defined {
+							return nil, fmt.Errorf("backend %q rule #%d: peer group %q is not defined in the top-level groups map", b.Name, ri+1, g)
+						}
+					}
+				}
+			}
+		}
+		switch b.SessionStoreMode {
+		case "", "handshake", "full", "backend":
+		default:
+			return nil, fmt.Errorf("backend %q: session_store_mode %q is not one of handshake|full|backend", b.Name, b.SessionStoreMode)
+		}
+		if len(b.DLP) > 0 {
+			if !hasStdio || b.Policy == nil {
+				return nil, fmt.Errorf("backend %q: dlp requires a stdio backend with a policy", b.Name)
+			}
+			if _, err := policy.NewPatternDLP(b.DLP); err != nil {
+				return nil, fmt.Errorf("backend %q: %w", b.Name, err)
+			}
+		}
+		if b.ShadowPolicy != nil {
+			if !hasStdio || b.Policy == nil {
+				return nil, fmt.Errorf("backend %q: shadow_policy requires a stdio backend with a policy", b.Name)
+			}
+			if err := b.ShadowPolicy.Validate(); err != nil {
+				return nil, fmt.Errorf("backend %q: shadow_policy: %w", b.Name, err)
+			}
 		}
 		if b.CosignStore != "" && b.Policy == nil {
 			return nil, fmt.Errorf("backend %q: cosign_store requires a policy", b.Name)
@@ -239,6 +319,14 @@ func loadConfig(path string) (*Config, error) {
 			}
 			if b.Secrets.File == "" && b.Secrets.EnvPrefix == "" {
 				return nil, fmt.Errorf("backend %q: secrets needs a file or env_prefix store", b.Name)
+			}
+			// A grant with no peers would inject a credential for ANY mesh peer.
+			// Require an explicit identity list so a secret is never granted to
+			// everyone by omission.
+			for gi, g := range b.Secrets.Grants {
+				if len(g.Peers) == 0 {
+					return nil, fmt.Errorf("backend %q: secret grant #%d must list peers (an empty peers list would grant the secret to every mesh peer)", b.Name, gi+1)
+				}
 			}
 		}
 		if hasHTTP {

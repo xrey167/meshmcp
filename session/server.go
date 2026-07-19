@@ -11,6 +11,11 @@ import (
 	"time"
 )
 
+// errSessionIdentity is returned by attach when a reattach is presented by a
+// cryptographic identity other than the one that opened the session. The
+// session id alone can never authorize a takeover.
+var errSessionIdentity = errors.New("session: reattach identity does not match the session's creator")
+
 // ErrNoSession is returned by Steer when no live session has the given id.
 var ErrNoSession = errors.New("session: no such session")
 
@@ -58,11 +63,12 @@ func NewServer(factory BackendFactory, ttl time.Duration, logf func(string, ...a
 }
 
 type serverSession struct {
-	ep      *endpoint
-	backend Backend
-	reader  *bufio.Reader // backend output reader (survives handshake pre-read)
-	reaper  *time.Timer   // fires when a detached session's TTL expires
-	active  int           // number of live Handle goroutines for this session
+	ep         *endpoint
+	backend    Backend
+	creatorKey string        // WireGuard key of the peer that opened the session
+	reader     *bufio.Reader // backend output reader (survives handshake pre-read)
+	reaper     *time.Timer   // fires when a detached session's TTL expires
+	active     int           // number of live Handle goroutines for this session
 
 	meta      Meta      // caller identity (for enumeration)
 	createdAt time.Time // when this session was opened/rehydrated here (for age)
@@ -166,6 +172,13 @@ func (s *Server) attach(id sessionID, meta Meta) (*serverSession, bool, error) {
 
 	if !id.isZero() {
 		if sess, ok := s.sessions[id]; ok {
+			// Identity binding: a session may be reattached only by the
+			// cryptographic identity that opened it. Otherwise any mesh peer
+			// that learns a session id (they are logged and shared for
+			// migration) could take over the backend and its buffered output.
+			if sess.creatorKey != meta.PeerKey {
+				return nil, false, errSessionIdentity
+			}
 			if sess.reaper != nil {
 				sess.reaper.Stop()
 				sess.reaper = nil
@@ -177,6 +190,12 @@ func (s *Server) attach(id sessionID, meta Meta) (*serverSession, bool, error) {
 		// Rehydrate and take over (session migration / failover).
 		if s.store != nil {
 			if ps, ok, _ := s.store.Load(id.String()); ok {
+				// The same identity binding holds across a failover: the
+				// rehydrating gateway must reject a reattach from any identity
+				// other than the one that originally opened the session.
+				if ps.CreatorKey != meta.PeerKey {
+					return nil, false, errSessionIdentity
+				}
 				sess, err := s.rehydrate(ps, meta)
 				if err != nil {
 					return nil, false, err
@@ -196,12 +215,13 @@ func (s *Server) attach(id sessionID, meta Meta) (*serverSession, bool, error) {
 		return nil, false, err
 	}
 	sess := &serverSession{
-		ep:        newEndpoint(newID),
-		backend:   backend,
-		reader:    bufio.NewReaderSize(backend, maxPayload+64),
-		active:    1,
-		meta:      meta,
-		createdAt: time.Now(),
+		ep:         newEndpoint(newID),
+		backend:    backend,
+		creatorKey: meta.PeerKey,
+		reader:     bufio.NewReaderSize(backend, maxPayload+64),
+		active:     1,
+		meta:       meta,
+		createdAt:  time.Now(),
 	}
 	s.sessions[newID] = sess
 	s.pump(sess)
@@ -244,6 +264,7 @@ func (s *Server) rehydrate(ps PersistedSession, meta Meta) (*serverSession, erro
 	sess := &serverSession{
 		ep:          ep,
 		backend:     backend,
+		creatorKey:  ps.CreatorKey,
 		reader:      reader,
 		active:      1,
 		meta:        meta,
@@ -269,6 +290,7 @@ func (s *Server) checkpoint(sess *serverSession) {
 	sess.cmu.Unlock()
 	ps := sess.ep.snapshot(replay, countRequests(replay))
 	ps.Owner = s.instance
+	ps.CreatorKey = sess.creatorKey
 	_ = s.store.Save(ps)
 }
 

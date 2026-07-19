@@ -39,13 +39,20 @@ func (e EnvStore) Get(name string) (string, bool) {
 }
 
 // FileStore reads a flat JSON object {"name":"value",...} from a file. The file
-// SHOULD be mode 0600; the broker warns if it is group/world readable.
+// MUST be mode 0600 (owner-only): NewFileStore refuses a group- or
+// world-accessible secrets file rather than silently reading it.
 type FileStore struct {
 	m map[string]string
 }
 
-// NewFileStore loads a JSON secrets file.
+// NewFileStore loads a JSON secrets file. It fails closed if the file is
+// readable or writable by group or others — a secrets file must be owner-only.
 func NewFileStore(path string) (*FileStore, error) {
+	if fi, err := os.Stat(path); err == nil {
+		if perm := fi.Mode().Perm(); perm&0o077 != 0 {
+			return nil, fmt.Errorf("secrets file %s has mode %#o: it must be owner-only (0600); run 'chmod 600 %s'", path, perm, path)
+		}
+	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err

@@ -22,12 +22,17 @@ type PersistedFrame struct {
 // cursors + unacked buffer, and the client->backend handshake to replay
 // against a freshly spawned (stateless) backend.
 type PersistedSession struct {
-	ID      string           `json:"id"`
-	Owner   string           `json:"owner"` // gateway instance currently serving it (lease)
-	SendSeq uint64           `json:"send_seq"`
-	Acked   uint64           `json:"acked"`
-	RecvSeq uint64           `json:"recv_seq"`
-	SendBuf []PersistedFrame `json:"send_buf"`
+	ID    string `json:"id"`
+	Owner string `json:"owner"` // gateway instance currently serving it (lease)
+	// CreatorKey is the WireGuard public key of the peer that opened the
+	// session. A gateway resuming this session (failover) must reject a
+	// reattach from any other identity, so the session id alone can never be
+	// used to take over the backend and its buffered output.
+	CreatorKey string           `json:"creator_key,omitempty"`
+	SendSeq    uint64           `json:"send_seq"`
+	Acked      uint64           `json:"acked"`
+	RecvSeq    uint64           `json:"recv_seq"`
+	SendBuf    []PersistedFrame `json:"send_buf"`
 	// Replay is the captured client->backend bytes to replay against a fresh
 	// backend on migration; ReplayResponses is how many response lines that
 	// replay produces (to discard, since the client already has them).

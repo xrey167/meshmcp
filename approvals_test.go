@@ -23,7 +23,7 @@ func TestApprovalsFlow(t *testing.T) {
 	_ = ps.Record(policy.Pending{Peer: "bot.mesh", Backend: "pay", Tool: "wire", RPCID: "2"})
 
 	fixedNow := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
-	h := approvalsHandler(ps, func(*http.Request) string { return "alice-phone.netbird.cloud" }, func() time.Time { return fixedNow })
+	h := approvalsHandler(ps, func(*http.Request) string { return "alice-phone.netbird.cloud" }, nil, func() time.Time { return fixedNow })
 	ts := httptest.NewServer(h)
 	defer ts.Close()
 
@@ -65,9 +65,33 @@ func TestApprovalsFlow(t *testing.T) {
 	}
 }
 
+func TestApprovalsOperatorAllowlist(t *testing.T) {
+	dir := t.TempDir()
+	ps := &policy.FilePending{Dir: dir}
+	_ = ps.Record(policy.Pending{Peer: "bot.mesh", Backend: "pay", Tool: "wire", RPCID: "1"})
+
+	// authorized=false → approve must be rejected and no grant written.
+	h := approvalsHandler(ps, func(*http.Request) string { return "bot.mesh" },
+		func(*http.Request) bool { return false }, time.Now)
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/v1/approve", "application/json",
+		strings.NewReader(`{"peer":"bot.mesh","tool":"wire"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("unauthorized approver got %d, want 403", resp.StatusCode)
+	}
+	if (&policy.FileCosign{Dir: dir}).Approved(policy.CosignKey("bot.mesh", "wire")) {
+		t.Fatal("a forbidden approve wrote a grant")
+	}
+}
+
 func TestApprovalsServesMobileUI(t *testing.T) {
 	ps := &policy.FilePending{Dir: t.TempDir()}
-	h := approvalsHandler(ps, func(*http.Request) string { return "x" }, time.Now)
+	h := approvalsHandler(ps, func(*http.Request) string { return "x" }, nil, time.Now)
 	ts := httptest.NewServer(h)
 	defer ts.Close()
 	resp, _ := http.Get(ts.URL + "/")
@@ -90,7 +114,7 @@ func TestApprovalsServesMobileUI(t *testing.T) {
 func TestApproverExternalRequestFlow(t *testing.T) {
 	dir := t.TempDir()
 	ps := &policy.FilePending{Dir: dir}
-	h := approvalsHandler(ps, func(*http.Request) string { return "phone" }, time.Now)
+	h := approvalsHandler(ps, func(*http.Request) string { return "phone" }, nil, time.Now)
 	ts := httptest.NewServer(h)
 	defer ts.Close()
 

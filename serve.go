@@ -88,11 +88,16 @@ func cmdServe(args []string) error {
 	// so a unified live view reads a single, verifiable stream.
 	var sharedAudit *policy.AuditLog
 	if cfg.AuditLog != "" {
-		f, err := os.OpenFile(cfg.AuditLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		f, err := os.OpenFile(cfg.AuditLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 		if err != nil {
 			return fmt.Errorf("open shared audit log %s: %w", cfg.AuditLog, err)
 		}
-		sharedAudit = policy.NewAuditLog(f, func() string { return time.Now().UTC().Format(time.RFC3339) })
+		sharedAudit = policy.NewAuditLog(f, func() string { return time.Now().UTC().Format(time.RFC3339) }).
+			WithFailClosed(cfg.AuditFailClosed)
+		if cfg.AuditWebhook != "" {
+			sharedAudit.AddSink(newWebhookSink(cfg.AuditWebhook, !cfg.AuditWebhookAll))
+			log.Printf("audit webhook sink: %s (deny/cosign only=%v)", cfg.AuditWebhook, !cfg.AuditWebhookAll)
+		}
 		auditLogs = append(auditLogs, sharedAudit)
 		log.Printf("shared audit ledger: %s", cfg.AuditLog)
 	}
@@ -141,13 +146,11 @@ func cmdServe(args []string) error {
 		}
 		log.Printf("backend %q: %s on mesh port %d (allow: %s%s)", b.Name, b.kind(), b.Port, allow, policyNote)
 
-		// The backend factory (subprocess + policy/trace filter) applies only
-		// to stdio backends; HTTP backends are reverse-proxied and never use it.
-		var factory session.BackendFactory
-		if b.HTTP == "" {
-			// Prefer the gateway-wide shared ledger for policy backends; fall
-			// back to a per-backend audit sink when none is configured.
-			audit := sharedAudit
+		// Resolve the audit sink for any policy-bearing backend (stdio OR http):
+		// prefer the gateway-wide shared ledger, else a per-backend sink.
+		var audit *policy.AuditLog
+		if b.Policy != nil || b.HTTP == "" {
+			audit = sharedAudit
 			if audit == nil || b.Policy == nil {
 				var err error
 				audit, err = auditSink(b)
@@ -163,15 +166,25 @@ func cmdServe(args []string) error {
 					auditLogs = append(auditLogs, audit)
 				}
 			}
+		}
+
+		// stdio backends run through the byte-stream Filter; HTTP backends with
+		// a policy run through the request-level httpEnforcer (F16).
+		var factory session.BackendFactory
+		var httpEnf *httpEnforcer
+		if b.HTTP == "" {
 			factory = backendFactory(b, audit, tracer, hookSink)
+		} else if b.Policy != nil {
+			httpEnf = newHTTPEnforcer(b, audit)
+			log.Printf("backend %q: HTTP policy enforcement on (%d rules)", b.Name, len(b.Policy.Rules))
 		}
 
 		wg.Add(1)
-		go func(b *Backend, ln net.Listener, factory session.BackendFactory) {
+		go func(b *Backend, ln net.Listener, factory session.BackendFactory, httpEnf *httpEnforcer) {
 			defer wg.Done()
 			switch {
 			case b.HTTP != "":
-				serveHTTP(client, b, ln)
+				serveHTTP(client, b, ln, httpEnf)
 			case b.Resumable:
 				serveResumable(client, b, ln, shutdown, factory, func(srv *session.Server) {
 					serversMu.Lock()
@@ -181,7 +194,7 @@ func cmdServe(args []string) error {
 			default:
 				serveStdio(client, b, ln, shutdown, factory)
 			}
-		}(b, ln, factory)
+		}(b, ln, factory, httpEnf)
 	}
 
 	// Optionally serve the Air control endpoint: list and steer live sessions
@@ -364,12 +377,21 @@ func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer, h
 	} else if b.Capabilities != nil {
 		eng = policy.NewEngine(&policy.Policy{DefaultAllow: false}, func() time.Time { return time.Now() }, nil)
 	}
+	// Attach the group resolver (F17) so rules can match group:<name> peers.
+	if eng != nil && len(b.groups) > 0 {
+		eng.SetGroupResolver(policy.StaticGroups(b.groups))
+	}
 	// Capability verifier: pins the backend's trusted authority keys.
 	var capVerifier *policy.CapabilityVerifier
 	if b.Capabilities != nil {
 		v, err := policy.NewCapabilityVerifier(b.Capabilities.TrustedPublicKeys, func() time.Time { return time.Now() })
 		if err != nil {
 			log.Fatalf("backend %q: capabilities: %v", b.Name, err)
+		}
+		if b.Capabilities.RevocationStore != "" {
+			rev := policy.FileRevocation{Dir: b.Capabilities.RevocationStore}
+			v = v.WithRevocation(rev.IsRevoked)
+			log.Printf("backend %q: capability revocation store: %s", b.Name, b.Capabilities.RevocationStore)
 		}
 		capVerifier = v
 	}
@@ -390,6 +412,27 @@ func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer, h
 		}
 		broker = secrets.New(store, b.Secrets.Grants, audit)
 	}
+	// One DLP hook per backend, shared across connections (compiled regexes are
+	// stateless). Validated already in loadConfig, so NewPatternDLP won't error.
+	var dlpHook *policy.PatternDLPHook
+	if len(b.DLP) > 0 {
+		h, err := policy.NewPatternDLP(b.DLP)
+		if err != nil {
+			log.Fatalf("backend %q: dlp: %v", b.Name, err)
+		}
+		dlpHook = h
+	}
+	// One shadow-policy hook per backend: it observes and logs where a candidate
+	// policy would disagree with the enforced one, without changing enforcement.
+	var shadowHook *policy.ShadowHook
+	if b.ShadowPolicy != nil {
+		name := b.Name
+		shadowHook = policy.NewShadowHook(b.ShadowPolicy, func(d policy.ShadowDivergence) {
+			log.Printf("backend %q: SHADOW divergence: peer=%s tool=%s live=%s shadow=%s",
+				name, d.Peer, d.Tool, d.Live, d.Shadow)
+		})
+		log.Printf("backend %q: shadow policy active (%d rules) — divergences logged, enforcement unchanged", b.Name, len(b.ShadowPolicy.Rules))
+	}
 	return func(meta session.Meta) (session.Backend, error) {
 		inner, err := exec(meta)
 		if err != nil {
@@ -409,6 +452,12 @@ func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer, h
 		}
 		if capVerifier != nil {
 			f.SetCapabilityVerifier(capVerifier, b.Capabilities.Required)
+		}
+		if dlpHook != nil {
+			f.AddDecisionHook(dlpHook)
+		}
+		if shadowHook != nil {
+			f.AddDecisionHook(shadowHook)
 		}
 		if hook != nil {
 			f.SetEventHook(hook)
@@ -440,7 +489,8 @@ func buildTracer(cfg *TraceConfig) (*policy.Tracer, error) {
 	if cfg == nil || cfg.Log == "" {
 		return nil, nil
 	}
-	f, err := os.OpenFile(cfg.Log, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	// 0600: a trace with payloads carries full request/response bodies.
+	f, err := os.OpenFile(cfg.Log, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open trace log %s: %w", cfg.Log, err)
 	}
@@ -458,14 +508,14 @@ func auditSink(b *Backend) (*policy.AuditLog, error) {
 	}
 	var w io.Writer = os.Stderr
 	if b.AuditLog != "" {
-		f, err := os.OpenFile(b.AuditLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		f, err := os.OpenFile(b.AuditLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 		if err != nil {
 			return nil, fmt.Errorf("backend %q: open audit log %s: %w", b.Name, b.AuditLog, err)
 		}
 		w = f
 	}
 	now := func() string { return time.Now().UTC().Format(time.RFC3339) }
-	audit := policy.NewAuditLog(w, now)
+	audit := policy.NewAuditLog(w, now).WithFailClosed(b.AuditFailClosed)
 
 	if b.AuditCheckpoints != "" {
 		cp, err := checkpointer(b, now)
@@ -484,12 +534,21 @@ func checkpointer(b *Backend, now func() string) (*policy.Checkpointer, error) {
 		return nil, fmt.Errorf("backend %q: audit_checkpoints requires audit_signing_key", b.Name)
 	}
 	var signer *policy.Signer
-	if _, err := os.Stat(b.AuditSigningKey); err == nil {
+	if _, statErr := os.Stat(b.AuditSigningKey); statErr == nil {
+		var err error
 		signer, err = policy.LoadSigner(b.AuditSigningKey)
 		if err != nil {
 			return nil, fmt.Errorf("backend %q: load signing key: %w", b.Name, err)
 		}
-	} else {
+	} else if os.IsNotExist(statErr) {
+		// A missing signing key is fatal unless the operator explicitly opted
+		// into autogen: silently minting a new key would let anyone who can
+		// delete the file force a fresh signing identity that an unpinned
+		// verifier would then trust.
+		if !b.AuditSigningKeyAutogen {
+			return nil, fmt.Errorf("backend %q: audit signing key %s does not exist — run 'meshmcp audit keygen --out %s' (or set audit_signing_key_autogen: true to create it on start)", b.Name, b.AuditSigningKey, b.AuditSigningKey)
+		}
+		var err error
 		signer, err = policy.GenerateSigner()
 		if err != nil {
 			return nil, err
@@ -498,6 +557,8 @@ func checkpointer(b *Backend, now func() string) (*policy.Checkpointer, error) {
 			return nil, fmt.Errorf("backend %q: save signing key: %w", b.Name, err)
 		}
 		log.Printf("backend %q: generated audit signing key %s (public %s)", b.Name, b.AuditSigningKey, signer.PubKeyHex())
+	} else {
+		return nil, fmt.Errorf("backend %q: stat signing key %s: %w", b.Name, b.AuditSigningKey, statErr)
 	}
 
 	f, err := os.OpenFile(b.AuditCheckpoints, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
@@ -512,7 +573,11 @@ func checkpointer(b *Backend, now func() string) (*policy.Checkpointer, error) {
 		}
 		anchor = &policy.FileAnchor{W: af}
 	}
-	return policy.NewCheckpointer(signer, f, b.AuditCheckpointEvery, now, anchor), nil
+	name := b.Name
+	return policy.NewCheckpointer(signer, f, b.AuditCheckpointEvery, now, anchor).
+		WithErrorHandler(func(err error) {
+			log.Printf("backend %q: AUDIT CHECKPOINT ERROR: %v", name, err)
+		}), nil
 }
 
 func allowWord(allow bool) string {
@@ -525,7 +590,7 @@ func allowWord(allow bool) string {
 // serveHTTP reverse-proxies mesh connections to a local HTTP MCP server,
 // enforcing the ACL and stamping the caller's mesh identity onto each
 // request so the backend can do per-agent authorization and audit.
-func serveHTTP(client *embed.Client, b *Backend, ln net.Listener) {
+func serveHTTP(client *embed.Client, b *Backend, ln net.Listener, enf *httpEnforcer) {
 	checker := newACL(b.Allow)
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -542,6 +607,18 @@ func serveHTTP(client *embed.Client, b *Backend, ln net.Listener) {
 			log.Printf("backend %q: DENIED peer %s (%s)", b.Name, fqdn, r.RemoteAddr)
 			http.Error(w, "forbidden: mesh peer not in backend ACL", http.StatusForbidden)
 			return
+		}
+		// Per-tool policy for HTTP backends (F16): parse the JSON-RPC body,
+		// authorize tools/call by identity, audit, and deny inline — the same
+		// firewall the stdio path applies.
+		if enf != nil {
+			ok, status, denial := enf.decide(fqdn, pubKey, r)
+			if !ok {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				_, _ = w.Write(denial)
+				return
+			}
 		}
 		// Identity headers are set by the gateway, never trusted from input.
 		r.Header.Del("X-Meshmcp-Peer")

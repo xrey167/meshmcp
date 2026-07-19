@@ -1,0 +1,49 @@
+# Policy for the meshmcp client-hook adapter (F33). Point a client's tool hooks
+# at `meshmcp hook --client <c> --config examples/hook-policy.yaml` and EVERY
+# tool the model calls — Bash, Edit, a native MCP tool — is authorized by this
+# policy, DLP-scanned, taint-tracked, and recorded in the tamper-evident audit
+# ledger, not just calls to mesh backends. Runs locally (no mesh join).
+#
+# Install (prints the per-client settings snippet):
+#   meshmcp hook install --client claude-code --config examples/hook-policy.yaml
+identity: claude-code-local        # the identity recorded for this client
+audit_log: ./hook-audit.jsonl      # tamper-evident ledger of every governed call
+session_dir: ./hook-sessions       # per-session taint state (prompt-injection guard)
+cosign_store: ./cosign             # consult/record mesh co-sign (a phone approves)
+
+# Tools that pull untrusted content into the session. Once one runs, the session
+# is tainted and any taint_guard tool below is blocked — F7's network-layer
+# prompt-injection defense, now inside the client's own tool loop.
+taint_tools: ["WebFetch", "Fetch", "mcp__*fetch*", "mcp__*browser*"]
+
+policy:
+  default_allow: true              # allow-with-holes: govern the risky tools
+  rules:
+    - peers: ["*"]
+      tools: ["Bash"]
+      allow: true
+      rate: { max: 60, per: "1m" }
+    # Untrusted-content sources taint the session.
+    - peers: ["*"]
+      tools: ["WebFetch", "Fetch"]
+      allow: true
+      taint_source: true
+    # Writes/edits are refused once the session is tainted.
+    - peers: ["*"]
+      tools: ["Write", "Edit"]
+      allow: true
+      taint_guard: true
+    # A privileged tool waits for a human co-sign (approve from your phone via
+    # `meshmcp approvals` writing to the same cosign_store).
+    - peers: ["*"]
+      tools: ["Deploy", "mcp__github__delete_*"]
+      allow: true
+      require_cosign: true
+
+# Content-aware DLP on tool arguments AND submitted prompts: a hard-coded key,
+# a private key, or a prompt-injection phrase is denied before it takes effect.
+dlp:
+  - patterns: ['AKIA[0-9A-Z]{16}', '-----BEGIN [A-Z ]*PRIVATE KEY-----']
+    deny: true
+  - patterns: ['ignore (all )?previous instructions']
+    deny: true

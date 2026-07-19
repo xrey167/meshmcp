@@ -2,6 +2,7 @@ package policy
 
 import (
 	"fmt"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -72,7 +73,11 @@ func (w *Window) active(t time.Time) bool {
 	}
 	lo, hi, ok := parseHourRange(w.Hours)
 	if !ok {
-		return true // malformed range: don't accidentally lock everything out
+		// Fail closed: a malformed hours range makes the window inactive, so
+		// the rule falls through to the next rule / the default (deny) rather
+		// than an allow rule firing 24/7 on a typo. Config load validates
+		// windows (Policy.Validate), so this is defense in depth.
+		return false
 	}
 	mins := lt.Hour()*60 + lt.Minute()
 	if lo <= hi {
@@ -155,9 +160,44 @@ type Engine struct {
 	pol    *Policy
 	now    func() time.Time
 	cosign CosignStore
+	groups GroupResolver // optional: resolves group:<name> peer patterns (F17)
 
 	mu      sync.Mutex
 	buckets map[string]*bucket // key: ruleID|peerKey
+}
+
+// SetGroupResolver attaches a group resolver so rules may match `group:<name>`
+// peers (nil disables group matching — such patterns then never match).
+func (e *Engine) SetGroupResolver(g GroupResolver) { e.groups = g }
+
+// peerMatches reports whether rule r applies to this caller, handling
+// `group:<name>` patterns via the resolver in addition to the pubkey/FQDN forms
+// the pure Rule matcher understands.
+func (e *Engine) peerMatches(r Rule, fqdn, key string) bool {
+	if len(r.Peers) == 0 {
+		return true
+	}
+	for _, p := range r.Peers {
+		if g, ok := strings.CutPrefix(p, "group:"); ok {
+			if e.groups != nil && e.groups.InGroup(key, fqdn, g) {
+				return true
+			}
+			continue
+		}
+		if k, ok := strings.CutPrefix(p, "pubkey:"); ok {
+			if k == key {
+				return true
+			}
+			continue
+		}
+		if p == "*" || fqdn == p {
+			return true
+		}
+		if ok, _ := path.Match(p, fqdn); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // NewEngine wraps pol. now defaults to time.Now; cosign may be nil (then
@@ -182,7 +222,7 @@ func (e *Engine) DecideToolCall(peerFQDN, peerKey, tool string, labels map[strin
 		if len(r.Methods) > 0 {
 			continue
 		}
-		if !r.matchesPeer(peerFQDN, peerKey) || !r.matchesTool(tool) {
+		if !e.peerMatches(r, peerFQDN, peerKey) || !r.matchesTool(tool) {
 			continue
 		}
 		// A window-gated rule only applies inside its window; otherwise fall
@@ -208,14 +248,27 @@ func (e *Engine) DecideToolCall(peerFQDN, peerKey, tool string, labels map[strin
 		if r.RequireCosign {
 			if e.cosign != nil && e.cosign.Approved(CosignKey(peerFQDN, tool)) {
 				return Decision{Allow: true, RuleID: i, Outcome: OutcomeAllow,
-					Reason: "co-signed", AddLabels: r.emitSet()}
+					Reason: "co-signed", AddLabels: r.emitSet(), Cost: ruleCost(r)}
 			}
 			return Decision{RuleID: i, Outcome: OutcomeCosign,
 				Reason: fmt.Sprintf("awaiting human co-sign for %q", tool)}
 		}
-		return Decision{Allow: true, RuleID: i, Outcome: OutcomeAllow, AddLabels: r.emitSet()}
+		return Decision{Allow: true, RuleID: i, Outcome: OutcomeAllow, AddLabels: r.emitSet(), Cost: ruleCost(r)}
 	}
 	return Decision{Allow: e.pol.DefaultAllow, RuleID: -1, Outcome: outcomeOf(e.pol.DefaultAllow)}
+}
+
+// ruleCost is the cost/quota units an allowed call under rule r consumes: the
+// rule's rate.cost (default 1 when a rate limit is set), or 0 when the rule has
+// no rate/cost (cost is untracked for that rule).
+func ruleCost(r Rule) int {
+	if r.Rate == nil {
+		return 0
+	}
+	if r.Rate.Cost > 0 {
+		return r.Rate.Cost
+	}
+	return 1
 }
 
 // firstPresent returns the first label in want that is set in have, or "".

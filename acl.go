@@ -22,6 +22,12 @@ func newACL(patterns []string) acl {
 }
 
 func (a acl) allows(pubKey, fqdn string) bool {
+	// Fail closed on an unidentifiable peer: if the transport could not resolve
+	// any cryptographic identity (both key and FQDN empty), deny — an
+	// unattributable caller must never be admitted, even to an open backend.
+	if pubKey == "" && fqdn == "" {
+		return false
+	}
 	if len(a.patterns) == 0 {
 		return true
 	}

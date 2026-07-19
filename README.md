@@ -232,13 +232,19 @@ Watch it live with `meshmcp dash --audit audit.jsonl`; re-run a past session wit
 | `ls · call · read · prompt <peer:port>` | Drive tools / resources / prompts from the terminal. |
 | `insight profile·recommend·simulate·detect` | Turn the audit stream into policy; detect drift. |
 | `mcp [flags]` | Run meshmcp **as an MCP server** — add it to Claude Code / Codex to operate the mesh (network, call tools, run, approve). |
+| `hook --client <c> --config <f>` | **Client-hook firewall** (F33): govern *every* local tool call in Claude Code / Cursor / Codex by policy + DLP + taint + audit — `hook install` prints the settings snippet. |
 | `audit verify <f> [--checkpoints --pubkey]` | Verify a log: hash chain, or signatures + Merkle. |
 | `audit keygen [--out f]` | Generate a gateway Ed25519 signing key. |
+| `audit export --in <f>` · `audit receipt --in <f>` | Export the ledger to CSV; emit a verifiable provenance receipt (what a session's tools produced). |
 | `capability keygen [--out f]` | Generate an Ed25519 authority key backends pin as a trust root. |
 | `capability issue --subject --audience --tool [--ttl]` | Sign a short-lived, subject-bound tool grant (present it with `call --capability @file`). |
+| `capability revoke·list --store <d>` | Revoke a capability id (fails closed everywhere) / list revoked ids. |
 | `approve --store <d> <peer> <tool>` | Human co-sign a held `require_cosign` call from the CLI. |
-| `approvals --store <d>` | Serve the phone-friendly co-sign approver over the mesh (approver = your mesh identity). |
+| `approvals --store <d> [--approver <id>]` | Serve the phone-friendly co-sign approver over the mesh (`--approver` restricts who may approve). |
 | `secrets check --config <f>` | Validate the credential broker config (never prints values). |
+| `status --audit <f>` · `budget --audit <f>` | Roll up a ledger (per-peer/tool/backend + chain verdict); total cost/quota per identity (FinOps). |
+| `config validate --config <f>` · `doctor --config <f>` | Validate a config (globs/windows/enums/DLP) / run pre-flight readiness checks. |
+| `plugins` | List the extensions compiled into this build (F13). |
 | `dash --audit <f>` | Serve the live control dashboard. |
 | `room --audit <f>` | Serve the interactive **Control Room** — live network (servers, agents, decision feed) **plus a console**: list/call tools over the mesh, a governed `run_command` terminal, and (opt-in `--local-shell`) a raw shell. |
 | `agent --role <r> <peer:port>` | Run a demo agent app (reader/fetcher/billing/analyst) with its own mesh identity. |
@@ -298,6 +304,8 @@ examples/    ready-to-adapt configs        docs/  design docs + open specs
 - **[examples/hitl/](examples/hitl/)** — route any agent framework's approval hook (e.g. OpenAI Agents SDK `ShellTool.on_approval`) to the mesh approver — approve from your phone, identity-attributed and audited.
 - **[docs/HA-TOOLMESH.md](docs/HA-TOOLMESH.md)** · **[docs/reference.md](docs/reference.md)** · **[docs/VISION.md](docs/VISION.md)** — HA design, full reference, roadmap.
 - **[docs/IDEAS.md](docs/IDEAS.md)** — the payload layer: a provenance-native knowledge graph (`cmd/kg`), zero-exposure RAG (`cmd/vectors`), an agent-memory fabric (`cmd/memory`), `meshmcp drop` (AirDrop across instances) + content-addressed `fetch`, taint-contained retrieval, signed provenance receipts, and more — 22 enhancements grounded in the existing primitives (see `examples/knowledge.yaml`, `drop.yaml`, `rag-firewall.yaml`).
+- **[docs/ROADMAP-HARDENING.md](docs/ROADMAP-HARDENING.md)** — the Wave-2 roadmap: a compile-time **plugin platform** (tool · decision · sink · subcommand seams), a governed plugin marketplace, HTTP-backend policy parity, federated Mesh Spotlight, new dark backends (vault · scheduler · event bus), fail-closed audit + identity-bound sessions, and a 30-finding hardening sweep — **20 flagships (F13–F32) + 50 minor (S11–S60)**, each grounded in an existing primitive.
+- **[docs/CLIENT-HOOKS.md](docs/CLIENT-HOOKS.md)** — bake the firewall **into the LLM client's own tool loop** (F33): `meshmcp hook` is the decision engine behind Claude Code's `PreToolUse`, Cursor's `beforeShellExecution`/`beforeMCPExecution`, and Codex's `PermissionRequest` — so *every* local tool call (Bash, Edit, native MCP) is policy-governed, DLP-scanned, and recorded in the tamper-evident ledger, not just mesh traffic.
 
 ## Build & test
 

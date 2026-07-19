@@ -1,6 +1,6 @@
 # Extensions
 
-Three capability surfaces added on top of the core gateway. Each is additive —
+Capability surfaces added on top of the core gateway. Each is additive —
 nothing here changes existing behavior unless you opt in — and each was built
 against meshmcp's own baseline (MCP 2025-06-18, the three-valued policy engine,
 the hash-chained audit) rather than dropped in from elsewhere.
@@ -8,6 +8,13 @@ the hash-chained audit) rather than dropped in from elsewhere.
 - [Signed capabilities](#signed-capabilities) — short-lived, subject-bound tool grants
 - [Server middleware](#server-middleware) — compose cross-cutting behavior around tool calls
 - [Typed function calls & task client](#typed-function-calls--task-client) — provider-neutral tool invocation
+
+The **Wave-2 plugin platform** (F13, see [ROADMAP-HARDENING.md](ROADMAP-HARDENING.md))
+adds three more compile-time Go-interface seams — all invariant-preserving, no
+dynamic loading: **`policy.DecisionHook`** (refine an allow/deny/co-sign decision,
+tighten-only — used by the F18 DLP hook and the F24 shadow-policy canary),
+**`policy.AuditSink`** (fan out committed records to a SIEM/webhook/OTel — used by
+F15), and a **subcommand registry** (`RegisterCommand`, listed by `meshmcp plugins`).
 
 ---
 
@@ -119,11 +126,12 @@ the backend could mistake for an argument.
 
 A capability's primary containment is its **short lifetime** — keep TTLs tight
 (the `issue` default is 15m, and 24h is a hard ceiling). The verifier also
-supports an optional **revocation predicate** (`CapabilityVerifier.WithRevocation`,
-keyed on the token's unique `cap_…` ID), but it is not yet wired to a
-config-driven revocation store, so today short TTLs are the operative control.
-Issue narrowly-scoped, short-lived grants rather than relying on being able to
-pull one back.
+supports a **revocation predicate** (`CapabilityVerifier.WithRevocation`, keyed
+on the token's unique `cap_…` ID), now wired to a config-driven, directory-backed
+store (F21): set `capabilities.revocation_store` on a backend and revoke with
+`meshmcp capability revoke --store <dir> <cap-id>` — a revoked id fails closed at
+every gateway sharing the store, even before its TTL expires. Still, prefer
+narrowly-scoped, short-lived grants; revocation is the kill-switch, not the plan.
 
 ---
 

@@ -1,0 +1,24 @@
+# Governed scheduler / cron (F27): identity-attributed scheduled tool calls.
+# Agents register jobs; a worker polls `due` and makes the actual calls over the
+# mesh — where the firewall governs and audits them. The scheduler itself is
+# pure state and never calls out, so every fired action stays attributable.
+mesh:
+  device_name: meshmcp-scheduler
+  setup_key_env: NB_SETUP_KEY
+  config_path: ./scheduler-gw.json
+
+backends:
+  - name: scheduler
+    port: 9140
+    stdio: ["./cmd/scheduler/scheduler", "--store", "./schedule.jsonl"]
+    audit_log: ./scheduler-audit.jsonl
+    policy:
+      default_allow: false
+      rules:
+        # Anyone may register and inspect jobs; only the worker drains `due`.
+        - peers: ["*"]
+          tools: ["schedule", "list", "cancel"]
+          allow: true
+        - peers: ["pubkey:<worker-key>"]
+          tools: ["due"]
+          allow: true

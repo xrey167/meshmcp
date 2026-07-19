@@ -1,4 +1,10 @@
 # Gateway exposing an HTTP (Streamable-HTTP) MCP backend on the mesh.
+#
+# HTTP backends now get the SAME per-tool firewall as stdio backends (F16): the
+# gateway parses each request body's JSON-RPC and authorizes tools/call by the
+# caller's mesh identity, auditing every decision. Rate limits, time windows,
+# and co-sign work here too; taint labels, secret injection, and capability
+# upgrades remain on the stdio path.
 mesh:
   device_name: meshmcp-gw-live
   setup_key_env: NB_SETUP_KEY
@@ -9,3 +15,15 @@ backends:
   - name: httpsrv
     port: 9200
     http: http://127.0.0.1:3001
+    audit_log: ./httpsrv-audit.jsonl
+    policy:
+      default_allow: false
+      rules:
+        - peers: ["*"]
+          tools: ["read_*", "search"]
+          allow: true
+          rate: { max: 30, per: "1m" }
+        - peers: ["pubkey:<agent-key>"]
+          tools: ["deploy"]
+          allow: true
+          require_cosign: true

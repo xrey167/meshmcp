@@ -54,7 +54,7 @@ func TestPushWakeNotifiesOnRequest(t *testing.T) {
 	ps := &policy.FilePending{Dir: dir}
 	devs := &DeviceStore{Dir: t.TempDir()}
 	cap := &captureNotifier{}
-	h := approvalsHandler(ps, func(*http.Request) string { return "phone.mesh" }, time.Now, withPushWake(devs, cap))
+	h := approvalsHandler(ps, func(*http.Request) string { return "phone.mesh" }, nil, time.Now, withPushWake(devs, cap))
 
 	// Register a device.
 	rr := httptest.NewRecorder()
@@ -79,7 +79,7 @@ func TestPushWakeNotifiesOnRequest(t *testing.T) {
 
 func TestPushWakeDisabledWithoutDevices(t *testing.T) {
 	// No withPushWake → /v1/devices is not registered.
-	h := approvalsHandler(&policy.FilePending{Dir: t.TempDir()}, func(*http.Request) string { return "x" }, time.Now)
+	h := approvalsHandler(&policy.FilePending{Dir: t.TempDir()}, func(*http.Request) string { return "x" }, nil, time.Now)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/devices", strings.NewReader(`{"token":"t"}`)))
 	if rr.Code == http.StatusOK {

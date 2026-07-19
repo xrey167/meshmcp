@@ -18,6 +18,8 @@ Design documentation and open specifications for meshmcp. Human-facing narrative
 | `MOBILE.md` | How the stack reaches phones (a phone as a human identity / co-sign approver). |
 | `DEMO.md` · `COOKBOOK.md` | The live mesh demo, and 10 worked "what's possible" scenarios with configs + diagrams. |
 | `HA-TOOLMESH.md` · `NETWORK-PLAN.md` · `VISION.md` · `reference.md` | HA design, network design, roadmap, full reference. |
+| `IDEAS.md` · `ROADMAP-HARDENING.md` | Wave-1 (F1–F12/S1–S10) and Wave-2 (F13–F33/S11–S60) ideation maps; ROADMAP-HARDENING carries the "Implemented status" of the current branch. |
+| `CLIENT-HOOKS.md` | Baking the firewall into an LLM client's own tool loop (F33): the `meshmcp hook` adapter for Claude Code / Cursor / Codex. |
 
 ## Subdirectories
 | Directory | Purpose |

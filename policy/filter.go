@@ -3,6 +3,7 @@ package policy
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -21,6 +22,14 @@ type Caller struct {
 // denied tools/call requests are answered with a JSON-RPC error and never
 // reach the backend. Reads (backend -> peer) pass through, interleaved
 // with any synthetic denial responses on whole-line boundaries.
+// maxLineBytes caps a single reassembled client->backend JSON-RPC line, so a
+// peer that never sends a newline cannot grow the filter's buffer without
+// bound. Matches the audit/verify line cap.
+const maxLineBytes = 16 << 20 // 16 MiB
+
+// errLineTooLong tears down a connection whose pending line exceeds maxLineBytes.
+var errLineTooLong = errors.New("policy: client line exceeds maximum length")
+
 type Filter struct {
 	inner       io.ReadWriteCloser
 	eng         *Engine
@@ -30,6 +39,7 @@ type Filter struct {
 	pending     PendingStore
 	capVerifier *CapabilityVerifier
 	capRequired bool
+	hooks       []DecisionHook
 	caller      Caller
 	hook        EventHook
 
@@ -85,7 +95,14 @@ type EventHook interface {
 func (f *Filter) SetEventHook(h EventHook) { f.hook = h }
 
 // audited writes a decision to the audit log and forwards it to the event hook
-// (if any). The hook is fire-and-forget: it never blocks or fails the caller.
+// (if any). It returns the write error so a fail-closed caller can deny an
+// unrecorded call (F22); the hook is fire-and-forget and never blocks or fails
+// the caller.
+//
+// Routing every decision through this one choke point keeps two controls in
+// lock-step: the tamper-evident ledger AND the event hook (pub/sub bus /
+// webhook) both observe the same decision, so no code path can record a
+// decision without also publishing it (or vice versa).
 //
 // Every decision is recorded — including denials and rate-limit blocks. That is
 // deliberate and differs from the pub/sub broker (which drops rate-limited
@@ -93,11 +110,12 @@ func (f *Filter) SetEventHook(h EventHook) { f.hook = h }
 // security record, and denied/blocked attempts are precisely what a security
 // audit must retain. Flood protection is the policy engine's per-rule rate
 // limits plus operational log rotation, not silence about denials.
-func (f *Filter) audited(rec AuditRecord) {
-	f.audit.write(rec)
+func (f *Filter) audited(rec AuditRecord) error {
+	err := f.audit.write(rec)
 	if f.hook != nil {
 		f.hook.Emit(rec)
 	}
+	return err
 }
 
 // labelSnapshot copies the current session label set for a decision.
@@ -150,6 +168,13 @@ func (f *Filter) Write(p []byte) (int, error) {
 		return f.inner.Write(p)
 	}
 	f.wbuf = append(f.wbuf, p...)
+	// A peer streaming bytes with no newline would grow this reassembly buffer
+	// without bound — a memory-DoS on the enforcement path. Cap the pending
+	// line and tear the connection down when it is exceeded.
+	if len(f.wbuf) > maxLineBytes {
+		f.wbuf = nil
+		return 0, errLineTooLong
+	}
 	for {
 		i := bytes.IndexByte(f.wbuf, '\n')
 		if i < 0 {
@@ -176,7 +201,8 @@ type rpcPeek struct {
 	Method string          `json:"method"`
 	ID     json.RawMessage `json:"id,omitempty"`
 	Params struct {
-		Name string `json:"name"`
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
 	} `json:"params"`
 }
 
@@ -196,7 +222,7 @@ func (f *Filter) handleLine(line []byte) error {
 	// forward blind.
 	if trimmed[0] == '[' {
 		if f.eng != nil {
-			f.audited(f.record("<batch>", "", "", Decision{RuleID: -1, Reason: "batches unsupported"}))
+			_ = f.audited(f.record("<batch>", "", "", Decision{RuleID: -1, Reason: "batches unsupported"}))
 			f.traceLine("c2s", trimmed, "deny")
 			f.writeDenial(json.RawMessage("null"), "JSON-RPC batches are not supported by the mesh policy filter")
 			return nil
@@ -207,7 +233,16 @@ func (f *Filter) handleLine(line []byte) error {
 	}
 	var msg rpcPeek
 	if err := json.Unmarshal(trimmed, &msg); err != nil {
-		// Unparseable single message: trace and pass through untouched.
+		// Under enforcement, an unparseable line must not reach the backend: a
+		// parser differential (bytes this strict peek rejects but the backend
+		// accepts) could smuggle a call past policy, exactly as a batch could.
+		if f.eng != nil {
+			_ = f.audited(f.record("<unparseable>", "", "", Decision{RuleID: -1, Reason: "unparseable JSON-RPC"}))
+			f.traceLine("c2s", trimmed, "deny")
+			f.writeDenial(json.RawMessage("null"), "unparseable JSON-RPC line rejected by mesh policy")
+			return nil
+		}
+		// Tracing-only (or pure passthrough): forward untouched.
 		f.traceLine("c2s", trimmed, "")
 		_, werr := f.inner.Write(line)
 		return werr
@@ -251,8 +286,22 @@ func (f *Filter) handleToolCall(line []byte, msg rpcPeek, capToken string) error
 	if f.capVerifier != nil {
 		dec = f.applyCapability(dec, capToken, tool)
 	}
+	// Plugin decision hooks run last and may only tighten the outcome (deny /
+	// co-sign) or add labels — never widen a deny into an allow.
+	if len(f.hooks) > 0 {
+		dec = applyDecisionHooks(f.hooks, ToolCallInfo{
+			Caller: f.caller, Tool: tool, Arguments: msg.Params.Arguments, Labels: f.labelSnapshot(),
+		}, dec)
+	}
 	rec := f.record(msg.Method, tool, string(msg.ID), dec)
-	f.audited(rec)
+	if err := f.audited(rec); err != nil && f.audit.FailClosed() {
+		// Audit is a control: if the tamper-evident record cannot be written
+		// and the log is fail-closed, deny the call rather than let it reach
+		// the backend unrecorded.
+		f.traceLine("c2s", line, "deny")
+		f.writeDenial(msg.ID, fmt.Sprintf("tool %q blocked: audit sink unavailable (fail-closed)", tool))
+		return nil
+	}
 	f.traceLine("c2s", line, rec.Decision)
 
 	switch dec.Outcome {
@@ -305,9 +354,13 @@ func (f *Filter) handleMethod(line []byte, msg rpcPeek) error {
 		_, werr := f.inner.Write(line)
 		return werr
 	}
-	f.audited(f.record(msg.Method, "", string(msg.ID), dec))
+	auditErr := f.audited(f.record(msg.Method, "", string(msg.ID), dec))
 	f.traceLine("c2s", line, decisionStr(dec.Allow))
 	if dec.Allow {
+		if auditErr != nil && f.audit.FailClosed() {
+			f.writeDenial(msg.ID, fmt.Sprintf("method %q blocked: audit sink unavailable (fail-closed)", msg.Method))
+			return nil
+		}
 		_, werr := f.inner.Write(line)
 		return werr
 	}
@@ -325,10 +378,13 @@ func (f *Filter) handleNotification(line []byte, method string) error {
 		_, werr := f.inner.Write(line)
 		return werr
 	}
-	f.audited(f.record(method, "", "", dec))
+	auditErr := f.audited(f.record(method, "", "", dec))
 	f.traceLine("c2s", line, decisionStr(dec.Allow))
 	if !dec.Allow {
 		return nil // drop
+	}
+	if auditErr != nil && f.audit.FailClosed() {
+		return nil // fail closed: drop an unaudited (would-be-allowed) notification
 	}
 	_, werr := f.inner.Write(line)
 	return werr
@@ -346,6 +402,7 @@ func (f *Filter) record(method, tool, rpcID string, dec Decision) AuditRecord {
 		Decision: dec.Outcome.String(),
 		Reason:   dec.Reason,
 		Rule:     dec.RuleID,
+		Cost:     dec.Cost,
 	}
 }
 
