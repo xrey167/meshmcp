@@ -132,6 +132,26 @@ it can **only upgrade a default-deny — never an explicit `allow: false`**. A
 capability-granted topic carries no data-flow label clearance (it receives only
 unlabeled events): the grant conveys access, not taint clearance.
 
+## Federation
+
+A single broker is a single point of failure. Run several and **federate** them:
+a broker mirrors remote brokers' topics into its own, so a subscriber on one
+broker also sees events published to another.
+
+```yaml
+federate:
+  - peer: "100.64.0.6:9120"
+    topics: ["alerts.*", "ops.*"]
+```
+
+Each mirrored event preserves its original publisher and is tagged with the
+source broker (`origin`), so a bidirectional federation **cannot loop** — a
+mirror is never re-mirrored. Taint labels are preserved across the hop, so
+containment holds mesh-wide. The remote broker must authorize this broker's
+identity to subscribe to the mirrored topics (federation is a granted relation,
+not ambient). Mirroring is best-effort live; pair it with `event_log:` +
+`--durable` subscribers for at-least-once across a broker outage.
+
 ## Introspection
 
 Query a running broker for a live snapshot:

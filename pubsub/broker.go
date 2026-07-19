@@ -364,6 +364,20 @@ func (b *Broker) PublishOpts(id Identity, topic string, payload json.RawMessage,
 // to each subscriber's label clearance, and audited. source names the event's
 // Publisher (a system identifier, not a WireGuard key).
 func (b *Broker) EmitInternal(source, topic string, payload json.RawMessage, labels []string) (*Event, error) {
+	return b.emitTrusted(topic, payload, labels, source, "")
+}
+
+// EmitFederated mirrors an event received from another broker into this one. It
+// preserves the original publisher for attribution and sets Origin to the
+// source broker so the event is never re-mirrored (loop prevention across a
+// federation mesh). Like EmitInternal, it is a trusted operator path.
+func (b *Broker) EmitFederated(topic string, payload json.RawMessage, labels []string, publisher, origin string) (*Event, error) {
+	return b.emitTrusted(topic, payload, labels, publisher, origin)
+}
+
+// emitTrusted is the shared trusted-emission core (bypasses per-topic authz +
+// rate limit, still validated/capped/sealed/retained/fanned-out; not audited).
+func (b *Broker) emitTrusted(topic string, payload json.RawMessage, labels []string, publisher, origin string) (*Event, error) {
 	if err := validateTopic(topic, b.lm.MaxTopicLen); err != nil {
 		return nil, err
 	}
@@ -385,8 +399,9 @@ func (b *Broker) EmitInternal(source, topic string, payload json.RawMessage, lab
 		Topic:     topic,
 		Seq:       b.seq,
 		Time:      b.now().UTC().Format(time.RFC3339Nano),
-		Publisher: source,
+		Publisher: publisher,
 		Labels:    labels,
+		Origin:    origin,
 		Payload:   payload,
 		PrevHash:  b.prev,
 	}
@@ -398,9 +413,6 @@ func (b *Broker) EmitInternal(source, topic string, payload json.RawMessage, lab
 	ev.Hash = h
 	b.prev = h
 	b.ring.add(*ev)
-	// Persist the sealed event in sequence order (best-effort per-event, like
-	// the audit ledger; a failed append degrades durability but never blocks
-	// delivery). Held under b.mu so the on-disk order matches the chain.
 	if b.events != nil {
 		_ = b.events.append(*ev)
 	}
@@ -411,10 +423,9 @@ func (b *Broker) EmitInternal(source, topic string, payload json.RawMessage, lab
 	}
 	b.mu.Unlock()
 
-	// Internal emission is not audited here: its events derive from decisions
-	// the gateway already recorded in the ledger, and re-auditing every one
-	// would double ledger volume under a deny-flood. External publish/subscribe
-	// on the bus are still audited.
+	// Trusted emission is not audited here: internal events derive from
+	// decisions already in the ledger; federated events were audited by the
+	// origin broker. External publish/subscribe are still audited.
 	return ev, nil
 }
 

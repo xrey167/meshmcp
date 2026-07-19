@@ -34,6 +34,35 @@ func TestRetainedMessages(t *testing.T) {
 	}
 }
 
+// TestEmitFederated verifies a mirrored event preserves the original publisher,
+// carries the source broker in Origin (the loop guard), and is delivered — and
+// that a normal publish has no Origin (so it *would* be mirrored).
+func TestEmitFederated(t *testing.T) {
+	b := New(Options{Authorizer: AllowAll{}})
+	defer b.Close()
+	sub, _ := b.Subscribe(id("s"), SubOptions{Topics: []string{"t"}})
+	defer sub.Close()
+
+	if ev, _ := b.Publish(id("orig"), "t", json.RawMessage(`1`), nil); ev.Origin != "" {
+		t.Fatalf("a normal publish must have empty Origin, got %q", ev.Origin)
+	}
+	recv(t, sub) // drain the normal publish
+
+	ev, err := b.EmitFederated("t", json.RawMessage(`2`), nil, "orig-key", "broker-A")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.Origin != "broker-A" || ev.Publisher != "orig-key" {
+		t.Fatalf("federated event: %+v", ev)
+	}
+	got := recv(t, sub)
+	if got.Origin != "broker-A" || got.Publisher != "orig-key" {
+		t.Fatalf("delivered federated event: %+v", got)
+	}
+	// The non-empty Origin is exactly what the federation runner checks to avoid
+	// re-mirroring (loop prevention across a bidirectional federation).
+}
+
 // TestBinaryPayload verifies a base64-encoded binary payload round-trips with
 // its encoding hint.
 func TestBinaryPayload(t *testing.T) {

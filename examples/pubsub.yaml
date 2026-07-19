@@ -83,3 +83,11 @@ limits:
 # Present it:  meshmcp subscribe --capability @grant.tok <peer>:9120 'metrics.*'
 # trusted_public_keys:
 #   - "AUTHORITY_PUBKEY_HEX"            # from `meshmcp capability keygen`
+
+# Federation: mirror remote brokers' topics into this one, so a subscriber here
+# also sees events published there (removes the single-broker SPOF; run several
+# brokers that federate each other). Loop-safe — a mirrored event is never
+# re-mirrored. The remote broker must allow this broker's identity to subscribe.
+# federate:
+#   - peer: "100.64.0.6:9120"
+#     topics: ["alerts.*", "ops.*"]

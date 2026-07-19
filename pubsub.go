@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/netbirdio/netbird/client/embed"
 	"gopkg.in/yaml.v3"
 
 	"meshmcp/policy"
@@ -58,8 +59,18 @@ type PubsubConfig struct {
 	Name        string   `yaml:"name"`
 	TrustedKeys []string `yaml:"trusted_public_keys"`
 
+	// Federate mirrors remote brokers' topics into this one, so a subscriber
+	// here also sees events published there (removing the single-broker SPOF).
+	Federate []FederatePeer `yaml:"federate"`
+
 	Policy pubsub.RuleAuthorizer `yaml:"policy"` // per-topic authorization
 	Limits pubsub.Limits         `yaml:"limits"` // resource caps
+}
+
+// FederatePeer is one remote broker to mirror topics from.
+type FederatePeer struct {
+	Peer   string   `yaml:"peer"`   // remote broker mesh address, e.g. 100.64.0.6:9120
+	Topics []string `yaml:"topics"` // topic globs to mirror (empty = all: ["*"])
 }
 
 func loadPubsubConfig(path string) (*PubsubConfig, error) {
@@ -301,15 +312,80 @@ func cmdPubsub(args []string) error {
 	}
 	defer ln.Close()
 
+	// Federation: mirror remote brokers' topics into this one.
+	fedQuit := make(chan struct{})
+	for _, fp := range cfg.Federate {
+		if fp.Peer == "" {
+			continue
+		}
+		go runFederation(client, broker, fp.Peer, fp.Topics, fedQuit)
+		log.Printf("federating topics %v from %s", fp.Topics, fp.Peer)
+	}
+
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt)
 	<-sig
 	log.Println("pubsub broker shutting down")
+	close(fedQuit)
 	broker.Close() // stop publishes before sealing the final checkpoint
 	if eventLog != nil {
 		eventLog.Flush()
 	}
 	return nil
+}
+
+// runFederation subscribes to a remote broker and mirrors its original events
+// into the local broker, reconnecting until quit is closed. An event that is
+// itself a mirror (Origin set) is not re-mirrored, so a bidirectional
+// federation cannot loop. Taint labels are preserved, so containment holds
+// across brokers.
+func runFederation(mesh *embed.Client, local *pubsub.Broker, peer string, topics []string, quit <-chan struct{}) {
+	if len(topics) == 0 {
+		topics = []string{"*"}
+	}
+	hello, _ := json.Marshal(helloFrame{Role: "sub", Topics: topics})
+	preamble := append(hello, '\n')
+	dial := func(ctx context.Context) (net.Conn, error) { return mesh.Dial(ctx, "tcp", peer) }
+	for {
+		select {
+		case <-quit:
+			return
+		default:
+		}
+		firstLine := true
+		stream := &clientStream{out: append([]byte(nil), preamble...), done: make(chan struct{})}
+		stream.onLine = func(line []byte) {
+			if firstLine {
+				firstLine = false // subscribe ack
+				return
+			}
+			var ev pubsub.Event
+			if json.Unmarshal(line, &ev) != nil {
+				return
+			}
+			if ev.Origin != "" {
+				return // already federated elsewhere — do not re-mirror (loop guard)
+			}
+			_, _ = local.EmitFederated(ev.Topic, ev.Payload, ev.Labels, ev.Publisher, peer)
+		}
+		bridge := make(chan struct{})
+		go func() {
+			select {
+			case <-quit:
+				stream.finish()
+			case <-bridge:
+			}
+		}()
+		_ = session.NewClient(dial, nil).Run(context.Background(), stream)
+		close(bridge)
+		// Re-establish the subscription (fresh session) after a brief pause,
+		// e.g. if the remote broker restarted.
+		select {
+		case <-quit:
+			return
+		case <-time.After(2 * time.Second):
+		}
+	}
 }
 
 // lastCheckpoint parses the last checkpoint line from a checkpoints file, so a
