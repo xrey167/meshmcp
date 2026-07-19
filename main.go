@@ -29,10 +29,15 @@ Usage:
   meshmcp air <sessions|steer|launch> [flags]   drive live work: list/steer a gateway's sessions, launch an agent
   meshmcp connect [flags] <peer-ip:port>        bridge stdio <-> remote stdio backend
   meshmcp forward [flags] <local> <peer:port>   forward a local TCP port to a mesh peer
-  meshmcp drop [flags] <peer:port> <file...>    AirDrop files to a mesh peer (resumable, audited); --config runs a receiver
+  meshmcp drop [flags] <peer:port> <path...>    AirDrop files or directories to a mesh peer (resumable, audited); --config runs a receiver
   meshmcp peers [flags]                          list mesh peers you can reach (identities you can drop to)
   meshmcp fetch [flags] <peer:port> <sha256>    fetch a blob by content hash from a peer's store (F11)
   meshmcp push [flags] <peer:port>              push a stdin payload to a peer's inbox (universal clipboard)
+  meshmcp pubsub --config <file>                run an identity-gated, audited event bus on the mesh (durable + resumable)
+  meshmcp pubsub verify <event-log>             verify a persisted event stream's hash chain
+  meshmcp pubsub stats [flags] <peer:port>      query a running broker (subscribers, sequence, drops)
+  meshmcp publish [flags] <peer:port> <topic>   publish an event to a broker topic (stdin or --data; --stream: one per line)
+  meshmcp subscribe [flags] <peer:port> <topic...>  stream events from a broker (--since replays, Ctrl-C to stop)
   meshmcp probe [flags] <peer-ip:port>          run an MCP handshake against a backend
   meshmcp ls [flags] <peer-ip:port>             list a backend's tools/resources/prompts
   meshmcp call [flags] <peer:port> <tool>       call a tool (--arg k=v, --json, --task, --capability @file)
@@ -83,6 +88,12 @@ func main() {
 		err = cmdFetch(os.Args[2:])
 	case "push":
 		err = cmdPush(os.Args[2:])
+	case "pubsub":
+		err = cmdPubsub(os.Args[2:])
+	case "publish":
+		err = cmdPublish(os.Args[2:])
+	case "subscribe":
+		err = cmdSubscribe(os.Args[2:])
 	case "probe":
 		err = cmdProbe(os.Args[2:])
 	case "ls":

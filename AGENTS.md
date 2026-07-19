@@ -33,6 +33,8 @@ meshmcp is an **identity-native control plane for agent-to-tool (MCP) traffic**.
 | `pushwake.go` | Push-wake seam: device registry + `Notifier` (vendor APNs/FCM pluggable), wired into `approvals`. |
 | `drop.go` · `push.go` · `cas.go` · `peers.go` | AirDrop payload layer: `drop` / `push` / `fetch` / `peers`, resumable + audited. |
 | `probe.go` · `replay.go` | `probe` (handshake diagnostic) and `replay` (re-issue a traced session and diff). |
+| `pubsub.go` · `pubsubwire.go` | `pubsub` (identity-gated event-bus daemon), `publish`, `subscribe`; the wire protocol + `session.Backend` adapter over the `pubsub/` core. |
+| `hooks.go` | Gateway event hooks: publishes each policy decision (`policy.EventHook`) onto an embedded event bus and/or a webhook — observability, decoupled from enforcement (never blocks a decision). |
 | `README.md` · `LICENSE` | Project overview; proprietary license (© Rey Darius). |
 | `index.html` | Published GitHub Pages site, merged to the code root (Pages still deploys from the `gh-pages` branch). |
 
@@ -45,6 +47,7 @@ meshmcp is an **identity-native control plane for agent-to-tool (MCP) traffic**.
 | `session/` | Resumable, exactly-once session layer that survives roaming and gateway failover (see `session/AGENTS.md`). |
 | `secrets/` | Identity-gated credential broker (`{{secret:NAME}}` injection) (see `secrets/AGENTS.md`). |
 | `insight/` | Audit → policy: observe, recommend, simulate, detect (see `insight/AGENTS.md`). |
+| `pubsub/` | The identity-native event fabric: deny-by-default topic ACL, taint containment, hash-chained events, bounded fan-out (see `pubsub/AGENTS.md`). |
 | `control/` | Managed control plane: enrollment, policy store (see `control/AGENTS.md`). |
 | `federation/` | Cross-org tool bridging with identity mapping (see `federation/AGENTS.md`). |
 | `registry/` | File-based service registry for router discovery (see `registry/AGENTS.md`). |

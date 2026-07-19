@@ -26,3 +26,5 @@ allow:
 
 audit_log: ./drop-audit.jsonl        # one hash-chained record per file (who sent what)
 max_bytes: 1073741824                # per-file cap (1 GiB); 0 = unlimited
+max_files: 100000                    # files per transfer (<=0 = default 100k)
+max_total_bytes: 107374182400        # aggregate per transfer (<=0 = default 100 GiB)

@@ -1,0 +1,94 @@
+# meshmcp pubsub broker — the identity-native event fabric.
+#
+# Run it:   meshmcp pubsub --config examples/pubsub.yaml
+# Publish:  echo '{"level":"warn","msg":"disk 90%"}' | \
+#             meshmcp publish --json <this-peer-mesh-ip>:9120 alerts.prod
+# Subscribe:  meshmcp subscribe <this-peer-mesh-ip>:9120 'alerts.*'
+#
+# The broker joins the mesh, listens only on the mesh interface (no public
+# port), admits only peers matching `allow`, and authorizes every publish and
+# subscribe per topic by the caller's WireGuard identity. Events are stamped
+# with the publisher's key, contained by data-flow labels, hash-chained, and
+# audited — the same guarantees the gateway gives tool calls, for events.
+
+mesh:
+  device_name: meshmcp-pubsub
+  setup_key_env: NB_SETUP_KEY          # env var holding the NetBird setup key
+  config_path: ./pubsub-nb.json        # persist identity: same mesh IP across restarts
+  log_level: warn
+
+listen_port: 9120                      # mesh port publishers/subscribers connect to
+
+# Connection ACL: who may open a pub/sub session at all. Empty = any mesh peer
+# (the mesh is already the outer boundary). Same vocabulary as the firewall.
+allow:
+  - "*.netbird.cloud"
+
+name: alerts-bus                       # audience name for signed capability grants (below)
+audit_log: ./pubsub-audit.jsonl        # one hash-chained record per allow/deny decision
+event_log: ./pubsub-events.jsonl       # durable event stream: survives restart, --since replay,
+                                       # verify with `meshmcp pubsub verify ./pubsub-events.jsonl`
+
+# Signed Merkle checkpoints over the event stream — non-repudiation, so an
+# insider who controls the file can't rewrite history without the signature
+# disagreeing. Generate the key once: `meshmcp audit keygen --out pubsub-signer.json`.
+event_signing_key: ./pubsub-signer.json
+event_checkpoints: ./pubsub-checkpoints.jsonl
+event_checkpoint_every: 128            # emit a signed checkpoint every N events
+# Verify: meshmcp pubsub verify --checkpoints ./pubsub-checkpoints.jsonl --pubkey <hex> ./pubsub-events.jsonl
+
+# Per-topic authorization. Deny by default (default_allow omitted/false): a
+# publish or subscribe is refused unless a rule grants it. First match wins.
+policy:
+  default_allow: false
+  rules:
+    # A crawler publishes to web.* topics; every such event is marked tainted
+    # at the source, so only cleared subscribers ever receive it.
+    - peers: ["crawler.netbird.cloud"]
+      topics: ["web.*"]
+      allow: true
+      taint: true
+
+    # Trusted analysts may subscribe to everything, cleared for all labels
+    # (including tainted content).
+    - peers: ["analyst-*.netbird.cloud"]
+      topics: ["*"]
+      allow: true
+      clear_all: true
+
+    # Services may publish and subscribe to their own alerts namespace, but are
+    # NOT cleared for tainted data — a tainted event is contained away from them.
+    - peers: ["pubkey:AbCdEf0123...="]
+      topics: ["alerts.*"]
+      allow: true
+
+# Resource caps. Zero fields fall back to conservative defaults.
+limits:
+  sub_queue: 256                       # per-subscriber buffer before backpressure
+  max_subs: 1024                       # concurrent subscriptions
+  max_topics_per_sub: 64               # topic patterns per subscription
+  max_topic_len: 256                   # topic/pattern length (bytes)
+  max_payload_bytes: 1048576           # per-event payload cap (1 MiB); retain × this bounds memory
+  max_labels: 32                       # max data-flow labels per event
+  max_subs_per_peer: 128               # one identity cannot pin every global slot
+  retain: 4096                         # events kept for --since replay
+  max_retained_topics: 4096            # distinct topics that may hold a --retain last-value (bounds retained-map memory)
+  publish_rate: 50                     # per-peer publish+subscribe requests/second; 0 = default (200), -1 = unlimited
+  publish_burst: 100                   # per-peer burst ceiling
+
+# Signed capability grants: a caller presenting a short-lived token from one of
+# these pinned authority keys may subscribe/publish a topic beyond the default
+# deny — access minted out-of-band without editing the policy above. Mint one:
+#   meshmcp capability issue --key authority.json --subject <wg-key> \
+#     --audience alerts-bus --tool 'metrics.*' --ttl 8h > grant.tok
+# Present it:  meshmcp subscribe --capability @grant.tok <peer>:9120 'metrics.*'
+# trusted_public_keys:
+#   - "AUTHORITY_PUBKEY_HEX"            # from `meshmcp capability keygen`
+
+# Federation: mirror remote brokers' topics into this one, so a subscriber here
+# also sees events published there (removes the single-broker SPOF; run several
+# brokers that federate each other). Loop-safe — a mirrored event is never
+# re-mirrored. The remote broker must allow this broker's identity to subscribe.
+# federate:
+#   - peer: "100.64.0.6:9120"
+#     topics: ["alerts.*", "ops.*"]

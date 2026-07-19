@@ -37,6 +37,7 @@ type Config struct {
 	Trace    *TraceConfig   `yaml:"trace"`
 	Registry string         `yaml:"registry"` // dir: register backends for router discovery
 	Control  *ControlConfig `yaml:"control"`  // optional: Air session-control endpoint
+	Hooks    *HooksConfig   `yaml:"hooks"`    // publish policy decisions to the event bus and/or a webhook
 	Backends []*Backend     `yaml:"backends"`
 }
 
