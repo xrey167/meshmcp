@@ -92,6 +92,29 @@ func cmdServe(args []string) error {
 		log.Printf("shared audit ledger: %s", cfg.AuditLog)
 	}
 
+	// Optional gateway event hooks: publish every policy decision onto the
+	// event bus and/or a webhook. Kept as a nil interface when disabled so the
+	// filter never invokes it.
+	var hookSink policy.EventHook
+	var gatewayHookSink *gatewayHooks
+	if cfg.Hooks != nil {
+		gh, err := newGatewayHooks(cfg.Hooks, client, sharedAudit)
+		if err != nil {
+			return fmt.Errorf("hooks: %w", err)
+		}
+		gatewayHookSink = gh
+		defer gh.Close() // safety net; also closed explicitly before the audit flush
+		hookSink = gh
+		note := []string{}
+		if cfg.Hooks.Bus != nil {
+			note = append(note, fmt.Sprintf("bus on port %d", cfg.Hooks.Bus.ListenPort))
+		}
+		if cfg.Hooks.Webhook != nil && cfg.Hooks.Webhook.URL != "" {
+			note = append(note, "webhook")
+		}
+		log.Printf("gateway hooks enabled (%s)", strings.Join(note, ", "))
+	}
+
 	for _, b := range cfg.Backends {
 		ln, err := client.ListenTCP(fmt.Sprintf(":%d", b.Port))
 		if err != nil {
@@ -135,7 +158,7 @@ func cmdServe(args []string) error {
 					auditLogs = append(auditLogs, audit)
 				}
 			}
-			factory = backendFactory(b, audit, tracer)
+			factory = backendFactory(b, audit, tracer, hookSink)
 		}
 
 		wg.Add(1)
@@ -162,6 +185,12 @@ func cmdServe(args []string) error {
 		ln.Close()
 	}
 	wg.Wait()
+	// Close the hook bus before sealing the ledger: its broker writes subscribe
+	// records into the shared audit, so it must stop before the final flush or a
+	// last-moment bus session could land records after the sealed checkpoint.
+	if gatewayHookSink != nil {
+		gatewayHookSink.Close()
+	}
 	// Seal the final partial checkpoint batch so no audit records are left
 	// uncommitted by a clean shutdown.
 	for _, a := range auditLogs {
@@ -276,7 +305,7 @@ func bridgeConn(conn net.Conn, backend session.Backend) {
 // backendFactory builds the per-session backend for a stdio backend. It
 // wraps the subprocess with the inspection filter when a policy is set OR a
 // tracer is configured; with neither, the raw subprocess is used.
-func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer) session.BackendFactory {
+func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer, hook policy.EventHook) session.BackendFactory {
 	exec := session.ExecBackendFactory(b.Stdio[0], b.Stdio[1:], os.Environ())
 	if b.Policy == nil && tracer == nil && b.Capabilities == nil {
 		return exec
@@ -343,6 +372,9 @@ func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer) s
 		}
 		if capVerifier != nil {
 			f.SetCapabilityVerifier(capVerifier, b.Capabilities.Required)
+		}
+		if hook != nil {
+			f.SetEventHook(hook)
 		}
 		return f, nil
 	}

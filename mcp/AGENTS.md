@@ -14,6 +14,7 @@ A small, dependency-free MCP **server** framework speaking the 2025-06-18 protoc
 | `tasks.go` | The MCP task lifecycle: `start`, status values, `tasks/get`/`tasks/result`/`tasks/cancel`. Threads the composed handler through async execution. |
 | `middleware.go` | `ToolHandler`, `ToolMiddleware`, `ToolCallInfo`, `withToolCall`/`ToolCallFrom`, `effectiveHandler`, and built-ins `RecoverPanics`/`Timeout`/`LimitConcurrency`. |
 | `http.go` | `WithHTTPHeaders` — attach request headers to a handler context (Streamable-HTTP servers). |
+| `subscriptions.go` | The draft `subscriptions/listen` stream: `handleListen`, `NotifyToolsChanged`/`NotifyPromptsChanged`/`NotifyResourcesChanged`/`NotifyResourceUpdated`, ack + terminal `complete`. Served when used; not advertised in the 2025-06-18 initialize capabilities. |
 
 ## For AI Agents
 

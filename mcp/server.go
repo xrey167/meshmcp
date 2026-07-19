@@ -147,6 +147,9 @@ type Server struct {
 	reqMu   sync.Mutex
 	reqSeq  int
 	pending map[int]chan clientResp
+
+	submu sync.Mutex
+	subs  map[string]*subscription // active subscriptions/listen streams by id
 }
 
 type clientResp struct {
@@ -278,11 +281,15 @@ func (s *Server) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 1<<20), 8<<20)
 	conn := &outConn{bw: bufio.NewWriter(w)}
+	if wd, ok := w.(writeDeadliner); ok {
+		conn.wd = wd // bound writes on transports that support deadlines (net.Conn)
+	}
 	sess := &Session{conn: conn}
 	s.mu.Lock()
 	s.sess = sess
 	s.mu.Unlock()
 	sctx := WithSession(ctx, sess)
+	defer s.closeAllSubscriptions() // terminate any open listen streams on disconnect
 
 	for sc.Scan() {
 		line := sc.Bytes()
@@ -331,6 +338,11 @@ func (s *Server) handleNotification(req request) {
 			TaskID    string          `json:"taskId"`
 		}
 		_ = json.Unmarshal(req.Params, &p)
+		// A cancel may target an open subscriptions/listen stream (its id is the
+		// subscription id); if so, close it with the terminal `complete` result.
+		if s.closeSubscription(string(p.RequestID)) {
+			return
+		}
 		id := p.TaskID
 		if id == "" {
 			// requestId may be a JSON string or number; trim quotes.
@@ -377,6 +389,8 @@ func (s *Server) dispatch(ctx context.Context, req request, sess *Session) respo
 		return s.taskResult(req, ok, fail)
 	case "tasks/cancel":
 		return s.taskCancel(req, ok, fail)
+	case methodSubscriptionsListen:
+		return s.handleListen(req, sess)
 	default:
 		return fail(codeMethodNotFound, "method not found: "+req.Method)
 	}

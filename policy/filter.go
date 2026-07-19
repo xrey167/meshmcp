@@ -31,6 +31,7 @@ type Filter struct {
 	capVerifier *CapabilityVerifier
 	capRequired bool
 	caller      Caller
+	hook        EventHook
 
 	lmu    sync.Mutex      // guards labels
 	labels map[string]bool // data-flow labels accumulated this session
@@ -67,6 +68,36 @@ func NewFilterEngine(inner io.ReadWriteCloser, caller Caller, eng *Engine, audit
 		labels: map[string]bool{}, outR: r, outW: w}
 	go f.pumpInner()
 	return f
+}
+
+// EventHook observes policy decisions as they are audited, so the gateway can
+// publish them onto the event bus or a webhook. It is deliberately decoupled
+// from enforcement: Emit MUST NOT block or error the request path — it is
+// called inline on every decision, and a slow or failing sink must never delay
+// or change a decision. Implementations should hand the record to a buffered
+// worker and return immediately.
+type EventHook interface {
+	Emit(AuditRecord)
+}
+
+// SetEventHook attaches an EventHook. Safe to call before the filter carries
+// traffic (during construction).
+func (f *Filter) SetEventHook(h EventHook) { f.hook = h }
+
+// audited writes a decision to the audit log and forwards it to the event hook
+// (if any). The hook is fire-and-forget: it never blocks or fails the caller.
+//
+// Every decision is recorded — including denials and rate-limit blocks. That is
+// deliberate and differs from the pub/sub broker (which drops rate-limited
+// attempts unaudited): the gateway's tool-call ledger is the non-repudiable
+// security record, and denied/blocked attempts are precisely what a security
+// audit must retain. Flood protection is the policy engine's per-rule rate
+// limits plus operational log rotation, not silence about denials.
+func (f *Filter) audited(rec AuditRecord) {
+	f.audit.write(rec)
+	if f.hook != nil {
+		f.hook.Emit(rec)
+	}
 }
 
 // labelSnapshot copies the current session label set for a decision.
@@ -165,7 +196,7 @@ func (f *Filter) handleLine(line []byte) error {
 	// forward blind.
 	if trimmed[0] == '[' {
 		if f.eng != nil {
-			f.audit.write(f.record("<batch>", "", "", Decision{RuleID: -1, Reason: "batches unsupported"}))
+			f.audited(f.record("<batch>", "", "", Decision{RuleID: -1, Reason: "batches unsupported"}))
 			f.traceLine("c2s", trimmed, "deny")
 			f.writeDenial(json.RawMessage("null"), "JSON-RPC batches are not supported by the mesh policy filter")
 			return nil
@@ -221,7 +252,7 @@ func (f *Filter) handleToolCall(line []byte, msg rpcPeek, capToken string) error
 		dec = f.applyCapability(dec, capToken, tool)
 	}
 	rec := f.record(msg.Method, tool, string(msg.ID), dec)
-	f.audit.write(rec)
+	f.audited(rec)
 	f.traceLine("c2s", line, rec.Decision)
 
 	switch dec.Outcome {
@@ -274,7 +305,7 @@ func (f *Filter) handleMethod(line []byte, msg rpcPeek) error {
 		_, werr := f.inner.Write(line)
 		return werr
 	}
-	f.audit.write(f.record(msg.Method, "", string(msg.ID), dec))
+	f.audited(f.record(msg.Method, "", string(msg.ID), dec))
 	f.traceLine("c2s", line, decisionStr(dec.Allow))
 	if dec.Allow {
 		_, werr := f.inner.Write(line)
@@ -294,7 +325,7 @@ func (f *Filter) handleNotification(line []byte, method string) error {
 		_, werr := f.inner.Write(line)
 		return werr
 	}
-	f.audit.write(f.record(method, "", "", dec))
+	f.audited(f.record(method, "", "", dec))
 	f.traceLine("c2s", line, decisionStr(dec.Allow))
 	if !dec.Allow {
 		return nil // drop

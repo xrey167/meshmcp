@@ -36,6 +36,7 @@ type Config struct {
 	AuditLog string       `yaml:"audit_log"`
 	Trace    *TraceConfig `yaml:"trace"`
 	Registry string       `yaml:"registry"` // dir: register backends for router discovery
+	Hooks    *HooksConfig `yaml:"hooks"`     // publish policy decisions to the event bus and/or a webhook
 	Backends []*Backend   `yaml:"backends"`
 }
 
