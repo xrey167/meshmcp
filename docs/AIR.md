@@ -287,7 +287,8 @@ Honesty about the seam, so nobody mistakes the mockup for shipped product:
 | Assistant tools `air_peers` · `air_push` · `air_fetch` · `air_launch` (opt-in) | **Ships now** | `mcpapp.go` · `mcpapp_air_test.go` |
 | A served **live** Air web page over the mesh (`meshmcp air serve`) | **Ships now** | `airserve.go` · `site/air-live.html` · `airserve_test.go` |
 | Push-wake seam (device registry + notify hook; vendor APNs/FCM pluggable) | **Ships now** | `pushwake.go` · `approvals.go` · `pushwake_test.go` — [MOBILE.md §4](MOBILE.md) |
-| Native mobile app (gomobile) | **Proposed** | binding surface — [MOBILE.md §3](MOBILE.md) |
+| Native mobile **binding package** (`mobile/`, compiles; `gomobile bind` external) | **Ships now** | `mobile/mobile.go` · `mobile/mobile_test.go` — [MOBILE.md §3](MOBILE.md) |
+| A shipped native mobile **app** (bound + built + on a device) | **External** | needs the iOS/Android toolchain + a device |
 
 Invariants that never move: **no open ports**, **identity is cryptographic**, **deny is
 the default**.

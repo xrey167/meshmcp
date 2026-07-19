@@ -106,16 +106,24 @@ phone *buzz* when an approval is waiting, the gateway must notify APNs/FCM — s
 
 ---
 
-## 3 · The on-device SDK (`gomobile`)
+## 3 · The on-device SDK (`gomobile`) — *package ships; `gomobile bind` is external*
 
-For architecture A.2 and B, bind meshmcp's Go into a mobile framework. `gomobile
-bind` produces an iOS `.xcframework` and an Android `.aar` from a Go package with
-a gomobile-friendly surface (exported types, no channels/maps across the
-boundary, simple params + callbacks). NetBird's own mobile clients prove this for
-the connectivity half.
+The binding package **`mobile/` ships** (`mobile/mobile.go`, tested by
+`mobile/mobile_test.go`): a string/error-only surface over `client/embed` +
+`mcpclient` — `Join`, `Mesh.Identity`, `Mesh.Dial` → `Conn.Call`, and
+`Mesh.Approvals` → `Pending`/`Approve`/`Deny`. It compiles as an ordinary Go
+package. Producing the framework is the one external step (it needs the mobile
+toolchain + a device):
 
-The surface a `mobile/` binding package would export (thin wrappers over existing
-code):
+```
+gomobile bind -target=ios     -o Meshmcp.xcframework ./mobile
+gomobile bind -target=android -o meshmcp.aar          ./mobile
+```
+
+`gomobile bind` turns it into an iOS `.xcframework` / Android `.aar`; the package
+already follows the boundary rule (no channels/maps/struct-slices crossing).
+NetBird's own mobile clients prove the connectivity half. The exported surface
+(thin wrappers over existing code):
 
 ```go
 package mobile // gomobile bind target
