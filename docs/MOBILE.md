@@ -148,24 +148,31 @@ crossing into Swift/Kotlin.
 
 ---
 
-## 4 · The push seam (the one missing piece)
+## 4 · The push seam — *shipped (vendor delivery pluggable)*
 
-For the phone to be woken instead of polling, the gateway needs to send a push
-when a pending appears. This is a small, well-bounded addition:
+For the phone to be woken instead of polling, the approver notifies a registered
+device when a pending appears. The seam ships (`pushwake.go`, wired into
+`approvals.go`); only the vendor HTTP call is left as a credentialed plug-in:
 
-1. **Device registration.** A mesh service `POST /v1/devices` — a phone
-   registers its APNs/FCM token *and* is identified by its WireGuard key (so only
-   real mesh peers can register, and you know which human owns which token).
-2. **Notify on pending.** Give `policy.FilePending.Record` (or the approvals
-   service watching the dir) a `Notifier` hook: on a new pending, look up the
-   approver device(s) and send a push ("billing.mesh wants transfer_funds").
-   APNs/FCM delivery is an HTTP call to Apple/Google — no inbound port, fits the
-   mesh model.
-3. **Wake → approve.** The push opens the approver (deep link), Face ID gates the
+1. **Device registration.** ✅ `POST /v1/devices` (enable with
+   `meshmcp approvals --devices <dir>`) — a phone registers its APNs/FCM token,
+   owned by the caller's WireGuard identity via the approver resolver, into a
+   `DeviceStore` (`pushwake.go`). Only real mesh peers can register.
+2. **Notify on pending.** ✅ On a new approval request (`/v1/request`), the
+   approver looks up the registered device(s) and calls the `Notifier` hook
+   ("billing.mesh wants transfer_funds"). The default `logNotifier` writes what
+   *would* be pushed, so the whole path is exercisable without credentials
+   (`TestPushWakeNotifiesOnRequest`).
+3. **Vendor delivery.** *Pluggable.* Implement `Notifier` with the APNs/FCM HTTP
+   call (an outbound request to Apple/Google — no inbound port, consistent with
+   zero-open-ports) and pass it instead of `logNotifier`. This is the one part
+   that needs vendor credentials and is not built here.
+4. **Wake → approve.** The push opens the approver (deep link), Face ID gates the
    `POST /v1/approve`, done.
 
-This keeps the gateway push-*out* only (it never accepts inbound from Apple/Google),
-consistent with the zero-open-ports invariant. It's the natural next PR.
+A gateway-side co-sign hold (`require_cosign`) records its pending in the same
+cosign dir; a small directory-watcher in the approvals service would call the
+same `Notifier` — the identical seam, over the file store already shared today.
 
 ---
 

@@ -27,6 +27,7 @@ func cmdApprovals(args []string) error {
 	port := fs.Int("port", 9700, "mesh port to serve on")
 	addr := fs.String("addr", "", "bind a plain local address instead of the mesh (dev/testing)")
 	ttlSec := fs.Int("ttl", 0, "drop pending requests older than this many seconds (0 = never)")
+	devices := fs.String("devices", "", "directory to persist push-wake device tokens (enables /v1/devices + notify on new pendings)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -35,9 +36,15 @@ func cmdApprovals(args []string) error {
 	}
 	ps := &policy.FilePending{Dir: *store, TTL: time.Duration(*ttlSec) * time.Second}
 
+	var opts []approvalsOption
+	if *devices != "" {
+		opts = append(opts, withPushWake(&DeviceStore{Dir: *devices}, logNotifier{w: os.Stderr}))
+		log.Printf("push-wake enabled: devices in %s (register via POST /v1/devices)", *devices)
+	}
+
 	// Local/dev mode: no mesh, a fixed approver identity.
 	if *addr != "" {
-		h := approvalsHandler(ps, func(*http.Request) string { return "operator@local" }, time.Now)
+		h := approvalsHandler(ps, func(*http.Request) string { return "operator@local" }, time.Now, opts...)
 		log.Printf("approvals on http://%s (LOCAL — approver is 'operator@local')", *addr)
 		return http.ListenAndServe(*addr, h)
 	}
@@ -62,13 +69,32 @@ func cmdApprovals(args []string) error {
 	}
 	defer ln.Close()
 	log.Printf("approvals on mesh port %d (open it from a phone on the mesh; approver = your mesh identity)", *port)
-	return http.Serve(ln, approvalsHandler(ps, approver, time.Now))
+	return http.Serve(ln, approvalsHandler(ps, approver, time.Now, opts...))
+}
+
+// approvalsOpts are optional add-ons for approvalsHandler (push-wake).
+type approvalsOpts struct {
+	devices  *DeviceStore
+	notifier Notifier
+}
+
+// approvalsOption configures approvalsHandler without breaking its callers.
+type approvalsOption func(*approvalsOpts)
+
+// withPushWake enables device registration (/v1/devices) and notifies the
+// registered devices when a new approval request is recorded.
+func withPushWake(d *DeviceStore, n Notifier) approvalsOption {
+	return func(o *approvalsOpts) { o.devices, o.notifier = d, n }
 }
 
 // approvalsHandler builds the approver HTTP surface. approver resolves the
 // caller identity for a request; now supplies grant timestamps. Split out so it
 // is unit-testable with a fixed approver via httptest.
-func approvalsHandler(ps *policy.FilePending, approver func(*http.Request) string, now func() time.Time) http.Handler {
+func approvalsHandler(ps *policy.FilePending, approver func(*http.Request) string, now func() time.Time, options ...approvalsOption) http.Handler {
+	var opt approvalsOpts
+	for _, o := range options {
+		o(&opt)
+	}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/v1/pending", func(w http.ResponseWriter, r *http.Request) {
@@ -139,8 +165,36 @@ func approvalsHandler(ps *policy.FilePending, approver func(*http.Request) strin
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		// Push-wake: buzz the registered approver device(s) instead of polling.
+		if opt.notifier != nil && opt.devices != nil {
+			if devs, err := opt.devices.List(""); err == nil && len(devs) > 0 {
+				_ = opt.notifier.Notify(devs, "approval needed", body.Peer+" wants "+body.Tool)
+			}
+		}
 		writeJSONResp(w, http.StatusOK, map[string]string{"status": "pending", "peer": body.Peer, "tool": body.Tool})
 	})
+
+	// /v1/devices registers a phone's push token, owned by the caller's mesh
+	// identity, so the gateway can wake it when an approval is pending.
+	if opt.devices != nil {
+		mux.HandleFunc("/v1/devices", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "POST only", http.StatusMethodNotAllowed)
+				return
+			}
+			var body struct{ Token, Platform string }
+			if json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body) != nil || body.Token == "" {
+				http.Error(w, "token is required", http.StatusBadRequest)
+				return
+			}
+			d := Device{Identity: approver(r), Token: body.Token, Platform: body.Platform}
+			if err := opt.devices.Register(d); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			writeJSONResp(w, http.StatusOK, map[string]string{"status": "registered", "identity": d.Identity})
+		})
+	}
 
 	// /v1/status?peer=&tool= lets the requester poll the human's decision.
 	mux.HandleFunc("/v1/status", func(w http.ResponseWriter, r *http.Request) {
