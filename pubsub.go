@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -432,6 +434,8 @@ func cmdPublish(args []string) error {
 	fileFlag := fs.String("file", "", "publish a file's bytes as a base64 (binary) payload")
 	maxBytes := fs.Int64("max-bytes", 1<<20, "reject a payload larger than this (the broker enforces its own cap too)")
 	capFlag := fs.String("capability", "", "present a signed capability grant; @file reads the token from a file")
+	replyTo := fs.String("reply-to", "", "request/reply: topic a responder should send the reply to")
+	corr := fs.String("corr", "", "request/reply: correlation id (echo the request's corr when replying)")
 	var labels stringList
 	fs.Var(&labels, "label", "data-flow label to attach to the event (repeatable)")
 	if err := fs.Parse(args); err != nil {
@@ -489,7 +493,7 @@ func cmdPublish(args []string) error {
 	}
 
 	hello, _ := json.Marshal(helloFrame{Role: "pub", Capability: capToken})
-	pub, _ := json.Marshal(pubFrame{Topic: topic, Labels: labels, Retain: *retainFlag, Enc: enc, Payload: payload})
+	pub, _ := json.Marshal(pubFrame{Topic: topic, Labels: labels, Retain: *retainFlag, Enc: enc, ReplyTo: *replyTo, Corr: *corr, Payload: payload})
 	preamble := append(append(hello, '\n'), append(pub, '\n')...)
 
 	// ack/gotAck are written in the session inbound goroutine (via onLine) and
@@ -788,4 +792,183 @@ func cmdSubscribe(args []string) error {
 		return fmt.Errorf("subscribe to %s: %w", target, err)
 	}
 	return nil
+}
+
+// cmdRequest publishes a request event and waits for the correlated reply,
+// turning the bus into an identity-native RPC transport. The request and the
+// reply are both ordinary events, so RPC inherits every bus guarantee: each is
+// stamped with the caller's proven key, authorized per topic (deny by default),
+// taint-contained, and hash-chained. A responder is any subscriber to the
+// request topic that publishes its result to the event's reply_to with the same
+// corr. Both parties must be granted the reply-topic namespace (default
+// `_rpc.reply.*`) — the requester to subscribe it, the responder to publish it.
+func cmdRequest(args []string) error {
+	fs := flag.NewFlagSet("request", flag.ExitOnError)
+	o := meshFlags(fs)
+	data := fs.String("data", "", "request payload (default: read stdin)")
+	rawJSON := fs.Bool("json", false, "treat the payload as raw JSON instead of wrapping it as a string")
+	var labels stringList
+	fs.Var(&labels, "label", "data-flow label to attach to the request (repeatable)")
+	capFlag := fs.String("capability", "", "present a signed capability grant; @file reads the token from a file")
+	replyTopic := fs.String("reply-topic", "", "topic to receive the reply on (default: _rpc.reply.<id>)")
+	timeout := fs.Duration("timeout", 30*time.Second, "how long to wait for a reply")
+	maxBytes := fs.Int64("max-bytes", 1<<20, "maximum request payload size in bytes")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 2 {
+		return errors.New("usage: meshmcp request [flags] <peer-ip:port> <topic>")
+	}
+	target, topic := fs.Arg(0), fs.Arg(1)
+	capToken, err := readCapabilityToken(*capFlag)
+	if err != nil {
+		return err
+	}
+
+	// Build the request payload (stdin or --data; wrapped as a JSON string
+	// unless --json), bounded by the payload cap.
+	var body []byte
+	if *data != "" {
+		body = []byte(*data)
+	} else {
+		b, err := io.ReadAll(io.LimitReader(os.Stdin, *maxBytes+1))
+		if err != nil {
+			return fmt.Errorf("read stdin: %w", err)
+		}
+		body = b
+	}
+	if int64(len(body)) > *maxBytes {
+		return fmt.Errorf("payload exceeds %d bytes", *maxBytes)
+	}
+	var payload json.RawMessage
+	if *rawJSON {
+		if !json.Valid(body) {
+			return errors.New("--json set but payload is not valid JSON")
+		}
+		payload = json.RawMessage(body)
+	} else {
+		wrapped, _ := json.Marshal(string(body))
+		payload = wrapped
+	}
+
+	// A random correlation id ties the reply to this request; the reply topic
+	// defaults to a per-request name so concurrent requests never cross talk.
+	var idb [16]byte
+	if _, err := rand.Read(idb[:]); err != nil {
+		return fmt.Errorf("generate correlation id: %w", err)
+	}
+	corr := hex.EncodeToString(idb[:])
+	reply := *replyTopic
+	if reply == "" {
+		reply = "_rpc.reply." + corr
+	}
+
+	o.BlockInbound = true
+	client, err := startMesh(o, os.Stderr)
+	if err != nil {
+		return err
+	}
+	defer stopMesh(client)
+	dial := func(ctx context.Context) (net.Conn, error) { return client.Dial(ctx, "tcp", target) }
+
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+
+	// Subscribe to the reply topic FIRST, so the reply cannot race ahead of our
+	// subscription. onLine handles the ack, then captures the correlated reply.
+	var mu sync.Mutex
+	var replyPayload []byte
+	var subErr error
+	subscribed := make(chan struct{})
+	replyCh := make(chan struct{})
+	var subOnce, replyOnce sync.Once
+	subHello, _ := json.Marshal(helloFrame{Role: "sub", Topics: []string{reply}, Capability: capToken})
+	subStream := &clientStream{out: append(subHello, '\n'), done: make(chan struct{})}
+	firstLine := true
+	subStream.onLine = func(line []byte) {
+		if firstLine {
+			firstLine = false
+			var ack ackFrame
+			_ = json.Unmarshal(line, &ack)
+			if ack.Error != "" {
+				mu.Lock()
+				subErr = fmt.Errorf("broker rejected reply subscribe: %s", ack.Error)
+				mu.Unlock()
+				subStream.finish()
+			}
+			subOnce.Do(func() { close(subscribed) })
+			return
+		}
+		var ev pubsub.Event
+		if json.Unmarshal(line, &ev) != nil || ev.Corr != corr {
+			return // not our reply
+		}
+		mu.Lock()
+		replyPayload = append([]byte(nil), ev.Payload...)
+		mu.Unlock()
+		replyOnce.Do(func() { close(replyCh) })
+		subStream.finish()
+	}
+	go func() {
+		scl := session.NewClient(dial, log.Printf)
+		_ = scl.Run(ctx, subStream)
+		subOnce.Do(func() { close(subscribed) }) // unblock if Run ends before an ack
+	}()
+
+	select {
+	case <-subscribed:
+	case <-ctx.Done():
+		return fmt.Errorf("request to %s: timed out before subscribing", target)
+	}
+	mu.Lock()
+	se := subErr
+	mu.Unlock()
+	if se != nil {
+		return se
+	}
+
+	// Publish the request with reply_to + corr over a second session.
+	pubHello, _ := json.Marshal(helloFrame{Role: "pub", Capability: capToken})
+	pub, _ := json.Marshal(pubFrame{Topic: topic, Labels: labels, ReplyTo: reply, Corr: corr, Payload: payload})
+	preamble := append(append(pubHello, '\n'), append(pub, '\n')...)
+	var pmu sync.Mutex
+	var pack ackFrame
+	var gotAck bool
+	pubStream := &clientStream{out: preamble, done: make(chan struct{})}
+	pubStream.onLine = func(line []byte) {
+		pmu.Lock()
+		defer pmu.Unlock()
+		if gotAck {
+			return
+		}
+		gotAck = true
+		_ = json.Unmarshal(line, &pack)
+		pubStream.finish()
+	}
+	runErr := session.NewClient(dial, log.Printf).Run(ctx, pubStream)
+	pmu.Lock()
+	got, presult := gotAck, pack
+	pmu.Unlock()
+	if !got {
+		if runErr != nil {
+			return fmt.Errorf("send request to %s: %w", target, runErr)
+		}
+		return fmt.Errorf("send request to %s: no acknowledgment", target)
+	}
+	if presult.Error != "" {
+		return fmt.Errorf("broker rejected request: %s", presult.Error)
+	}
+
+	// Await the correlated reply (or time out).
+	select {
+	case <-replyCh:
+		mu.Lock()
+		rp := replyPayload
+		mu.Unlock()
+		os.Stdout.Write(append(rp, '\n'))
+		return nil
+	case <-ctx.Done():
+		subStream.finish()
+		return fmt.Errorf("request to %s: no reply within %s", target, *timeout)
+	}
 }

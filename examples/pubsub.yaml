@@ -62,6 +62,13 @@ policy:
       topics: ["alerts.*"]
       allow: true
 
+    # Request/reply (RPC over the bus): grant the reply namespace so a requester
+    # may subscribe its reply topic and a responder may publish it. Still
+    # deny-by-default — an RPC channel is an explicit grant, not ambient.
+    - peers: ["analyst-*.netbird.cloud", "pubkey:AbCdEf0123...="]
+      topics: ["_rpc.reply.*", "rpc.*"]
+      allow: true
+
 # Resource caps. Zero fields fall back to conservative defaults.
 limits:
   sub_queue: 256                       # per-subscriber buffer before backpressure

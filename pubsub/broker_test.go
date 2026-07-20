@@ -396,6 +396,91 @@ func TestConsumerGroupRejectsSince(t *testing.T) {
 	}
 }
 
+// TestRequestReplyFields verifies the request/reply correlation fields are
+// stamped onto the sealed event, delivered intact, and covered by the hash
+// chain (they are part of the event, so a tamper would be detected).
+func TestRequestReplyFields(t *testing.T) {
+	b := New(Options{Authorizer: AllowAll{}})
+	defer b.Close()
+	sub, _ := b.Subscribe(id("s"), SubOptions{Topics: []string{"rpc.add"}})
+	defer sub.Close()
+
+	ev, err := b.PublishOpts(id("client"), "rpc.add", json.RawMessage(`[1,2]`),
+		PublishOptions{ReplyTo: "_rpc.reply.abc", Corr: "abc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.ReplyTo != "_rpc.reply.abc" || ev.Corr != "abc" {
+		t.Fatalf("published event missing correlation: %+v", ev)
+	}
+	got := recv(t, sub)
+	if got.ReplyTo != "_rpc.reply.abc" || got.Corr != "abc" {
+		t.Fatalf("delivered event missing correlation: %+v", got)
+	}
+	if err := VerifyChain(b.Retained()); err != nil {
+		t.Fatalf("chain with correlation fields must verify: %v", err)
+	}
+}
+
+// TestRequestReplyRoundTrip exercises the whole RPC pattern on the core: a
+// responder subscribed to the request topic replies to the event's ReplyTo with
+// the same Corr, and the requester (subscribed to the reply topic) matches it.
+// Everything is ordinary per-topic publish/subscribe — RPC needs no special path.
+func TestRequestReplyRoundTrip(t *testing.T) {
+	b := New(Options{Authorizer: AllowAll{}})
+	defer b.Close()
+
+	// Requester listens on its private reply topic; responder listens on the
+	// request topic.
+	reply, err := b.Subscribe(id("client"), SubOptions{Topics: []string{"_rpc.reply.xyz"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reply.Close()
+	requests, err := b.Subscribe(id("server"), SubOptions{Topics: []string{"rpc.echo"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer requests.Close()
+
+	// Requester publishes the request.
+	if _, err := b.PublishOpts(id("client"), "rpc.echo", json.RawMessage(`"ping"`),
+		PublishOptions{ReplyTo: "_rpc.reply.xyz", Corr: "xyz"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Responder receives it and replies to ReplyTo with the same Corr.
+	req := recv(t, requests)
+	if req.ReplyTo == "" || req.Corr == "" {
+		t.Fatalf("responder got a request without correlation: %+v", req)
+	}
+	if _, err := b.PublishOpts(id("server"), req.ReplyTo, json.RawMessage(`"pong"`),
+		PublishOptions{Corr: req.Corr}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Requester matches the reply by Corr.
+	resp := recv(t, reply)
+	if resp.Corr != "xyz" || string(resp.Payload) != `"pong"` {
+		t.Fatalf("requester got wrong reply: %+v", resp)
+	}
+}
+
+// TestRequestReplyValidation verifies the correlation fields are bounded like a
+// topic/label (they are retained and hashed): an over-long reply_to or corr is
+// refused.
+func TestRequestReplyValidation(t *testing.T) {
+	b := New(Options{Authorizer: AllowAll{}, Limits: Limits{MaxTopicLen: 16}})
+	defer b.Close()
+	long := strings.Repeat("x", 17)
+	if _, err := b.PublishOpts(id("c"), "t", json.RawMessage(`1`), PublishOptions{ReplyTo: long}); err == nil {
+		t.Fatal("over-long reply_to should be rejected")
+	}
+	if _, err := b.PublishOpts(id("c"), "t", json.RawMessage(`1`), PublishOptions{Corr: long}); !errors.Is(err, ErrBadTopic) {
+		t.Fatalf("over-long corr: got %v, want ErrBadTopic", err)
+	}
+}
+
 // fakeClock is a settable clock for deterministic time-dependent tests.
 type fakeClock struct {
 	mu sync.Mutex

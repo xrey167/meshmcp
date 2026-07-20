@@ -38,6 +38,7 @@ Usage:
   meshmcp pubsub stats [flags] <peer:port>      query a running broker (subscribers, sequence, drops)
   meshmcp publish [flags] <peer:port> <topic>   publish an event to a broker topic (stdin or --data; --stream: one per line)
   meshmcp subscribe [flags] <peer:port> <topic...>  stream events from a broker (--since replays, Ctrl-C to stop)
+  meshmcp request [flags] <peer:port> <topic>   publish a request and wait for the correlated reply (RPC over the bus)
   meshmcp probe [flags] <peer-ip:port>          run an MCP handshake against a backend
   meshmcp ls [flags] <peer-ip:port>             list a backend's tools/resources/prompts
   meshmcp call [flags] <peer:port> <tool>       call a tool (--arg k=v, --json, --task, --capability @file)
@@ -94,6 +95,8 @@ func main() {
 		err = cmdPublish(os.Args[2:])
 	case "subscribe":
 		err = cmdSubscribe(os.Args[2:])
+	case "request":
+		err = cmdRequest(os.Args[2:])
 	case "probe":
 		err = cmdProbe(os.Args[2:])
 	case "ls":

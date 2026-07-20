@@ -47,7 +47,9 @@ type pubFrame struct {
 	Topic   string          `json:"topic"`
 	Labels  []string        `json:"labels,omitempty"`
 	Retain  bool            `json:"retain,omitempty"`
-	Enc     string          `json:"enc,omitempty"` // payload encoding hint (e.g. "base64")
+	Enc     string          `json:"enc,omitempty"`      // payload encoding hint (e.g. "base64")
+	ReplyTo string          `json:"reply_to,omitempty"` // request/reply: topic for the reply
+	Corr    string          `json:"corr,omitempty"`     // request/reply: correlation id echoed on the reply
 	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
@@ -207,6 +209,8 @@ func (bb *brokerBackend) servePub(sc *bufio.Scanner, capToken string) {
 			Capability: capToken,
 			Retain:     pf.Retain,
 			Encoding:   pf.Enc,
+			ReplyTo:    pf.ReplyTo,
+			Corr:       pf.Corr,
 		})
 		if err != nil {
 			if bb.writeAck(ackFrame{Error: err.Error()}) != nil {

@@ -259,6 +259,14 @@ type PublishOptions struct {
 	// Encoding is an opaque payload-encoding hint stamped onto the event
 	// (e.g. "base64" for a binary payload carried as a JSON string).
 	Encoding string
+	// ReplyTo and Corr carry request/reply correlation: ReplyTo is the topic a
+	// responder should publish its reply to, and Corr is an opaque id echoed on
+	// the reply so a requester can match it. Both are stamped onto the event and
+	// otherwise opaque to the broker — request/reply is an ordinary publish plus
+	// a correlated subscribe, so it inherits per-topic authorization and taint
+	// containment with no special path.
+	ReplyTo string
+	Corr    string
 }
 
 // Publish authorizes and emits an event to topic (see PublishOpts for the full
@@ -306,6 +314,19 @@ func (b *Broker) PublishOpts(id Identity, topic string, payload json.RawMessage,
 		b.record(id, "pubsub/publish", topic, "deny", "encoding hint too long", nil)
 		return nil, fmt.Errorf("%w: encoding hint exceeds %d bytes", ErrBadTopic, maxEncodingLen)
 	}
+	// Request/reply correlation fields are retained and hashed, so bound them:
+	// ReplyTo is a topic (a responder publishes to it), Corr an opaque id capped
+	// like a topic. Both are validated before allocation, never trusted raw.
+	if o.ReplyTo != "" {
+		if err := validateTopic(o.ReplyTo, b.lm.MaxTopicLen); err != nil {
+			b.record(id, "pubsub/publish", topic, "deny", "invalid reply_to", nil)
+			return nil, fmt.Errorf("reply_to: %w", err)
+		}
+	}
+	if len(o.Corr) > b.lm.MaxTopicLen {
+		b.record(id, "pubsub/publish", topic, "deny", "correlation id too long", nil)
+		return nil, fmt.Errorf("%w: correlation id exceeds %d bytes", ErrBadTopic, b.lm.MaxTopicLen)
+	}
 	dec := b.auth.Publish(id, topic)
 	if !dec.Allow {
 		// A signed capability may upgrade a DEFAULT deny (never an explicit
@@ -346,6 +367,8 @@ func (b *Broker) PublishOpts(id Identity, topic string, payload json.RawMessage,
 		PubFQDN:   id.FQDN,
 		Labels:    labels,
 		Enc:       o.Encoding,
+		ReplyTo:   o.ReplyTo,
+		Corr:      o.Corr,
 		Payload:   payload,
 		PrevHash:  b.prev,
 	}

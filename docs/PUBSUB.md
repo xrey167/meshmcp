@@ -33,6 +33,7 @@ It is a bus that no ordinary message queue can be:
 meshmcp pubsub    --config broker.yaml                run a broker on the mesh
 meshmcp publish   [flags] <peer-ip:port> <topic>      publish one event
 meshmcp subscribe [flags] <peer-ip:port> <topic...>   stream events to stdout
+meshmcp request   [flags] <peer-ip:port> <topic>      publish a request, wait for the reply (RPC)
 ```
 
 Publish reads its payload from stdin (or `--data`), wraps it as a JSON string
@@ -93,6 +94,37 @@ not exactly-once):
 ```sh
 meshmcp subscribe --durable ./alerts.cursor 100.x.y.z:9120 'alerts.prod'
 ```
+
+## Request/reply (RPC over the bus)
+
+`meshmcp request` turns the bus into an **identity-native RPC transport**: it
+publishes a request and blocks for the correlated reply. Because the request and
+the reply are both ordinary events, every RPC is attributable (stamped with the
+caller's proven key), authorized per topic (deny by default), taint-contained,
+and hash-chained — guarantees no ordinary RPC has:
+
+```sh
+echo '[2,3]' | meshmcp request --json 100.x.y.z:9120 rpc.add    # prints the reply
+```
+
+A **responder** is any subscriber to the request topic that publishes its result
+to the event's `reply_to` with the same `corr` (correlation id). In shell:
+
+```sh
+# a worker answering rpc.add — one line in, one line out
+meshmcp subscribe 100.x.y.z:9120 'rpc.add' | while read -r ev; do
+  reply=$(jq -r .reply_to <<<"$ev"); corr=$(jq -r .corr <<<"$ev")
+  echo "$(jq '.payload | add' <<<"$ev")" | \
+    meshmcp publish --json --corr "$corr" 100.x.y.z:9120 "$reply"
+done
+```
+
+`request` allocates a private per-request reply topic by default
+(`_rpc.reply.<id>`) and matches the reply by `corr`, so concurrent requests never
+cross-talk; `--reply-topic` overrides it and `--timeout` bounds the wait. RPC is
+still deny-by-default: **both parties must be granted the reply namespace** — the
+requester to *subscribe* `_rpc.reply.*`, the responder to *publish* it — so an
+RPC channel is an explicit policy grant, not ambient.
 
 ## Durability
 
