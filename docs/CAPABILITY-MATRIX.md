@@ -53,7 +53,7 @@ continuously tested.
 | Capability | Phase |
 |---|---|
 | Request-bound, signed, single-use approval objects | 3 |
-| Signed router/federation delegation tokens + scope intersection | 4 |
+| Wire the signed delegation-token primitive (done + tested) into the router/upstream proxy path + caller ACL | 4 |
 | Restart-safe audit append (seed from verified tail; refuse unverifiable) | 5 |
 | External audit anchoring interface (witnessed) | 5 |
 | Wire the CAS/fencing session-lease primitive (done at store layer) into the server failover path | 6 |

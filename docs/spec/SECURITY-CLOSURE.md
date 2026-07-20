@@ -650,3 +650,63 @@ the lease API is additive.
 ### Commit
 
 `session: atomic CAS ownership lease with fencing generation`
+
+---
+
+## F-P4 · Router is an unrestricted confused deputy — REPRODUCED, FIXED (primitive)
+
+**Severity:** High (any caller reaching the router can drive any upstream tool
+with the router's authority; the router can widen a caller's scope).
+
+**Component:** `router.go` (forwarding), `policy/delegation.go` (new).
+
+**Reproduced:** Yes. The router forwards under its own WireGuard identity and
+conveys the downstream caller only as unsigned `_meta`; the proxy tool handlers
+(`registerProxyTool` → `pool.call`) apply no caller identity or policy. The
+router is a confused deputy.
+
+### Fix (design + enforcement primitive)
+
+Signed delegation tokens with scope intersection (`policy/delegation.go`):
+
+- `DelegationToken` signed over `caller, router, audience, backend, tool,
+  req_hash, nonce, exp` (lifetime capped at 5 min) by a **pinned** trusted
+  router authority.
+- `VerifyDelegation` binds a token to the exact hop and rejects: a non-authority
+  signer (empty pin never verifies), a different audience/backend/tool, a
+  different presenting router, changed arguments, expiry, and a replayed nonce
+  (`NonceStore`).
+- `AuthorizeDelegated` computes the upstream decision as the **intersection** of
+  original-caller policy ∩ router-service policy ∩ delegation — so a router
+  cannot widen a caller's authority and a caller cannot exceed the router's.
+
+### Tests (`policy/delegation_test.go`)
+
+Forged origin metadata; delegation for another backend/audience; changed
+arguments; expired (+ lifetime cap); replayed nonce; wrong presenting router;
+router-exceeds-caller and caller-exceeds-router intersection; nested hops
+(first-hop token does not authorize a second hop); compromised-router-widening
+(tamper breaks the signature). Race-clean.
+
+### Compatibility impact
+
+None yet — additive primitive. Router/federation remain **experimental** until
+wired.
+
+### Residual risk / follow-up
+
+- The router does not yet mint tokens per hop, and upstreams do not yet call
+  `VerifyDelegation`/`AuthorizeDelegated` in the proxy path; the minimum interim
+  hardening (default-deny **caller ACL** on the router + full tool policy at the
+  router) ships with the wiring. Both identities must be preserved in the audit
+  record when wired. Design + status: `docs/spec/ROUTER-DELEGATION.md`.
+
+### Definition-of-Done item
+
+- *"Router forwarding cannot widen a downstream caller's authority"* — the
+  enforcement primitive (intersection + signed, hop-bound, single-use tokens) is
+  implemented and proven; the router/upstream wiring is the documented follow-up.
+
+### Commit
+
+`policy: signed router/federation delegation tokens + scope intersection`
