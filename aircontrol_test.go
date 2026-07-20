@@ -43,11 +43,13 @@ func (f *fakeAirControl) steer(pubKey, fqdn, backend, id, method string, _ any) 
 	return nil
 }
 
-func newTestHandler(c airController, allowAll bool) http.Handler {
+func newTestHandler(c airController, allowCaller bool) http.Handler {
 	id := func(*http.Request) (string, string) { return "key1", "caller.mesh" }
-	allow := newACL(nil)
-	if !allowAll {
-		allow = newACL([]string{"pubkey:someone-else"})
+	// The Air endpoint is default-deny: allowing the caller requires an explicit
+	// ACL entry for its key; the deny case uses an ACL that does not list it.
+	allow := newACL([]string{"pubkey:someone-else"})
+	if allowCaller {
+		allow = newACL([]string{"pubkey:key1"})
 	}
 	return airControlHandler(c, id, allow, nil)
 }
@@ -210,5 +212,46 @@ func TestAirControlSteerBadRequest(t *testing.T) {
 	newTestHandler(c, true).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/v1/steer", nil))
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("GET /v1/steer = %d, want 405", rr.Code)
+	}
+}
+
+// TestAirControlEmptyACLDeniesAll is the Phase-4/Air regression: an empty ACL is
+// DEFAULT-DENY (not "any mesh peer"), so no one can list or steer without an
+// explicit allowlist entry.
+func TestAirControlEmptyACLDeniesAll(t *testing.T) {
+	c := &fakeAirControl{list: []AirSession{{Backend: "fs", ID: "9f2a"}}}
+	id := func(*http.Request) (string, string) { return "key1", "caller.mesh" }
+	h := airControlHandler(c, id, newACL(nil), nil) // empty ACL
+	for _, tc := range []struct {
+		method, path, body string
+	}{
+		{http.MethodGet, "/v1/sessions", ""},
+		{http.MethodPost, "/v1/steer", `{"backend":"fs","id":"9f2a","method":"notifications/air/steer"}`},
+	} {
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body)))
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("%s %s with empty ACL should be 403, got %d", tc.method, tc.path, rr.Code)
+		}
+	}
+	if len(c.steers) != 0 {
+		t.Fatalf("empty-ACL caller must not steer: %v", c.steers)
+	}
+}
+
+// TestAirControlSteerMethodAllowlist: only notifications/* may be steered; a
+// server->client request (or any other method) is rejected.
+func TestAirControlSteerMethodAllowlist(t *testing.T) {
+	for _, method := range []string{"sampling/createMessage", "tools/call", "roots/list", "initialize"} {
+		c := &fakeAirControl{}
+		rr := httptest.NewRecorder()
+		body := `{"backend":"fs","id":"9f2a","method":"` + method + `"}`
+		newTestHandler(c, true).ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/steer", strings.NewReader(body)))
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("steer method %q should be rejected (400), got %d", method, rr.Code)
+		}
+		if len(c.steers) != 0 {
+			t.Fatalf("off-allowlist method %q was steered: %v", method, c.steers)
+		}
 	}
 }

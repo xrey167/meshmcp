@@ -995,3 +995,37 @@ grant. That end-to-end grant wiring is the next narrow commit.
 ### Commit
 
 `approvals: session + policy-version binding; protect pending/status endpoints`
+
+---
+
+## F-P4.Air · Air control default-allows on empty ACL + arbitrary steer methods — FIXED (wired)
+
+**Severity:** High (any mesh peer could list and steer live sessions; a steer
+could inject arbitrary server->client methods).
+
+**Component:** `aircontrol.go`, `acl.go`, `serve.go`.
+
+**Reproduced:** Yes. The Air control endpoint gated on `acl.allows`, which
+returns true for an empty pattern list, so an unconfigured ACL admitted any
+identified mesh peer. The steer method was unrestricted.
+
+### Fix
+
+- **Default-deny:** the Air handler treats an **empty ACL as deny-all**
+  (`acl.empty()`), so an operator must explicitly allowlist steerers.
+- **Startup guard:** `serve.go` refuses to start the Air control endpoint when
+  `control.allow` is empty.
+- **Steer method allowlist:** only `notifications/*` (server->client
+  notifications) may be steered; a server->client request (`sampling/*`,
+  `roots/list`, …) or any other method is rejected and audited.
+
+### Tests (`aircontrol_test.go`)
+
+- `TestAirControlEmptyACLDeniesAll` — empty ACL ⇒ 403 on sessions and steer.
+- `TestAirControlSteerMethodAllowlist` — `sampling/createMessage`, `tools/call`,
+  `roots/list`, `initialize` all rejected. Existing Air tests updated to an
+  explicit allowlist (default-deny) and pass.
+
+### Commit
+
+`air: default-deny control ACL + steer-method allowlist`

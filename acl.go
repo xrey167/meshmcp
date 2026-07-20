@@ -21,6 +21,11 @@ func newACL(patterns []string) acl {
 	return acl{patterns: patterns}
 }
 
+// empty reports whether the ACL has no patterns. For most backends an empty ACL
+// means "any mesh peer" (the mesh is the outer boundary), but privileged
+// surfaces (e.g. the Air control endpoint) treat an empty ACL as default-deny.
+func (a acl) empty() bool { return len(a.patterns) == 0 }
+
 func (a acl) allows(pubKey, fqdn string) bool {
 	// Fail closed on an unidentifiable peer: if the transport could not resolve
 	// any cryptographic identity (both key and FQDN empty), deny — an
