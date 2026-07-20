@@ -921,3 +921,44 @@ with a regression test.
 ### Commit
 
 `policy: fix review-found defects (arg-hash precision, redactor race, HTTP fail-closed, audit linkage)`
+
+---
+
+## F-P5.1 · Audit chain reset on gateway restart — REPRODUCED, FIXED (wired)
+
+**Severity:** High (a restart silently forks the audit chain — a second `seq 1`
+and a fresh checkpoint root in the same file — making it unverifiable).
+
+**Component:** `serve.go` (audit + checkpoint construction).
+
+**Reproduced:** Yes. `serve.go` opened the audit and checkpoint files in append
+mode but constructed the `AuditLog`/`Checkpointer` with sequence and checkpoint
+state at zero. After a restart the next record was `seq 1` again and a new
+checkpoint chain (`prev_checkpoint: ""`) began in the same file.
+
+### Fix (runtime wiring)
+
+- `seedAuditFromExisting` reads and **verifies** the existing log (`VerifyChain`)
+  and returns its tail `(seq, lastHash)`; `seedCheckpointFromExisting` returns
+  the last checkpoint's ordinal + hash. Both are wired into the shared-audit,
+  per-backend-audit, and checkpointer construction paths, calling
+  `AuditLog.SeedFrom` / `Checkpointer.SeedFrom` so a restart continues the SAME
+  chain.
+- **Fail closed:** if the existing log does not verify, startup **refuses to
+  append** (rather than silently resetting the chain).
+
+### Tests (`serve_restart_test.go`)
+
+- `TestAuditRestartContinuity` — write 4 records + a checkpoint, "restart" via
+  the seed helpers, write 4 more; the combined file verifies as one **sealed,
+  trusted** chain with 8 contiguous records, 2 checkpoints, and exactly one
+  `seq 1`.
+- `TestAuditRestartRefusesTamperedLog` — seeding refuses a tampered existing log.
+
+### Definition-of-Done item satisfied
+
+- *"Restarting a gateway does not silently break its audit chain."*
+
+### Commit
+
+`serve: seed audit + checkpoint chain from the verified tail on restart`

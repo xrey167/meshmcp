@@ -120,8 +120,12 @@ An adversary who can write the audit file (but lacks the signing key).
   covered), **sealed** (valid, trusted, fully covered) — and only a *sealed*
   result pinned to an expected key is complete and trusted (F-P5). An edit to a
   covered record fails verification.
+  The whole hash chain — including the unsealed tail — is verified (each
+  record's stored hash and `PrevHash` link), and a gateway restart continues the
+  same chain (the writer and checkpointer are seeded from the verified tail;
+  appending to an unverifiable log is refused).
 - **Limit:** Records after the last checkpoint (an *unsealed* tail) are
-  tamper-evident only once a checkpoint seals them.
+  hash-chain-verified but not yet Merkle-sealed/signed; a checkpoint seals them.
 
 ### 8. Gateway crash during a side-effecting call
 

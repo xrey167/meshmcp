@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -88,12 +90,20 @@ func cmdServe(args []string) error {
 	// so a unified live view reads a single, verifiable stream.
 	var sharedAudit *policy.AuditLog
 	if cfg.AuditLog != "" {
+		seq, lastHash, serr := seedAuditFromExisting(cfg.AuditLog)
+		if serr != nil {
+			return fmt.Errorf("shared audit log: %w", serr)
+		}
 		f, err := os.OpenFile(cfg.AuditLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 		if err != nil {
 			return fmt.Errorf("open shared audit log %s: %w", cfg.AuditLog, err)
 		}
 		sharedAudit = policy.NewAuditLog(f, func() string { return time.Now().UTC().Format(time.RFC3339) }).
 			WithFailClosed(cfg.AuditFailClosed)
+		if seq > 0 {
+			sharedAudit.SeedFrom(seq, lastHash) // continue the chain across restart
+			log.Printf("shared audit ledger: resumed from seq %d", seq)
+		}
 		if cfg.AuditWebhook != "" {
 			sharedAudit.AddSink(newWebhookSink(cfg.AuditWebhook, !cfg.AuditWebhookAll))
 			log.Printf("audit webhook sink: %s (deny/cosign only=%v)", cfg.AuditWebhook, !cfg.AuditWebhookAll)
@@ -514,12 +524,75 @@ func buildTracer(cfg *TraceConfig) (*policy.Tracer, error) {
 // auditSink opens the audit destination for a policy-enabled backend.
 // A configured file that cannot be opened is a hard error: an audit sink
 // is a security control, not best-effort.
+// seedAuditFromExisting verifies an existing audit log and returns its tail
+// (last sequence + hash) so a restarting gateway continues the SAME chain
+// instead of resetting to seq 1 with a fresh genesis. It refuses to append to a
+// malformed or tampered log (fail closed): silently starting a second chain in
+// the same file would produce a duplicate seq 1 and make the log unverifiable.
+// An absent or empty file returns (0, "", nil).
+func seedAuditFromExisting(path string) (seq int, lastHash string, err error) {
+	if path == "" {
+		return 0, "", nil
+	}
+	data, rerr := os.ReadFile(path)
+	if os.IsNotExist(rerr) {
+		return 0, "", nil
+	}
+	if rerr != nil {
+		return 0, "", rerr
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return 0, "", nil
+	}
+	res, verr := policy.VerifyChain(bytes.NewReader(data))
+	if verr != nil {
+		return 0, "", verr
+	}
+	if !res.OK {
+		return 0, "", fmt.Errorf("existing audit log %s is unverifiable (break at seq %d: %s); refusing to append and reset the chain", path, res.BreakSeq, res.Reason)
+	}
+	return res.Count, res.LastHash, nil
+}
+
+// seedCheckpointFromExisting returns the last checkpoint's ordinal and hash from
+// an existing checkpoints file, so a restart continues one verifiable chain of
+// checkpoints. An absent/empty file returns (0, "", nil).
+func seedCheckpointFromExisting(path string) (cpSeq int, prevCPHash string, err error) {
+	if path == "" {
+		return 0, "", nil
+	}
+	data, rerr := os.ReadFile(path)
+	if os.IsNotExist(rerr) {
+		return 0, "", nil
+	}
+	if rerr != nil {
+		return 0, "", rerr
+	}
+	trimmed := bytes.TrimRight(data, "\n")
+	if len(bytes.TrimSpace(trimmed)) == 0 {
+		return 0, "", nil
+	}
+	lines := bytes.Split(trimmed, []byte("\n"))
+	var cp policy.Checkpoint
+	if uerr := json.Unmarshal(lines[len(lines)-1], &cp); uerr != nil {
+		return 0, "", fmt.Errorf("existing checkpoints %s: last line is not a checkpoint: %w", path, uerr)
+	}
+	return cp.Seq, cp.Hash(), nil
+}
+
 func auditSink(b *Backend) (*policy.AuditLog, error) {
 	if b.Policy == nil {
 		return nil, nil
 	}
 	var w io.Writer = os.Stderr
+	var seedSeq int
+	var seedHash string
 	if b.AuditLog != "" {
+		var serr error
+		seedSeq, seedHash, serr = seedAuditFromExisting(b.AuditLog)
+		if serr != nil {
+			return nil, fmt.Errorf("backend %q audit log: %w", b.Name, serr)
+		}
 		f, err := os.OpenFile(b.AuditLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 		if err != nil {
 			return nil, fmt.Errorf("backend %q: open audit log %s: %w", b.Name, b.AuditLog, err)
@@ -528,6 +601,10 @@ func auditSink(b *Backend) (*policy.AuditLog, error) {
 	}
 	now := func() string { return time.Now().UTC().Format(time.RFC3339) }
 	audit := policy.NewAuditLog(w, now).WithFailClosed(b.AuditFailClosed)
+	if seedSeq > 0 {
+		audit.SeedFrom(seedSeq, seedHash) // continue the chain across restart
+		log.Printf("backend %q: audit resumed from seq %d", b.Name, seedSeq)
+	}
 
 	if b.AuditCheckpoints != "" {
 		cp, err := checkpointer(b, now)
@@ -573,6 +650,10 @@ func checkpointer(b *Backend, now func() string) (*policy.Checkpointer, error) {
 		return nil, fmt.Errorf("backend %q: stat signing key %s: %w", b.Name, b.AuditSigningKey, statErr)
 	}
 
+	cpSeq, prevCPHash, serr := seedCheckpointFromExisting(b.AuditCheckpoints)
+	if serr != nil {
+		return nil, fmt.Errorf("backend %q: %w", b.Name, serr)
+	}
 	f, err := os.OpenFile(b.AuditCheckpoints, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("backend %q: open checkpoints %s: %w", b.Name, b.AuditCheckpoints, err)
@@ -586,7 +667,12 @@ func checkpointer(b *Backend, now func() string) (*policy.Checkpointer, error) {
 		anchor = &policy.FileAnchor{W: af}
 	}
 	name := b.Name
-	return policy.NewCheckpointer(signer, f, b.AuditCheckpointEvery, now, anchor).
+	cp := policy.NewCheckpointer(signer, f, b.AuditCheckpointEvery, now, anchor)
+	if cpSeq > 0 {
+		cp.SeedFrom(cpSeq, prevCPHash) // continue the checkpoint chain across restart
+		log.Printf("backend %q: checkpoints resumed from checkpoint %d", b.Name, cpSeq)
+	}
+	return cp.
 		WithErrorHandler(func(err error) {
 			log.Printf("backend %q: AUDIT CHECKPOINT ERROR: %v", name, err)
 		}), nil
