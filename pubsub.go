@@ -431,6 +431,8 @@ func cmdPublish(args []string) error {
 	rawJSON := fs.Bool("json", false, "treat the payload as raw JSON (default: wrap it as a JSON string)")
 	streamMode := fs.Bool("stream", false, "publish one event per stdin line over a single session (a producer feed)")
 	retainFlag := fs.Bool("retain", false, "store this event as the topic's retained last-value (new subscribers receive it)")
+	retainTTL := fs.Duration("retain-ttl", 0, "expire the retained last-value after this duration (0 = never; implies --retain)")
+	unretain := fs.Bool("unretain", false, "clear the topic's retained last-value (tombstone); the event is still published live")
 	fileFlag := fs.String("file", "", "publish a file's bytes as a base64 (binary) payload")
 	maxBytes := fs.Int64("max-bytes", 1<<20, "reject a payload larger than this (the broker enforces its own cap too)")
 	capFlag := fs.String("capability", "", "present a signed capability grant; @file reads the token from a file")
@@ -449,6 +451,10 @@ func cmdPublish(args []string) error {
 	if err != nil {
 		return err
 	}
+	if *unretain && (*retainFlag || *retainTTL > 0) {
+		return errors.New("--unretain (clear) cannot be combined with --retain/--retain-ttl (set)")
+	}
+	retain := *retainFlag || *retainTTL > 0
 
 	if *streamMode {
 		return streamPublish(o, target, topic, labels, *rawJSON, *maxBytes, capToken, *retainFlag)
@@ -493,7 +499,10 @@ func cmdPublish(args []string) error {
 	}
 
 	hello, _ := json.Marshal(helloFrame{Role: "pub", Capability: capToken})
-	pub, _ := json.Marshal(pubFrame{Topic: topic, Labels: labels, Retain: *retainFlag, Enc: enc, ReplyTo: *replyTo, Corr: *corr, Payload: payload})
+	pub, _ := json.Marshal(pubFrame{
+		Topic: topic, Labels: labels, Retain: retain, RetainTTLSec: int(retainTTL.Seconds()),
+		RetainDelete: *unretain, Enc: enc, ReplyTo: *replyTo, Corr: *corr, Payload: payload,
+	})
 	preamble := append(append(hello, '\n'), append(pub, '\n')...)
 
 	// ack/gotAck are written in the session inbound goroutine (via onLine) and

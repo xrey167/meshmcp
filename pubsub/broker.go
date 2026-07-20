@@ -146,10 +146,11 @@ type Broker struct {
 	seq       uint64
 	prev      string // hash of the last published event ("" before genesis)
 	subs      map[uint64]*Subscription
-	perPeer   map[string]int    // active subscription count per identity key
-	retained  map[string]*Event // last-value per topic (retained messages)
-	groupRR   map[string]uint64 // round-robin cursor per consumer group
-	groupN    map[string]int    // live member count per consumer group (for cursor GC)
+	perPeer   map[string]int       // active subscription count per identity key
+	retained  map[string]*Event    // last-value per topic (retained messages)
+	retainExp map[string]time.Time // optional expiry per retained topic (TTL); absent = never expires
+	groupRR   map[string]uint64    // round-robin cursor per consumer group
+	groupN    map[string]int       // live member count per consumer group (for cursor GC)
 	nextSubID uint64
 	ring      *ring
 	dropped   uint64 // aggregate events dropped by backpressure across all subs
@@ -188,20 +189,21 @@ func New(opts Options) *Broker {
 		auth = denyAll{}
 	}
 	b := &Broker{
-		auth:     auth,
-		audit:    opts.Audit,
-		events:   opts.Events,
-		name:     opts.Name,
-		caps:     opts.Capabilities,
-		now:      now,
-		lim:      newLimiter(lm.PublishRate, lm.PublishBurst, now),
-		lm:       lm,
-		subs:     map[uint64]*Subscription{},
-		perPeer:  map[string]int{},
-		retained: map[string]*Event{},
-		groupRR:  map[string]uint64{},
-		groupN:   map[string]int{},
-		ring:     newRing(lm.Retain),
+		auth:      auth,
+		audit:     opts.Audit,
+		events:    opts.Events,
+		name:      opts.Name,
+		caps:      opts.Capabilities,
+		now:       now,
+		lim:       newLimiter(lm.PublishRate, lm.PublishBurst, now),
+		lm:        lm,
+		subs:      map[uint64]*Subscription{},
+		perPeer:   map[string]int{},
+		retained:  map[string]*Event{},
+		retainExp: map[string]time.Time{},
+		groupRR:   map[string]uint64{},
+		groupN:    map[string]int{},
+		ring:      newRing(lm.Retain),
 	}
 	// Resume from a persisted stream: continue the sequence and hash chain from
 	// its last event, and preload the retention ring's tail so --since replay
@@ -256,6 +258,16 @@ type PublishOptions struct {
 	// Retain stores this event as the topic's last-value, delivered to future
 	// subscribers of the topic (MQTT-style retained message).
 	Retain bool
+	// RetainTTL, if >0, expires the retained last-value after this duration: a
+	// subscriber connecting later does not receive an expired value (stale state
+	// like presence or a reading valid for a bounded window). Only meaningful
+	// with Retain. Retained TTL is tracked in memory.
+	RetainTTL time.Duration
+	// RetainDelete clears the topic's retained last-value (an MQTT-style
+	// tombstone: a retained publish with no value deletes the retained message).
+	// The event is still published live so current subscribers see the clear;
+	// future subscribers get no retained value for the topic. Overrides Retain.
+	RetainDelete bool
 	// Encoding is an opaque payload-encoding hint stamped onto the event
 	// (e.g. "base64" for a binary payload carried as a JSON string).
 	Encoding string
@@ -380,12 +392,23 @@ func (b *Broker) PublishOpts(id Identity, topic string, payload json.RawMessage,
 	ev.Hash = h
 	b.prev = h
 	b.ring.add(*ev)
-	if o.Retain {
+	switch {
+	case o.RetainDelete:
+		// Tombstone: clear the topic's retained last-value (the event still fans
+		// out live below, so current subscribers see the clear).
+		delete(b.retained, topic)
+		delete(b.retainExp, topic)
+	case o.Retain:
 		// Bound the retained map: a new topic is only retained while under the
 		// cap (an existing topic always updates). Prevents unbounded growth from
 		// a publisher retaining to an unbounded topic space.
 		if _, exists := b.retained[topic]; exists || len(b.retained) < b.lm.MaxRetainedTopics {
 			b.retained[topic] = ev
+			if o.RetainTTL > 0 {
+				b.retainExp[topic] = b.now().Add(o.RetainTTL)
+			} else {
+				delete(b.retainExp, topic) // an update without a TTL clears any prior expiry
+			}
 		}
 	}
 	// Persist the sealed event in sequence order (best-effort per-event, like
@@ -658,11 +681,21 @@ func (b *Broker) Subscribe(id Identity, opts SubOptions) (*Subscription, error) 
 	// every joining member would duplicate it across the group.
 	if opts.Since == 0 && s.group == "" {
 		if _, ok := b.subs[s.ID]; ok {
+			now := b.now()
 			retained := make([]*Event, 0, len(b.retained))
-			for _, ev := range b.retained {
+			var expired []string
+			for topic, ev := range b.retained {
+				if exp, ok := b.retainExp[topic]; ok && now.After(exp) {
+					expired = append(expired, topic) // TTL lapsed: evict, don't deliver
+					continue
+				}
 				if s.accepts(ev) {
 					retained = append(retained, ev)
 				}
+			}
+			for _, topic := range expired {
+				delete(b.retained, topic)
+				delete(b.retainExp, topic)
 			}
 			sort.Slice(retained, func(i, j int) bool { return retained[i].Seq < retained[j].Seq })
 			for _, ev := range retained {
@@ -770,6 +803,8 @@ func (b *Broker) Close() {
 	b.perPeer = map[string]int{}
 	b.groupN = map[string]int{}
 	b.groupRR = map[string]uint64{}
+	b.retained = map[string]*Event{}
+	b.retainExp = map[string]time.Time{}
 }
 
 // Seq returns the sequence number of the last published event.

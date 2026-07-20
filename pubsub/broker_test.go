@@ -481,6 +481,79 @@ func TestRequestReplyValidation(t *testing.T) {
 	}
 }
 
+// TestRetainedTTL verifies a retained last-value with a TTL is delivered before
+// it expires and withheld (and evicted) after, using an injected clock.
+func TestRetainedTTL(t *testing.T) {
+	clk := newClock()
+	b := New(Options{Authorizer: AllowAll{}, Now: clk.now})
+	defer b.Close()
+
+	b.PublishOpts(id("p"), "state.presence", json.RawMessage(`"online"`),
+		PublishOptions{Retain: true, RetainTTL: time.Minute})
+
+	// Before expiry: a new subscriber receives it.
+	early, _ := b.Subscribe(id("s1"), SubOptions{Topics: []string{"state.*"}})
+	if ev := recv(t, early); string(ev.Payload) != `"online"` {
+		t.Fatalf("pre-expiry retained = %s, want online", ev.Payload)
+	}
+	early.Close()
+
+	// After expiry: a new subscriber receives nothing, and the entry is evicted.
+	clk.add(2 * time.Minute)
+	late, _ := b.Subscribe(id("s2"), SubOptions{Topics: []string{"state.*"}})
+	defer late.Close()
+	expectNone(t, late)
+	b.mu.Lock()
+	_, stillThere := b.retained["state.presence"]
+	b.mu.Unlock()
+	if stillThere {
+		t.Fatal("expired retained value was not evicted")
+	}
+}
+
+// TestRetainedTombstone verifies an unretain (RetainDelete) clears the topic's
+// retained last-value: the clear event still fans out live, but a later
+// subscriber gets no retained value.
+func TestRetainedTombstone(t *testing.T) {
+	b := New(Options{Authorizer: AllowAll{}})
+	defer b.Close()
+
+	b.PublishOpts(id("p"), "state.k", json.RawMessage(`1`), PublishOptions{Retain: true})
+
+	// A live subscriber sees the tombstone event.
+	live, _ := b.Subscribe(id("live"), SubOptions{Topics: []string{"state.k"}})
+	recv(t, live) // the retained value on connect
+	if _, err := b.PublishOpts(id("p"), "state.k", json.RawMessage(`null`), PublishOptions{RetainDelete: true}); err != nil {
+		t.Fatal(err)
+	}
+	if ev := recv(t, live); string(ev.Payload) != `null` {
+		t.Fatalf("live subscriber should see the clear event, got %s", ev.Payload)
+	}
+	live.Close()
+
+	// A later subscriber gets no retained value for the cleared topic.
+	later, _ := b.Subscribe(id("later"), SubOptions{Topics: []string{"state.k"}})
+	defer later.Close()
+	expectNone(t, later)
+}
+
+// TestRetainedTTLRefreshedOnUpdate verifies re-retaining a topic without a TTL
+// clears a previously set expiry (the value becomes permanent again).
+func TestRetainedTTLRefreshedOnUpdate(t *testing.T) {
+	clk := newClock()
+	b := New(Options{Authorizer: AllowAll{}, Now: clk.now})
+	defer b.Close()
+
+	b.PublishOpts(id("p"), "t", json.RawMessage(`1`), PublishOptions{Retain: true, RetainTTL: time.Minute})
+	b.PublishOpts(id("p"), "t", json.RawMessage(`2`), PublishOptions{Retain: true}) // no TTL: clears expiry
+	clk.add(2 * time.Minute)
+	sub, _ := b.Subscribe(id("s"), SubOptions{Topics: []string{"t"}})
+	defer sub.Close()
+	if ev := recv(t, sub); string(ev.Payload) != `2` {
+		t.Fatalf("retained (no-TTL update) = %s, want 2 (should not have expired)", ev.Payload)
+	}
+}
+
 // fakeClock is a settable clock for deterministic time-dependent tests.
 type fakeClock struct {
 	mu sync.Mutex

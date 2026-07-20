@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"sync"
+	"time"
 
 	"meshmcp/pubsub"
 	"meshmcp/session"
@@ -44,13 +45,15 @@ type helloFrame struct {
 }
 
 type pubFrame struct {
-	Topic   string          `json:"topic"`
-	Labels  []string        `json:"labels,omitempty"`
-	Retain  bool            `json:"retain,omitempty"`
-	Enc     string          `json:"enc,omitempty"`      // payload encoding hint (e.g. "base64")
-	ReplyTo string          `json:"reply_to,omitempty"` // request/reply: topic for the reply
-	Corr    string          `json:"corr,omitempty"`     // request/reply: correlation id echoed on the reply
-	Payload json.RawMessage `json:"payload,omitempty"`
+	Topic        string          `json:"topic"`
+	Labels       []string        `json:"labels,omitempty"`
+	Retain       bool            `json:"retain,omitempty"`
+	RetainTTLSec int             `json:"retain_ttl_sec,omitempty"` // retained last-value expires after this many seconds (0 = never)
+	RetainDelete bool            `json:"retain_delete,omitempty"`  // clear the topic's retained last-value (tombstone)
+	Enc          string          `json:"enc,omitempty"`            // payload encoding hint (e.g. "base64")
+	ReplyTo      string          `json:"reply_to,omitempty"`       // request/reply: topic for the reply
+	Corr         string          `json:"corr,omitempty"`           // request/reply: correlation id echoed on the reply
+	Payload      json.RawMessage `json:"payload,omitempty"`
 }
 
 type ackFrame struct {
@@ -205,12 +208,14 @@ func (bb *brokerBackend) servePub(sc *bufio.Scanner, capToken string) {
 			continue
 		}
 		ev, err := bb.broker.PublishOpts(bb.ident, pf.Topic, pf.Payload, pubsub.PublishOptions{
-			Labels:     pf.Labels,
-			Capability: capToken,
-			Retain:     pf.Retain,
-			Encoding:   pf.Enc,
-			ReplyTo:    pf.ReplyTo,
-			Corr:       pf.Corr,
+			Labels:       pf.Labels,
+			Capability:   capToken,
+			Retain:       pf.Retain,
+			RetainTTL:    time.Duration(pf.RetainTTLSec) * time.Second,
+			RetainDelete: pf.RetainDelete,
+			Encoding:     pf.Enc,
+			ReplyTo:      pf.ReplyTo,
+			Corr:         pf.Corr,
 		})
 		if err != nil {
 			if bb.writeAck(ackFrame{Error: err.Error()}) != nil {

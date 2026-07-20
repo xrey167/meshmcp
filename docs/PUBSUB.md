@@ -61,6 +61,16 @@ meshmcp publish --retain 100.x.y.z:9120 state.thermostat --data '{"c":21}'
 meshmcp publish --file model.bin 100.x.y.z:9120 artifacts.model
 ```
 
+A retained value can **expire** (`--retain-ttl`, so stale state like presence
+isn't served to a late subscriber) or be **cleared** (`--unretain`, an MQTT-style
+tombstone — the clear still reaches current subscribers, but future ones get no
+retained value):
+
+```sh
+meshmcp publish --retain --retain-ttl 5m 100.x.y.z:9120 state.presence --data '"online"'
+meshmcp publish --unretain 100.x.y.z:9120 state.presence   # clear it
+```
+
 Subscribe streams matching events as newline-delimited JSON and blocks until
 Ctrl-C. Topics are globs; `--since` replays retained events first:
 
