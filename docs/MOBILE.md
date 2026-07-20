@@ -102,8 +102,9 @@ the identity that signs the approval.
 
 **Push, for a *great* UX.** The page can poll; to have the phone *buzz*, the
 push-wake seam now ships (§4) — device registration + a `Notifier` hook, wired
-into the approver. Only the vendor APNs/FCM delivery call (which needs Apple/Google
-credentials) is left to plug into the interface. Everything else is done.
+into the approver — with a **webhook `Notifier`** that already delivers over the
+network (no vendor credentials). Only a *direct* in-process APNs/FCM call is left
+to plug into the interface. Everything else is done.
 
 ---
 
@@ -131,8 +132,8 @@ package mobile // gomobile bind target
 
 // Connectivity (wraps client/embed).
 type Mesh struct{ /* *embed.Client */ }
-func Join(setupKey, mgmtURL, configPath string) (*Mesh, error) // embed.New + Start
-func (m *Mesh) Identity() string                               // this device's mesh FQDN
+func Join(setupKey, mgmtURL, deviceName, configPath string) (*Mesh, error) // embed.New + Start
+func (m *Mesh) Identity() (string, error)                     // this device's mesh FQDN
 func (m *Mesh) Close() error
 
 // A resumable MCP client to one backend (wraps session.NewClient + mcpclient).
@@ -161,7 +162,9 @@ crossing into Swift/Kotlin.
 
 For the phone to be woken instead of polling, the approver notifies a registered
 device when a pending appears. The seam ships (`pushwake.go`, wired into
-`approvals.go`); only the vendor HTTP call is left as a credentialed plug-in:
+`approvals.go`), and so does a **webhook `Notifier`** that delivers over the
+network without any vendor credentials; only a *direct* in-process APNs/FCM call
+is left as a credentialed plug-in:
 
 1. **Device registration.** ✅ `POST /v1/devices` (enable with
    `meshmcp approvals --devices <dir>`) — a phone registers its APNs/FCM token,
@@ -172,10 +175,14 @@ device when a pending appears. The seam ships (`pushwake.go`, wired into
    ("billing.mesh wants transfer_funds"). The default `logNotifier` writes what
    *would* be pushed, so the whole path is exercisable without credentials
    (`TestPushWakeNotifiesOnRequest`).
-3. **Vendor delivery.** *Pluggable.* Implement `Notifier` with the APNs/FCM HTTP
-   call (an outbound request to Apple/Google — no inbound port, consistent with
-   zero-open-ports) and pass it instead of `logNotifier`. This is the one part
-   that needs vendor credentials and is not built here.
+3. **Network delivery.** ✅ *Ships in-repo.* `meshmcp approvals --devices <dir>
+   --notify-webhook <url>` swaps `logNotifier` for a `webhookNotifier`
+   (`webhooknotify.go`) that POSTs `{title, body, devices}` to an operator relay
+   — an outbound request (no inbound port, consistent with zero-open-ports). The
+   relay fans out to APNs/FCM with **its own** credentials, so meshmcp holds no
+   Apple/Google keys. A *direct* in-process APNs/FCM `Notifier` is still a valid
+   plug-in for operators who prefer it, and is the one part that needs vendor
+   credentials embedded here.
 4. **Wake → approve.** The push opens the approver (deep link), Face ID gates the
    `POST /v1/approve`, done.
 
@@ -239,9 +246,10 @@ agent* peer can't approve its own calls.
    list/steer live sessions — **shipping today**, zero new code.
 2. **Now — push seam + the client SDK.** ✅ The device-registration + notify seam
    ships (§4; enable with `approvals --devices`), and the `mobile/` package (§3)
-   binds `embed` + `mcpclient` into a gomobile-ready surface. What's left is
-   external: the APNs/FCM `Notifier` impl (vendor credentials) and `gomobile bind`
-   (mobile toolchain).
+   binds `embed` + `mcpclient` into a gomobile-ready surface. Network push
+   delivery also ships in-repo via the webhook `Notifier` (`--notify-webhook`).
+   What's left is external: a *direct* in-process APNs/FCM `Notifier` (vendor
+   credentials) and `gomobile bind` (mobile toolchain).
 3. **Next — the native shell.** `gomobile bind ./mobile` → an iOS `.xcframework` /
    Android `.aar`, wrapped in a thin app that registers for push, deep-links into
    the approver, and gates approval behind Face ID.

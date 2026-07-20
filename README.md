@@ -235,12 +235,12 @@ Watch it live with `meshmcp dash --audit audit.jsonl`; re-run a past session wit
 | `hook --client <c> --config <f>` | **Client-hook firewall** (F33): govern *every* local tool call in Claude Code / Cursor / Codex by policy + DLP + taint + audit — `hook install` prints the settings snippet. |
 | `audit verify <f> [--checkpoints --pubkey]` | Verify a log: hash chain, or signatures + Merkle. |
 | `audit keygen [--out f]` | Generate a gateway Ed25519 signing key. |
-| `audit export --in <f>` · `audit receipt --in <f>` | Export the ledger to CSV; emit a verifiable provenance receipt (what a session's tools produced). |
+| `audit export --in <f>` · `audit receipt --in <f>` · `audit attest --in <f>` | Export the ledger to CSV; emit a verifiable provenance receipt (what a session's tools produced); build a self-describing, independently-verifiable compliance/attestation bundle (F32). |
 | `capability keygen [--out f]` | Generate an Ed25519 authority key backends pin as a trust root. |
 | `capability issue --subject --audience --tool [--ttl]` | Sign a short-lived, subject-bound tool grant (present it with `call --capability @file`). |
 | `capability revoke·list --store <d>` | Revoke a capability id (fails closed everywhere) / list revoked ids. |
 | `approve --store <d> <peer> <tool>` | Human co-sign a held `require_cosign` call from the CLI. |
-| `approvals --store <d> [--approver <id>]` | Serve the phone-friendly co-sign approver over the mesh (`--approver` restricts who may approve). |
+| `approvals --store <d> [--approver <id>] [--devices <d> --notify-webhook <url>]` | Serve the phone-friendly co-sign approver over the mesh (`--approver` restricts who may approve; `--devices` enables push-wake token registration, `--notify-webhook` POSTs each new pending to a relay that fans out to APNs/FCM). |
 | `secrets check --config <f>` | Validate the credential broker config (never prints values). |
 | `status --audit <f>` · `budget --audit <f>` | Roll up a ledger (per-peer/tool/backend + chain verdict); total cost/quota per identity (FinOps). |
 | `config validate --config <f>` · `doctor --config <f>` | Validate a config (globs/windows/enums/DLP) / run pre-flight readiness checks. |

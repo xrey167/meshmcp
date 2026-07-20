@@ -286,7 +286,7 @@ Honesty about the seam, so nobody mistakes the mockup for shipped product:
 | **Steer/Launch** — the `meshmcp air` CLI (`sessions` · `steer` · `launch` · `agent-steer` · `workflow`) + P4 runner | **Ships now** | `air.go` · `airworkflow.go` · `examples/air-workflow.yaml` |
 | Assistant tools `air_peers` · `air_push` · `air_fetch` · `air_launch` (opt-in) | **Ships now** | `mcpapp.go` · `mcpapp_air_test.go` |
 | A served **live** Air web page over the mesh (`meshmcp air serve`) | **Ships now** | `airserve.go` · `site/air-live.html` · `airserve_test.go` |
-| Push-wake seam (device registry + notify hook; vendor APNs/FCM pluggable) | **Ships now** | `pushwake.go` · `approvals.go` · `pushwake_test.go` — [MOBILE.md §4](MOBILE.md) |
+| Push-wake seam (device registry + notify hook) + a **webhook Notifier** delivering over the network (no vendor creds) | **Ships now** | `pushwake.go` · `webhooknotify.go` · `approvals.go` (`--notify-webhook`) · `pushwake_test.go` · `webhooknotify_test.go` — [MOBILE.md §4](MOBILE.md) |
 | Native mobile **binding package** (`mobile/`, compiles; `gomobile bind` external) | **Ships now** | `mobile/mobile.go` · `mobile/mobile_test.go` — [MOBILE.md §3](MOBILE.md) |
 | A shipped native mobile **app** (bound + built + on a device) | **External** | needs the iOS/Android toolchain + a device |
 
@@ -305,9 +305,11 @@ device this repo can't exercise:
    endpoint, the `air_*` assistant tools, the `meshmcp air` CLI (`sessions` · `steer` ·
    `launch` · `agent-steer` · `workflow` · `serve`), the served live web page, the push-wake
    seam, and the `mobile/` binding package. Usable end-to-end today.
-2. **External — vendor push delivery.** Implement the `Notifier` interface with the APNs/FCM
-   HTTP call (needs Apple/Google credentials) and pass it instead of `logNotifier`
-   ([MOBILE.md §4](MOBILE.md)). Everything up to the delivery already runs.
+2. **Push delivery — mostly done.** A **webhook `Notifier`** ships in-repo
+   (`meshmcp approvals --devices <dir> --notify-webhook <url>`): each new pending is POSTed to
+   an operator relay that fans out to APNs/FCM with its own credentials — real network delivery
+   with **no vendor keys in meshmcp**. Only a *direct* in-process APNs/FCM `Notifier` (which
+   would embed Apple/Google credentials) remains external ([MOBILE.md §4](MOBILE.md)).
 3. **External — the shipped mobile app.** `gomobile bind ./mobile` → an iOS `.xcframework` /
    Android `.aar`, then a thin native shell (Face-ID approve, receive/share sheets). Needs the
    mobile toolchain + a device ([MOBILE.md §3](MOBILE.md)).
