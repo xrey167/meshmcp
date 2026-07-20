@@ -517,3 +517,69 @@ example gateway configs are unaffected.
 ### Commit
 
 `config: strict YAML decoding so security-field typos fail startup`
+
+---
+
+## F-P3 · Co-sign approval is ambient, not request-bound — REPRODUCED, FIXED (core)
+
+**Severity:** High (an approval for one operation authorizes any other call to
+the same tool — approving `transfer($10)` also authorizes `transfer($10000)`).
+
+**Component:** `policy/engine.go` (co-sign decision) + `policy/filter.go`.
+
+**Reproduced:** Yes. `DecideToolCall` consulted `Approved(CosignKey(peer, tool))`
+— keyed only on `(peer, tool)` — and never received the arguments, so a single
+human approval authorized every subsequent call to that tool by that peer,
+regardless of amount/path/target, until TTL. Approvals were also not single-use.
+
+### Fix
+
+New request-bound approval primitive (`policy/approval_token.go`):
+
+- `ApprovalToken` bound to and signed over `peer_key, backend, tool, args_hash,
+  session, nonce, decision, approver, policy_hash, created_at, expires_at`.
+- `canonicalArgsHash` canonicalizes JSON arguments (sorted keys) so key-order /
+  whitespace do not break a legitimate approval, but any value change does.
+- `FileApprovalStore`: signed `0600` tokens; **atomic single-use** consume via
+  `rename` (exactly one concurrent consumer wins; replays find nothing); TTL
+  default 5 min, clamped ≤ 1 h, non-disableable (zero → default); Ed25519 signed
+  and verified against a pinned key.
+
+Wired into enforcement:
+
+- `Engine.SetRequestApprovals` + `DecideToolCallBound` consume an argument-bound
+  approval for a `require_cosign` rule; falls back to the legacy ambient store
+  when none is attached (existing behavior/tests preserved).
+- `Filter.handleToolCall` calls `DecideToolCallBound` with the backend and the
+  actual arguments.
+
+### Tests (`policy/approval_token_test.go`)
+
+Argument binding, canonical-args stability, single-use, **concurrent
+single-winner** (race-clean), backend binding, TTL (expiry + non-disableable +
+clamp), signature/pinning, `0600` perms, and an **end-to-end filter** test
+(un-approved → co-sign; approved exact args → forwarded once; different args →
+not forwarded; replay → not forwarded).
+
+### Compatibility impact
+
+None by default: with no request-approval store attached, the legacy ambient
+co-sign path is unchanged. A gateway opts in by attaching a `FileApprovalStore`.
+
+### Residual risk / follow-up
+
+- The **approver HTTP service** still grants the legacy ambient approval;
+  connecting it to `FileApprovalStore.Grant` (and showing the human the exact
+  canonical operation in the UI) is the remaining integration step. The
+  enforcement primitive and gateway decision path are complete and tested.
+- Spec: `docs/spec/APPROVAL-TOKEN.md`.
+
+### Definition-of-Done item satisfied
+
+- *"Approvals are signed, short-lived, request-bound and single-use"* (the
+  enforcement primitive and gateway path; approver-UI grant wiring is the
+  documented follow-up).
+
+### Commit
+
+`policy: request-bound, signed, single-use co-sign approval tokens`

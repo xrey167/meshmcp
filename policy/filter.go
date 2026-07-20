@@ -393,7 +393,10 @@ func (f *Filter) handleToolCall(line []byte, msg rpcPeek, capToken string) error
 		return nil
 	}
 
-	dec := f.eng.DecideToolCall(f.caller.Peer, f.caller.PeerKey, tool, f.labelSnapshot())
+	// Bind co-sign approvals to this exact backend + arguments (Phase 3): a
+	// require_cosign rule is satisfied only by a signed, single-use approval for
+	// precisely these arguments, which DecideToolCallBound consumes atomically.
+	dec := f.eng.DecideToolCallBound(f.caller.Peer, f.caller.PeerKey, f.caller.Backend, tool, msg.Params.Arguments, f.labelSnapshot())
 	if f.capVerifier != nil {
 		dec = f.applyCapability(dec, capToken, tool)
 	}
