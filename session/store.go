@@ -38,6 +38,16 @@ type PersistedSession struct {
 	// replay produces (to discard, since the client already has them).
 	Replay          []byte `json:"replay"`
 	ReplayResponses int    `json:"replay_responses"`
+
+	// Generation is a monotonic fencing token. Every successful lease
+	// acquisition increments it, so a gateway whose lease was taken over holds a
+	// stale generation and is fenced out of SaveIfOwned/Renew/Release — it cannot
+	// write or delete after losing ownership.
+	Generation uint64 `json:"generation,omitempty"`
+	// LeaseExpiry is when the current owner's lease lapses (Unix nanos). After
+	// it passes another gateway may acquire the lease; the fencing generation is
+	// what actually prevents a superseded owner from writing.
+	LeaseExpiry int64 `json:"lease_expiry,omitempty"`
 }
 
 // SessionStore persists session state so a session survives the gateway that
@@ -95,11 +105,116 @@ func (s *MemStore) List() ([]PersistedSession, error) {
 	return out, nil
 }
 
-// FileStore persists sessions as JSON files in a shared directory, so two
-// gateway processes on shared (optionally replicated) storage can hand a
-// session off. Writes are atomic (temp + fsync + rename) and serialized
-// across processes by a cross-process lock, so the ownership lease holds even
-// under concurrent multi-gateway access.
+// canAcquire is the shared compare-and-swap decision for AcquireLease: it
+// returns the new generation and whether the acquire is permitted. An acquire
+// is allowed only when there is no live lease held by a *different* owner AND
+// the caller's expectedGen matches the stored generation (so two racing
+// takeovers of an expired lease cannot both succeed).
+func canAcquire(cur PersistedSession, exists bool, owner string, expectedGen uint64, now time.Time) (uint64, bool) {
+	if !exists {
+		if expectedGen != 0 {
+			return 0, false
+		}
+		return 1, true
+	}
+	live := now.UnixNano() < cur.LeaseExpiry
+	if live && cur.Owner != owner {
+		return 0, false // a live lease is held by another gateway
+	}
+	if cur.Generation != expectedGen {
+		return 0, false // the generation moved under us (lost the CAS race)
+	}
+	return cur.Generation + 1, true
+}
+
+func (s *MemStore) AcquireLease(id, owner string, expectedGen uint64, ttl time.Duration, now time.Time) (Lease, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cur, exists := s.m[id]
+	newGen, ok := canAcquire(cur, exists, owner, expectedGen, now)
+	if !ok {
+		return Lease{}, false, nil
+	}
+	exp := now.Add(ttl)
+	cur.ID, cur.Owner, cur.Generation, cur.LeaseExpiry = id, owner, newGen, exp.UnixNano()
+	s.m[id] = cur
+	return Lease{SessionID: id, Owner: owner, Generation: newGen, Expiry: exp}, true, nil
+}
+
+func (s *MemStore) RenewLease(id, owner string, gen uint64, ttl time.Duration, now time.Time) (Lease, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cur, ok := s.m[id]
+	if !ok || cur.Owner != owner || cur.Generation != gen {
+		return Lease{}, false, nil
+	}
+	exp := now.Add(ttl)
+	cur.LeaseExpiry = exp.UnixNano()
+	s.m[id] = cur
+	return Lease{SessionID: id, Owner: owner, Generation: gen, Expiry: exp}, true, nil
+}
+
+func (s *MemStore) ReleaseLease(id, owner string, gen uint64) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cur, ok := s.m[id]
+	if !ok || cur.Owner != owner || cur.Generation != gen {
+		return false, nil
+	}
+	cur.Owner, cur.LeaseExpiry = "", 0 // free the lease; keep generation + state
+	s.m[id] = cur
+	return true, nil
+}
+
+func (s *MemStore) SaveIfOwned(ps PersistedSession, owner string, gen uint64) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cur, ok := s.m[ps.ID]
+	if !ok || cur.Owner != owner || cur.Generation != gen {
+		return false, nil // fenced: a superseded owner cannot write
+	}
+	ps.Owner, ps.Generation, ps.LeaseExpiry = owner, gen, cur.LeaseExpiry
+	s.m[ps.ID] = ps
+	return true, nil
+}
+
+// Lease is an ownership grant for a session, carrying a monotonic fencing
+// generation and an expiry. A holder presents (Owner, Generation) to renew,
+// save, or release; a holder whose lease was taken over holds a stale
+// generation and is fenced out.
+type Lease struct {
+	SessionID  string
+	Owner      string
+	Generation uint64
+	Expiry     time.Time
+}
+
+// LeaseStore provides atomic compare-and-swap session ownership so two gateways
+// cannot concurrently own the same session. AcquireLease grants ownership only
+// when no live lease is held by another owner AND the caller's expectedGen
+// matches the stored generation (optimistic concurrency); it increments the
+// generation on success. Renew/Release/SaveIfOwned require the presented
+// (owner, generation) to still match, so a superseded owner is fenced.
+//
+// NOTE ON DURABILITY: FileStore implements this over a shared filesystem with a
+// cross-process lock. That is correct for a single host (or a lock-correct
+// shared filesystem) and is intended for single-node development — it is NOT a
+// substitute for a real distributed CAS store. Production cross-gateway HA needs
+// a backend with genuine atomic compare-and-swap and fencing (PostgreSQL,
+// etcd, or Redis with appropriate transaction semantics).
+type LeaseStore interface {
+	AcquireLease(id, owner string, expectedGen uint64, ttl time.Duration, now time.Time) (Lease, bool, error)
+	RenewLease(id, owner string, gen uint64, ttl time.Duration, now time.Time) (Lease, bool, error)
+	ReleaseLease(id, owner string, gen uint64) (bool, error)
+	// SaveIfOwned writes ps only if (owner, gen) still hold the lease; otherwise
+	// it returns false and does not write (the caller was fenced).
+	SaveIfOwned(ps PersistedSession, owner string, gen uint64) (bool, error)
+}
+
+// FileStore persists sessions as JSON files in a shared directory with a
+// cross-process lock, providing atomic lease compare-and-swap for a single host
+// / lock-correct shared filesystem (single-node development). It is NOT
+// cross-gateway HA — see LeaseStore. Writes are atomic (temp + fsync + rename).
 type FileStore struct {
 	dir string
 	mu  sync.Mutex
@@ -199,6 +314,138 @@ func (s *FileStore) DeleteIfOwner(id, owner string) error {
 		return nil
 	}
 	return err
+}
+
+// readUnlocked reads and parses one session file. Caller holds s.mu (and, for a
+// CAS, the cross-process lock).
+func (s *FileStore) readUnlocked(id string) (PersistedSession, bool, error) {
+	b, err := os.ReadFile(s.path(id))
+	if os.IsNotExist(err) {
+		return PersistedSession{}, false, nil
+	}
+	if err != nil {
+		return PersistedSession{}, false, err
+	}
+	var ps PersistedSession
+	if err := json.Unmarshal(b, &ps); err != nil {
+		return PersistedSession{}, false, err
+	}
+	return ps, true, nil
+}
+
+// writeUnlocked writes ps atomically (temp + fsync + rename). Caller holds the
+// locks.
+func (s *FileStore) writeUnlocked(ps PersistedSession) error {
+	b, err := json.Marshal(ps)
+	if err != nil {
+		return err
+	}
+	tmp := s.path(ps.ID) + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, s.path(ps.ID))
+}
+
+// withLock runs fn while holding both s.mu and the cross-process store lock, so
+// a read-modify-write is atomic across processes (the CAS guarantee).
+func (s *FileStore) withLock(fn func() error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	lk := s.lock()
+	if err := lk.acquire(); err != nil {
+		return err
+	}
+	defer lk.release()
+	return fn()
+}
+
+func (s *FileStore) AcquireLease(id, owner string, expectedGen uint64, ttl time.Duration, now time.Time) (Lease, bool, error) {
+	var lease Lease
+	var ok bool
+	err := s.withLock(func() error {
+		cur, exists, err := s.readUnlocked(id)
+		if err != nil {
+			return err
+		}
+		newGen, allowed := canAcquire(cur, exists, owner, expectedGen, now)
+		if !allowed {
+			return nil
+		}
+		exp := now.Add(ttl)
+		cur.ID, cur.Owner, cur.Generation, cur.LeaseExpiry = id, owner, newGen, exp.UnixNano()
+		if err := s.writeUnlocked(cur); err != nil {
+			return err
+		}
+		lease, ok = Lease{SessionID: id, Owner: owner, Generation: newGen, Expiry: exp}, true
+		return nil
+	})
+	return lease, ok, err
+}
+
+func (s *FileStore) RenewLease(id, owner string, gen uint64, ttl time.Duration, now time.Time) (Lease, bool, error) {
+	var lease Lease
+	var ok bool
+	err := s.withLock(func() error {
+		cur, exists, err := s.readUnlocked(id)
+		if err != nil || !exists || cur.Owner != owner || cur.Generation != gen {
+			return err
+		}
+		exp := now.Add(ttl)
+		cur.LeaseExpiry = exp.UnixNano()
+		if err := s.writeUnlocked(cur); err != nil {
+			return err
+		}
+		lease, ok = Lease{SessionID: id, Owner: owner, Generation: gen, Expiry: exp}, true
+		return nil
+	})
+	return lease, ok, err
+}
+
+func (s *FileStore) ReleaseLease(id, owner string, gen uint64) (bool, error) {
+	var ok bool
+	err := s.withLock(func() error {
+		cur, exists, err := s.readUnlocked(id)
+		if err != nil || !exists || cur.Owner != owner || cur.Generation != gen {
+			return err
+		}
+		cur.Owner, cur.LeaseExpiry = "", 0
+		if err := s.writeUnlocked(cur); err != nil {
+			return err
+		}
+		ok = true
+		return nil
+	})
+	return ok, err
+}
+
+func (s *FileStore) SaveIfOwned(ps PersistedSession, owner string, gen uint64) (bool, error) {
+	var ok bool
+	err := s.withLock(func() error {
+		cur, exists, err := s.readUnlocked(ps.ID)
+		if err != nil || !exists || cur.Owner != owner || cur.Generation != gen {
+			return err // fenced (or error): do not write
+		}
+		ps.Owner, ps.Generation, ps.LeaseExpiry = owner, gen, cur.LeaseExpiry
+		if err := s.writeUnlocked(ps); err != nil {
+			return err
+		}
+		ok = true
+		return nil
+	})
+	return ok, err
 }
 
 // List scans the store directory and loads every persisted session. Files that

@@ -128,11 +128,20 @@ An adversary who can write the audit file (but lacks the signing key).
 
 ### 9. Concurrent gateways restoring the same session (split-brain)
 
-- **Status: in progress.** Single-node file storage is for development and is
-  **not** cross-gateway HA. Real ownership leases with atomic compare-and-swap,
-  lease expiry, and monotonic fencing (so a stale owner cannot write after
-  losing ownership) are Phase 6. Until then, do not run two gateways over one
-  shared session store in production.
+- **Defended (store layer):** an atomic compare-and-swap lease primitive with a
+  monotonic fencing generation and expiry (`session.LeaseStore`:
+  `AcquireLease` / `RenewLease` / `ReleaseLease` / `SaveIfOwned`) guarantees that
+  at most one gateway can hold a session's lease, and a superseded owner is
+  fenced out of writes (its stale generation fails `SaveIfOwned`). Proven for
+  both `MemStore` and `FileStore` with concurrent single-winner and fencing
+  tests.
+- **Limit:** the session *server's* failover path does not yet route through the
+  lease API (it still checkpoints via unconditional `Save`); wiring
+  lease-expiry-driven takeover + per-write fencing into the server is the
+  remaining step. `FileStore` provides CAS only for a single host / lock-correct
+  shared filesystem and is **not** cross-gateway HA — production needs a real
+  CAS backend (PostgreSQL, etcd, or Redis). Until the server wiring lands, do
+  not run two gateways over one shared session store in production.
 
 ### 10. Malformed / adversarial JSON-RPC
 

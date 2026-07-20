@@ -56,7 +56,7 @@ continuously tested.
 | Signed router/federation delegation tokens + scope intersection | 4 |
 | Restart-safe audit append (seed from verified tail; refuse unverifiable) | 5 |
 | External audit anchoring interface (witnessed) | 5 |
-| Atomic session ownership leases (CAS, fencing) on a shared store | 6 |
+| Wire the CAS/fencing session-lease primitive (done at store layer) into the server failover path | 6 |
 | Explicit tool retry classification + enforced idempotency keys | 6 |
 | stdio/HTTP enforcement-parity conformance suite + capability matrix | 7 |
 | Response-side secret redaction + egress restriction | 8 |

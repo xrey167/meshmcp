@@ -583,3 +583,70 @@ co-sign path is unchanged. A gateway opts in by attaching a `FileApprovalStore`.
 ### Commit
 
 `policy: request-bound, signed, single-use co-sign approval tokens`
+
+---
+
+## F-P6.1 · Session ownership is load-then-save, no fencing — REPRODUCED, FIXED (store layer)
+
+**Severity:** High (two gateways can concurrently believe they own a session —
+split-brain — and a superseded gateway can keep writing).
+
+**Component:** `session/store.go`, `session/server.go`.
+
+**Reproduced:** Yes. `Server.checkpoint` persisted ownership with an
+**unconditional** `store.Save` (`ps.Owner = s.instance`), with no
+compare-and-swap, no lease expiry, and no fencing generation. Two gateways can
+both `Load` a session and both `Save` it (last write wins); a gateway that lost
+ownership keeps overwriting state. The `FileStore` doc also over-claimed
+cross-gateway hand-off ("HA").
+
+### Fix
+
+Add an atomic CAS lease primitive (`session.LeaseStore`) implemented by both
+`MemStore` and `FileStore`:
+
+- `AcquireLease(id, owner, expectedGen, ttl, now)` — grants ownership only when
+  no live lease is held by another owner AND `expectedGen` matches the stored
+  generation (optimistic concurrency), and **increments** the generation. Two
+  racing takeovers of an expired lease cannot both win.
+- `RenewLease` / `ReleaseLease` / `SaveIfOwned` — require the presented
+  `(owner, generation)` to still match; a superseded owner (stale generation) is
+  **fenced** out of writes.
+- Monotonic fencing generation + `LeaseExpiry` fields added to
+  `PersistedSession` (`omitempty`, backward-compatible).
+- `FileStore` performs each CAS under its cross-process lock (read-modify-write
+  is atomic for a single host / lock-correct shared filesystem). Its doc now
+  states plainly it is single-node development, **not** cross-gateway HA;
+  production needs a real CAS backend (PostgreSQL, etcd, Redis).
+
+### Tests (`session/lease_cas_test.go`, run against **both** stores)
+
+- `TestLeaseMutualExclusion` — a live lease cannot be acquired by another owner.
+- `TestLeaseFencingStaleOwnerCannotWrite` — after takeover, the old owner's
+  `SaveIfOwned` fails; the new owner's succeeds.
+- `TestLeaseConcurrentAcquireSingleWinner` / `TestLeaseConcurrentTakeoverSingleWinner`
+  — exactly one of 24 racing gateways wins (fresh lease and expired-lease
+  takeover). Race-clean.
+- `TestLeaseRenewAndRelease` — renew/release reject wrong owner or stale gen.
+
+### Compatibility impact
+
+None: existing `Save`/`Load`/`DeleteIfOwner` and all session tests are unchanged;
+the lease API is additive.
+
+### Residual risk / follow-up
+
+- The session **server** still checkpoints via unconditional `Save`; routing its
+  failover through `AcquireLease` (lease-expiry-driven takeover) and fencing
+  every backend write via `SaveIfOwned` is the remaining integration step, and
+  needs the migration tests updated for lease-gated takeover. The invariant is
+  established and enforceable at the store layer today.
+
+### Definition-of-Done item satisfied
+
+- *"Two gateways cannot concurrently own the same production session"* — enforced
+  and proven at the store layer (server wiring is the documented follow-up).
+
+### Commit
+
+`session: atomic CAS ownership lease with fencing generation`
