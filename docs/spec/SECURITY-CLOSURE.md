@@ -771,3 +771,54 @@ secret is injected.
 ### Commit
 
 `policy: response-side redaction of injected secret values`
+
+---
+
+## F-P9.2 · Capability revocation fails OPEN when the store is unavailable — REPRODUCED, FIXED
+
+**Severity:** High (a revoked or unverifiable capability can widen a default deny
+when the revocation store is unreachable).
+
+**Component:** `policy/revocation.go`, `serve.go`.
+
+**Reproduced:** Yes. `FileRevocation.IsRevoked` returned `os.Stat(...) == nil`,
+so **any** stat error — a missing/unreadable revocation directory, an I/O or
+permission failure — was read as "not revoked" (`false`). If the revocation
+store went away, every capability sailed through even though its revocation
+state was unknown. Capabilities are used precisely to widen a default deny, so
+this is fail-open at the worst point.
+
+### Fix
+
+`IsRevoked` now **fails closed**: a malformed id, an unreachable/non-directory
+store, or a lookup error all return `true` (treated as revoked). Only a
+reachable store with no marker for the id returns `false`. `NewFileRevocation`
+creates the store directory at startup, so a later-missing directory means the
+store was **lost** (fail closed), not merely "never used". `serve.go` uses the
+constructor and **fails startup** if the configured store cannot be created.
+
+### Tests (`policy/revocation_test.go`)
+
+- `TestRevocationFailsClosedWhenStoreUnavailable` — a missing store dir, a
+  corrupt (non-directory) store, and a malformed id all fail closed; a reachable
+  empty store still reports not-revoked. (Case 1 fails on the pre-fix code.)
+- `TestRevocationVerifierFailsClosedOnUnavailableStore` — end-to-end: a valid
+  capability is rejected by the verifier when its revocation store is
+  unavailable.
+- Existing `TestFileRevocationFailsClosedInVerifier` still passes.
+
+### Compatibility impact
+
+A configured revocation store that becomes unreachable now denies capabilities
+(previously allowed them). This is the intended fail-closed behavior. The normal
+reachable-empty-store case is unchanged.
+
+### Definition-of-Done / mission item
+
+- Phase 9.2: *"Revocation lookup failures must fail closed when capabilities are
+  being used to widen a default deny."* — and *"Capability revocation failures
+  cannot widen access."*
+
+### Commit
+
+`policy: capability revocation fails closed when the store is unavailable`

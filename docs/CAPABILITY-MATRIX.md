@@ -60,7 +60,7 @@ continuously tested.
 | Explicit tool retry classification + enforced idempotency keys | 6 |
 | stdio/HTTP enforcement-parity conformance suite + capability matrix | 7 |
 | Backend egress restriction for secrets (response-side redaction is done) | 8 |
-| Strict config (`KnownFields`) across all security config + typo negative tests | 9 |
+| Extend strict config (`KnownFields`) to the remaining subsystem configs (gateway config + control ACL done) | 9 |
 | MCP protocol-version negotiation + supported-version matrix | 9 |
 | Required CI (build/test/race/vuln/fuzz) and signed releases + SBOM | 11 |
 

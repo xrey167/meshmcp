@@ -15,6 +15,17 @@ import (
 // co-sign / session migration, so no extra infrastructure is needed.
 type FileRevocation struct{ Dir string }
 
+// NewFileRevocation returns a revocation store, creating its directory so the
+// store is present from startup. This lets IsRevoked distinguish an empty store
+// ("nothing revoked yet") from a store that has since become unavailable ("we
+// can no longer confirm revocation state") — the latter fails closed.
+func NewFileRevocation(dir string) (FileRevocation, error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return FileRevocation{}, err
+	}
+	return FileRevocation{Dir: dir}, nil
+}
+
 // safeID rejects a capability id that could escape the directory. Capability
 // ids are "cap_" + hex, so anything with a path separator or "." is refused.
 func safeID(id string) bool {
@@ -37,14 +48,30 @@ func (r FileRevocation) Revoke(id string) error {
 }
 
 // IsRevoked reports whether a capability id has been revoked. It is the
-// predicate passed to CapabilityVerifier.WithRevocation, and fails safe: a
-// malformed id is treated as revoked.
+// predicate passed to CapabilityVerifier.WithRevocation and FAILS CLOSED: a
+// malformed id, an unreachable store, or a lookup error is treated as revoked,
+// so a capability can never widen a default deny while its revocation state is
+// unknown. Only a reachable store with no marker for the id returns "not
+// revoked".
 func (r FileRevocation) IsRevoked(id string) bool {
 	if !safeID(id) {
 		return true
 	}
+	// The configured store must be reachable. If the revocation directory is
+	// missing, unreadable, or not a directory, we cannot confirm this id was not
+	// revoked — fail closed. (NewFileRevocation creates the dir at startup, so a
+	// missing dir here means the store was lost, not "never used".)
+	if fi, err := os.Stat(r.Dir); err != nil || !fi.IsDir() {
+		return true
+	}
 	_, err := os.Stat(filepath.Join(r.Dir, id+".revoked"))
-	return err == nil
+	if err == nil {
+		return true // marker present → revoked
+	}
+	if os.IsNotExist(err) {
+		return false // store reachable, no marker → not revoked
+	}
+	return true // lookup failed (permission / I/O) → fail closed
 }
 
 // List returns the revoked capability ids, sorted.
