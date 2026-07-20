@@ -30,6 +30,18 @@ type RouterConfig struct {
 	ListenPort int                 `yaml:"listen_port"`
 	Upstreams  map[string]Upstream `yaml:"upstreams"` // static: name -> one or more peer:port
 	Registry   string              `yaml:"registry"`  // dir: discover upstreams dynamically
+	// Allow lists the mesh identities permitted to use the router
+	// ("pubkey:<key>" or an FQDN glob). The router is DEFAULT-DENY: reaching its
+	// port is not enough, and an empty allow list is a startup error. This keeps
+	// the router from acting as an unrestricted confused deputy (delegated
+	// identity to upstreams is still experimental — see docs/spec/ROUTER-DELEGATION.md).
+	Allow []string `yaml:"allow"`
+}
+
+// callerAllowed reports whether a caller may use the router. Default-deny: an
+// empty allow list admits no one.
+func routerCallerAllowed(allow acl, pubKey, fqdn string) bool {
+	return !allow.empty() && allow.allows(pubKey, fqdn)
 }
 
 // Upstream is a set of interchangeable replica addresses for one logical
@@ -75,6 +87,9 @@ func loadRouterConfig(path string) (*RouterConfig, error) {
 	}
 	if len(cfg.Upstreams) == 0 && cfg.Registry == "" {
 		return nil, errors.New("at least one upstream or a registry is required")
+	}
+	if len(cfg.Allow) == 0 {
+		return nil, errors.New("router requires an allow list (default-deny): set 'allow' to the mesh identities (pubkey:<key> or FQDN globs) permitted to use the router")
 	}
 	for name, up := range cfg.Upstreams {
 		if len(up.Addrs) == 0 {
@@ -137,13 +152,15 @@ func cmdRouter(args []string) error {
 	signal.Notify(sig, os.Interrupt)
 	go func() { <-sig; ln.Close() }()
 
+	allow := newACL(cfg.Allow)
+	log.Printf("router: caller allow list active (%v)", cfg.Allow)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			log.Println("router shutting down")
 			return nil
 		}
-		go handleRouterConn(client, conn, discover())
+		go handleRouterConn(client, conn, discover(), allow)
 	}
 }
 
@@ -165,13 +182,19 @@ type dialFunc func(ctx context.Context, addr string) (net.Conn, error)
 
 // handleRouterConn serves one downstream client: it discovers every
 // upstream, presents their union, and routes calls until the client leaves.
-func handleRouterConn(client *embed.Client, conn net.Conn, upstreams map[string][]string) {
+func handleRouterConn(client *embed.Client, conn net.Conn, upstreams map[string][]string, allow acl) {
 	defer conn.Close()
 	ctx := context.Background()
 
 	// The end client's cryptographic mesh identity, carried through to
 	// upstreams as an "on behalf of" hint in request _meta.
 	pubKey, fqdn := peerIdentity(client, conn.RemoteAddr())
+	// Default-deny caller ACL: the router only serves explicitly-allowed mesh
+	// identities, so it cannot be used as an open confused deputy.
+	if !routerCallerAllowed(allow, pubKey, fqdn) {
+		log.Printf("router: DENIED client %s (%s) — not on the caller allow list", fqdn, conn.RemoteAddr())
+		return
+	}
 	log.Printf("router: serving client %s (%s)", fqdn, conn.RemoteAddr())
 	origin := map[string]any{"meshmcpOriginPeer": fqdn, "meshmcpOriginKey": pubKey}
 

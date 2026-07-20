@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -278,4 +279,47 @@ func (c *readFlakyConn) Write(b []byte) (int, error) {
 		c.once.Do(func() { _ = c.Conn.Close() })
 	}
 	return n, err
+}
+
+// TestRouterRequiresAllowList: the router is default-deny — a config without an
+// allow list fails startup, and routerCallerAllowed admits no one on an empty
+// ACL but admits a listed caller.
+func TestRouterRequiresAllowList(t *testing.T) {
+	base := "listen_port: 9100\nupstreams:\n  svc: 100.64.0.2:9101\n"
+	writeCfg := func(body string) string {
+		p := t.TempDir() + "/router.yaml"
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	// No allow list → startup error.
+	if _, err := loadRouterConfig(writeCfg(base)); err == nil {
+		t.Fatal("router config without an allow list must fail to load (default-deny)")
+	}
+	// With an allow list → loads.
+	if _, err := loadRouterConfig(writeCfg(base + "allow:\n  - \"pubkey:KEY\"\n")); err != nil {
+		t.Fatalf("router config with an allow list should load: %v", err)
+	}
+
+	// routerCallerAllowed is default-deny.
+	if routerCallerAllowed(newACL(nil), "KEY", "a.mesh") {
+		t.Fatal("empty router ACL must deny")
+	}
+	if !routerCallerAllowed(newACL([]string{"pubkey:KEY"}), "KEY", "a.mesh") {
+		t.Fatal("a listed caller must be allowed")
+	}
+	if routerCallerAllowed(newACL([]string{"pubkey:OTHER"}), "KEY", "a.mesh") {
+		t.Fatal("an unlisted caller must be denied")
+	}
+}
+
+// TestRouterExampleConfigsLoad: the shipped router example configs include an
+// allow list and load.
+func TestRouterExampleConfigsLoad(t *testing.T) {
+	for _, f := range []string{"examples/router.yaml", "examples/router-failover.yaml"} {
+		if _, err := loadRouterConfig(f); err != nil {
+			t.Errorf("%s should load: %v", f, err)
+		}
+	}
 }

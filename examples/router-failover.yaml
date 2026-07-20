@@ -9,3 +9,8 @@ upstreams:
   svc:
     - "100.81.215.9:9099"   # dead replica (nothing listening) — router must skip it
     - "100.81.215.9:9101"   # healthy demo backend
+
+# The router is DEFAULT-DENY: list the mesh identities allowed to use it
+# ("pubkey:<key>" or FQDN globs). An empty allow list is a startup error.
+allow:
+  - "*.netbird.cloud"   # replace with the specific callers permitted to use the router

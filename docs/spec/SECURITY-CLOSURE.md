@@ -1065,3 +1065,42 @@ _meta) would be resolved, and there was no argument-location binding.
 ### Commit
 
 `secrets: inject only into declared argument locations, not whole-message regex`
+
+---
+
+## F-P4.2 · Router serves any mesh peer (confused deputy) — FIXED (caller ACL)
+
+**Severity:** High (any mesh peer could drive any upstream tool through the
+router under the router's identity).
+
+**Component:** `router.go`.
+
+**Reproduced:** Yes. `handleRouterConn` served every connecting mesh peer with no
+caller ACL.
+
+### Fix (the mission's "at minimum" for delegation)
+
+- New `RouterConfig.Allow` — a **default-deny** caller ACL (`pubkey:<key>` or FQDN
+  globs). `loadRouterConfig` **fails startup** when it is empty.
+- `handleRouterConn` derives the caller's WireGuard identity and rejects any
+  caller not on the allow list (`routerCallerAllowed`; empty ACL admits no one),
+  so the router can no longer act as an unrestricted confused deputy.
+- Example router configs updated with an `allow` list.
+
+### Tests (`router_test.go`)
+
+- `TestRouterRequiresAllowList` — config without `allow` fails to load;
+  `routerCallerAllowed` denies on empty ACL, admits a listed caller, denies an
+  unlisted one.
+- `TestRouterExampleConfigsLoad` — shipped example router configs load.
+
+### Residual risk
+
+Full tool policy at the router and signed, hop-bound delegation to upstreams
+(so upstream policy computes caller ∩ router ∩ delegation) remain the next step
+— the primitive exists (`policy/delegation.go`) and is tracked in
+`docs/spec/ROUTER-DELEGATION.md`. The caller ACL removes the open-deputy exposure.
+
+### Commit
+
+`router: default-deny caller ACL (close open confused-deputy exposure)`
