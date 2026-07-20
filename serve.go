@@ -210,7 +210,13 @@ func cmdServe(args []string) error {
 			return fmt.Errorf("control: listen on mesh port %d: %w", cfg.Control.Port, err)
 		}
 		listeners = append(listeners, ln)
-		ctl := &gatewayAirControl{servers: servers, mu: &serversMu}
+		// Each backend's own allow list, so the control endpoint re-checks the
+		// target backend's ACL (not just the global Control.Allow) on list/steer.
+		backendACLs := map[string]acl{}
+		for _, b := range cfg.Backends {
+			backendACLs[b.Name] = newACL(b.Allow)
+		}
+		ctl := &gatewayAirControl{servers: servers, acls: backendACLs, mu: &serversMu}
 		identify := func(r *http.Request) (string, string) { return peerIdentityStr(client, r.RemoteAddr) }
 		allow := newACL(cfg.Control.Allow)
 		h := airControlHandler(ctl, identify, allow, airAuditFunc(sharedAudit))

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 )
 
 //go:embed site/air-live.html
@@ -27,9 +28,10 @@ type airPeerRow struct {
 // airServeDeps are the injectable dependencies of the served Air page, so the
 // handler is testable with httptest (no mesh).
 type airServeDeps struct {
-	peers       func() ([]airPeerRow, error) // reachable identities (from client.Status())
-	controlHC   *http.Client                 // client that reaches the gateway control endpoint
-	controlBase string                       // base URL for the control endpoint (empty = sessions/steer disabled)
+	peers       func() ([]airPeerRow, error)              // reachable identities (from client.Status())
+	identify    func(*http.Request) (pubkey, fqdn string) // resolve the browser's own mesh identity (nil = none)
+	controlHC   *http.Client                              // client that reaches the gateway control endpoint
+	controlBase string                                    // base URL for the control endpoint (empty = sessions/steer disabled)
 }
 
 // airServeHandler builds the live Air page + its /api proxy to the gateway
@@ -64,7 +66,9 @@ func airServeHandler(d airServeDeps) http.Handler {
 			http.Error(w, "no --control endpoint configured", http.StatusServiceUnavailable)
 			return
 		}
-		resp, err := d.controlHC.Get(d.controlBase + "/v1/sessions")
+		req, _ := http.NewRequest(http.MethodGet, d.controlBase+"/v1/sessions", nil)
+		d.attest(req, r)
+		resp, err := d.controlHC.Do(req)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
@@ -82,7 +86,10 @@ func airServeHandler(d airServeDeps) http.Handler {
 			return
 		}
 		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-		resp, err := d.controlHC.Post(d.controlBase+"/v1/steer", "application/json", bytes.NewReader(body))
+		req, _ := http.NewRequest(http.MethodPost, d.controlBase+"/v1/steer", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		d.attest(req, r)
+		resp, err := d.controlHC.Do(req)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
@@ -91,6 +98,23 @@ func airServeHandler(d airServeDeps) http.Handler {
 	})
 
 	return mux
+}
+
+// attest stamps the outbound control-endpoint request with the browser's own mesh
+// identity, so the gateway audits the human who clicked — not the air-serve relay.
+// Relay-attested: the control endpoint honours it only because this proxy is
+// itself an ACL-allowed mesh peer (see aircontrol.onBehalfOf).
+func (d airServeDeps) attest(out, in *http.Request) {
+	if d.identify == nil {
+		return
+	}
+	pubkey, fqdn := d.identify(in)
+	if fqdn != "" {
+		out.Header.Set("X-Air-On-Behalf", fqdn)
+	}
+	if pubkey != "" {
+		out.Header.Set("X-Air-On-Behalf-Key", pubkey)
+	}
 }
 
 // relay copies an upstream control-endpoint response back to the caller.
@@ -129,6 +153,9 @@ func cmdAirServe(args []string) error {
 	defer stopMesh(client)
 
 	d := airServeDeps{
+		// The browser is itself a mesh peer; resolve its WireGuard identity so
+		// steers it drives are attributed to the human, not this relay.
+		identify: func(r *http.Request) (string, string) { return peerIdentityStr(client, r.RemoteAddr) },
 		peers: func() ([]airPeerRow, error) {
 			st, err := client.Status()
 			if err != nil {
@@ -153,11 +180,14 @@ func cmdAirServe(args []string) error {
 	}
 	if *control != "" {
 		d.controlBase = "http://air-control"
-		d.controlHC = &http.Client{Transport: &http.Transport{
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				return client.Dial(ctx, "tcp", *control)
+		d.controlHC = &http.Client{
+			Timeout: 20 * time.Second, // never let a hung control endpoint wedge the page
+			Transport: &http.Transport{
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					return client.Dial(ctx, "tcp", *control)
+				},
 			},
-		}}
+		}
 	}
 
 	ln, err := client.ListenTCP(fmt.Sprintf(":%d", *port))

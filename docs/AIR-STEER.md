@@ -285,6 +285,15 @@ serves `GET /v1/sessions` and `POST /v1/steer {backend,id,method,params}` on a m
 gated by the caller's WireGuard identity + an `allow` ACL and audited into the shared ledger;
 `session.ErrNoSession`/unknown-backend → 404, ACL deny → 403. Tests: `aircontrol_test.go`.
 
+Two ACL gates apply, not one: the endpoint's own `Control.Allow` decides *who may reach the
+endpoint*, and then **each backend's own `allow` list is re-checked** for the target backend —
+so a caller listed on the control endpoint still cannot list or steer sessions on a backend
+that backend would deny (`gatewayAirControl` carries a per-backend `acls` map; a denied
+backend's sessions are filtered out of `/v1/sessions` and `/v1/steer` returns 403). The
+`method` field is restricted to an allowlist (`airSteerMethods`, currently
+`notifications/air/steer`) so the endpoint can't be used to inject arbitrary server→client
+JSON-RPC; an off-allowlist method is a 400 + an audited deny.
+
 So an assistant can say: *"list the live sessions"* → `air_sessions`; *"steer session 9f2a on
 fs to re-read customer 42"* → `air_steer`; *"what tasks are running on the analyst?"* →
 `air_tasks`; *"nudge task-17 to focus on the API"* → `air_task_steer` — each a governed,
@@ -309,6 +318,12 @@ audited mesh call, never a backdoor. (Agent-target steer and launch are CLI verb
   `tasks/cancel`" claim; that phrase is exact only for `tasks/steer`.
 - **Identity-attributed.** Every steer/launch resolves to the caller's WireGuard key; the
   ledger records who steered/launched what, when — provable with the public key alone.
+- **Relay-attested web attribution.** The served Air page (`airserve.go`) is a mesh peer that
+  proxies steers to the control endpoint. It resolves the *browser's own* mesh identity and
+  forwards it as `X-Air-On-Behalf`, which the control endpoint honours **only because the proxy
+  is itself ACL-allowed** — so a receipt shows the human who clicked, with the relay recorded in
+  the `Reason` for chain-of-custody. This is relay-attested, not a cryptographic binding: it is
+  as strong as trusting the air-serve node, which the mesh already admits.
 - **ACL'd inbox.** An agent's steer port admits only allow-listed senders (`acl.go`,
   `examples/drop.yaml` `allow:`).
 - **Broadcast = N audited records.** A broadcast expands to one governed, audited call per

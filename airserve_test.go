@@ -47,6 +47,9 @@ func TestAirServeSessionsProxy(t *testing.T) {
 			if !strings.Contains(string(b), "9f2a") {
 				t.Errorf("steer body missing id: %s", b)
 			}
+			if ob := r.Header.Get("X-Air-On-Behalf"); ob != "phone.mesh" {
+				t.Errorf("X-Air-On-Behalf = %q, want phone.mesh", ob)
+			}
 			_, _ = io.WriteString(w, `{"status":"steered"}`)
 		default:
 			http.NotFound(w, r)
@@ -54,7 +57,11 @@ func TestAirServeSessionsProxy(t *testing.T) {
 	}))
 	defer control.Close()
 
-	h := airServeHandler(airServeDeps{controlHC: control.Client(), controlBase: control.URL})
+	h := airServeHandler(airServeDeps{
+		controlHC:   control.Client(),
+		controlBase: control.URL,
+		identify:    func(*http.Request) (string, string) { return "browserkey", "phone.mesh" },
+	})
 
 	// sessions proxied through
 	rr := httptest.NewRecorder()

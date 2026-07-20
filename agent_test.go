@@ -120,13 +120,17 @@ func TestRunAgentLoopSteerTask(t *testing.T) {
 func TestRecvEnvelopes(t *testing.T) {
 	in := strings.NewReader(`{"type":"task","tool":"read_file","args":{"path":"x"}}` + "\n" +
 		"\n" + // blank line skipped
+		`{"type":"nudge","text":"focus","target":"task:9f2a","id":"corr-7"}` + "\n" +
 		`{"type":"cancel"}` + "\n")
 	var got []steerEnvelope
 	if err := recvEnvelopes(in, func(e steerEnvelope) { got = append(got, e) }); err != nil {
 		t.Fatalf("recvEnvelopes: %v", err)
 	}
-	if len(got) != 2 || got[0].Type != "task" || got[0].Tool != "read_file" || got[1].Type != "cancel" {
+	if len(got) != 3 || got[0].Type != "task" || got[0].Tool != "read_file" || got[2].Type != "cancel" {
 		t.Fatalf("unexpected envelopes: %+v", got)
+	}
+	if got[1].Target != "task:9f2a" || got[1].ID != "corr-7" {
+		t.Fatalf("target/id not parsed: %+v", got[1])
 	}
 	// A malformed line is an error.
 	if err := recvEnvelopes(strings.NewReader("not json\n"), func(steerEnvelope) {}); err == nil {

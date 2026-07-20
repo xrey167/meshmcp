@@ -26,10 +26,14 @@ func newSteerFactory(ctx context.Context, ch chan<- steerEnvelope, audit *policy
 			err := recvEnvelopes(pr, func(env steerEnvelope) {
 				log.Printf("steer %q from %s", env.Type, meta.PeerFQDN)
 				if audit != nil {
+					reason := fmt.Sprintf("steer %s", env.Type)
+					if env.Target != "" {
+						reason += " -> " + env.Target
+					}
 					audit.Append(policy.AuditRecord{
 						Backend: "agent", Peer: meta.PeerFQDN, PeerKey: meta.PeerKey, PeerAddr: meta.PeerAddr,
 						Method: "air/steer", Tool: env.Tool, Decision: "allow",
-						Reason: fmt.Sprintf("steer %s", env.Type), Rule: -1,
+						Reason: reason, Rule: -1,
 					})
 				}
 				select {

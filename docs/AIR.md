@@ -283,7 +283,9 @@ Honesty about the seam, so nobody mistakes the mockup for shipped product:
 | `site/air.html` unified Air mockup | **This change** (mockup only) | `site/air.html` |
 | **Steer** — P3 task augment · P2 session core · P1 agent inbox | **Ships now** | `mcp/tasks.go` · `session/server.go` · `agent.go` · `steerinbox.go` (+ tests) |
 | **Steer** — gateway `/v1/sessions`+`/v1/steer` endpoint · `air_sessions`/`air_steer`/`air_tasks`/`air_task_steer` tools | **Ships now** | `config.go` · `serve.go` · `aircontrol.go` · `mcpapp.go` · `aircontrol_test.go` |
-| **Steer/Launch** — the `meshmcp air` CLI (`sessions` · `steer` · `launch` · `agent-steer` · `workflow`) + P4 runner | **Ships now** | `air.go` · `airworkflow.go` · `examples/air-workflow.yaml` |
+| **Steer** — control endpoint hardening: per-backend ACL re-check · steer-method allowlist · relay-attested web attribution (`X-Air-On-Behalf`) | **Ships now** | `aircontrol.go` · `serve.go` · `airserve.go` · `aircontrol_test.go` |
+| **Steer/Launch** — the `meshmcp air` CLI (`sessions --json` · `steer` · `launch` · `agent-steer --target/--id` · `workflow`) + P4 runner | **Ships now** | `air.go` · `airworkflow.go` · `examples/air-workflow.yaml` |
+| **Workflow** — variables between steps (`as:` + `${var.field}`) · `parallel:` blocks · `on_error` · per-step `timeout` · `--json` summary · launch-race retry | **Ships now** | `airworkflow.go` · `airworkflow_test.go` |
 | Assistant tools `air_peers` · `air_push` · `air_fetch` · `air_launch` (opt-in) | **Ships now** | `mcpapp.go` · `mcpapp_air_test.go` |
 | A served **live** Air web page over the mesh (`meshmcp air serve`) | **Ships now** | `airserve.go` · `site/air-live.html` · `airserve_test.go` |
 | Push-wake seam (device registry + notify hook; vendor APNs/FCM pluggable) | **Ships now** | `pushwake.go` · `approvals.go` · `pushwake_test.go` — [MOBILE.md §4](MOBILE.md) |
