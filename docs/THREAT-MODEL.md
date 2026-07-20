@@ -86,12 +86,17 @@ The enforcement point itself is compromised.
 
 ### 5. Malicious or buggy backend MCP server
 
-- **Defended:** Secrets are injected only into declared backend-owned argument
-  locations and never returned to the agent by the gateway; secret **names**
-  (never values) appear in audit. The guarantee is **credential isolation**.
-- **Limit:** A malicious backend that receives an injected secret is within the
-  secret's exposure boundary and can misuse or attempt to echo it. Response-side
-  redaction and egress restriction are partial/Labs (Phase 8).
+- **Defended:** Secrets are injected only after authorization; secret **names**
+  (never values) appear in audit; and the gateway performs **response-side
+  redaction** — injected secret values (raw and JSON-escaped forms) are scrubbed
+  from the backend→agent stream and traces, so a backend cannot trivially echo an
+  injected credential back to the agent. The guarantee is **credential
+  isolation**.
+- **Limit:** Redaction defeats the trivial echo, not a determined leak. A
+  malicious backend that receives an injected secret is within the secret's
+  exposure boundary and can transform it (encode, split, exfiltrate out of band).
+  Egress restriction on the backend is Labs; prefer short-lived scoped
+  credentials so an escaped value is low-value.
 
 ### 6. Stolen approval credentials
 

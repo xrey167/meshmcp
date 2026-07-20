@@ -31,7 +31,7 @@ func TestBrokerInjectsGrantedSecret(t *testing.T) {
 	b := testBroker(policy.NewAuditLog(&buf, func() string { return "T" }))
 
 	line := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"charge","arguments":{"auth":"Bearer {{secret:stripe_key}}"}}}`)
-	out, ok, reason := b.Resolve(caller(), "charge", line, nil)
+	out, _, ok, reason := b.Resolve(caller(), "charge", line, nil)
 	if !ok {
 		t.Fatalf("granted secret should resolve, got reason %q", reason)
 	}
@@ -59,7 +59,7 @@ func TestBrokerDeniesUngranted(t *testing.T) {
 	// stranger has no grant for stripe_key.
 	stranger := policy.Caller{Backend: "pay", Peer: "stranger.mesh", PeerKey: "ZZ"}
 	line := []byte(`{"params":{"name":"charge","arguments":{"k":"{{secret:stripe_key}}"}}}`)
-	out, ok, reason := b.Resolve(stranger, "charge", line, nil)
+	out, _, ok, reason := b.Resolve(stranger, "charge", line, nil)
 	if ok {
 		t.Fatalf("ungranted caller must be denied")
 	}
@@ -75,7 +75,7 @@ func TestBrokerToolRestriction(t *testing.T) {
 	b := testBroker(nil)
 	// AGENT may use stripe_key only for `charge`, not `refund`.
 	line := []byte(`{"params":{"name":"refund","arguments":{"k":"{{secret:stripe_key}}"}}}`)
-	if _, ok, _ := b.Resolve(caller(), "refund", line, nil); ok {
+	if _, _, ok, _ := b.Resolve(caller(), "refund", line, nil); ok {
 		t.Fatalf("stripe_key must not inject into a non-granted tool")
 	}
 }
@@ -84,7 +84,7 @@ func TestBrokerTaintBlocksInjection(t *testing.T) {
 	b := testBroker(nil)
 	line := []byte(`{"params":{"name":"charge","arguments":{"k":"{{secret:stripe_key}}"}}}`)
 	// Session tainted → the grant's block_labels refuses injection.
-	_, ok, reason := b.Resolve(caller(), "charge", line, map[string]bool{"tainted": true})
+	_, _, ok, reason := b.Resolve(caller(), "charge", line, map[string]bool{"tainted": true})
 	if ok {
 		t.Fatalf("tainted session must not receive a secret")
 	}
@@ -96,7 +96,7 @@ func TestBrokerTaintBlocksInjection(t *testing.T) {
 func TestBrokerNoRefsPassthrough(t *testing.T) {
 	b := testBroker(nil)
 	line := []byte(`{"params":{"name":"charge","arguments":{"amount":100}}}`)
-	out, ok, _ := b.Resolve(caller(), "charge", line, nil)
+	out, _, ok, _ := b.Resolve(caller(), "charge", line, nil)
 	if !ok || !bytes.Equal(out, line) {
 		t.Fatalf("a line with no references must pass through unchanged")
 	}
@@ -105,7 +105,7 @@ func TestBrokerNoRefsPassthrough(t *testing.T) {
 func TestBrokerUnavailableSecret(t *testing.T) {
 	b := New(MapStore{}, []Grant{{Peers: []string{"*"}, Secrets: []string{"*"}}}, nil)
 	line := []byte(`{"params":{"name":"x","arguments":{"k":"{{secret:missing}}"}}}`)
-	if _, ok, reason := b.Resolve(caller(), "x", line, nil); ok || !strings.Contains(reason, "not available") {
+	if _, _, ok, reason := b.Resolve(caller(), "x", line, nil); ok || !strings.Contains(reason, "not available") {
 		t.Fatalf("missing secret must be denied, got ok=%v reason=%q", ok, reason)
 	}
 }

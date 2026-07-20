@@ -710,3 +710,64 @@ wired.
 ### Commit
 
 `policy: signed router/federation delegation tokens + scope intersection`
+
+---
+
+## F-P8 · A backend can echo an injected secret back to the agent — REPRODUCED, FIXED
+
+**Severity:** Medium-High (defeats credential isolation: the agent references a
+secret by name but the backend replies with the raw value).
+
+**Component:** `policy/filter.go` (response pump), `policy/redact.go` (new),
+`secrets/broker.go`, `policy/secret.go` (interface).
+
+**Reproduced:** Yes. Secret injection substituted the real value into the request
+toward the backend, but the backend→agent response stream was forwarded verbatim.
+A backend that echoes its arguments returns the injected credential to the agent.
+`TestFilterRedactsEchoedSecret` demonstrates it.
+
+### Fix
+
+Response-side redaction:
+
+- New `Redactor` (`policy/redact.go`): a concurrency-safe set of injected secret
+  byte-values with a `Redact` method; ignores values shorter than 4 bytes (no
+  over-matching) and is nil-safe (no-op).
+- The `SecretResolver.Resolve` interface now also returns the **injected values**
+  (raw and JSON-escaped forms — the broker reports both). These bytes are for
+  in-memory redaction only and are never audited, traced, or logged.
+- The filter records injected values in a per-session redactor and scrubs them
+  from every backend→peer line **before** it reaches the trace or the agent
+  (`pumpInner`), replacing them with `[redacted-secret]`.
+
+### Tests (`policy/redact_test.go`)
+
+- `TestRedactorBasic`, `...MultipleAndUnicode`, `...IgnoresShortAndNoMatch`,
+  `...NilSafe` — unit coverage incl. multiple secrets, Unicode, short-value and
+  no-match passthrough.
+- `TestFilterRedactsEchoedSecret` — end-to-end: a backend echoes the injected
+  secret; the agent-visible response carries the placeholder, not the value; the
+  backend really received the injected value (proving redaction is response-side,
+  not a failure to inject). Race-clean.
+
+### Compatibility impact
+
+Interface change to `SecretResolver.Resolve` (now returns injected values); only
+the `secrets.Broker` implements it (updated). Redaction is automatic once a
+secret is injected.
+
+### Residual risk
+
+- Best-effort echo defense, **not** a leak-proof guarantee: a malicious backend
+  can transform/split/exfiltrate a value out of band and remains within the
+  secret's exposure boundary (documented in the threat model). Prefer short-lived
+  scoped credentials. Backend egress restriction is a follow-up.
+
+### Definition-of-Done / mission item
+
+- Phase 8: *"Add response-side detection or redaction for injected values"* and
+  *"Prevent backends from trivially echoing injected credentials where feasible."*
+
+### Commit
+
+`policy: response-side redaction of injected secret values`

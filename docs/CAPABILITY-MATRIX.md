@@ -59,7 +59,7 @@ continuously tested.
 | Wire the CAS/fencing session-lease primitive (done at store layer) into the server failover path | 6 |
 | Explicit tool retry classification + enforced idempotency keys | 6 |
 | stdio/HTTP enforcement-parity conformance suite + capability matrix | 7 |
-| Response-side secret redaction + egress restriction | 8 |
+| Backend egress restriction for secrets (response-side redaction is done) | 8 |
 | Strict config (`KnownFields`) across all security config + typo negative tests | 9 |
 | MCP protocol-version negotiation + supported-version matrix | 9 |
 | Required CI (build/test/race/vuln/fuzz) and signed releases + SBOM | 11 |

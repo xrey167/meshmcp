@@ -43,6 +43,8 @@ type Filter struct {
 	caller      Caller
 	hook        EventHook
 
+	redactor *Redactor // scrubs injected secret values from responses (Phase 8)
+
 	lmu    sync.Mutex      // guards labels
 	labels map[string]bool // data-flow labels accumulated this session
 
@@ -428,10 +430,19 @@ func (f *Filter) handleToolCall(line []byte, msg rpcPeek, capToken string) error
 		// injection (ungranted / tainted / unavailable) blocks the call.
 		outLine := line
 		if f.secrets != nil {
-			resolved, ok, reason := f.secrets.Resolve(f.caller, tool, line, f.labelSnapshot())
+			resolved, injected, ok, reason := f.secrets.Resolve(f.caller, tool, line, f.labelSnapshot())
 			if !ok {
 				f.writeDenial(msg.ID, fmt.Sprintf("tool %q blocked: %s", tool, reason))
 				return nil
+			}
+			// Record injected values so the response pump can scrub them: a
+			// backend must not be able to echo an injected credential back to
+			// the agent (best-effort; see Redactor / the threat model).
+			if len(injected) > 0 {
+				if f.redactor == nil {
+					f.redactor = &Redactor{}
+				}
+				f.redactor.Add(injected...)
 			}
 			outLine = resolved
 		}
@@ -546,15 +557,19 @@ func (f *Filter) pumpInner() {
 				if i < 0 {
 					break
 				}
-				f.traceLine("s2c", line[:i], "")
-				f.writeOut(line[:i+1])
+				// Scrub any injected secret value a backend tried to echo,
+				// before it reaches the trace or the peer.
+				red := f.redactor.Redact(line[:i+1])
+				f.traceLine("s2c", bytes.TrimRight(red, "\n"), "")
+				f.writeOut(red)
 				line = line[i+1:]
 			}
 		}
 		if err != nil {
 			if len(line) > 0 {
-				f.traceLine("s2c", line, "")
-				f.writeOut(line)
+				red := f.redactor.Redact(line)
+				f.traceLine("s2c", red, "")
+				f.writeOut(red)
 			}
 			f.closeOnce.Do(func() { f.outW.CloseWithError(err) })
 			return
