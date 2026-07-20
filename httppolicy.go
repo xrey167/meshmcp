@@ -93,8 +93,11 @@ func (e *httpEnforcer) decide(peer, peerKey string, r *http.Request) (ok bool, s
 		if md.RuleID == -1 {
 			return true, 0, nil // ungoverned: pass through
 		}
-		_ = e.audit.Append(e.record(class.Method, "", string(class.ID), md, peer, peerKey))
+		auditErr := e.audit.Append(e.record(class.Method, "", string(class.ID), md, peer, peerKey))
 		if md.Allow {
+			if auditErr != nil && e.audit.FailClosed() {
+				return false, http.StatusOK, jsonRPCError(class.ID, fmt.Sprintf("method %q blocked: audit sink unavailable (fail-closed)", class.Method))
+			}
 			return true, 0, nil
 		}
 		return false, http.StatusOK, jsonRPCError(class.ID, fmt.Sprintf("method %q denied by mesh policy for peer %s", class.Method, peer))
@@ -102,9 +105,15 @@ func (e *httpEnforcer) decide(peer, peerKey string, r *http.Request) (ok bool, s
 
 	// RPCToolCall.
 	dec := e.eng.DecideToolCallBound(peer, peerKey, e.backend, class.Tool, class.Args, nil)
-	_ = e.audit.Append(e.record("tools/call", class.Tool, string(class.ID), dec, peer, peerKey))
+	auditErr := e.audit.Append(e.record("tools/call", class.Tool, string(class.ID), dec, peer, peerKey))
 	switch dec.Outcome {
 	case policy.OutcomeAllow:
+		// Audit is a control: if the record cannot be written and the log is
+		// fail-closed, deny rather than proxy an unrecorded call (parity with the
+		// stdio filter).
+		if auditErr != nil && e.audit.FailClosed() {
+			return false, http.StatusOK, jsonRPCError(class.ID, fmt.Sprintf("tool %q blocked: audit sink unavailable (fail-closed)", class.Tool))
+		}
 		return true, 0, nil
 	case policy.OutcomeCosign:
 		if e.pending != nil {

@@ -63,6 +63,7 @@ func VerifySigned(auditR, checkpointR io.Reader, expectPub string) (SignedVerify
 	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 	lastSeq := 0
 	maxSeq := 0
+	prevHash := "" // the previous record's hash; "" is the genesis PrevHash
 	for sc.Scan() {
 		line := bytes.TrimSpace(sc.Bytes())
 		if len(line) == 0 {
@@ -81,13 +82,28 @@ func VerifySigned(auditR, checkpointR io.Reader, expectPub string) (SignedVerify
 			res.Reason = fmt.Sprintf("record sequence number %d is duplicate or non-monotonic (previous was %d)", rec.Seq, lastSeq)
 			return res, nil
 		}
-		lastSeq = rec.Seq
-		maxSeq = rec.Seq
-		res.Records++
 		hHex, _, err := chainHash(rec)
 		if err != nil {
 			return res, err
 		}
+		// Verify the record's OWN stored hash matches its recomputed content
+		// hash, and that its PrevHash links to the previous record — so the whole
+		// hash chain (including any unsealed tail not covered by a checkpoint) is
+		// validated, and stored-field tampering is caught.
+		if rec.Hash != hHex {
+			res.Status = StatusInvalid
+			res.Reason = fmt.Sprintf("record %d stored hash does not match its content", rec.Seq)
+			return res, nil
+		}
+		if rec.PrevHash != prevHash {
+			res.Status = StatusInvalid
+			res.Reason = fmt.Sprintf("record %d prev_hash does not link to the previous record (chain broken)", rec.Seq)
+			return res, nil
+		}
+		prevHash = hHex
+		lastSeq = rec.Seq
+		maxSeq = rec.Seq
+		res.Records++
 		raw, _ := hex.DecodeString(hHex)
 		hashBySeq[rec.Seq] = raw
 	}

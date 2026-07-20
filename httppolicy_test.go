@@ -58,3 +58,29 @@ func TestHTTPEnforcerRefusesBatchAndPassesOtherMethods(t *testing.T) {
 		t.Fatal("tools/list should pass through (ungoverned method)")
 	}
 }
+
+// errWriter fails every write, to simulate an unavailable audit sink.
+type errWriter struct{}
+
+func (errWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
+
+// TestHTTPEnforcerFailsClosedOnAuditError is the parity fix: when the audit log
+// is fail-closed and the record cannot be written, an otherwise-allowed
+// tools/call must be denied over HTTP (matching the stdio filter).
+func TestHTTPEnforcerFailsClosedOnAuditError(t *testing.T) {
+	pol := &policy.Policy{DefaultAllow: false, Rules: []policy.Rule{
+		{Peers: []string{"*"}, Tools: []string{"read_*"}, Allow: true},
+	}}
+	audit := policy.NewAuditLog(errWriter{}, func() string { return "" }).WithFailClosed(true)
+	e := &httpEnforcer{eng: policy.NewEngine(pol, nil, nil), audit: audit, backend: "b"}
+
+	r := httptest.NewRequest("POST", "/mcp", strings.NewReader(
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_file"}}`))
+	ok, _, denial := e.decide("alice", "k", r)
+	if ok {
+		t.Fatal("an allowed tool must be DENIED over HTTP when the fail-closed audit cannot record it")
+	}
+	if !strings.Contains(string(denial), "audit sink unavailable") {
+		t.Fatalf("expected a fail-closed audit denial, got: %s", denial)
+	}
+}

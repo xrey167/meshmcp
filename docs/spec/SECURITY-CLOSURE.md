@@ -886,3 +886,38 @@ unaffected.
 ### Commit
 
 `policy: shared JSON-RPC classifier for stdio/HTTP enforcement parity`
+
+---
+
+## F-R1..R4 · Correctness defects in shipped primitives (review follow-up) — FIXED
+
+A code review found real correctness bugs in the primitives above. Each is fixed
+with a regression test.
+
+- **R1 — argument-hash integer collision.** `canonicalArgsHash` decoded numbers
+  through `float64`, so distinct integers above 2^53 (e.g. two large amounts)
+  collided to the same hash — an approval/delegation bound to one amount could
+  match another. Now decodes with `UseNumber()` (exact) and rejects trailing
+  data. Test: `TestApprovalArgsHashIntegerPrecision` (2^53+1 vs 2^53+2). Applies
+  to both approval tokens and delegation `req_hash`.
+- **R2 — redactor lazy-init data race.** `Filter.redactor` was created lazily in
+  the `Write` goroutine while `pumpInner` read it concurrently. It is now created
+  at filter construction (always non-nil); the lazy init is removed. Verified
+  under `-race`.
+- **R3 — HTTP audit not fail-closed.** The HTTP enforcer discarded audit-write
+  errors, so `audit_fail_closed` did not fail closed there. It now denies an
+  allowed `tools/call`/method when the record cannot be written and the log is
+  fail-closed, matching stdio. Test: `TestHTTPEnforcerFailsClosedOnAuditError`.
+- **R4 — audit chain linkage unverified.** `VerifySigned` recomputed hashes but
+  never compared the stored `Hash` or verified `PrevHash` linkage, so a tampered
+  record in the unsealed tail (not Merkle-covered) went undetected. It now
+  verifies, per record, that the stored hash matches the content and that
+  `PrevHash` links to the previous record — the whole chain (including the tail)
+  is validated. Tests: `TestSignedVerifyDetectsBrokenLinkage`,
+  `TestSignedVerifyDetectsTailTamper`; and `TestSignedVerifyDetectsFullRewrite`
+  now genuinely re-hashes the plain chain to prove only the signed Merkle root
+  catches an insider rewrite.
+
+### Commit
+
+`policy: fix review-found defects (arg-hash precision, redactor race, HTTP fail-closed, audit linkage)`

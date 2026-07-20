@@ -1,12 +1,14 @@
 package policy
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -31,11 +33,21 @@ const (
 // identical arguments hash equally regardless of key order or insignificant
 // whitespace; arrays keep their order. Non-JSON bytes are hashed as-is.
 func canonicalArgsHash(args []byte) string {
+	// Decode with UseNumber so numbers stay exact (as json.Number/string) rather
+	// than being coerced through float64 — otherwise distinct integers above 2^53
+	// (e.g. two different large amounts) would collide to the same value and an
+	// approval for one could authorize another.
+	dec := json.NewDecoder(bytes.NewReader(args))
+	dec.UseNumber()
 	var v any
-	if len(args) > 0 && json.Unmarshal(args, &v) == nil {
-		if canon, err := json.Marshal(v); err == nil {
-			sum := sha256.Sum256(canon)
-			return hex.EncodeToString(sum[:])
+	if len(args) > 0 && dec.Decode(&v) == nil {
+		// Reject trailing data so two concatenated documents can't canonicalize
+		// to the same hash as one.
+		if _, err := dec.Token(); err == io.EOF {
+			if canon, err := json.Marshal(v); err == nil {
+				sum := sha256.Sum256(canon)
+				return hex.EncodeToString(sum[:])
+			}
 		}
 	}
 	sum := sha256.Sum256(args)

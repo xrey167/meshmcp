@@ -246,3 +246,20 @@ func TestFilterRequestBoundCosignEndToEnd(t *testing.T) {
 		t.Fatalf("approval is single-use; a replay must not be forwarded")
 	}
 }
+
+// TestApprovalArgsHashIntegerPrecision: distinct integers above 2^53 must NOT
+// collide (the old float64 canonicalization coerced them to the same value, so
+// an approval for one amount could authorize another).
+func TestApprovalArgsHashIntegerPrecision(t *testing.T) {
+	a := canonicalArgsHash([]byte(`{"amount":9007199254740993}`)) // 2^53 + 1
+	b := canonicalArgsHash([]byte(`{"amount":9007199254740994}`)) // 2^53 + 2
+	if a == b {
+		t.Fatal("distinct large integers must not collide in the canonical args hash")
+	}
+	// Same value, different key order still matches (canonicalization holds).
+	x := canonicalArgsHash([]byte(`{"a":1,"amount":9007199254740993}`))
+	y := canonicalArgsHash([]byte(`{"amount":9007199254740993,"a":1}`))
+	if x != y {
+		t.Fatal("key order must not change the canonical hash")
+	}
+}
