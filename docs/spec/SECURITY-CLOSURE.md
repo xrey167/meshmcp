@@ -466,3 +466,54 @@ failover is unchanged.
 ### Commit
 
 `router: do not auto-retry unknown-outcome mutating calls on failover`
+
+---
+
+## F-P9.1 · Gateway config silently ignores misspelled security fields — REPRODUCED, FIXED
+
+**Severity:** Medium-High (a mistyped security control fails open — the operator
+believes it is enabled but it never fires).
+
+**Component:** `config.go` (`loadConfig`).
+
+**Reproduced:** Yes. `loadConfig` used `yaml.Unmarshal`, which silently ignores
+unknown keys. A typo such as `audit_fail_clsoed`, `defualt_allow`,
+`require_cosgin`, or `taint_gaurd` was dropped with no error, so the intended
+control simply did not apply.
+
+### Fix
+
+`loadConfig` now decodes with `yaml.NewDecoder(...).KnownFields(true)`, so an
+unknown/misspelled/misplaced key is a startup error. Verified that **all 20 real
+gateway example configs** (every `examples/*.yaml` with a top-level `backends:`)
+still load; the non-gateway configs (router, pubsub, air, federation, …) use
+their own structs and are unaffected.
+
+### Tests (`config_test.go`)
+
+- `TestConfigStrictRejectsSecurityTypos` — misspelled `audit_fail_closed`,
+  `default_allow`, `require_cosign`, and `taint_guard` each fail startup;
+  the valid base config loads.
+- `TestExampleGatewayConfigsLoadStrictly` — every gateway example still loads
+  under strict decoding (guards against over-strictness).
+
+### Compatibility impact
+
+A config with an unknown/misspelled key now fails to start (previously ignored).
+This is the intended fail-closed behavior; operators must fix typos. All shipped
+example gateway configs are unaffected.
+
+### Residual risk / follow-up
+
+- This covers the gateway config. Extending strict decoding uniformly to the
+  other subsystem configs (router, pubsub, air, federation) plus invalid
+  duration/timezone/TTL negative tests is the remaining Phase-9 work. (The
+  control-plane ACL loader already uses strict decoding — see F-P2.)
+
+### Definition-of-Done item satisfied
+
+- *"Security configuration typos fail startup"* (gateway config).
+
+### Commit
+
+`config: strict YAML decoding so security-field typos fail startup`
