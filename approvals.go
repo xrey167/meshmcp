@@ -28,13 +28,21 @@ func cmdApprovals(args []string) error {
 	addr := fs.String("addr", "", "bind a plain local address instead of the mesh (dev/testing)")
 	ttlSec := fs.Int("ttl", 0, "drop pending requests older than this many seconds (0 = never)")
 	var approvers stringList
-	fs.Var(&approvers, "approver", "identity allowed to approve (FQDN glob or 'pubkey:<key>'); repeatable; empty = any mesh peer")
+	fs.Var(&approvers, "approver", "identity allowed to approve (FQDN glob or 'pubkey:<key>'); repeatable; REQUIRED in mesh mode")
 	devices := fs.String("devices", "", "directory to persist push-wake device tokens (enables /v1/devices + notify on new pendings)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *store == "" {
 		return fmt.Errorf("meshmcp approvals: --store <dir> is required")
+	}
+	// Fail closed: on the mesh, a mandatory approver ACL identifies who may
+	// approve/deny. An empty ACL must NOT mean "any mesh peer may approve" — that
+	// would let a low-privilege agent self-authorize its own held call. Require
+	// at least one --approver in mesh mode (the local --addr dev listener uses a
+	// fixed operator identity and is not a mesh administrative endpoint).
+	if *addr == "" && len(approvers) == 0 {
+		return fmt.Errorf("meshmcp approvals: --approver is required in mesh mode (e.g. --approver 'pubkey:<key>' or an FQDN glob); refusing to start an approver that any mesh peer could use to self-authorize")
 	}
 	ps := &policy.FilePending{Dir: *store, TTL: time.Duration(*ttlSec) * time.Second}
 

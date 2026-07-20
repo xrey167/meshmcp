@@ -336,3 +336,61 @@ Migration noted for operators.
 ### Commit
 
 `control: default-deny transport-derived RBAC on the control plane`
+
+---
+
+## F-P2.2 · Empty approver config = any mesh peer may approve — REPRODUCED, FIXED
+
+**Severity:** High (a low-privilege agent could approve its own held
+`require_cosign` call).
+
+**Component:** `approvals.go` (`cmdApprovals`).
+
+**Reproduced:** Yes. `--approver` was optional and documented as *"empty = any
+mesh peer"*: when no approver was configured, the `decide` handler's
+authorization check (`if authorized != nil && !authorized(r)`) was skipped, so
+any mesh peer could `POST /v1/approve` or `/v1/deny`.
+
+### Root cause
+
+The approver ACL was opt-in. An empty operator ACL silently meant "any mesh
+peer may approve," so the human-in-the-loop control could be self-satisfied by
+the very agent whose call was being held.
+
+### Fix
+
+`cmdApprovals` now **fails closed at startup in mesh mode**: at least one
+`--approver` (FQDN glob or `pubkey:<key>`) is required, else it refuses to
+start. The approver identity is still derived from the transport (the handler
+already did this and ignores caller-supplied identity). The local `--addr` dev
+listener (fixed `operator@local`, local bind) is exempt and clearly not a mesh
+administrative endpoint.
+
+### Tests
+
+- `TestApprovalsRequiresApproverACLInMeshMode` — mesh mode with no `--approver`
+  returns a fail-closed startup error (network-free; guard runs before the mesh
+  starts).
+- Existing `TestApprovalsOperatorAllowlist` (unauthorized approver ⇒ 403) and
+  `TestApprovalsFlow` still pass.
+
+### Compatibility impact
+
+`meshmcp approvals` served on the mesh now requires `--approver`. Deployments
+relying on the implicit "any peer" behavior must add an explicit approver ACL.
+
+### Residual risk
+
+- This makes approval *authorization* mandatory. Request-bound, signed,
+  single-use approval *objects* (argument-hash binding, TTL, replay protection)
+  are Phase 3 and not yet implemented — current approvals remain per-(peer,tool)
+  ambient grants with an optional TTL.
+
+### Definition-of-Done item advanced
+
+- *"Ordinary mesh peers cannot mutate control or approval state"* — approval
+  half (authorization). The request-binding half is Phase 3.
+
+### Commit
+
+`approvals: require a mandatory approver ACL on the mesh (fail closed)`
