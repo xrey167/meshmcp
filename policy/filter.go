@@ -214,85 +214,60 @@ type rpcPeek struct {
 // notifications (by method; denied notifications are dropped since there
 // is no id to answer).
 func (f *Filter) handleLine(line []byte) error {
-	trimmed := bytes.TrimSpace(line)
-	if len(trimmed) == 0 {
-		return nil
-	}
-	// A JSON-RPC batch (top-level array) can't be authorized per-entry by
-	// this line filter, so a batch-capable backend could smuggle a denied
-	// tools/call inside one. Refuse batches (when enforcing) rather than
-	// forward blind.
-	if trimmed[0] == '[' {
-		if f.eng != nil {
-			_ = f.audited(f.record("<batch>", "", "", Decision{RuleID: -1, Reason: "batches unsupported"}))
-			f.traceLine("c2s", trimmed, "deny")
-			f.writeDenial(json.RawMessage("null"), "JSON-RPC batches are not supported by the mesh policy filter")
-			return nil
-		}
-		f.traceLine("c2s", trimmed, "")
-		_, werr := f.inner.Write(line)
-		return werr
-	}
-	var msg rpcPeek
-	if err := json.Unmarshal(trimmed, &msg); err != nil {
-		// Under enforcement, an unparseable line must not reach the backend: a
-		// parser differential (bytes this strict peek rejects but the backend
-		// accepts) could smuggle a call past policy, exactly as a batch could.
-		if f.eng != nil {
-			_ = f.audited(f.record("<unparseable>", "", "", Decision{RuleID: -1, Reason: "unparseable JSON-RPC"}))
-			f.traceLine("c2s", trimmed, "deny")
-			f.writeDenial(json.RawMessage("null"), "unparseable JSON-RPC line rejected by mesh policy")
-			return nil
-		}
-		// Tracing-only (or pure passthrough): forward untouched.
-		f.traceLine("c2s", trimmed, "")
-		_, werr := f.inner.Write(line)
-		return werr
-	}
-
-	// Tracing-only (no policy): record and forward everything.
+	// Tracing-only (no policy): record and forward everything untouched,
+	// including batches / unparseable lines (there is nothing to enforce).
 	if f.eng == nil {
+		trimmed := bytes.TrimSpace(line)
+		if len(trimmed) == 0 {
+			return nil
+		}
 		f.traceLine("c2s", trimmed, "")
 		_, werr := f.inner.Write(line)
 		return werr
 	}
 
-	// Canonical parse: reject a line whose security-relevant framing is
-	// ambiguous. Go's encoding/json silently keeps the LAST of duplicated keys,
-	// so a backend that keeps the first (or a different tool name / method /
-	// id) would act on a different request than the one we authorized. Refuse
-	// any duplicate key rather than authorize one interpretation and forward
-	// another. (See Phase 2 / canonical-json in the audit-verification spec.)
-	if err := checkNoDuplicateKeys(trimmed); err != nil {
-		_ = f.audited(f.record("<ambiguous>", "", "", Decision{RuleID: -1, Reason: "duplicate JSON key"}))
-		f.traceLine("c2s", trimmed, "deny")
-		f.writeDenial(json.RawMessage("null"), "ambiguous JSON-RPC (duplicate key) rejected by mesh policy")
-		return nil
-	}
+	// Classify + validate through the SHARED classifier, so the stdio path and
+	// the Streamable-HTTP enforcer cannot drift on which requests are rejected,
+	// governed, or passed through (Phase 7).
+	class := ClassifyRPC(line)
 
-	// Strip any presented capability from EVERY governed client->backend line
-	// so the token never reaches the backend, trace, audit, or secret injection.
-	// It is honored only on tools/call (below); on tasks/*, tools/list, and
+	// Strip any presented capability from EVERY governed client->backend line so
+	// the token never reaches the backend, trace, audit, or secret injection. It
+	// is honored only on tools/call (via capToken); on tasks/*, tools/list, and
 	// notifications it is simply removed — a caller sets it once on the session,
-	// so it rides along on follow-up requests (e.g. task polling) that must not
-	// forward it. Non-token lines are returned byte-identical.
+	// so it rides along on follow-up requests that must not forward it.
 	var capToken string
 	if f.capVerifier != nil {
-		capToken, line = stripCapability(line)
+		switch class.Kind {
+		case RPCToolCall, RPCNotification, RPCMethod:
+			capToken, line = stripCapability(line)
+		}
 	}
 
-	// Dispatch security-sensitive methods by NAME before classifying by the
-	// presence of an id. A tools/call is a JSON-RPC *request* and must always
-	// pass through tool policy; routing it by id first let an id-less
-	// tools/call fall into generic notification handling and skip tool
-	// authorization entirely.
-	if msg.Method == "tools/call" {
-		return f.handleToolCall(line, msg, capToken)
+	switch class.Kind {
+	case RPCEmpty:
+		return nil
+	case RPCBatch:
+		_ = f.audited(f.record("<batch>", "", "", Decision{RuleID: -1, Reason: "batches unsupported"}))
+		f.traceLine("c2s", line, "deny")
+		f.writeDenial(json.RawMessage("null"), class.Reason)
+		return nil
+	case RPCInvalid:
+		method := class.Method
+		if method == "" {
+			method = "<invalid>"
+		}
+		_ = f.audited(f.record(method, class.Tool, string(class.ID), Decision{RuleID: -1, Outcome: OutcomeDeny, Reason: class.Reason}))
+		f.traceLine("c2s", line, "deny")
+		f.writeDenial(class.ID, class.Reason)
+		return nil
+	case RPCToolCall:
+		return f.handleToolCall(line, class.Tool, class.ID, class.Args, capToken)
+	case RPCNotification:
+		return f.handleNotification(line, class.Method)
+	default: // RPCMethod
+		return f.handleMethod(line, class.Method, class.ID)
 	}
-	if len(msg.ID) == 0 {
-		return f.handleNotification(line, msg.Method)
-	}
-	return f.handleMethod(line, msg)
 }
 
 // validRequestID reports whether id is a usable JSON-RPC request id: present
@@ -371,34 +346,15 @@ func scanNoDupKeys(dec *json.Decoder) error {
 // been stripped from line by handleLine and passed in as capToken, so every
 // downstream step (audit, trace, secret injection, backend write) uses the
 // token-free line.
-func (f *Filter) handleToolCall(line []byte, msg rpcPeek, capToken string) error {
-	// A tools/call is a JSON-RPC request and MUST carry a valid, non-null id.
-	// An id-less or null-id tools/call is a malformed MCP request: reject it as
-	// protocol-invalid so it can never slip past tool policy. Audit the
-	// rejection and never forward it to the backend.
-	if !validRequestID(msg.ID) {
-		_ = f.audited(f.record(msg.Method, msg.Params.Name, "",
-			Decision{RuleID: -1, Outcome: OutcomeDeny, Reason: "tools/call missing valid id"}))
-		f.traceLine("c2s", line, "deny")
-		f.writeDenial(json.RawMessage("null"), "tools/call rejected: missing or null JSON-RPC id (invalid MCP request)")
-		return nil
-	}
-	tool := msg.Params.Name
-	// params.name must be a non-empty string. A wrong-typed name would already
-	// have failed the strict peek unmarshal in handleLine; an absent/empty one
-	// reaches here and is rejected rather than authorized as the empty tool.
-	if tool == "" {
-		_ = f.audited(f.record(msg.Method, "", string(msg.ID),
-			Decision{RuleID: -1, Outcome: OutcomeDeny, Reason: "tools/call missing tool name"}))
-		f.traceLine("c2s", line, "deny")
-		f.writeDenial(msg.ID, "tools/call rejected: missing or empty params.name")
-		return nil
-	}
+func (f *Filter) handleToolCall(line []byte, tool string, id, args json.RawMessage, capToken string) error {
+	// id validity and a non-empty tool name are guaranteed by ClassifyRPC (an
+	// id-less / null-id / empty-name tools/call is rejected there as
+	// protocol-invalid before reaching this handler).
 
 	// Bind co-sign approvals to this exact backend + arguments (Phase 3): a
 	// require_cosign rule is satisfied only by a signed, single-use approval for
 	// precisely these arguments, which DecideToolCallBound consumes atomically.
-	dec := f.eng.DecideToolCallBound(f.caller.Peer, f.caller.PeerKey, f.caller.Backend, tool, msg.Params.Arguments, f.labelSnapshot())
+	dec := f.eng.DecideToolCallBound(f.caller.Peer, f.caller.PeerKey, f.caller.Backend, tool, args, f.labelSnapshot())
 	if f.capVerifier != nil {
 		dec = f.applyCapability(dec, capToken, tool)
 	}
@@ -406,16 +362,16 @@ func (f *Filter) handleToolCall(line []byte, msg rpcPeek, capToken string) error
 	// co-sign) or add labels — never widen a deny into an allow.
 	if len(f.hooks) > 0 {
 		dec = applyDecisionHooks(f.hooks, ToolCallInfo{
-			Caller: f.caller, Tool: tool, Arguments: msg.Params.Arguments, Labels: f.labelSnapshot(),
+			Caller: f.caller, Tool: tool, Arguments: args, Labels: f.labelSnapshot(),
 		}, dec)
 	}
-	rec := f.record(msg.Method, tool, string(msg.ID), dec)
+	rec := f.record("tools/call", tool, string(id), dec)
 	if err := f.audited(rec); err != nil && f.audit.FailClosed() {
 		// Audit is a control: if the tamper-evident record cannot be written
 		// and the log is fail-closed, deny the call rather than let it reach
 		// the backend unrecorded.
 		f.traceLine("c2s", line, "deny")
-		f.writeDenial(msg.ID, fmt.Sprintf("tool %q blocked: audit sink unavailable (fail-closed)", tool))
+		f.writeDenial(id, fmt.Sprintf("tool %q blocked: audit sink unavailable (fail-closed)", tool))
 		return nil
 	}
 	f.traceLine("c2s", line, rec.Decision)
@@ -432,7 +388,7 @@ func (f *Filter) handleToolCall(line []byte, msg rpcPeek, capToken string) error
 		if f.secrets != nil {
 			resolved, injected, ok, reason := f.secrets.Resolve(f.caller, tool, line, f.labelSnapshot())
 			if !ok {
-				f.writeDenial(msg.ID, fmt.Sprintf("tool %q blocked: %s", tool, reason))
+				f.writeDenial(id, fmt.Sprintf("tool %q blocked: %s", tool, reason))
 				return nil
 			}
 			// Record injected values so the response pump can scrub them: a
@@ -454,17 +410,17 @@ func (f *Filter) handleToolCall(line []byte, msg rpcPeek, capToken string) error
 		if f.pending != nil {
 			_ = f.pending.Record(Pending{
 				Peer: f.caller.Peer, PeerKey: f.caller.PeerKey, Backend: f.caller.Backend,
-				Tool: tool, RPCID: string(msg.ID),
+				Tool: tool, RPCID: string(id),
 			})
 		}
-		f.writeDenial(msg.ID, fmt.Sprintf("tool %q requires a human co-sign on the mesh: %s", tool, dec.Reason))
+		f.writeDenial(id, fmt.Sprintf("tool %q requires a human co-sign on the mesh: %s", tool, dec.Reason))
 		return nil
 	default:
 		reason := dec.Reason
 		if reason == "" {
 			reason = "denied by mesh policy"
 		}
-		f.writeDenial(msg.ID, fmt.Sprintf("tool %q blocked for peer %s: %s", tool, f.caller.Peer, reason))
+		f.writeDenial(id, fmt.Sprintf("tool %q blocked for peer %s: %s", tool, f.caller.Peer, reason))
 		return nil
 	}
 }
@@ -472,24 +428,24 @@ func (f *Filter) handleToolCall(line []byte, msg rpcPeek, capToken string) error
 // handleMethod governs a non-tool request (e.g. tasks/cancel). Methods are
 // audited and enforced only when a Methods rule matches; ungoverned methods
 // (initialize, tools/list, ...) pass through unaudited.
-func (f *Filter) handleMethod(line []byte, msg rpcPeek) error {
-	dec := f.eng.pol.DecideMethod(f.caller.Peer, f.caller.PeerKey, msg.Method)
+func (f *Filter) handleMethod(line []byte, method string, id json.RawMessage) error {
+	dec := f.eng.pol.DecideMethod(f.caller.Peer, f.caller.PeerKey, method)
 	if dec.RuleID == -1 {
 		f.traceLine("c2s", line, "")
 		_, werr := f.inner.Write(line)
 		return werr
 	}
-	auditErr := f.audited(f.record(msg.Method, "", string(msg.ID), dec))
+	auditErr := f.audited(f.record(method, "", string(id), dec))
 	f.traceLine("c2s", line, decisionStr(dec.Allow))
 	if dec.Allow {
 		if auditErr != nil && f.audit.FailClosed() {
-			f.writeDenial(msg.ID, fmt.Sprintf("method %q blocked: audit sink unavailable (fail-closed)", msg.Method))
+			f.writeDenial(id, fmt.Sprintf("method %q blocked: audit sink unavailable (fail-closed)", method))
 			return nil
 		}
 		_, werr := f.inner.Write(line)
 		return werr
 	}
-	f.writeDenial(msg.ID, fmt.Sprintf("method %q denied by mesh policy for peer %s", msg.Method, f.caller.Peer))
+	f.writeDenial(id, fmt.Sprintf("method %q denied by mesh policy for peer %s", method, f.caller.Peer))
 	return nil
 }
 

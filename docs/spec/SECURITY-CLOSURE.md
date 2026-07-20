@@ -822,3 +822,67 @@ reachable-empty-store case is unchanged.
 ### Commit
 
 `policy: capability revocation fails closed when the store is unavailable`
+
+---
+
+## F-P7 · stdio and HTTP enforcement drift — REPRODUCED, FIXED
+
+**Severity:** High (a request hardened on stdio was softer over HTTP: the Phase-1
+protections applied to stdio only).
+
+**Component:** `policy/classify.go` (new), `policy/filter.go`, `httppolicy.go`.
+
+**Reproduced:** Yes. The stdio `Filter` (post Phase-1) rejects an id-less /
+null-id / empty-name / duplicate-key `tools/call` and governs methods, but the
+HTTP `httpEnforcer.decide` only checked `msg.Method == "tools/call"` and then
+`DecideToolCall`. Over HTTP an **id-less tools/call for an allowed tool was
+forwarded**, a duplicate-key smuggle passed, and governed non-tool methods
+(e.g. `tasks/cancel`) passed through — different decisions than stdio for the
+same request and identity.
+
+### Fix
+
+Introduce a single shared classifier, `policy.ClassifyRPC`, as the source of
+truth for how a JSON-RPC line classifies (batch / invalid / tool-call /
+notification / method) and which are protocol-invalid. Both transports route
+through it:
+
+- `policy/filter.go` `handleLine` now dispatches on `ClassifyRPC` (the stdio
+  Phase-1 logic, unchanged in effect); `handleToolCall`/`handleMethod` take the
+  classified fields.
+- `httppolicy.go` `decide` now uses `ClassifyRPC` too — rejecting id-less /
+  null-id / empty-name / duplicate-key tool calls and batches identically, and
+  governing non-tool methods with `DecideMethod` like stdio.
+
+### Tests
+
+- `conformance_test.go` `TestStdioHTTPConformance` — 9 cases (allowed/denied
+  tool, id-less, null-id, empty name, duplicate key, batch, governed method,
+  ungoverned method) asserting the stdio filter and the HTTP enforcer reach the
+  **same** allow/deny outcome for the same request+identity. This fails on the
+  pre-fix HTTP path for the id-less/null-id/empty-name/dup-key/governed-method
+  cases.
+- All existing filter and HTTP-enforcer tests still pass; policy + root race-clean.
+
+### Compatibility impact
+
+The HTTP path now rejects malformed/ambiguous tool calls and enforces method
+rules it previously ignored — a security tightening. Well-formed traffic is
+unaffected.
+
+### Residual risk / follow-up
+
+- Taint labels, secret injection, and capability upgrades remain on the stdio
+  path (they need per-session state / SSE body rewriting); this is documented in
+  the enforcer and the capability matrix rather than silently ignored. The
+  shared classifier prevents the classification/decision drift that mattered
+  most.
+
+### Definition-of-Done item satisfied
+
+- *"Stdio and HTTP enforce the same declared controls"* (classification + tool/
+  method decisions; per-session controls remain stdio-only and are labeled).
+
+### Commit
+
+`policy: shared JSON-RPC classifier for stdio/HTTP enforcement parity`

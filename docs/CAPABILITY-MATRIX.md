@@ -20,7 +20,7 @@ production recommendation. Guarantees are bounded by
 |---|---|---|---|---|---|---|---|---|
 | Private mesh transport + transport-bound identity | Stable | stdio, HTTP | Caller identity is the WireGuard key proved by the transport; no public application ingress | Depends on a correctly configured NetBird/WireGuard mesh | NetBird mgmt (or static keys) | none | mesh/acl tests | Recommended |
 | MCP gatewaying (stdio) | Stable | stdio | Transparent pass-through with policy enforcement on the wire | — | none | none | filter/mcp tests | Recommended |
-| MCP gatewaying (Streamable HTTP) | Beta | HTTP | Same policy pipeline as stdio | Enforcement-parity conformance suite (Phase 7) still landing | none | none | httppolicy tests | Recommended, verify parity for your config |
+| MCP gatewaying (Streamable HTTP) | Beta | HTTP | Same classifier + tool/method decisions as stdio (conformance-tested) | Per-session controls (taint/secrets/capabilities) remain stdio-only | none | none | httppolicy + conformance tests | Recommended |
 | Per-identity tool/method policy | Stable | stdio, HTTP | Default-deny tools; opt-in method governance; ID-less/ambiguous `tools/call` cannot bypass policy | — | none | none | filter + fuzz | Recommended |
 | Control-plane RBAC | Stable | mesh HTTP | Default-deny, transport-derived roles; ordinary peers cannot administer; fail-closed startup | Bootstrap credential redesign + policy optimistic-concurrency are follow-ups | registry/policy dirs | files | control RBAC tests | Recommended |
 | Request-specific human approval | Beta | mesh HTTP | Mandatory approver ACL; approver identity from transport | Per-(peer,tool) ambient grant, not yet request-bound/single-use (Phase 3) | approver store dir | files | approvals tests | Use with a tight TTL |
@@ -58,7 +58,7 @@ continuously tested.
 | External audit anchoring interface (witnessed) | 5 |
 | Wire the CAS/fencing session-lease primitive (done at store layer) into the server failover path | 6 |
 | Explicit tool retry classification + enforced idempotency keys | 6 |
-| stdio/HTTP enforcement-parity conformance suite + capability matrix | 7 |
+| Extend stdio/HTTP parity to per-session controls (taint/secrets/capabilities); classification + tool/method decisions are done + conformance-tested | 7 |
 | Backend egress restriction for secrets (response-side redaction is done) | 8 |
 | Extend strict config (`KnownFields`) to the remaining subsystem configs (gateway config + control ACL done) | 9 |
 | MCP protocol-version negotiation + supported-version matrix | 9 |
