@@ -255,6 +255,19 @@ func (f *Filter) handleLine(line []byte) error {
 		return werr
 	}
 
+	// Canonical parse: reject a line whose security-relevant framing is
+	// ambiguous. Go's encoding/json silently keeps the LAST of duplicated keys,
+	// so a backend that keeps the first (or a different tool name / method /
+	// id) would act on a different request than the one we authorized. Refuse
+	// any duplicate key rather than authorize one interpretation and forward
+	// another. (See Phase 2 / canonical-json in the audit-verification spec.)
+	if err := checkNoDuplicateKeys(trimmed); err != nil {
+		_ = f.audited(f.record("<ambiguous>", "", "", Decision{RuleID: -1, Reason: "duplicate JSON key"}))
+		f.traceLine("c2s", trimmed, "deny")
+		f.writeDenial(json.RawMessage("null"), "ambiguous JSON-RPC (duplicate key) rejected by mesh policy")
+		return nil
+	}
+
 	// Strip any presented capability from EVERY governed client->backend line
 	// so the token never reaches the backend, trace, audit, or secret injection.
 	// It is honored only on tools/call (below); on tasks/*, tools/list, and
@@ -266,13 +279,90 @@ func (f *Filter) handleLine(line []byte) error {
 		capToken, line = stripCapability(line)
 	}
 
-	if len(msg.ID) == 0 {
-		return f.handleNotification(line, msg.Method)
-	}
+	// Dispatch security-sensitive methods by NAME before classifying by the
+	// presence of an id. A tools/call is a JSON-RPC *request* and must always
+	// pass through tool policy; routing it by id first let an id-less
+	// tools/call fall into generic notification handling and skip tool
+	// authorization entirely.
 	if msg.Method == "tools/call" {
 		return f.handleToolCall(line, msg, capToken)
 	}
+	if len(msg.ID) == 0 {
+		return f.handleNotification(line, msg.Method)
+	}
 	return f.handleMethod(line, msg)
+}
+
+// validRequestID reports whether id is a usable JSON-RPC request id: present
+// and not null. A string (including "") or a number is accepted; an absent or
+// null id is not. A tools/call lacking a valid id is a malformed MCP request.
+func validRequestID(id json.RawMessage) bool {
+	t := bytes.TrimSpace(id)
+	return len(t) != 0 && !bytes.Equal(t, []byte("null"))
+}
+
+// checkNoDuplicateKeys walks a JSON document and returns an error if any object
+// (at any depth) contains a duplicated key. This closes the parser-differential
+// gap where the strict peek here and the downstream backend could disagree on
+// method, id, or tool name.
+func checkNoDuplicateKeys(data []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	if err := scanNoDupKeys(dec); err != nil {
+		return err
+	}
+	// Reject trailing garbage after the first value (a second concatenated
+	// document could be re-parsed differently by a lenient backend).
+	if _, err := dec.Token(); err != io.EOF {
+		if err == nil {
+			return errors.New("policy: trailing data after JSON value")
+		}
+		return err
+	}
+	return nil
+}
+
+func scanNoDupKeys(dec *json.Decoder) error {
+	t, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	delim, ok := t.(json.Delim)
+	if !ok {
+		return nil // scalar
+	}
+	switch delim {
+	case '{':
+		seen := make(map[string]struct{})
+		for dec.More() {
+			kt, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := kt.(string)
+			if !ok {
+				return errors.New("policy: non-string object key")
+			}
+			if _, dup := seen[key]; dup {
+				return fmt.Errorf("policy: duplicate JSON key %q", key)
+			}
+			seen[key] = struct{}{}
+			if err := scanNoDupKeys(dec); err != nil {
+				return err
+			}
+		}
+		_, err := dec.Token() // consume '}'
+		return err
+	case '[':
+		for dec.More() {
+			if err := scanNoDupKeys(dec); err != nil {
+				return err
+			}
+		}
+		_, err := dec.Token() // consume ']'
+		return err
+	}
+	return nil
 }
 
 // handleToolCall authorizes a tools/call. The capability (if any) has already
@@ -280,7 +370,28 @@ func (f *Filter) handleLine(line []byte) error {
 // downstream step (audit, trace, secret injection, backend write) uses the
 // token-free line.
 func (f *Filter) handleToolCall(line []byte, msg rpcPeek, capToken string) error {
+	// A tools/call is a JSON-RPC request and MUST carry a valid, non-null id.
+	// An id-less or null-id tools/call is a malformed MCP request: reject it as
+	// protocol-invalid so it can never slip past tool policy. Audit the
+	// rejection and never forward it to the backend.
+	if !validRequestID(msg.ID) {
+		_ = f.audited(f.record(msg.Method, msg.Params.Name, "",
+			Decision{RuleID: -1, Outcome: OutcomeDeny, Reason: "tools/call missing valid id"}))
+		f.traceLine("c2s", line, "deny")
+		f.writeDenial(json.RawMessage("null"), "tools/call rejected: missing or null JSON-RPC id (invalid MCP request)")
+		return nil
+	}
 	tool := msg.Params.Name
+	// params.name must be a non-empty string. A wrong-typed name would already
+	// have failed the strict peek unmarshal in handleLine; an absent/empty one
+	// reaches here and is rejected rather than authorized as the empty tool.
+	if tool == "" {
+		_ = f.audited(f.record(msg.Method, "", string(msg.ID),
+			Decision{RuleID: -1, Outcome: OutcomeDeny, Reason: "tools/call missing tool name"}))
+		f.traceLine("c2s", line, "deny")
+		f.writeDenial(msg.ID, "tools/call rejected: missing or empty params.name")
+		return nil
+	}
 
 	dec := f.eng.DecideToolCall(f.caller.Peer, f.caller.PeerKey, tool, f.labelSnapshot())
 	if f.capVerifier != nil {
