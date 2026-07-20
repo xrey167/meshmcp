@@ -126,3 +126,115 @@ JSON-RPC is unaffected.
 ### Commit
 
 `policy: close ID-less tools/call bypass and duplicate-key parser differential`
+
+---
+
+## F-P5 · Audit verification over-reports completeness and trust — REPRODUCED, FIXED
+
+**Severity:** High (a false "complete, non-repudiable, verified" claim over an
+incomplete or untrusted audit log undermines the product's core security claim).
+
+**Component:** `policy/verify_signed.go` (`VerifySigned`) and its CLI callers in
+`audit.go`.
+
+**Reproduced:** Yes, against the current tree (see failing tests below).
+
+### Root cause
+
+`VerifySigned` set `res.OK = true` whenever there was at least one valid
+checkpoint, and the CLI (`audit.go`) then printed *"non-repudiable: the log is
+complete and unedited, provable with the public key alone."* This was wrong in
+four ways:
+
+1. **Uncovered tail.** Records after the last checkpoint's `ToSeq` are unsealed,
+   yet `OK=true` was returned and reported as *complete*. A verifier could show
+   `covered_records < records` and still call the log complete.
+2. **No pinned key required for trust.** With an empty `expectPub`,
+   `VerifyCheckpoint` skips the pin check and verifies only the self-signature,
+   so a whole-file rewrite re-signed by an *attacker's* key verified as OK and
+   was reported "provable with the public key alone."
+3. **Duplicate / non-monotonic record sequence numbers** were silently
+   collapsed into a map (`hashBySeq[rec.Seq]`), never detected.
+4. **Mixed signers.** Without a pin, checkpoints signed by two different keys
+   all passed (each self-consistent), so an attacker could append their own
+   checkpoints over a rolled-back log.
+
+Additionally, the signed `Count` was trusted for `covered_records` without being
+checked against the covered span, so a forged `Count` could inflate coverage.
+
+### Fix
+
+`policy/verify_signed.go`:
+
+- Report **four distinct outcomes** via a new `Status` field (plus `Sealed` and
+  `Trusted` booleans): `invalid`, `untrusted_key` (valid but no expected key
+  pinned), `unsealed` (valid & trusted but a tail is uncovered), `sealed`
+  (valid, trusted, every record covered). `OK` now means only "the checkpoint
+  chain is structurally and cryptographically valid."
+- **Sealed** requires the last checkpoint to cover the final record with gapless
+  coverage from seq 1.
+- **Trusted** requires an explicitly pinned `expectPub` (enforced on every
+  checkpoint). Without a pin the result is `untrusted_key`, never trusted.
+- **Reject** duplicate / non-monotonic record sequence numbers, mixed signers,
+  a `Count` that does not equal the covered span, inverted ranges, and lines
+  that do not parse as a record.
+- Honest doc comment: "gateway-signed tamper-evident decision log"; explicitly
+  states it does not prove every real-world action was observed and cannot alone
+  defend against a key-holding insider without external anchoring.
+
+`audit.go`:
+
+- `audit verify --checkpoints` now prints a tiered, honest verdict and **exits
+  non-zero unless `Status == sealed`** (i.e. valid, fully covered, and pinned to
+  an expected key). The false "complete/non-repudiable/with the public key
+  alone" line is removed.
+- `audit attest` verdict now includes `sealed`, `trusted`, and `status`.
+
+### Tests (`policy/verify_signed_states_test.go`)
+
+Each confirmed to **fail on the vulnerable code** first, pass after the fix:
+
+- `TestSignedVerifyUnsealedTail` — uncovered tail ⇒ `OK` true but `Sealed` false, `Status=unsealed`.
+- `TestSignedVerifySealedWhenFlushed` — flushed + pinned ⇒ `OK && Sealed && Trusted`, `Status=sealed`.
+- `TestSignedVerifyUntrustedKey` — no pinned key ⇒ `Trusted` false, `Status=untrusted_key`.
+- `TestSignedVerifyDuplicateSeq` — duplicate record seq ⇒ invalid.
+- `TestSignedVerifyMixedSigners` — checkpoints signed by two keys ⇒ invalid.
+
+Existing tests (`TestSignedVerifyIntact`, `DetectsFullRewrite`,
+`DetectsForgedCheckpoint`, `PinsSigner`) still pass unchanged.
+
+### Commands run
+
+- `go test ./policy/ -run 'TestSignedVerify|TestMerkle'` — all pass.
+- `go build ./...` — pass. `go vet ./policy/ .` — clean.
+- `go test -race ./policy/` — pass. `go test ./...` — pass except the
+  pre-existing `mcp:TestTaskSteer` flake.
+
+### Compatibility impact
+
+`meshmcp audit verify --checkpoints` **without `--pubkey`, or over a log with an
+unsealed tail, now exits non-zero** (previously exit 0). This is intentional:
+such a result is not a trusted, complete verification. Pin `--pubkey <hex>` and
+flush a checkpoint to get a `sealed` result and exit 0. The JSON result gains
+`sealed`/`trusted`/`status`; existing `ok`/`records`/`covered_records` fields are
+unchanged.
+
+### Residual risk
+
+- Sealing and trust are established; **rollback of both the log and its local
+  checkpoints by a key-holding insider** is only defended by external anchoring
+  (`Anchor` interface / `FileAnchor` exist; a documented external witness is
+  still Labs/optional). This limit is now stated in the verifier's own doc and
+  the CLI output rather than overclaimed.
+- Restart-safe append continuity (parse+verify existing chain, seed the writer
+  from the verified tail, refuse to append to an unverifiable log) is a separate
+  Phase 5 item, not yet implemented here.
+
+### Definition-of-Done items satisfied
+
+- *"Audit verification cannot report completeness with an uncovered tail."*
+- *"Audit trust requires a pinned expected key."*
+
+### Commit
+
+`policy: honest four-state audit verification (sealed/trusted/unsealed/invalid)`

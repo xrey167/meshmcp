@@ -233,9 +233,24 @@ func auditVerifySigned(logPath, cpPath, pubkey string) error {
 		return fmt.Errorf("verify: %w", err)
 	}
 	if res.OK {
-		fmt.Printf("OK  %d records, %d signed checkpoint(s), %d records committed\n", res.Records, res.Checkpoints, res.CoveredRecords)
+		fmt.Printf("OK  %d records, %d signed checkpoint(s), %d records covered  [%s]\n", res.Records, res.Checkpoints, res.CoveredRecords, res.Status)
 		fmt.Printf("    signer %s\n", res.SignerPub)
-		fmt.Printf("    non-repudiable: the log is complete and unedited, provable with the public key alone\n")
+		switch res.Status {
+		case policy.StatusSealed:
+			fmt.Printf("    SEALED & TRUSTED: gateway-signed tamper-evident decision log — every record is covered\n")
+			fmt.Printf("    by a checkpoint signed with the pinned key. A holder of the file cannot edit a\n")
+			fmt.Printf("    covered record without the signing key. (Anchor a checkpoint externally to also\n")
+			fmt.Printf("    defend against a key-holding insider who rolls the log and checkpoints back together.)\n")
+		case policy.StatusUnsealed:
+			fmt.Printf("    VALID but UNSEALED: %d record(s) after the last checkpoint are not yet sealed.\n", res.Records-res.CoveredRecords)
+			fmt.Printf("    Flush a checkpoint and re-verify to seal the tail before treating the log as complete.\n")
+		case policy.StatusUntrustedKey:
+			fmt.Printf("    UNTRUSTED KEY: the chain is internally valid but no expected --pubkey was pinned,\n")
+			fmt.Printf("    so the signer is unverified. Re-run with --pubkey <hex> to establish trust.\n")
+		}
+		if res.Status != policy.StatusSealed {
+			return fmt.Errorf("audit log %s verified but is not fully sealed and trusted (status %s)", logPath, res.Status)
+		}
 		return nil
 	}
 	fmt.Fprintf(os.Stderr, "FAILED  %d records, %d checkpoint(s) read\n", res.Records, res.Checkpoints)
@@ -300,6 +315,7 @@ func auditAttest(args []string) error {
 			"mode": "signed-merkle", "ok": res.OK, "records": res.Records,
 			"checkpoints": res.Checkpoints, "covered_records": res.CoveredRecords,
 			"signer_pubkey": res.SignerPub, "reason": res.Reason,
+			"sealed": res.Sealed, "trusted": res.Trusted, "status": res.Status,
 		}
 		cpArt, err := artifact(*cpPath)
 		if err != nil {
