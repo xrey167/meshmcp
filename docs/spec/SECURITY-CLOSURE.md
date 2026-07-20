@@ -394,3 +394,75 @@ relying on the implicit "any peer" behavior must add an explicit approver ACL.
 ### Commit
 
 `approvals: require a mandatory approver ACL on the mesh (fail closed)`
+
+---
+
+## F-P6.4 · Router auto-retries unknown-outcome mutating calls — REPRODUCED, FIXED
+
+**Severity:** High (a non-idempotent tool — a payment, a deploy — could execute
+twice on failover).
+
+**Component:** `router.go` (`upstreamPool.call`).
+
+**Reproduced:** Yes. `pool.call` failed over to the next replica on **any**
+transport error from `uc.Call`, including for `tools/call`, even when the
+request had already been dispatched on a live connection and only the *response*
+was lost. The regression test drives a replica whose transport dies mid
+`tools/call`; on the old code the router silently re-sent the call to a healthy
+replica (double execution).
+
+### Root cause
+
+The failover loop did not distinguish "never connected" (request not sent — safe
+to try elsewhere) from "dispatched, then transport failed" (ambiguous outcome —
+the upstream may have executed the side effect). It also did not distinguish
+read-only methods from potentially-mutating `tools/call`.
+
+### Fix
+
+`upstreamPool.call` now:
+
+- Fails over freely when `p.get` fails (the request was never sent on that
+  replica).
+- On a transport error **after** dispatch, re-sends only methods that are safe
+  to repeat (`safeToRetryAfterDispatch`: read-only discovery/read/ping). For a
+  potentially-mutating call (`tools/call` and anything unknown) it marks the
+  replica down and **returns the ambiguous failure** instead of retrying.
+- Idempotency keys that would make a mutating retry safe are not yet enforced
+  end-to-end, so `tools/call` stays non-retryable after dispatch (documented).
+
+### Tests (`router_test.go`)
+
+- `TestRouterDoesNotRetryMutatingCallAfterAmbiguousFailure` — dispatched
+  `tools/call` + mid-flight transport death ⇒ error surfaced, healthy replica
+  executed **0** times. Confirmed failing on the pre-fix code.
+- `TestRouterFailsOverReadOnlyAfterDispatch` — a `resources/read` that dies
+  mid-flight **is** retried and succeeds once (fix does not break safe failover).
+- Existing `TestRouterFailsOverToHealthyReplica` (dead/refused replica) still
+  passes — pre-send failover is unchanged.
+
+### Commands run
+
+`go test . -run TestRouter` ✓ · `go test -race .` ✓ · `go build ./...` ✓ ·
+`go vet .` ✓.
+
+### Compatibility impact
+
+A `tools/call` that fails with a transport error after being dispatched now
+returns an error to the caller instead of transparently retrying. The caller
+must decide whether to retry (ideally with an idempotency key). Read-only
+failover is unchanged.
+
+### Residual risk / follow-up
+
+- Full tool retry classification with **enforced** idempotency keys across the
+  gateway/backend contract (so idempotent mutating calls can safely retry) is
+  the remaining Phase-6 work. The current fix is the safe default (no retry).
+
+### Definition-of-Done item satisfied
+
+- *"Unknown-outcome mutating calls are not automatically retried."*
+
+### Commit
+
+`router: do not auto-retry unknown-outcome mutating calls on failover`

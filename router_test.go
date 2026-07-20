@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -145,4 +147,135 @@ func TestPoolHealthCheckRecoversReplica(t *testing.T) {
 	if !recovered {
 		t.Fatal("health check did not recover the down replica")
 	}
+}
+
+// flakyConn delivers writes to the upstream but kills the connection the moment
+// a tools/call request is dispatched, so the upstream may have executed the
+// request while the response is lost — the ambiguous mid-execution case.
+type flakyConn struct {
+	net.Conn
+	once sync.Once
+}
+
+func (c *flakyConn) Write(b []byte) (int, error) {
+	n, err := c.Conn.Write(b)
+	if bytes.Contains(b, []byte("tools/call")) {
+		c.once.Do(func() { _ = c.Conn.Close() })
+	}
+	return n, err
+}
+
+// TestRouterDoesNotRetryMutatingCallAfterAmbiguousFailure is the Phase-6.4
+// regression: when a tools/call is dispatched and the transport then fails, the
+// router must NOT re-send it to another replica (that could execute a
+// non-idempotent side effect twice). It must surface the ambiguous outcome.
+func TestRouterDoesNotRetryMutatingCallAfterAmbiguousFailure(t *testing.T) {
+	var mu sync.Mutex
+	healthyCalls := 0
+	addrGood, stopGood := startLoopbackServer(t, func(s *mcp.Server) {
+		s.AddTool(mcp.Tool{Name: "pay", Handler: func(_ context.Context, _ json.RawMessage) (mcp.ToolResult, error) {
+			mu.Lock()
+			healthyCalls++
+			mu.Unlock()
+			return mcp.ToolResult{Content: []mcp.Content{mcp.Text("charged")}}, nil
+		}})
+	})
+	defer stopGood()
+
+	addrFlaky, stopFlaky := startLoopbackServer(t, func(s *mcp.Server) {
+		s.AddTool(mcp.Tool{Name: "pay", Handler: func(_ context.Context, _ json.RawMessage) (mcp.ToolResult, error) {
+			return mcp.ToolResult{Content: []mcp.Content{mcp.Text("charged")}}, nil
+		}})
+	})
+	defer stopFlaky()
+
+	// The flaky replica is dialed first; its connection dies during tools/call.
+	dial := func(ctx context.Context, addr string) (net.Conn, error) {
+		c, err := loopbackDial(ctx, addr)
+		if err != nil {
+			return nil, err
+		}
+		if addr == addrFlaky {
+			return &flakyConn{Conn: c}, nil
+		}
+		return c, nil
+	}
+	pool := newUpstreamPool("svc", []string{addrFlaky, addrGood}, dial, nil,
+		func(string, json.RawMessage) {}, nil)
+	defer pool.closeAll()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := pool.call(ctx, "tools/call", map[string]any{"name": "pay", "arguments": map[string]any{}})
+	if err == nil {
+		t.Fatal("expected an error surfacing the ambiguous outcome, got a silent success (retry)")
+	}
+	mu.Lock()
+	n := healthyCalls
+	mu.Unlock()
+	if n != 0 {
+		t.Fatalf("mutating tools/call was auto-retried on another replica after an ambiguous failure (executed %d extra time(s))", n)
+	}
+}
+
+// TestRouterFailsOverReadOnlyAfterDispatch confirms the fix does not break
+// failover for safe read-only methods: a read that fails mid-flight IS retried.
+func TestRouterFailsOverReadOnlyAfterDispatch(t *testing.T) {
+	var mu sync.Mutex
+	reads := 0
+	addrGood, stopGood := startLoopbackServer(t, func(s *mcp.Server) {
+		s.AddResource(mcp.Resource{URI: "info://x", Name: "x", Read: func(_ context.Context) (mcp.ResourceContents, error) {
+			mu.Lock()
+			reads++
+			mu.Unlock()
+			return mcp.ResourceContents{URI: "info://x", Text: "ok"}, nil
+		}})
+	})
+	defer stopGood()
+	addrFlaky, stopFlaky := startLoopbackServer(t, func(s *mcp.Server) {
+		s.AddResource(mcp.Resource{URI: "info://x", Name: "x", Read: func(_ context.Context) (mcp.ResourceContents, error) {
+			return mcp.ResourceContents{URI: "info://x", Text: "ok"}, nil
+		}})
+	})
+	defer stopFlaky()
+
+	dial := func(ctx context.Context, addr string) (net.Conn, error) {
+		c, err := loopbackDial(ctx, addr)
+		if err != nil {
+			return nil, err
+		}
+		if addr == addrFlaky {
+			return &readFlakyConn{Conn: c}, nil
+		}
+		return c, nil
+	}
+	pool := newUpstreamPool("svc", []string{addrFlaky, addrGood}, dial, nil,
+		func(string, json.RawMessage) {}, nil)
+	defer pool.closeAll()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := pool.call(ctx, "resources/read", map[string]any{"uri": "info://x"}); err != nil {
+		t.Fatalf("read-only method should fail over to the healthy replica: %v", err)
+	}
+	mu.Lock()
+	n := reads
+	mu.Unlock()
+	if n != 1 {
+		t.Fatalf("read-only method should have succeeded once via failover, got %d", n)
+	}
+}
+
+// readFlakyConn kills the connection when a resources/read is dispatched.
+type readFlakyConn struct {
+	net.Conn
+	once sync.Once
+}
+
+func (c *readFlakyConn) Write(b []byte) (int, error) {
+	n, err := c.Conn.Write(b)
+	if bytes.Contains(b, []byte("resources/read")) {
+		c.once.Do(func() { _ = c.Conn.Close() })
+	}
+	return n, err
 }

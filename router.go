@@ -272,9 +272,36 @@ func (p *upstreamPool) any(ctx context.Context) (*mcpclient.Client, error) {
 	return nil, lastErr
 }
 
-// call routes one JSON-RPC request to a healthy replica, failing over on a
-// transport error. An application-level RPC error is returned as-is (the
-// replica is healthy — the tool just returned an error).
+// safeToRetryAfterDispatch reports whether a method may be re-sent to another
+// replica AFTER it was already dispatched on a live connection but the transport
+// failed before a response arrived. Such a failure is an AMBIGUOUS outcome: the
+// upstream may have already executed the request. Only read-only methods (no
+// side effects) are safe to repeat. tools/call is treated as potentially
+// mutating (unknown), so it is never auto-retried after dispatch — repeating it
+// could execute a non-idempotent side effect (a payment, a deploy) twice.
+//
+// End-to-end idempotency keys (which would make even a mutating call safe to
+// retry) are not yet enforced across the gateway/backend contract, so tools/call
+// stays in the non-retryable class. See docs/THREAT-MODEL.md (delivery vs.
+// execution) and the router-delegation design.
+func safeToRetryAfterDispatch(method string) bool {
+	switch method {
+	case "resources/read", "resources/list", "resources/templates/list",
+		"tools/list", "prompts/list", "prompts/get", "initialize", "ping":
+		return true
+	default:
+		return false
+	}
+}
+
+// call routes one JSON-RPC request to a healthy replica. It fails over freely
+// when a replica cannot be reached at all (the request was never sent). But once
+// a request has been DISPATCHED on a live connection and the transport then
+// fails, the outcome is unknown: it re-sends only methods that are safe to
+// repeat (see safeToRetryAfterDispatch) and otherwise surfaces the ambiguous
+// failure to the caller rather than risk double-executing a side effect. An
+// application-level RPC error is returned as-is (the replica is healthy — the
+// tool just returned an error).
 func (p *upstreamPool) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -287,6 +314,8 @@ func (p *upstreamPool) call(ctx context.Context, method string, params any) (jso
 		p.next++
 		uc, err := p.get(ctx, r)
 		if err != nil {
+			// Never connected/initialized on this replica: the request was not
+			// sent here, so trying another replica is safe for any method.
 			lastErr = err
 			continue
 		}
@@ -297,8 +326,15 @@ func (p *upstreamPool) call(ctx context.Context, method string, params any) (jso
 		if _, isRPC := err.(*mcpclient.RPCError); isRPC {
 			return nil, err // healthy replica, application error
 		}
-		p.markDown(r) // transport error: fail over
+		// Transport error after dispatch: the upstream may have executed this
+		// request. Mark the replica down, but only fail over for methods that are
+		// safe to repeat; for a potentially-mutating call, stop and report the
+		// ambiguity instead of silently retrying it elsewhere.
+		p.markDown(r)
 		lastErr = err
+		if !safeToRetryAfterDispatch(method) {
+			return nil, fmt.Errorf("upstream %q: %s not retried after an ambiguous transport failure (outcome unknown — the upstream may have already executed it): %w", p.name, method, err)
+		}
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("upstream %q: all replicas failed", p.name)
