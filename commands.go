@@ -66,7 +66,7 @@ var builtinCommands = []string{
 	"approve", "approvals", "agent", "air", "secrets", "dash", "room", "mcp",
 	"pubsub", "publish", "subscribe",
 	"insight", "replay", "config", "status", "budget", "doctor", "hook",
-	"plugins", "spotlight", "version",
+	"plugins", "spotlight", "market", "version",
 }
 
 // cmdPlugins lists the extensions compiled into this binary: registered plugin

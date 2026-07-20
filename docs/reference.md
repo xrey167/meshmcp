@@ -135,6 +135,7 @@ resources, and prompts against a live backend.
 | `meshmcp hook --client <c> --config <f>` | Client-hook firewall: govern every local tool call in Claude Code / Cursor / Codex (F33) |
 | `meshmcp plugins` | List the extensions compiled into this build (F13) |
 | `meshmcp spotlight [flags] <query>` | Federated semantic search across the mesh backends you can reach — merged, ranked, provenance-tagged (F19) |
+| `meshmcp market <keygen\|publish\|list\|verify\|install>` | Governed plugin marketplace: signed bundle manifests, pinned-key + content-hash verify, metered + audited installs (F14) |
 
 Shared mesh flags for `connect`/`forward`/`probe`/`ls`/`call`/`read`/`prompt`/`drop`/`push`/`peers`/`fetch`/`air`: `--setup-key` (or `$NB_SETUP_KEY`),
 `--management-url` (or `$NB_MANAGEMENT_URL`), `--device-name`, `--nb-config`
