@@ -1,0 +1,92 @@
+name: Release
+
+# Cut a release when a semver tag is pushed. Produces versioned cross-platform
+# archives, a SHA256SUMS checksum file, an SBOM, and a keyless cosign signature
+# over the checksums, then attaches them all to a GitHub release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: build, sbom, sign, publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release + upload assets
+      id-token: write # cosign keyless (Fulcio/Rekor OIDC)
+    steps:
+      # actions/checkout v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      # actions/setup-go v5.2.0
+      - uses: actions/setup-go@3041bf56c941b39c61721a86cd11f3bb1338122a
+        with:
+          go-version-file: go.mod
+
+      - name: Build cross-platform archives
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+          mkdir -p dist
+          # Curated target set. Some netbird/wireguard code paths may need
+          # per-target adjustment on the first real release — see
+          # docs/RELEASE-CHECKLIST.md.
+          targets="linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64"
+          for t in $targets; do
+            goos="${t%/*}"; goarch="${t#*/}"
+            out="meshmcp"; [ "$goos" = "windows" ] && out="meshmcp.exe"
+            echo "building $goos/$goarch"
+            GOOS="$goos" GOARCH="$goarch" go build -trimpath \
+              -ldflags "-s -w -X main.version=${VERSION}" -o "dist/$out" .
+            base="meshmcp_${VERSION}_${goos}_${goarch}"
+            if [ "$goos" = "windows" ]; then
+              (cd dist && zip -q "${base}.zip" "$out" && rm -f "$out")
+            else
+              (cd dist && tar -czf "${base}.tar.gz" "$out" && rm -f "$out")
+            fi
+          done
+          ls -la dist
+
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum * > SHA256SUMS)
+          cat dist/SHA256SUMS
+
+      # anchore/sbom-action v0.17.9 — SPDX SBOM of the source tree.
+      - name: SBOM
+        uses: anchore/sbom-action@df80a981bc6edbc4e220a492d3cbe9f5547a6e75
+        with:
+          path: .
+          format: spdx-json
+          output-file: dist/meshmcp_${{ github.ref_name }}_sbom.spdx.json
+
+      # sigstore/cosign-installer v3.7.0
+      - name: Install cosign
+        uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409
+
+      - name: Sign checksums (keyless)
+        run: |
+          set -euo pipefail
+          cosign sign-blob --yes \
+            --output-signature dist/SHA256SUMS.sig \
+            --output-certificate dist/SHA256SUMS.pem \
+            dist/SHA256SUMS
+          echo "Verify with:"
+          echo "  cosign verify-blob --certificate SHA256SUMS.pem --signature SHA256SUMS.sig \\"
+          echo "    --certificate-identity-regexp 'https://github.com/${GITHUB_REPOSITORY}/.*' \\"
+          echo "    --certificate-oidc-issuer https://token.actions.githubusercontent.com SHA256SUMS"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            dist/*
