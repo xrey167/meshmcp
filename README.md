@@ -15,6 +15,14 @@ and a **gateway-signed, tamper-evident audit log** of every decision.
 > guarantee and limit of each control, and **[docs/CAPABILITY-MATRIX.md](docs/CAPABILITY-MATRIX.md)**
 > for what is stable vs. experimental.
 
+> ⚖️ **License & current status.** meshmcp is **not** open source (yet). The current
+> [`LICENSE`](LICENSE) is **proprietary and read-only**: you may view the source for evaluation, but
+> running, deploying, copying, modifying, or distributing it requires the copyright holder's prior
+> written permission. The build-and-run steps below are provided for reference and become usable once
+> you have obtained permission or the project adopts an open license. The licensing model is under
+> review — see **[LICENSE-DECISION.md](LICENSE-DECISION.md)**. To report a security issue, see
+> **[SECURITY.md](SECURITY.md)**.
+
 <br>
 
 ![Go 1.26](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white)
