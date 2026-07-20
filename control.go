@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"meshmcp/control"
-	"meshmcp/policy"
-	"meshmcp/registry"
+	"github.com/xrey167/meshmcp/control"
+	"github.com/xrey167/meshmcp/policy"
+	"github.com/xrey167/meshmcp/registry"
 )
 
 // cmdControl runs the managed control plane: enrollment, the service registry,

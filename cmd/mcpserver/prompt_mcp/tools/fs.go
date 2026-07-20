@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	"meshmcp/mcp"
+	"github.com/xrey167/meshmcp/mcp"
 )
 
 // registerFS registers the filesystem tools, all sandboxed to root.

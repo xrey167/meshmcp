@@ -4,11 +4,11 @@ import (
 	"encoding/json"
 	"testing"
 
-	"meshmcp/protocol/content"
-	"meshmcp/protocol/elicitation"
-	"meshmcp/protocol/initialize"
-	"meshmcp/protocol/resource"
-	"meshmcp/protocol/tool"
+	"github.com/xrey167/meshmcp/protocol/content"
+	"github.com/xrey167/meshmcp/protocol/elicitation"
+	"github.com/xrey167/meshmcp/protocol/initialize"
+	"github.com/xrey167/meshmcp/protocol/resource"
+	"github.com/xrey167/meshmcp/protocol/tool"
 )
 
 // TestInitializeResultRoundTrip checks that an embedded base.Result (_meta) and

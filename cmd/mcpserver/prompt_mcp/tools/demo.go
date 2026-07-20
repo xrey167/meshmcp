@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
-	"meshmcp/mcp"
+	"github.com/xrey167/meshmcp/mcp"
 )
 
 // registerDemo adds a few canned tools used by the mesh showcase agents so

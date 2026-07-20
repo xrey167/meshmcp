@@ -18,8 +18,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"meshmcp/policy"
-	"meshmcp/registry"
+	"github.com/xrey167/meshmcp/policy"
+	"github.com/xrey167/meshmcp/registry"
 )
 
 // EnrollRequest is a node asking to join the mesh.

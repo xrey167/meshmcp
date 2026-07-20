@@ -17,10 +17,10 @@ import (
 
 	"github.com/netbirdio/netbird/client/embed"
 
-	"meshmcp/mcp"
-	"meshmcp/mcpclient"
-	"meshmcp/policy"
-	"meshmcp/session"
+	"github.com/xrey167/meshmcp/mcp"
+	"github.com/xrey167/meshmcp/mcpclient"
+	"github.com/xrey167/meshmcp/policy"
+	"github.com/xrey167/meshmcp/session"
 )
 
 // cmdMCP runs meshmcp itself as an MCP server, so Claude Code or Codex can add

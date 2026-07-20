@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"meshmcp/mcp"
+	"github.com/xrey167/meshmcp/mcp"
 )
 
 // Config carries per-server settings the tool handlers need.

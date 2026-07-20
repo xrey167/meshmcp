@@ -6,8 +6,8 @@ package sampling
 import (
 	"encoding/json"
 
-	"meshmcp/protocol/base"
-	"meshmcp/protocol/content"
+	"github.com/xrey167/meshmcp/protocol/base"
+	"github.com/xrey167/meshmcp/protocol/content"
 )
 
 // Method is the JSON-RPC method name for a sampling request.

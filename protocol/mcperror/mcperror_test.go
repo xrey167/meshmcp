@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"meshmcp/protocol/mcperror"
+	"github.com/xrey167/meshmcp/protocol/mcperror"
 )
 
 func TestUnsupportedProtocolVersionError(t *testing.T) {

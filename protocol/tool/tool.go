@@ -5,8 +5,8 @@ package tool
 import (
 	"encoding/json"
 
-	"meshmcp/protocol/base"
-	"meshmcp/protocol/content"
+	"github.com/xrey167/meshmcp/protocol/base"
+	"github.com/xrey167/meshmcp/protocol/content"
 )
 
 // Method names in the tool domain.

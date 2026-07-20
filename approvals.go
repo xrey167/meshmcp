@@ -9,7 +9,7 @@ import (
 	"os"
 	"time"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // cmdApprovals serves the co-sign approver: a mesh service that lists held

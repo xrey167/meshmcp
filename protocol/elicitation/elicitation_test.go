@@ -3,7 +3,7 @@ package elicitation_test
 import (
 	"testing"
 
-	"meshmcp/protocol/elicitation"
+	"github.com/xrey167/meshmcp/protocol/elicitation"
 )
 
 func TestDecodePrimitiveSchemaUnknownIsError(t *testing.T) {

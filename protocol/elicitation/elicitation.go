@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"meshmcp/protocol/base"
+	"github.com/xrey167/meshmcp/protocol/base"
 )
 
 // Method is the JSON-RPC method name for an elicitation request.

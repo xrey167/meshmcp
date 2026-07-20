@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 func TestNetBirdIssuerMintsKeyAndAudits(t *testing.T) {

@@ -10,8 +10,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"meshmcp/policy"
-	"meshmcp/secrets"
+	"github.com/xrey167/meshmcp/policy"
+	"github.com/xrey167/meshmcp/secrets"
 )
 
 // SecretsConfig configures the credential broker for a backend: a store to

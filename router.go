@@ -16,9 +16,9 @@ import (
 	"github.com/netbirdio/netbird/client/embed"
 	"gopkg.in/yaml.v3"
 
-	"meshmcp/mcp"
-	"meshmcp/mcpclient"
-	"meshmcp/registry"
+	"github.com/xrey167/meshmcp/mcp"
+	"github.com/xrey167/meshmcp/mcpclient"
+	"github.com/xrey167/meshmcp/registry"
 )
 
 // RouterConfig configures the aggregating router: it joins the mesh, listens

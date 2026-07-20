@@ -13,7 +13,7 @@ import (
 
 	"github.com/netbirdio/netbird/client/embed"
 
-	"meshmcp/session"
+	"github.com/xrey167/meshmcp/session"
 )
 
 // cmdConnect joins the mesh and bridges stdio to a remote stdio backend.

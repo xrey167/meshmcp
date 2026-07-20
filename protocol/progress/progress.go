@@ -2,7 +2,7 @@
 // requests (schema @category `notifications/progress`).
 package progress
 
-import "meshmcp/protocol/base"
+import "github.com/xrey167/meshmcp/protocol/base"
 
 // Method is the JSON-RPC method name for a progress notification.
 const Method = "notifications/progress"

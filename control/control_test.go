@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"meshmcp/registry"
+	"github.com/xrey167/meshmcp/registry"
 )
 
 func newTestServer(t *testing.T) (*Server, *httptest.Server) {

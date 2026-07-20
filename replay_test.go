@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // echoAddBackend is an in-process backend: it replies to tools/call "add" with

@@ -8,7 +8,7 @@
 // protocol/* base models are generated from.
 package mrtr
 
-import "meshmcp/protocol/base"
+import "github.com/xrey167/meshmcp/protocol/base"
 
 // Result-type discriminators carried on a draft Result via its "resultType"
 // field.

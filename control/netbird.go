@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // Doer is the subset of *http.Client the issuer needs (injectable for tests).

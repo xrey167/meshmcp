@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"meshmcp/protocol/content"
-	"meshmcp/protocol/sampling"
+	"github.com/xrey167/meshmcp/protocol/content"
+	"github.com/xrey167/meshmcp/protocol/sampling"
 )
 
 // TestCreateMessageResultDecode covers the tricky decoder: CreateMessageResult

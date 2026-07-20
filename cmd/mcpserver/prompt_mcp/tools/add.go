@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"meshmcp/mcp"
+	"github.com/xrey167/meshmcp/mcp"
 )
 
 func registerAdd(s *mcp.Server) {

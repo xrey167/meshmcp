@@ -17,7 +17,7 @@ import (
 	"os"
 	"time"
 
-	"meshmcp/mcp"
+	"github.com/xrey167/meshmcp/mcp"
 )
 
 func main() {

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"meshmcp/protocol/transport/stdio"
+	"github.com/xrey167/meshmcp/protocol/transport/stdio"
 )
 
 func TestFrame(t *testing.T) {

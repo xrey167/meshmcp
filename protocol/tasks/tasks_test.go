@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"meshmcp/protocol/tasks"
+	"github.com/xrey167/meshmcp/protocol/tasks"
 )
 
 func TestCreateTaskResult(t *testing.T) {

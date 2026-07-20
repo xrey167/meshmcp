@@ -11,7 +11,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // cmdBudget is the cost/quota read side (F29): it sums the cost/quota units each

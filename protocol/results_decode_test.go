@@ -4,10 +4,10 @@ import (
 	"encoding/json"
 	"testing"
 
-	"meshmcp/protocol/cancellation"
-	"meshmcp/protocol/content"
-	"meshmcp/protocol/messages"
-	"meshmcp/protocol/tool"
+	"github.com/xrey167/meshmcp/protocol/cancellation"
+	"github.com/xrey167/meshmcp/protocol/content"
+	"github.com/xrey167/meshmcp/protocol/messages"
+	"github.com/xrey167/meshmcp/protocol/tool"
 )
 
 // firstText returns the text of the first content block, requiring it to be a

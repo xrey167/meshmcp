@@ -13,8 +13,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"meshmcp/mcp"
-	"meshmcp/mcpclient"
+	"github.com/xrey167/meshmcp/mcp"
+	"github.com/xrey167/meshmcp/mcpclient"
 )
 
 // meshmcp graphrag — GraphRAG bridge (S3).

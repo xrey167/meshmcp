@@ -14,7 +14,7 @@ import (
 	"strconv"
 	"strings"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // cmdAudit implements "meshmcp audit <subcommand>".
@@ -335,7 +335,7 @@ func auditAttest(args []string) error {
 	}
 
 	att := map[string]any{
-		"kind":       "meshmcp/attestation",
+		"kind":       "github.com/xrey167/meshmcp/attestation",
 		"version":    1,
 		"audit":      auditArt,
 		"verdict":    verdict,

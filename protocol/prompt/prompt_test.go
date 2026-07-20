@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"meshmcp/protocol/content"
-	"meshmcp/protocol/prompt"
+	"github.com/xrey167/meshmcp/protocol/content"
+	"github.com/xrey167/meshmcp/protocol/prompt"
 )
 
 // TestGetResultDecode covers prompt.Message.UnmarshalJSON (the content-block

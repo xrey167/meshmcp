@@ -21,8 +21,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"meshmcp/policy"
-	"meshmcp/session"
+	"github.com/xrey167/meshmcp/policy"
+	"github.com/xrey167/meshmcp/session"
 )
 
 // meshmcp drop — AirDrop across mesh instances.

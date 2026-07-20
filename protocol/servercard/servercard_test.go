@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"meshmcp/protocol/servercard"
+	"github.com/xrey167/meshmcp/protocol/servercard"
 )
 
 func TestServerCardRoundTrip(t *testing.T) {

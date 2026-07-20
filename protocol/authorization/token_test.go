@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	auth "meshmcp/protocol/authorization"
+	auth "github.com/xrey167/meshmcp/protocol/authorization"
 )
 
 func TestTokenRequestClientCredentials(t *testing.T) {

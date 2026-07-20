@@ -9,7 +9,7 @@ import (
 	"sort"
 	"time"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // DetectOptions tunes anomaly scoring.

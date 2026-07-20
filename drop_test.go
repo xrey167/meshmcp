@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"meshmcp/policy"
-	"meshmcp/session"
+	"github.com/xrey167/meshmcp/policy"
+	"github.com/xrey167/meshmcp/session"
 )
 
 // syncBuffer is a goroutine-safe io.Writer for capturing the audit stream that

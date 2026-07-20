@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"meshmcp/protocol/discover"
+	"github.com/xrey167/meshmcp/protocol/discover"
 )
 
 // roundTrip unmarshals a ClientCapabilities snippet and re-marshals it,

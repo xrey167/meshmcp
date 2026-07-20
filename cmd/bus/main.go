@@ -17,7 +17,7 @@ import (
 	"sort"
 	"sync"
 
-	"meshmcp/mcp"
+	"github.com/xrey167/meshmcp/mcp"
 )
 
 // event is one published message on a topic.

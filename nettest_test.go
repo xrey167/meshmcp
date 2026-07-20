@@ -8,8 +8,8 @@ import (
 	"net"
 	"testing"
 
-	"meshmcp/mcp"
-	"meshmcp/mcpclient"
+	"github.com/xrey167/meshmcp/mcp"
+	"github.com/xrey167/meshmcp/mcpclient"
 )
 
 // startLoopbackServer serves an mcp.Server (configured by the caller) on a

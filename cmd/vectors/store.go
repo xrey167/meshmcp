@@ -9,7 +9,7 @@ import (
 	"sort"
 	"sync"
 
-	"meshmcp/embed"
+	"github.com/xrey167/meshmcp/embed"
 )
 
 // doc is one stored document: its text, embedding, corpus, and the mesh

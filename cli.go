@@ -9,7 +9,7 @@ import (
 	"os"
 	"strings"
 
-	"meshmcp/mcpclient"
+	"github.com/xrey167/meshmcp/mcpclient"
 )
 
 // argFlags collects repeatable --arg key=value pairs. Values are coerced to

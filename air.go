@@ -17,7 +17,7 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"meshmcp/session"
+	"github.com/xrey167/meshmcp/session"
 )
 
 // cmdAir is the umbrella for Air's live-work verbs: list and steer sessions on

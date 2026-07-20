@@ -17,8 +17,8 @@ import (
 	"sort"
 	"sync"
 
-	"meshmcp/embed"
-	"meshmcp/mcp"
+	"github.com/xrey167/meshmcp/embed"
+	"github.com/xrey167/meshmcp/mcp"
 )
 
 // memoryItem is one stored memory.

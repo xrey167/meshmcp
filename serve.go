@@ -17,10 +17,10 @@ import (
 
 	"github.com/netbirdio/netbird/client/embed"
 
-	"meshmcp/policy"
-	"meshmcp/registry"
-	"meshmcp/secrets"
-	"meshmcp/session"
+	"github.com/xrey167/meshmcp/policy"
+	"github.com/xrey167/meshmcp/registry"
+	"github.com/xrey167/meshmcp/secrets"
+	"github.com/xrey167/meshmcp/session"
 )
 
 func cmdServe(args []string) error {

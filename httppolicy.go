@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // httpEnforcer applies the same identity-keyed policy engine to a Streamable-HTTP

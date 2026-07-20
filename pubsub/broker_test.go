@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // TestRetainedMessages verifies a retained publish becomes the topic's

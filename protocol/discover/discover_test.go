@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"meshmcp/protocol/discover"
+	"github.com/xrey167/meshmcp/protocol/discover"
 )
 
 func TestDiscoverResultRoundTrip(t *testing.T) {

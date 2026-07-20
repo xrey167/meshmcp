@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"meshmcp/mcp"
+	"github.com/xrey167/meshmcp/mcp"
 )
 
 func TestRouterAggregatesAndRoutes(t *testing.T) {

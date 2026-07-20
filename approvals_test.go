@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // TestApprovalsFlow drives the full approver API: a pending request appears,

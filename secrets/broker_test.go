@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 const secretVal = `sk_live_"weird"\value` // contains quotes + backslash on purpose

@@ -3,7 +3,7 @@ package insight
 import (
 	"sort"
 
-	"meshmcp/embed"
+	"github.com/xrey167/meshmcp/embed"
 )
 
 // Semantic policy assistance (S5): the recommend/detect passes key on exact

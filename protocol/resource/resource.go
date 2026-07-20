@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 
-	"meshmcp/protocol/base"
+	"github.com/xrey167/meshmcp/protocol/base"
 )
 
 // Method names in the resource domain.

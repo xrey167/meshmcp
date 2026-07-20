@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"os"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // cmdDash serves the mesh control dashboard: a live, identity-attributed view

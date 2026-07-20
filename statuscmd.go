@@ -8,7 +8,7 @@ import (
 	"sort"
 	"text/tabwriter"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // cmdStatus is the observability plane's read side (F15): it rolls up an audit

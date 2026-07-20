@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // baselineCorpus: agent K, weekday business hours (09-11 UTC), read_file only,

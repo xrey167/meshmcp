@@ -8,7 +8,7 @@ import (
 	"sort"
 	"time"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // Change is one aggregated difference between the recorded verdict and the

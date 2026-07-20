@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // ToolProfile is one identity's observed usage of one tool.

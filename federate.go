@@ -12,10 +12,10 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"meshmcp/federation"
-	"meshmcp/mcp"
-	"meshmcp/mcpclient"
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/federation"
+	"github.com/xrey167/meshmcp/mcp"
+	"github.com/xrey167/meshmcp/mcpclient"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // FederateConfig configures a federation boundary: it exposes a local upstream

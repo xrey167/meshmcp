@@ -7,8 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"meshmcp/protocol/base"
-	"meshmcp/protocol/resource"
+	"github.com/xrey167/meshmcp/protocol/base"
+	"github.com/xrey167/meshmcp/protocol/resource"
 )
 
 // Block is the discriminated union of content types carried in messages and

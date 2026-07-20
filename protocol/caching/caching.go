@@ -8,7 +8,7 @@
 // are library constructs, not wire types, and are not modelled here.
 package caching
 
-import "meshmcp/protocol/base"
+import "github.com/xrey167/meshmcp/protocol/base"
 
 // Result-type discriminator values carried on a draft Result's resultType field.
 const (

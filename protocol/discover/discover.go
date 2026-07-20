@@ -10,7 +10,7 @@ package discover
 import (
 	"encoding/json"
 
-	"meshmcp/protocol/caching"
+	"github.com/xrey167/meshmcp/protocol/caching"
 )
 
 // Method is the JSON-RPC method name for the discovery request.

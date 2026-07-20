@@ -2,7 +2,7 @@
 // abandon a previously-issued request (schema @category `notifications/cancelled`).
 package cancellation
 
-import "meshmcp/protocol/base"
+import "github.com/xrey167/meshmcp/protocol/base"
 
 // Method is the JSON-RPC method name for a cancelled notification.
 const Method = "notifications/cancelled"

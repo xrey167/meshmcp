@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"meshmcp/protocol/caching"
-	"meshmcp/protocol/discover"
+	"github.com/xrey167/meshmcp/protocol/caching"
+	"github.com/xrey167/meshmcp/protocol/discover"
 )
 
 func TestCacheableResultRoundTrip(t *testing.T) {

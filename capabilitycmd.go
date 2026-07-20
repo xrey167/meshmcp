@@ -6,7 +6,7 @@ import (
 	"os"
 	"time"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // stringList is a repeatable string flag.

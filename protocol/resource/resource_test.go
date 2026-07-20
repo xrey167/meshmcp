@@ -3,7 +3,7 @@ package resource_test
 import (
 	"testing"
 
-	"meshmcp/protocol/resource"
+	"github.com/xrey167/meshmcp/protocol/resource"
 )
 
 func TestDecodeContents(t *testing.T) {

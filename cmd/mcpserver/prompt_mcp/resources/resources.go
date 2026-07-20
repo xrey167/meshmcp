@@ -3,7 +3,7 @@
 // resources/index.ts + server.registerResource(...) pattern.
 package resources
 
-import "meshmcp/mcp"
+import "github.com/xrey167/meshmcp/mcp"
 
 // Config carries per-server settings the resource handlers need.
 type Config struct {

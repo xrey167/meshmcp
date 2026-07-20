@@ -7,8 +7,8 @@ import (
 	"io"
 	"sync"
 
-	"meshmcp/pubsub"
-	"meshmcp/session"
+	"github.com/xrey167/meshmcp/pubsub"
+	"github.com/xrey167/meshmcp/session"
 )
 
 // The pub/sub wire protocol is newline-delimited JSON over the resumable

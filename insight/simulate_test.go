@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // A recorded corpus: an agent that historically was ALLOWED read_file (x2) and

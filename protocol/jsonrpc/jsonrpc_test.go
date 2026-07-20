@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"meshmcp/protocol/jsonrpc"
-	"meshmcp/protocol/tool"
+	"github.com/xrey167/meshmcp/protocol/jsonrpc"
+	"github.com/xrey167/meshmcp/protocol/tool"
 )
 
 func TestDecodeMessagePreservesResultBody(t *testing.T) {

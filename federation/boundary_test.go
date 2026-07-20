@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 func testBoundary(audit *policy.AuditLog) *Boundary {

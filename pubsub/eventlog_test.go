@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // TestEventCheckpoints verifies signed Merkle checkpoints over the event stream:

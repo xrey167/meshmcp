@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"meshmcp/embed"
+	"github.com/xrey167/meshmcp/embed"
 )
 
 func newMem(t *testing.T) *memStore {

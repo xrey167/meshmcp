@@ -1,4 +1,4 @@
-module meshmcp
+module github.com/xrey167/meshmcp
 
 go 1.26
 

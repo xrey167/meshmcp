@@ -3,7 +3,7 @@
 // prompts/index.ts + server.registerPrompt(...) pattern.
 package prompts
 
-import "meshmcp/mcp"
+import "github.com/xrey167/meshmcp/mcp"
 
 // Register registers every prompt on the server.
 func Register(s *mcp.Server) {

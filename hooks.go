@@ -15,9 +15,9 @@ import (
 
 	"github.com/netbirdio/netbird/client/embed"
 
-	"meshmcp/policy"
-	"meshmcp/pubsub"
-	"meshmcp/session"
+	"github.com/xrey167/meshmcp/policy"
+	"github.com/xrey167/meshmcp/pubsub"
+	"github.com/xrey167/meshmcp/session"
 )
 
 // Gateway hooks turn the firewall's decisions into an observable event stream:

@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"meshmcp/protocol/mrtr"
-	"meshmcp/protocol/subscriptions"
+	"github.com/xrey167/meshmcp/protocol/mrtr"
+	"github.com/xrey167/meshmcp/protocol/subscriptions"
 )
 
 // TestInputRequiredResult checks the MRTR InputRequiredResult decodes its

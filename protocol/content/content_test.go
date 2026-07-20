@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"meshmcp/protocol/content"
-	"meshmcp/protocol/resource"
+	"github.com/xrey167/meshmcp/protocol/content"
+	"github.com/xrey167/meshmcp/protocol/resource"
 )
 
 // TestDecodeBlockAllTypes exercises every content-block discriminator, including

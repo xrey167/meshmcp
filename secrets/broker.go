@@ -8,7 +8,7 @@ import (
 	"regexp"
 	"strings"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // refRe matches a secret reference: {{secret:NAME}} (optional surrounding
