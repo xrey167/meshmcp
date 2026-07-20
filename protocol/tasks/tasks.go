@@ -7,7 +7,7 @@
 // extensions map under ExtensionID.
 package tasks
 
-import "meshmcp/protocol/base"
+import "github.com/xrey167/meshmcp/protocol/base"
 
 // ExtensionID is the capability identifier for the tasks extension.
 const ExtensionID = "io.modelcontextprotocol/tasks"

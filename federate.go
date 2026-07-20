@@ -12,22 +12,22 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"meshmcp/federation"
-	"meshmcp/mcp"
-	"meshmcp/mcpclient"
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/federation"
+	"github.com/xrey167/meshmcp/mcp"
+	"github.com/xrey167/meshmcp/mcpclient"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // FederateConfig configures a federation boundary: it exposes a local upstream
 // MCP server to remote orgs on other meshes, admitting only granted tools and
 // auditing every crossing.
 type FederateConfig struct {
-	Mesh     MeshConfig            `yaml:"mesh"`
-	Port     int                   `yaml:"port"`     // mesh port remote orgs connect to
-	Upstream string                `yaml:"upstream"` // local MCP server addr to expose (mesh addr)
-	Audit    string                `yaml:"audit"`    // crossing audit log (JSONL, hash-chained)
-	Grants   []federation.Grant    `yaml:"grants"`
-	Mappings []federation.Mapping  `yaml:"mappings"`
+	Mesh     MeshConfig           `yaml:"mesh"`
+	Port     int                  `yaml:"port"`     // mesh port remote orgs connect to
+	Upstream string               `yaml:"upstream"` // local MCP server addr to expose (mesh addr)
+	Audit    string               `yaml:"audit"`    // crossing audit log (JSONL, hash-chained)
+	Grants   []federation.Grant   `yaml:"grants"`
+	Mappings []federation.Mapping `yaml:"mappings"`
 }
 
 // cmdFederate runs a federation boundary as a mesh peer.

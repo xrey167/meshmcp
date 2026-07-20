@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // maxEncodingLen bounds the per-event encoding hint (e.g. "base64"). It is a

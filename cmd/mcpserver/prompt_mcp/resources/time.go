@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"meshmcp/mcp"
+	"github.com/xrey167/meshmcp/mcp"
 )
 
 func registerTime(s *mcp.Server) {

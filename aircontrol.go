@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"meshmcp/policy"
-	"meshmcp/session"
+	"github.com/xrey167/meshmcp/policy"
+	"github.com/xrey167/meshmcp/session"
 )
 
 // The Air control endpoint exposes a gateway's live resumable sessions over the

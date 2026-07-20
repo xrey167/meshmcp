@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/hex"
 	"fmt"
@@ -10,8 +11,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"meshmcp/policy"
-	"meshmcp/secrets"
+	"github.com/xrey167/meshmcp/policy"
+	"github.com/xrey167/meshmcp/secrets"
 )
 
 // SecretsConfig configures the credential broker for a backend: a store to
@@ -215,7 +216,13 @@ func loadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
 	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	// Strict decoding: an unknown or misspelled key is a startup error, not a
+	// silently ignored line. A typo in a SECURITY field (audit_fail_closed,
+	// require_cosign, taint_guard, default_allow, ...) would otherwise fail open
+	// — the control the operator thought they enabled simply never fires.
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
 

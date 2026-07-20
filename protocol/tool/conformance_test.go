@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"meshmcp/protocol/tool"
+	"github.com/xrey167/meshmcp/protocol/tool"
 )
 
 // toolExamples are the official draft schema/draft/examples/Tool fixtures. Each

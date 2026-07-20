@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // recordingBackend is an in-process MCP-ish server: it records every line it

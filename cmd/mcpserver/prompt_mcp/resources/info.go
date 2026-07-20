@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"meshmcp/mcp"
+	"github.com/xrey167/meshmcp/mcp"
 )
 
 func registerInfo(s *mcp.Server, root string) {

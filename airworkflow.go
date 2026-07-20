@@ -16,7 +16,7 @@ import (
 	"github.com/netbirdio/netbird/client/embed"
 	"gopkg.in/yaml.v3"
 
-	"meshmcp/mcpclient"
+	"github.com/xrey167/meshmcp/mcpclient"
 )
 
 // airWorkflow is a declarative sequence of Air steps (P4): launch an agent,

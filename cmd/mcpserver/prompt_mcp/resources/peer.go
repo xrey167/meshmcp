@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"os"
 
-	"meshmcp/mcp"
+	"github.com/xrey167/meshmcp/mcp"
 )
 
 // registerPeer exposes the connected mesh peer's identity, as injected by

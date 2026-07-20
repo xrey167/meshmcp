@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"testing"
 
-	"meshmcp/protocol/content"
-	"meshmcp/protocol/messages"
-	"meshmcp/protocol/sampling"
+	"github.com/xrey167/meshmcp/protocol/content"
+	"github.com/xrey167/meshmcp/protocol/messages"
+	"github.com/xrey167/meshmcp/protocol/sampling"
 )
 
 // TestSamplingFrameRoutes decodes a full sampling/createMessage frame (a

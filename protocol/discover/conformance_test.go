@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"meshmcp/protocol/discover"
+	"github.com/xrey167/meshmcp/protocol/discover"
 )
 
 // serverCapabilityExamples are the official draft

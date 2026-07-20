@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // TestWebhookSinkForwardsAndFilters proves the webhook AuditSink POSTs a deny

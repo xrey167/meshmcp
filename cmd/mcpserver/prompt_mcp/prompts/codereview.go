@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"meshmcp/mcp"
+	"github.com/xrey167/meshmcp/mcp"
 )
 
 func registerCodeReview(s *mcp.Server) {
@@ -28,4 +28,3 @@ func registerCodeReview(s *mcp.Server) {
 		},
 	})
 }
-

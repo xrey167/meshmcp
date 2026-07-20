@@ -9,7 +9,7 @@ package pubsub
 type ring struct {
 	buf  []Event
 	head int // index of the oldest element when full
-	n    int  // number of valid elements
+	n    int // number of valid elements
 	cap  int
 }
 

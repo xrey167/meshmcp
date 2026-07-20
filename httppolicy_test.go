@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 func newTestEnforcer(pol *policy.Policy) *httpEnforcer {

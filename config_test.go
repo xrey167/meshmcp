@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -132,5 +133,89 @@ backends:
 				t.Fatalf("expected error containing %q, got %v", c.wantErr, err)
 			}
 		})
+	}
+}
+
+// TestConfigStrictRejectsSecurityTypos is the Phase-9.1 regression: a misspelled
+// or misplaced SECURITY field must fail startup, not be silently ignored (which
+// would fail open — the control the operator meant to enable never fires).
+func TestConfigStrictRejectsSecurityTypos(t *testing.T) {
+	base := `backends:
+  - name: fs
+    port: 9101
+    stdio: ["echo"]
+    policy:
+      default_allow: false
+      rules:
+        - peers: ["*"]
+          tools: ["read_*"]
+          allow: true
+`
+	// Sanity: the base config is valid.
+	if err := writeAndLoad(t, base); err != nil {
+		t.Fatalf("base config should load: %v", err)
+	}
+
+	cases := map[string]string{
+		"audit_fail_closed typo (top level)": base + "audit_fail_clsoed: true\n",
+		"default_allow typo (policy)": `backends:
+  - name: fs
+    port: 9101
+    stdio: ["echo"]
+    policy:
+      defualt_allow: false
+`,
+		"require_cosign typo (rule)": `backends:
+  - name: fs
+    port: 9101
+    stdio: ["echo"]
+    policy:
+      default_allow: false
+      rules:
+        - peers: ["*"]
+          tools: ["pay"]
+          require_cosgin: true
+`,
+		"taint_guard typo (rule)": `backends:
+  - name: fs
+    port: 9101
+    stdio: ["echo"]
+    policy:
+      default_allow: false
+      rules:
+        - peers: ["*"]
+          tools: ["deploy"]
+          taint_gaurd: true
+`,
+	}
+	for name, cfg := range cases {
+		if err := writeAndLoad(t, cfg); err == nil {
+			t.Fatalf("%s: expected strict-decode to reject the typo, but it loaded", name)
+		}
+	}
+}
+
+func writeAndLoad(t *testing.T, body string) error {
+	t.Helper()
+	f := t.TempDir() + "/config.yaml"
+	if err := os.WriteFile(f, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := loadConfig(f)
+	return err
+}
+
+// TestExampleGatewayConfigsLoadStrictly guards that enabling strict decoding did
+// not break any real gateway config (every example with a top-level backends:).
+func TestExampleGatewayConfigsLoadStrictly(t *testing.T) {
+	files, _ := filepath.Glob("examples/*.yaml")
+	for _, f := range files {
+		data, err := os.ReadFile(f)
+		if err != nil || !bytes.Contains(data, []byte("\nbackends:")) && !bytes.HasPrefix(data, []byte("backends:")) {
+			continue // not a gateway config
+		}
+		if _, err := loadConfig(f); err != nil {
+			t.Errorf("gateway example %s no longer loads under strict decode: %v", filepath.Base(f), err)
+		}
 	}
 }

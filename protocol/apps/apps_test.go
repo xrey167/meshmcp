@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"meshmcp/protocol/apps"
+	"github.com/xrey167/meshmcp/protocol/apps"
 )
 
 func TestInitializeRoundTrip(t *testing.T) {

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"meshmcp/mcp"
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/mcp"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 func writeAudit(t *testing.T, path string) {

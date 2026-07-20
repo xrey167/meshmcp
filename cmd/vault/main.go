@@ -17,7 +17,7 @@ import (
 	"sort"
 	"sync"
 
-	"meshmcp/mcp"
+	"github.com/xrey167/meshmcp/mcp"
 )
 
 // vaultStore is a JSON secrets file ({"name":"value",...}) at mode 0600, written

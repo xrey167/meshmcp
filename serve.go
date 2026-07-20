@@ -17,10 +17,10 @@ import (
 
 	"github.com/netbirdio/netbird/client/embed"
 
-	"meshmcp/policy"
-	"meshmcp/registry"
-	"meshmcp/secrets"
-	"meshmcp/session"
+	"github.com/xrey167/meshmcp/policy"
+	"github.com/xrey167/meshmcp/registry"
+	"github.com/xrey167/meshmcp/secrets"
+	"github.com/xrey167/meshmcp/session"
 )
 
 func cmdServe(args []string) error {
@@ -389,7 +389,13 @@ func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer, h
 			log.Fatalf("backend %q: capabilities: %v", b.Name, err)
 		}
 		if b.Capabilities.RevocationStore != "" {
-			rev := policy.FileRevocation{Dir: b.Capabilities.RevocationStore}
+			// Create the store at startup so IsRevoked can later fail closed on a
+			// vanished/unavailable store; a store that cannot be created is a
+			// security-config error and must fail startup.
+			rev, err := policy.NewFileRevocation(b.Capabilities.RevocationStore)
+			if err != nil {
+				log.Fatalf("backend %q: capability revocation store %s: %v", b.Name, b.Capabilities.RevocationStore, err)
+			}
 			v = v.WithRevocation(rev.IsRevoked)
 			log.Printf("backend %q: capability revocation store: %s", b.Name, b.Capabilities.RevocationStore)
 		}

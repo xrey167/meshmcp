@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 
-	"meshmcp/protocol/base"
+	"github.com/xrey167/meshmcp/protocol/base"
 )
 
 // Version is the JSON-RPC version string used by every MCP message.

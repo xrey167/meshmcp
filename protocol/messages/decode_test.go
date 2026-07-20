@@ -3,9 +3,9 @@ package messages_test
 import (
 	"testing"
 
-	"meshmcp/protocol/messages"
-	"meshmcp/protocol/resource"
-	"meshmcp/protocol/tool"
+	"github.com/xrey167/meshmcp/protocol/messages"
+	"github.com/xrey167/meshmcp/protocol/resource"
+	"github.com/xrey167/meshmcp/protocol/tool"
 )
 
 func TestDecodeClientRequest(t *testing.T) {

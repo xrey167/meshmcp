@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	ed "meshmcp/protocol/elicitationdraft"
+	ed "github.com/xrey167/meshmcp/protocol/elicitationdraft"
 )
 
 func TestFormModeRequest(t *testing.T) {

@@ -27,11 +27,11 @@ type endpoint struct {
 	mu       sync.Mutex
 	conn     net.Conn
 	w        *bufio.Writer
-	connGen  uint64          // incremented on every bind; identifies the live conn
-	sendSeq  uint64          // seq of the last DATA we assigned
-	acked    uint64          // peer has acknowledged our DATA up to here
-	sendBuf  []frame         // unacked outbound DATA frames, ascending seq
-	recvSeq  uint64          // highest contiguous inbound DATA seq delivered
+	connGen  uint64  // incremented on every bind; identifies the live conn
+	sendSeq  uint64  // seq of the last DATA we assigned
+	acked    uint64  // peer has acknowledged our DATA up to here
+	sendBuf  []frame // unacked outbound DATA frames, ascending seq
+	recvSeq  uint64  // highest contiguous inbound DATA seq delivered
 	closed   bool
 	closeErr error
 

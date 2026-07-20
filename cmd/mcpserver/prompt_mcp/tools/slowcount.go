@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"meshmcp/mcp"
+	"github.com/xrey167/meshmcp/mcp"
 )
 
 // registerSlowCount registers a long-running tool best invoked as a task

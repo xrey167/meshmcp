@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"meshmcp/mcp"
-	"meshmcp/mcpclient"
+	"github.com/xrey167/meshmcp/mcp"
+	"github.com/xrey167/meshmcp/mcpclient"
 )
 
 // TestRouterRelaysServerRequest verifies full bidirectional MCP through the

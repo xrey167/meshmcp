@@ -3,7 +3,7 @@
 // capability and implementation descriptors (schema @category `initialize`).
 package initialize
 
-import "meshmcp/protocol/base"
+import "github.com/xrey167/meshmcp/protocol/base"
 
 // Method names in the initialization flow.
 const (

@@ -15,7 +15,9 @@ func testServer() *Server {
 		Description: "echo",
 		InputSchema: map[string]any{"type": "object", "properties": map[string]any{"text": map[string]any{"type": "string"}}},
 		Handler: func(_ context.Context, args json.RawMessage) (ToolResult, error) {
-			var a struct{ Text string `json:"text"` }
+			var a struct {
+				Text string `json:"text"`
+			}
 			_ = json.Unmarshal(args, &a)
 			return ToolResult{Content: []Content{Text(a.Text)}}, nil
 		},

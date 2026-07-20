@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"meshmcp/policy"
-	"meshmcp/pubsub"
-	"meshmcp/session"
+	"github.com/xrey167/meshmcp/policy"
+	"github.com/xrey167/meshmcp/pubsub"
+	"github.com/xrey167/meshmcp/session"
 )
 
 // TestPubsubVerifyCheckpointsCommand checks the CLI verifies signed checkpoints

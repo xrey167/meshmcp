@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // TestAuditAttestSignedBundle builds a signed audit log + checkpoints, runs

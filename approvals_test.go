@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // TestApprovalsFlow drives the full approver API: a pending request appears,
@@ -175,5 +175,18 @@ func post(t *testing.T, url, body string) {
 	}
 	if resp.StatusCode != 200 {
 		t.Fatalf("POST %s → %d", url, resp.StatusCode)
+	}
+}
+
+// TestApprovalsRequiresApproverACLInMeshMode is the Phase-2.2 regression: a
+// mesh-served approver must not start without a mandatory approver ACL, because
+// an empty ACL would let any mesh peer approve (self-authorize) its own held
+// call. The guard returns before any mesh is started, so this is a fast,
+// network-free check. (Local --addr dev mode is exempt but blocks on
+// ListenAndServe, so it is not exercised here.)
+func TestApprovalsRequiresApproverACLInMeshMode(t *testing.T) {
+	err := cmdApprovals([]string{"--store", t.TempDir()})
+	if err == nil || !strings.Contains(err.Error(), "approver") {
+		t.Fatalf("expected a fail-closed startup error requiring --approver, got %v", err)
 	}
 }

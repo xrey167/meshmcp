@@ -11,8 +11,18 @@ type SecretResolver interface {
 	// granted, is blocked by the session's labels, or is unavailable; the
 	// Filter then denies the call inline. A line with no references returns
 	// unchanged with ok=true.
-	Resolve(caller Caller, tool string, line []byte, labels map[string]bool) (out []byte, ok bool, reason string)
+	//
+	// injected is the set of secret byte-values substituted into this call, so
+	// the Filter can scrub them from later responses (response-side redaction).
+	// It must contain no value that was not actually injected, and the caller
+	// must never trace, audit, log, or otherwise surface these bytes.
+	Resolve(caller Caller, tool string, line []byte, labels map[string]bool) (out []byte, injected [][]byte, ok bool, reason string)
 }
+
+// SetSecretRedactor attaches a redactor the filter uses to scrub injected secret
+// values out of backend responses. A redactor is created automatically the
+// first time a secret is injected, so this is only needed to share one.
+func (f *Filter) SetSecretRedactor(r *Redactor) { f.redactor = r }
 
 // SetSecretResolver attaches a credential broker to the filter.
 func (f *Filter) SetSecretResolver(r SecretResolver) { f.secrets = r }

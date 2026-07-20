@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"meshmcp/protocol/transport"
+	"github.com/xrey167/meshmcp/protocol/transport"
 )
 
 func TestRequestMetaAllFields(t *testing.T) {

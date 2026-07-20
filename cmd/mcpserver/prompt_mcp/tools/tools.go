@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"meshmcp/mcp"
+	"github.com/xrey167/meshmcp/mcp"
 )
 
 // Config carries per-server settings the tool handlers need.
@@ -55,8 +55,12 @@ func objSchema(props map[string]any, required ...string) map[string]any {
 	return schema
 }
 
-func strProp(desc string) map[string]any { return map[string]any{"type": "string", "description": desc} }
-func numProp(desc string) map[string]any { return map[string]any{"type": "number", "description": desc} }
+func strProp(desc string) map[string]any {
+	return map[string]any{"type": "string", "description": desc}
+}
+func numProp(desc string) map[string]any {
+	return map[string]any{"type": "number", "description": desc}
+}
 
 func formatNum(f float64) string {
 	if f == float64(int64(f)) {

@@ -22,9 +22,9 @@ import (
 	"github.com/netbirdio/netbird/client/embed"
 	"gopkg.in/yaml.v3"
 
-	"meshmcp/policy"
-	"meshmcp/pubsub"
-	"meshmcp/session"
+	"github.com/xrey167/meshmcp/policy"
+	"github.com/xrey167/meshmcp/pubsub"
+	"github.com/xrey167/meshmcp/session"
 )
 
 // meshmcp publish / subscribe / pubsub — the identity-native event fabric.

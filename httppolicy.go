@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // httpEnforcer applies the same identity-keyed policy engine to a Streamable-HTTP
@@ -42,15 +42,6 @@ func newHTTPEnforcer(b *Backend, audit *policy.AuditLog) *httpEnforcer {
 	return &httpEnforcer{eng: eng, audit: audit, pending: pending, backend: b.Name}
 }
 
-// httpPeek is the minimal JSON-RPC shape read from a request body.
-type httpPeek struct {
-	Method string          `json:"method"`
-	ID     json.RawMessage `json:"id,omitempty"`
-	Params struct {
-		Name string `json:"name"`
-	} `json:"params"`
-}
-
 // decide authorizes the request. It returns ok=true (and possibly a rewound
 // body to forward) when the call may proceed, or ok=false with a status code and
 // a JSON-RPC error body to return without proxying. Non-tools/call requests and
@@ -70,43 +61,62 @@ func (e *httpEnforcer) decide(peer, peerKey string, r *http.Request) (ok bool, s
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	r.ContentLength = int64(len(body))
 
-	trimmed := bytes.TrimSpace(body)
-	if len(trimmed) == 0 {
+	// Classify + validate through the SHARED classifier, so an HTTP backend
+	// makes the SAME decision as the stdio filter for the same request: id-less
+	// / null-id / empty-name tools/call, duplicate keys, and batches are all
+	// rejected identically (Phase 7 conformance).
+	class := policy.ClassifyRPC(body)
+	switch class.Kind {
+	case policy.RPCEmpty:
 		return true, 0, nil
-	}
-	// A JSON-RPC batch can't be authorized per-entry — refuse it, as the stdio
-	// filter does.
-	if trimmed[0] == '[' {
+	case policy.RPCBatch:
 		_ = e.audit.Append(e.record("<batch>", "", "", policy.Decision{RuleID: -1, Reason: "batches unsupported"}, peer, peerKey))
-		return false, http.StatusOK, jsonRPCError(json.RawMessage("null"), "JSON-RPC batches are not supported by the mesh policy filter")
-	}
-	var msg httpPeek
-	if json.Unmarshal(trimmed, &msg) != nil {
-		// Under enforcement an unparseable body must not reach the backend.
-		_ = e.audit.Append(e.record("<unparseable>", "", "", policy.Decision{RuleID: -1, Reason: "unparseable JSON-RPC"}, peer, peerKey))
-		return false, http.StatusOK, jsonRPCError(json.RawMessage("null"), "unparseable JSON-RPC rejected by mesh policy")
-	}
-	if msg.Method != "tools/call" {
-		return true, 0, nil // ungoverned method: pass through
+		return false, http.StatusOK, jsonRPCError(json.RawMessage("null"), class.Reason)
+	case policy.RPCInvalid:
+		method := class.Method
+		if method == "" {
+			method = "<invalid>"
+		}
+		_ = e.audit.Append(e.record(method, class.Tool, string(class.ID), policy.Decision{RuleID: -1, Outcome: policy.OutcomeDeny, Reason: class.Reason}, peer, peerKey))
+		return false, http.StatusOK, jsonRPCError(class.ID, class.Reason)
+	case policy.RPCNotification:
+		// A notification has no id to answer; mirror the stdio filter by dropping
+		// it if a Methods rule denies it, otherwise pass through.
+		if md := e.eng.Policy().DecideMethod(peer, peerKey, class.Method); md.RuleID != -1 && !md.Allow {
+			_ = e.audit.Append(e.record(class.Method, "", "", md, peer, peerKey))
+			return false, http.StatusOK, nil // dropped: no body
+		}
+		return true, 0, nil
+	case policy.RPCMethod:
+		// Govern non-tool methods identically to stdio (opt-in Methods rules).
+		md := e.eng.Policy().DecideMethod(peer, peerKey, class.Method)
+		if md.RuleID == -1 {
+			return true, 0, nil // ungoverned: pass through
+		}
+		_ = e.audit.Append(e.record(class.Method, "", string(class.ID), md, peer, peerKey))
+		if md.Allow {
+			return true, 0, nil
+		}
+		return false, http.StatusOK, jsonRPCError(class.ID, fmt.Sprintf("method %q denied by mesh policy for peer %s", class.Method, peer))
 	}
 
-	dec := e.eng.DecideToolCall(peer, peerKey, msg.Params.Name, nil)
-	_ = e.audit.Append(e.record(msg.Method, msg.Params.Name, string(msg.ID), dec, peer, peerKey))
-
+	// RPCToolCall.
+	dec := e.eng.DecideToolCallBound(peer, peerKey, e.backend, class.Tool, class.Args, nil)
+	_ = e.audit.Append(e.record("tools/call", class.Tool, string(class.ID), dec, peer, peerKey))
 	switch dec.Outcome {
 	case policy.OutcomeAllow:
 		return true, 0, nil
 	case policy.OutcomeCosign:
 		if e.pending != nil {
-			_ = e.pending.Record(policy.Pending{Peer: peer, PeerKey: peerKey, Backend: e.backend, Tool: msg.Params.Name, RPCID: string(msg.ID)})
+			_ = e.pending.Record(policy.Pending{Peer: peer, PeerKey: peerKey, Backend: e.backend, Tool: class.Tool, RPCID: string(class.ID)})
 		}
-		return false, http.StatusOK, jsonRPCError(msg.ID, fmt.Sprintf("tool %q requires a human co-sign on the mesh: %s", msg.Params.Name, dec.Reason))
+		return false, http.StatusOK, jsonRPCError(class.ID, fmt.Sprintf("tool %q requires a human co-sign on the mesh: %s", class.Tool, dec.Reason))
 	default:
 		reason := dec.Reason
 		if reason == "" {
 			reason = "denied by mesh policy"
 		}
-		return false, http.StatusOK, jsonRPCError(msg.ID, fmt.Sprintf("tool %q blocked for peer %s: %s", msg.Params.Name, peer, reason))
+		return false, http.StatusOK, jsonRPCError(class.ID, fmt.Sprintf("tool %q blocked for peer %s: %s", class.Tool, peer, reason))
 	}
 }
 

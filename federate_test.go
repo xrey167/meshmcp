@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"meshmcp/federation"
-	"meshmcp/mcp"
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/federation"
+	"github.com/xrey167/meshmcp/mcp"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // TestFederationBoundaryRelaysGrantedToolOnly stands up a local upstream with

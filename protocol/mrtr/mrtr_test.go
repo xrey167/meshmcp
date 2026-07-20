@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"meshmcp/protocol/mrtr"
+	"github.com/xrey167/meshmcp/protocol/mrtr"
 )
 
 func TestInputResponseRequestParams(t *testing.T) {

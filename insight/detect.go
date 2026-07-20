@@ -9,7 +9,7 @@ import (
 	"sort"
 	"time"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // DetectOptions tunes anomaly scoring.
@@ -76,8 +76,8 @@ func Detect(baseline Corpus, newR io.Reader, opts DetectOptions) ([]Anomaly, err
 	var out []Anomaly
 	seenNewTool := map[string]bool{}
 	seenUnknown := map[string]bool{}
-	perMinute := map[string]int{}    // id+tool+minute -> count
-	seenSpike := map[string]bool{}   // id+tool+minute already flagged
+	perMinute := map[string]int{}     // id+tool+minute -> count
+	seenSpike := map[string]bool{}    // id+tool+minute already flagged
 	denyRecent := map[string][]bool{} // id -> recent allow(false)/deny(true) window
 
 	sc := bufio.NewScanner(newR)
@@ -114,7 +114,7 @@ func Detect(baseline Corpus, newR io.Reader, opts DetectOptions) ([]Anomaly, err
 						seenUnknown[key] = true
 						out = append(out, Anomaly{Peer: rec.Peer, PeerKey: rec.PeerKey, Kind: "deny-spike", Score: 0.85,
 							Detail: fmt.Sprintf("%.0f%% of recent calls denied — misconfigured or compromised agent", frac*100),
-							Time: rec.Time, Response: "investigate; consider suspending the identity"})
+							Time:   rec.Time, Response: "investigate; consider suspending the identity"})
 					}
 				}
 			}

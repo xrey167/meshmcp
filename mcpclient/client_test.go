@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"meshmcp/mcp"
+	"github.com/xrey167/meshmcp/mcp"
 )
 
 // rwPipe adapts a read half and a write half into one io.ReadWriteCloser.

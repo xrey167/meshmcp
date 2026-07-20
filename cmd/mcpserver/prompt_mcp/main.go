@@ -17,10 +17,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"meshmcp/cmd/mcpserver/prompt_mcp/prompts"
-	"meshmcp/cmd/mcpserver/prompt_mcp/resources"
-	"meshmcp/cmd/mcpserver/prompt_mcp/tools"
-	"meshmcp/mcp"
+	"github.com/xrey167/meshmcp/cmd/mcpserver/prompt_mcp/prompts"
+	"github.com/xrey167/meshmcp/cmd/mcpserver/prompt_mcp/resources"
+	"github.com/xrey167/meshmcp/cmd/mcpserver/prompt_mcp/tools"
+	"github.com/xrey167/meshmcp/mcp"
 )
 
 func main() {

@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"testing"
 
-	"meshmcp/protocol/completion"
-	"meshmcp/protocol/messages"
-	"meshmcp/protocol/transport"
+	"github.com/xrey167/meshmcp/protocol/completion"
+	"github.com/xrey167/meshmcp/protocol/messages"
+	"github.com/xrey167/meshmcp/protocol/transport"
 )
 
 // TestCompletionFrameRoutes decodes a full completion/complete frame through the

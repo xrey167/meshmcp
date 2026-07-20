@@ -15,8 +15,8 @@ import (
 	"github.com/netbirdio/netbird/client/embed"
 	"gopkg.in/yaml.v3"
 
-	"meshmcp/mcp"
-	"meshmcp/mcpclient"
+	"github.com/xrey167/meshmcp/mcp"
+	"github.com/xrey167/meshmcp/mcpclient"
 )
 
 // OrchestrateConfig configures a server-to-server node: it joins the mesh,

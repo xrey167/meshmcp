@@ -15,7 +15,7 @@ import (
 
 	"github.com/netbirdio/netbird/client/embed"
 
-	"meshmcp/session"
+	"github.com/xrey167/meshmcp/session"
 )
 
 // cmdProbe joins the mesh, opens a (resumable) session to a target backend,

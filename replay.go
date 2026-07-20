@@ -12,8 +12,8 @@ import (
 	"os"
 	"time"
 
-	"meshmcp/policy"
-	"meshmcp/session"
+	"github.com/xrey167/meshmcp/policy"
+	"github.com/xrey167/meshmcp/session"
 )
 
 // cmdReplay re-issues a traced session's requests against a backend and diffs

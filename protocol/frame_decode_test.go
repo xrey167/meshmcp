@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"testing"
 
-	"meshmcp/protocol/messages"
-	"meshmcp/protocol/tool"
-	"meshmcp/protocol/transport"
+	"github.com/xrey167/meshmcp/protocol/messages"
+	"github.com/xrey167/meshmcp/protocol/tool"
+	"github.com/xrey167/meshmcp/protocol/transport"
 )
 
 // The tools/call frame supplied in the draft 2026-07-28 shape.

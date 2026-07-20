@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"meshmcp/protocol/completion"
+	"github.com/xrey167/meshmcp/protocol/completion"
 )
 
 // TestDecodeReferenceResource covers the ref/resource branch (previously only

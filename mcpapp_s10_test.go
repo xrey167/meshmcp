@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // TestShowRetrievals verifies the S10 provenance view: it surfaces only audit

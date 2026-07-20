@@ -5,16 +5,30 @@
 ### The identity-native control plane for agent-to-tool traffic
 
 Expose any [Model Context Protocol](https://modelcontextprotocol.io) server as a **dark service** —
-reachable only over a private WireGuard mesh, with **zero open ports**, a cryptographic identity for
-every caller, an **agent firewall** that enforces what each agent may do, and a **non-repudiable audit
-log** that proves what it did.
+reachable only over a private WireGuard mesh, with **no public application ingress**, a transport-bound
+cryptographic identity for every caller, an **agent firewall** that enforces what each agent may do,
+and a **gateway-signed, tamper-evident audit log** of every decision.
+
+> **Positioning:** a self-hosted agent firewall for private MCP servers — no public application
+> ingress, transport-bound workload identity, enforceable tool/method policy, and a gateway-signed
+> tamper-evident decision log. See **[docs/THREAT-MODEL.md](docs/THREAT-MODEL.md)** for the exact
+> guarantee and limit of each control, and **[docs/CAPABILITY-MATRIX.md](docs/CAPABILITY-MATRIX.md)**
+> for what is stable vs. experimental.
+
+> ⚖️ **License & current status.** meshmcp is **not** open source (yet). The current
+> [`LICENSE`](LICENSE) is **proprietary and read-only**: you may view the source for evaluation, but
+> running, deploying, copying, modifying, or distributing it requires the copyright holder's prior
+> written permission. The build-and-run steps below are provided for reference and become usable once
+> you have obtained permission or the project adopts an open license. The licensing model is under
+> review — see **[LICENSE-DECISION.md](LICENSE-DECISION.md)**. To report a security issue, see
+> **[SECURITY.md](SECURITY.md)**.
 
 <br>
 
 ![Go 1.26](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white)
 ![MCP 2025-06-18](https://img.shields.io/badge/MCP-2025--06--18-6E56CF)
 ![transport WireGuard](https://img.shields.io/badge/transport-WireGuard%20·%20NetBird-88171A?logo=wireguard&logoColor=white)
-![open ports 0](https://img.shields.io/badge/open%20ports-0-2EA043)
+![public app ingress none](https://img.shields.io/badge/public%20app%20ingress-none-2EA043)
 ![go test -race](https://img.shields.io/badge/go%20test%20--race-green%20·%209%20pkgs-2EA043)
 
 <sub>userspace WireGuard, no TUN, no admin rights · stdio + Streamable-HTTP · one static binary</sub>
@@ -52,20 +66,24 @@ Scale it out with an aggregating **router**, a managed **control plane**, and cr
 
 ## Why it's different
 
-Every other "MCP gateway" trusts a header or a token the caller sends. meshmcp keys everything —
-policy, audit, routing — off the **WireGuard key the transport cryptographically proves**. That one
-choice is the moat: a caller can't forge an identity it doesn't hold the private key for, so the
-firewall can't be talked past and the audit can't be repudiated.
+Many MCP gateways authorize on an application-layer header or bearer token the caller supplies.
+meshmcp instead keys policy, audit, and routing off the **WireGuard public key the transport proves**
+— identity is derived from the authenticated transport at every enforcement point, not read from a
+caller-supplied header, `_meta`, or request body. A caller cannot present an identity it does not hold
+the private key for. This is authentication and workload identity; it is **not** by itself
+authorization — every privileged surface additionally enforces default-deny policy (see the threat
+model for where this boundary holds and where it does not, e.g. a compromised in-mesh peer or a
+key-holding insider).
 
 | | |
 |---|---|
 | 🔒 **Zero exposure** | Backends listen only on the mesh interface. No public port to scan, phish, or DDoS. |
 | 🪪 **Cryptographic identity** | Every request resolves to the caller's WireGuard public key + mesh FQDN — the root of policy and audit, not a claim. |
-| 🔁 **Sessions that survive** | Exactly-once, in-order delivery over a bounded, flow-controlled buffer; survives client roaming **and** a gateway crash (shared store + ownership lease). |
+| 🔁 **Sessions that survive** | In-order frame delivery with duplicate suppression on reconnect over a bounded, flow-controlled buffer; survives client roaming. Cross-gateway failover and end-to-end idempotency are experimental — meshmcp does **not** claim exactly-once *tool execution* (see the delivery-vs-execution guarantees in the threat model). |
 | 🧱 **The agent firewall** | Allow/deny per tool & method by identity, **rate limits**, **time windows**, **human co-sign**, and **data-flow labels** — enforced where no jailbreak can reach it. |
-| 🧾 **Non-repudiable audit** | Every decision is a hash-chained record sealed by **Ed25519-signed Merkle checkpoints** — provable complete-and-unedited with the public key alone. |
+| 🧾 **Gateway-signed audit** | Every decision is a hash-chained record sealed by **Ed25519-signed Merkle checkpoints**. `audit verify` reports one of four honest states — invalid, valid-but-untrusted-key, valid-but-unsealed-tail, or fully sealed — and only a **sealed** log verified against a **pinned** expected key is complete and trusted. It is tamper-evident against a file editor, not proof every real-world action occurred; a key-holding insider needs external anchoring. |
 | 🧠 **Policy from behavior** | `insight` profiles what agents actually do, **generates** a least-privilege policy, **simulates** changes against real traffic (CI gate), and **detects** drift. |
-| 🔑 **Credential broker** | Agents reference a secret by name (`{{secret:stripe_key}}`) and **never hold the value** — the gateway injects it by identity, audits the use (name, never value), and refuses injection into a tainted session. |
+| 🔑 **Credential broker** | Agents reference a secret by name (`{{secret:stripe_key}}`); the gateway injects it by identity into the declared backend argument, audits the use (name, never value), and refuses injection into a tainted session. The guarantee is **credential isolation** — the agent does not receive the secret from the gateway — not an absolute promise the value can never be observed: a malicious backend remains within the secret's exposure boundary (see the threat model). |
 | 🎟️ **Signed capabilities** | Short-lived, subject-bound Ed25519 grants **upgrade a policy-default deny** without editing config — pinned trust roots, bound to the caller's WireGuard key, stripped before the backend, fail-closed. Never override an explicit deny or a co-sign. |
 | 🌐 **Scale & federate** | Aggregating router (LB · failover · discovery · bidirectional MCP), a managed control plane, and identity-mapped cross-org federation. |
 
@@ -201,9 +219,17 @@ The audit log is a tamper-evident hash chain, sealed by signed Merkle checkpoint
 
 ```console
 $ meshmcp audit verify audit.jsonl --checkpoints cps.jsonl --pubkey <key>
-OK  1240 records, 10 signed checkpoint(s), 1240 records committed
-    non-repudiable: the log is complete and unedited, provable with the public key alone
+OK  1240 records, 10 signed checkpoint(s), 1240 records covered  [sealed]
+    signer <key>
+    SEALED & TRUSTED: gateway-signed tamper-evident decision log — every record is covered
+    by a checkpoint signed with the pinned key. A holder of the file cannot edit a
+    covered record without the signing key. (Anchor a checkpoint externally to also
+    defend against a key-holding insider who rolls the log and checkpoints back together.)
 ```
+
+Without `--pubkey` the signer is unverified (`untrusted_key`); with an uncovered tail the result is
+`unsealed`; either exits non-zero. Only a **sealed** result pinned to an expected key is complete and
+trusted.
 
 Edit a single record — even re-linking the whole chain — and verification fails at the exact
 sequence number. An insider with write access to the file still can't forge it without the key.
@@ -270,7 +296,7 @@ Watch it live with `meshmcp dash --audit audit.jsonl`; re-run a past session wit
 session/     resumable + migratable session layer (Mars-STN-style reliability · store · lease · flock)
 policy/      the agent firewall (enforce): policy engine, signed tamper-evident audit, trace, replay
 insight/     the firewall's read side (understand): profile · recommend · simulate · detect
-secrets/     credential broker: inject secrets by identity, agent never holds the value
+secrets/     credential broker: inject secrets by identity (credential isolation; agent does not receive the value)
 control/     managed control plane: enrollment (NetBird key issuance) · registry · policy distribution
 federation/  cross-org boundary: per-org tool grants · identity mapping · audited crossings
 mcp/         dependency-free MCP server framework (tools · resources · prompts · tasks · HTTP)
@@ -293,7 +319,7 @@ examples/    ready-to-adapt configs        docs/  design docs + open specs
 - **[examples/](examples/)** — annotated configs for every scenario (start with `agent-firewall.yaml`).
 - **[docs/AGENT-FIREWALL.md](docs/AGENT-FIREWALL.md)** — the policy engine, signed audit, dashboard, replay, control plane, federation.
 - **[docs/INSIGHT.md](docs/INSIGHT.md)** — the firewall's read side: observe → recommend → simulate → detect.
-- **[docs/SECRETS.md](docs/SECRETS.md)** — the credential broker: identity-gated secret injection, the agent never holds the value.
+- **[docs/SECRETS.md](docs/SECRETS.md)** — the credential broker: identity-gated secret injection (credential isolation; the agent does not receive the value; a malicious backend stays within the exposure boundary).
 - **[docs/EXTENSIONS.md](docs/EXTENSIONS.md)** — signed capabilities (short-lived, subject-bound tool grants), server middleware, and the typed function/task client.
 - **[protocol/README.md](protocol/README.md)** — granular Go models for the full MCP wire protocol: the 2025-06-18 base schema, the draft revision (server/discover, MRTR, subscriptions, error catalog, sampling tool-use, form/url elicitation, streamable-HTTP + stdio transports, OAuth 2.1 authorization), and the Server Card / Tasks / Apps extensions — plus a client-side response cache. One package per domain, each with round-trip tests.
 - **[docs/spec/](docs/spec/)** — open specs: the [audit-record format](docs/spec/AUDIT-RECORD.md) and the [policy DSL](docs/spec/POLICY-DSL.md), each with a JSON Schema.

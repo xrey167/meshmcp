@@ -3,7 +3,7 @@
 // (schema @category `roots/list`).
 package roots
 
-import "meshmcp/protocol/base"
+import "github.com/xrey167/meshmcp/protocol/base"
 
 // Method names in the roots domain.
 const (

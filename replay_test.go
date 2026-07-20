@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // echoAddBackend is an in-process backend: it replies to tools/call "add" with
@@ -27,7 +27,7 @@ func echoAddBackend(in io.Reader, out io.Writer, wrong bool) {
 			ID     json.RawMessage `json:"id"`
 			Method string          `json:"method"`
 			Params struct {
-				Name      string `json:"name"`
+				Name      string             `json:"name"`
 				Arguments struct{ A, B int } `json:"arguments"`
 			} `json:"params"`
 		}

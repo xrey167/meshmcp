@@ -11,9 +11,9 @@ package apps
 import (
 	"encoding/json"
 
-	"meshmcp/protocol/base"
-	"meshmcp/protocol/content"
-	"meshmcp/protocol/tool"
+	"github.com/xrey167/meshmcp/protocol/base"
+	"github.com/xrey167/meshmcp/protocol/content"
+	"github.com/xrey167/meshmcp/protocol/tool"
 )
 
 // ToolResultNotification carries a tool execution result (Host -> View).

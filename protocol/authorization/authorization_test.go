@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	auth "meshmcp/protocol/authorization"
+	auth "github.com/xrey167/meshmcp/protocol/authorization"
 )
 
 func TestProtectedResourceMetadataURLs(t *testing.T) {

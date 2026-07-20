@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // webhookSink is an observer AuditSink (the F13/S38 seam, S42) that POSTs

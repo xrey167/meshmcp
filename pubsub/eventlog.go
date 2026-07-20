@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"io"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // EventLog is an append-only sink for the sealed event stream. Persisting the

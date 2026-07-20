@@ -28,7 +28,7 @@ import (
 
 	"github.com/netbirdio/netbird/client/embed"
 
-	"meshmcp/mcpclient"
+	"github.com/xrey167/meshmcp/mcpclient"
 )
 
 const defaultManagementURL = "https://api.netbird.io:443"

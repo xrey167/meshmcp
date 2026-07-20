@@ -13,7 +13,9 @@ import (
 	"os"
 )
 
-const version = "0.1.0"
+// version is the build version. It defaults to the in-tree value and is
+// overridden at release time via -ldflags "-X main.version=<tag>".
+var version = "0.1.0"
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `meshmcp %s — MCP servers over a private WireGuard mesh

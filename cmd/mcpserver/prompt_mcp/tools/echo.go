@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
-	"meshmcp/mcp"
+	"github.com/xrey167/meshmcp/mcp"
 )
 
 func registerEcho(s *mcp.Server) {

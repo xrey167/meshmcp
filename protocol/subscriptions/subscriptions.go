@@ -9,7 +9,7 @@
 // types are the canonical wire model it mirrors.
 package subscriptions
 
-import "meshmcp/protocol/base"
+import "github.com/xrey167/meshmcp/protocol/base"
 
 // Method names in the subscriptions domain.
 const (

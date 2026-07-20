@@ -14,7 +14,7 @@ import (
 	"os"
 	"time"
 
-	"meshmcp/session"
+	"github.com/xrey167/meshmcp/session"
 )
 
 // meshmcp push — the universal clipboard / push-to-agent primitive (F10).

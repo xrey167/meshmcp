@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"meshmcp/policy"
-	"meshmcp/pubsub"
+	"github.com/xrey167/meshmcp/policy"
+	"github.com/xrey167/meshmcp/pubsub"
 )
 
 // TestGatewayHooksBusEndToEnd drives the full bus path: a gateway decision goes

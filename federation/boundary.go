@@ -11,7 +11,7 @@ import (
 	"path"
 	"strings"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // Grant lists what a remote org may reach across the boundary: tool-name globs

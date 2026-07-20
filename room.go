@@ -20,8 +20,8 @@ import (
 
 	"github.com/netbirdio/netbird/client/embed"
 
-	"meshmcp/mcpclient"
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/mcpclient"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // randToken returns a 32-byte hex bearer token for the control room's actuator

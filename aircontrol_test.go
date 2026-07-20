@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"meshmcp/session"
+	"github.com/xrey167/meshmcp/session"
 )
 
 // fakeAirControl is an in-memory airController for handler tests.

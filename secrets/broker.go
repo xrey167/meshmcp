@@ -8,7 +8,7 @@ import (
 	"regexp"
 	"strings"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // refRe matches a secret reference: {{secret:NAME}} (optional surrounding
@@ -53,9 +53,9 @@ func New(store Store, grants []Grant, audit *policy.AuditLog) *Broker {
 // returning ok=false (and a reason for the JSON-RPC denial) if any referenced
 // secret is not granted to the caller, is blocked by the session's labels, or
 // is unavailable. A line with no references passes through untouched.
-func (b *Broker) Resolve(caller policy.Caller, tool string, line []byte, labels map[string]bool) (out []byte, ok bool, reason string) {
+func (b *Broker) Resolve(caller policy.Caller, tool string, line []byte, labels map[string]bool) (out []byte, injected [][]byte, ok bool, reason string) {
 	if !bytes.Contains(line, refMarker) {
-		return line, true, ""
+		return line, nil, true, ""
 	}
 
 	// Collect the distinct referenced names.
@@ -71,13 +71,13 @@ func (b *Broker) Resolve(caller policy.Caller, tool string, line []byte, labels 
 		allowed, why := b.authorize(caller, name, tool, labels)
 		if !allowed {
 			b.record(caller, tool, name, "deny", why)
-			return nil, false, why
+			return nil, nil, false, why
 		}
 		v, found := b.store.Get(name)
 		if !found {
 			reason = fmt.Sprintf("secret %q is not available in the store", name)
 			b.record(caller, tool, name, "deny", "unavailable")
-			return nil, false, reason
+			return nil, nil, false, reason
 		}
 		values[name] = v
 	}
@@ -89,10 +89,19 @@ func (b *Broker) Resolve(caller policy.Caller, tool string, line []byte, labels 
 		name := string(refRe.FindSubmatch(m)[1])
 		return []byte(jsonInner(values[name]))
 	})
+	// Report the injected values (raw AND the JSON-escaped inner form that
+	// actually appears in the wire line) so the filter can scrub either form a
+	// backend might echo back. These bytes are for in-memory redaction only —
+	// they are never audited, traced, or logged.
 	for name := range names {
+		raw := values[name]
+		injected = append(injected, []byte(raw))
+		if esc := jsonInner(raw); esc != raw {
+			injected = append(injected, []byte(esc))
+		}
 		b.record(caller, tool, name, "allow", "injected")
 	}
-	return out, true, ""
+	return out, injected, true, ""
 }
 
 // authorize reports whether caller may inject secret into tool given the

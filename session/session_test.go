@@ -111,9 +111,9 @@ func (h *harness) severLive() {
 // localEnd is the "MCP client" side: the test writes requests to it and
 // reads replies from it.
 type localEnd struct {
-	in  *io.PipeReader // Run reads from here (our writes)
-	inW *io.PipeWriter
-	out *io.PipeWriter // Run writes here (our reads)
+	in   *io.PipeReader // Run reads from here (our writes)
+	inW  *io.PipeWriter
+	out  *io.PipeWriter // Run writes here (our reads)
 	outR *io.PipeReader
 }
 

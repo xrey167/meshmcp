@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sort"
 
-	"meshmcp/secrets"
+	"github.com/xrey167/meshmcp/secrets"
 )
 
 // cmdSecrets implements "meshmcp secrets <subcommand>".

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 func TestRuleAuthorizerMatching(t *testing.T) {
@@ -103,8 +103,8 @@ func TestAuditIntegration(t *testing.T) {
 	auth := &RuleAuthorizer{Rules: []TopicRule{{Peers: []string{"pubkey:ok"}, Topics: []string{"t"}, Allow: true, ClearAll: true}}}
 	b := New(Options{Authorizer: auth, Audit: log})
 
-	_, _ = b.Publish(id("ok"), "t", nil, nil)     // allow
-	_, _ = b.Publish(id("no"), "t", nil, nil)     // deny
+	_, _ = b.Publish(id("ok"), "t", nil, nil)                       // allow
+	_, _ = b.Publish(id("no"), "t", nil, nil)                       // deny
 	_, _ = b.Subscribe(id("no"), SubOptions{Topics: []string{"t"}}) // deny
 
 	out := buf.String()

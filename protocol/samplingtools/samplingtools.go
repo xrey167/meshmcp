@@ -13,10 +13,10 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"meshmcp/protocol/base"
-	"meshmcp/protocol/content"
-	"meshmcp/protocol/sampling"
-	"meshmcp/protocol/tool"
+	"github.com/xrey167/meshmcp/protocol/base"
+	"github.com/xrey167/meshmcp/protocol/content"
+	"github.com/xrey167/meshmcp/protocol/sampling"
+	"github.com/xrey167/meshmcp/protocol/tool"
 )
 
 // Method is the JSON-RPC method name for a sampling request.

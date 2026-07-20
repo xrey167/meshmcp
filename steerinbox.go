@@ -9,8 +9,8 @@ import (
 	"io"
 	"log"
 
-	"meshmcp/policy"
-	"meshmcp/session"
+	"github.com/xrey167/meshmcp/policy"
+	"github.com/xrey167/meshmcp/session"
 )
 
 // newSteerFactory returns a session backend factory for an agent's steer inbox:

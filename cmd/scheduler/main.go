@@ -19,7 +19,7 @@ import (
 	"sync"
 	"time"
 
-	"meshmcp/mcp"
+	"github.com/xrey167/meshmcp/mcp"
 )
 
 // job is one scheduled tool call.

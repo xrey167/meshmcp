@@ -13,8 +13,8 @@ import (
 	"fmt"
 	"os"
 
-	"meshmcp/embed"
-	"meshmcp/mcp"
+	"github.com/xrey167/meshmcp/embed"
+	"github.com/xrey167/meshmcp/mcp"
 )
 
 func main() {
@@ -101,7 +101,7 @@ func registerVectors(s *mcp.Server, ix *index, peer string) {
 			// The provenance refs also ride the result _meta, so the gateway can
 			// record which documents produced an answer (verifiable answers, F6).
 			return jsonResultMeta(map[string]any{"count": len(results), "results": results},
-				map[string]any{"meshmcp/retrieved": refs}), nil
+				map[string]any{"github.com/xrey167/meshmcp/retrieved": refs}), nil
 		},
 	})
 

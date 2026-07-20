@@ -6,7 +6,7 @@ import (
 	"os"
 	"time"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // cmdApprove records a human co-sign for a require_cosign tool call. A human

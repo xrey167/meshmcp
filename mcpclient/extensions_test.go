@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"meshmcp/mcp"
+	"github.com/xrey167/meshmcp/mcp"
 )
 
 // newTestClient wires an mcp.Server (configured by fn) to a Client over pipes.

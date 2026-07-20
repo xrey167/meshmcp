@@ -1,7 +1,7 @@
 package main
 
 import (
-	"meshmcp/embed"
+	"github.com/xrey167/meshmcp/embed"
 	"path/filepath"
 	"testing"
 )

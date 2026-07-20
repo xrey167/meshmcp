@@ -8,7 +8,7 @@
 // authoritative for security decisions.
 package servercard
 
-import "meshmcp/protocol/base"
+import "github.com/xrey167/meshmcp/protocol/base"
 
 // SchemaURI is the required $schema value a v1 Server Card must declare.
 const SchemaURI = "https://static.modelcontextprotocol.io/schemas/v1/server-card.schema.json"

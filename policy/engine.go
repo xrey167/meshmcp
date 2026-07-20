@@ -157,14 +157,20 @@ type bucket struct {
 // evaluates the taint_guard/taint_source rule flags against the taint state the
 // caller passes in.
 type Engine struct {
-	pol    *Policy
-	now    func() time.Time
-	cosign CosignStore
-	groups GroupResolver // optional: resolves group:<name> peer patterns (F17)
+	pol          *Policy
+	now          func() time.Time
+	cosign       CosignStore
+	reqApprovals RequestApprovalStore // optional: request-bound single-use approvals (Phase 3)
+	groups       GroupResolver        // optional: resolves group:<name> peer patterns (F17)
 
 	mu      sync.Mutex
 	buckets map[string]*bucket // key: ruleID|peerKey
 }
+
+// SetRequestApprovals attaches a request-bound approval store. When set,
+// DecideToolCallBound enforces argument-bound, single-use co-sign approvals in
+// place of the ambient (peer, tool) co-sign store.
+func (e *Engine) SetRequestApprovals(s RequestApprovalStore) { e.reqApprovals = s }
 
 // SetGroupResolver attaches a group resolver so rules may match `group:<name>`
 // peers (nil disables group matching — such patterns then never match).
@@ -216,7 +222,24 @@ func (e *Engine) Policy() *Policy { return e.pol }
 // co-sign, and data-flow labels. labels is the session's current label set
 // (nil is fine). The returned Decision's Outcome is allow, deny, or cosign,
 // and AddLabels lists labels the caller should add on an allowed call.
+//
+// This form uses the legacy ambient (peer, tool) co-sign store. Prefer
+// DecideToolCallBound, which binds co-sign approvals to the exact arguments and
+// backend and consumes them single-use.
 func (e *Engine) DecideToolCall(peerFQDN, peerKey, tool string, labels map[string]bool) Decision {
+	return e.decideTool(peerFQDN, peerKey, "", tool, nil, labels, false)
+}
+
+// DecideToolCallBound is DecideToolCall with request-bound co-sign: when a
+// request-approval store is configured (SetRequestApprovals), a require_cosign
+// rule is satisfied only by a signed, non-expired, single-use approval bound to
+// this exact (peer, backend, tool, arguments), which it atomically consumes.
+// Changing the arguments or backend no longer matches an approval.
+func (e *Engine) DecideToolCallBound(peerFQDN, peerKey, backend, tool string, args []byte, labels map[string]bool) Decision {
+	return e.decideTool(peerFQDN, peerKey, backend, tool, args, labels, true)
+}
+
+func (e *Engine) decideTool(peerFQDN, peerKey, backend, tool string, args []byte, labels map[string]bool, bound bool) Decision {
 	now := e.now()
 	for i, r := range e.pol.Rules {
 		if len(r.Methods) > 0 {
@@ -246,6 +269,18 @@ func (e *Engine) DecideToolCall(peerFQDN, peerKey, tool string, labels map[strin
 				Reason: fmt.Sprintf("rate limit exceeded (max %d per %s)", r.Rate.Max, r.Rate.window())}
 		}
 		if r.RequireCosign {
+			// Request-bound approvals (preferred): a signed, single-use approval
+			// bound to these exact arguments and backend. Consume atomically.
+			if bound && e.reqApprovals != nil {
+				req := ApprovalRequest{PeerKey: peerKey, Backend: backend, Tool: tool, ArgsHash: canonicalArgsHash(args)}
+				if ok, _ := e.reqApprovals.ConsumeApproval(req, now); ok {
+					return Decision{Allow: true, RuleID: i, Outcome: OutcomeAllow,
+						Reason: "request-bound co-sign consumed", AddLabels: r.emitSet(), Cost: ruleCost(r)}
+				}
+				return Decision{RuleID: i, Outcome: OutcomeCosign,
+					Reason: fmt.Sprintf("awaiting request-bound human co-sign for %q", tool)}
+			}
+			// Legacy ambient (peer, tool) co-sign.
 			if e.cosign != nil && e.cosign.Approved(CosignKey(peerFQDN, tool)) {
 				return Decision{Allow: true, RuleID: i, Outcome: OutcomeAllow,
 					Reason: "co-signed", AddLabels: r.emitSet(), Cost: ruleCost(r)}

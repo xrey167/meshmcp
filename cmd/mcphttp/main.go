@@ -12,7 +12,7 @@ import (
 	"net/http"
 	"os"
 
-	"meshmcp/mcp"
+	"github.com/xrey167/meshmcp/mcp"
 )
 
 func main() {

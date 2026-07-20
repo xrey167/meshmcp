@@ -3,7 +3,7 @@ package prompts
 import (
 	"context"
 
-	"meshmcp/mcp"
+	"github.com/xrey167/meshmcp/mcp"
 )
 
 func registerSummarize(s *mcp.Server) {

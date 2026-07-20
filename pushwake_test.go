@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // captureNotifier records the last Notify call for assertions.

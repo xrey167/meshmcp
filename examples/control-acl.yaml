@@ -1,0 +1,30 @@
+# Control-plane operator ACL (default-deny RBAC).
+#
+# The managed control plane (`meshmcp control --acl control-acl.yaml ...`) is
+# default-deny: a caller holds a privilege only if this file grants a role to
+# the caller's WireGuard PUBLIC KEY. Reaching the mesh port grants nothing —
+# WireGuard membership authenticates a peer, it does not authorize
+# administration. Identity is derived from the authenticated transport (the mesh
+# source address → WireGuard key); identity supplied in HTTP headers or the
+# request body is ignored.
+#
+# Roles:
+#   control.admin      implies every role below
+#   enrollment.issue   POST /v1/enroll        (mint setup keys)
+#   registry.read      GET  /v1/registry
+#   registry.write     POST/DELETE /v1/registry
+#   policy.read        GET  /v1/policy/<name>, GET /v1/policies
+#   policy.write       PUT  /v1/policy/<name>
+#
+# Keys are hex WireGuard public keys (the durable identity). A missing/empty ACL
+# is a startup error, not a silent "allow all".
+
+grants:
+  # A platform operator who administers everything.
+  "b1946ac92492d2347c6235b4d2611184b1946ac92492d2347c6235b4d2611184": [control.admin]
+
+  # A node-provisioning service that may only mint setup keys.
+  "3b1946ac92492d2347c6235b4d2611184b1946ac92492d2347c6235b4d261118": [enrollment.issue]
+
+  # A read-only auditor of registry and policy state.
+  "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2": [registry.read, policy.read]

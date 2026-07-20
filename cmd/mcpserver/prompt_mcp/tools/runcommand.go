@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"meshmcp/mcp"
+	"github.com/xrey167/meshmcp/mcp"
 )
 
 // registerRunCommand registers a guarded shell tool. Only command names in

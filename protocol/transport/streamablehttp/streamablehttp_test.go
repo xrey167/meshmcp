@@ -3,7 +3,7 @@ package streamablehttp_test
 import (
 	"testing"
 
-	sh "meshmcp/protocol/transport/streamablehttp"
+	sh "github.com/xrey167/meshmcp/protocol/transport/streamablehttp"
 )
 
 func TestHeaderValueRoundTrip(t *testing.T) {

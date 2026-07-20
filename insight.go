@@ -9,8 +9,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"meshmcp/insight"
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/insight"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // cmdInsight implements "meshmcp insight <subcommand>": the read side of the

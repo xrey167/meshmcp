@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"meshmcp/mcpclient"
-	"meshmcp/session"
+	"github.com/xrey167/meshmcp/mcpclient"
+	"github.com/xrey167/meshmcp/session"
 )
 
 // multiFlag collects repeatable string flags (e.g. --steer-allow a --steer-allow b).
