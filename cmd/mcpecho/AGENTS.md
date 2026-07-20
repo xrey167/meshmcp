@@ -9,7 +9,7 @@ A minimal but real MCP stdio server used mainly as a **resumable-session test ba
 ## Key Files
 | File | Description |
 |------|-------------|
-| `main.go` | `package main`: registers a trivial echo-style tool set on an `mcp.Server` over stdio. |
+| `main.go` | `package main`: a hand-rolled newline-delimited JSON-RPC 2.0 loop over stdio (no `mcp/` framework), implementing `initialize`, `tools/list`, `tools/call` (a single `echo` tool), and `ping`. |
 
 ## For AI Agents
 
@@ -18,7 +18,7 @@ A minimal but real MCP stdio server used mainly as a **resumable-session test ba
 
 ## Dependencies
 
-### Internal
-- `mcp/`.
+### External
+- Standard library only (`bufio`, `encoding/json`).
 
 <!-- MANUAL: Any manually added notes below this line are preserved on regeneration -->

@@ -11,7 +11,7 @@ A minimal MCP **client** over any `io.ReadWriteCloser`, plus two higher-level su
 |------|-------------|
 | `client.go` | `Client`: `Initialize`, `ListTools/Resources/Prompts`, `CallTool`, `ReadResource`, `GetPrompt`. `RequestMeta` is merged into every request's `params._meta` via `withMeta` (this is how `--capability` rides along). |
 | `function.go` | Provider-neutral tools-as-functions: `ListFunctions`, `InvokeFunction`/`InvokeTool`, `ToolCallResult`, and `ToolExecutionError` (an `isError` result becomes a typed Go error). Arguments validated to be exactly one JSON object. |
-| `tasks.go` | Task client: `StartTool`, `WaitTask` (polls; cancels via `notifications/cancelled` on ctx cancel), `GetTask`, `ListTasks`, `CancelTask`, `TaskResult`, `Task.Terminal()`. |
+| `tasks.go` | Task client: `StartTool`, `WaitTask` (polls; cancels via `notifications/cancelled` on ctx cancel), `GetTask`, `ListTasks`, `CancelTask`, `SteerTask` (mid-flight guidance via `tasks/steer`), `TaskResult`, `Task.Terminal()`. |
 
 ## For AI Agents
 

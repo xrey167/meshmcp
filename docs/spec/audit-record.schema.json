@@ -18,6 +18,8 @@
     "decision": { "type": "string", "enum": ["allow", "deny", "cosign"] },
     "reason": { "type": "string" },
     "rule": { "type": "integer" },
+    "cost": { "type": "integer", "minimum": 0, "description": "cost/quota units consumed (F29); omitted when zero" },
+    "provenance": { "type": "array", "items": { "type": "string" }, "description": "content refs that produced the answer (F6 provenance receipt)" },
     "seq": { "type": "integer", "minimum": 1 },
     "prev_hash": { "type": "string", "pattern": "^([0-9a-f]{64})?$" },
     "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }

@@ -34,33 +34,44 @@ properties at once.
 
 Phases 1–3 (gateway, resumable sessions, policy+audit) and much of the HA / tool-mesh
 track (session migration, replica failover, discovery registry, bidirectional MCP — see
-[HA-TOOLMESH.md](HA-TOOLMESH.md)) are **built and tested**. The phases below remain open;
-they are control-plane / governance work on top of the proven substrate.
+[HA-TOOLMESH.md](HA-TOOLMESH.md)) are **built and tested**. Wave 2 has since delivered most
+of the phases below — **Phase 4 (F21), Phase 5 (F29), and Phase 7 (F15) shipped**; Phase 6
+(federation) is the main remaining control-plane track. Each phase is annotated inline.
 
 **Phase 4 — capability tokens.** Today authz is peer-identity → tool. Next: short-lived,
 signed capability grants ("this agent may call `read_*` on `kg-memory` until 15:00"), issued
 by a control plane and verified at the gateway. Turns the mesh into an agent-scoped
 capability system, not just a network.
+> **Shipped (Wave 2):** signed capability grants gained a revocation lifecycle — a
+> mesh-distributed revocation store plus `capability issue / revoke / list` (**F21**).
 
 **Phase 5 — rate & cost governance.** The gateway already sees every tool call. Add
 per-identity quotas, token-bucket rate limits, and (for LLM-backed tools) cost accounting.
 A denied-by-budget response is the same inline-error mechanism as a policy deny.
+> **Shipped (Wave 2):** per-identity cost & budget governance — `meshmcp budget` (**F29**).
 
 **Phase 6 — federation.** Multiple NetBird networks (orgs) peering selected backends across
 a trust boundary, with policy at the seam. An agent in org A calls a vetted tool in org B,
 every call audited on both sides, nothing else reachable. B2B tool-sharing with no public
 surface.
+> **Status:** backlog — the governed plugin/tool marketplace (**F14**) and SSO-mapped
+> federation (**F31**) are not yet built; the federation boundary itself (`federation/`) is.
 
 **Phase 7 — observability plane.** `meshmcp status` → live sessions, peers, per-tool call
 rates; the audit stream shipped to any sink (OTel, a SIEM). "Who called what, from where,
 when" becomes queryable for an entire agent fleet.
+> **Shipped (Wave 2):** `meshmcp status` (live sessions, peers, per-tool call rates) plus a
+> webhook audit sink (**F15**); a dedicated OTel/Prometheus exporter (**S41**) is still open.
 
-> The open phases above are developed, sized, and mapped to concrete seams in
-> **[ROADMAP-HARDENING.md](ROADMAP-HARDENING.md)** (Wave 2): Phase 4 → F21 (capability
-> revocation lifecycle), Phase 5 → F29 (cost & budget governance), Phase 6 → F14/F31 (plugin
-> marketplace, SSO-mapped federation), Phase 7 → F15 (observability plane, OTel/SIEM export).
-> It also adds the compile-time **plugin platform** (F13), HTTP-backend policy parity (F16),
-> and a 30-finding hardening sweep — 20 flagships (F13–F32) + 50 minor (S11–S60).
+> These phases are developed, sized, and mapped to concrete seams in
+> **[ROADMAP-HARDENING.md](ROADMAP-HARDENING.md)** (Wave 2), most of them now **shipped**:
+> Phase 4 → **F21 ✓** (capability revocation lifecycle), Phase 5 → **F29 ✓** (cost & budget
+> governance), Phase 7 → **F15 ✓** (observability plane — `status` + webhook sink); Phase 6 →
+> **F14 / F31** (plugin marketplace, SSO-mapped federation) remains **backlog**. Wave 2 also
+> shipped the compile-time **plugin platform** (F13), HTTP-backend policy parity (F16),
+> group-based policy (F17), identity-bound sessions (F23), the mesh vault / scheduler / event
+> bus (F26–F28), an attestation pack (F32), client-hook adapters (F33), and most of the
+> hardening sweep — flagships F13–F33 (F14/F19/F25/F30/F31 still open) + minors S11–S60.
 
 ## Where it goes — wilder (still grounded in the primitives)
 
@@ -96,8 +107,10 @@ when" becomes queryable for an entire agent fleet.
   Streamable-HTTP backends for per-tool authorization + audit + rate/window/co-sign
   (F16, request-body parsing). Taint labels, secret injection, and capability upgrades
   remain stdio-only (they need per-session state / SSE body rewriting).
-- NetBird **group** membership isn't available through the embed API; policy matches FQDN
-  and pubkey today. Group-based rules need the management API.
+- Policy matches FQDN, pubkey, and **`group:<name>`** rules (F17); groups are resolved from
+  config today (`groups:`, a static `GroupResolver`). Dynamic NetBird group membership isn't
+  available through the embed API — a management-API-backed resolver is a drop-in for the same
+  interface but isn't wired yet.
 - The gateway binary is heavy (~44 MB, NetBird's dep tree) — a daemon, not something to
   embed in a tiny CLI. Clients that only `connect` could use a thinner build later.
 - One live roam (physically moving networks mid-session) is proven only by loopback drop +

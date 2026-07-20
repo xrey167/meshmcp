@@ -29,6 +29,8 @@ record's hash, forming a hash chain.
 | `decision` | string | yes | `allow` \| `deny` \| `cosign`. |
 | `reason` | string | no | Human-readable justification. |
 | `rule` | number | yes | Index of the matching policy rule, or `-1`. |
+| `cost` | number | no | Cost/quota units this call consumed (F29); absent when zero. |
+| `provenance` | array | no | Content refs (retrieved document / triple hashes) that produced the answer — a signed provenance receipt (F6). |
 | `seq` | number | yes | 1-based monotonic sequence number. |
 | `prev_hash` | string | yes | Hex SHA-256 of the previous record (`""` for `seq` 1). |
 | `hash` | string | yes | Hex SHA-256 of this record (see 1.2). |

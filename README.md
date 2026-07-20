@@ -235,7 +235,7 @@ Watch it live with `meshmcp dash --audit audit.jsonl`; re-run a past session wit
 | `hook --client <c> --config <f>` | **Client-hook firewall** (F33): govern *every* local tool call in Claude Code / Cursor / Codex by policy + DLP + taint + audit — `hook install` prints the settings snippet. |
 | `audit verify <f> [--checkpoints --pubkey]` | Verify a log: hash chain, or signatures + Merkle. |
 | `audit keygen [--out f]` | Generate a gateway Ed25519 signing key. |
-| `audit export --in <f>` · `audit receipt --in <f>` · `audit attest --in <f>` | Export the ledger to CSV; emit a verifiable provenance receipt (what a session's tools produced); build a self-describing, independently-verifiable compliance/attestation bundle (F32). |
+| `audit export --in <f>` · `audit receipt --in <f>` · `audit attest --audit <f>` | Export the ledger to CSV; emit a verifiable provenance receipt (what a session's tools produced); build a self-describing, independently-verifiable compliance/attestation bundle (F32). |
 | `capability keygen [--out f]` | Generate an Ed25519 authority key backends pin as a trust root. |
 | `capability issue --subject --audience --tool [--ttl]` | Sign a short-lived, subject-bound tool grant (present it with `call --capability @file`). |
 | `capability revoke·list --store <d>` | Revoke a capability id (fails closed everywhere) / list revoked ids. |
@@ -245,6 +245,7 @@ Watch it live with `meshmcp dash --audit audit.jsonl`; re-run a past session wit
 | `status --audit <f>` · `budget --audit <f>` | Roll up a ledger (per-peer/tool/backend + chain verdict); total cost/quota per identity (FinOps). |
 | `config validate --config <f>` · `doctor --config <f>` | Validate a config (globs/windows/enums/DLP) / run pre-flight readiness checks. |
 | `plugins` | List the extensions compiled into this build (F13). |
+| `spotlight [flags] <query>` | **Mesh Spotlight** (F19): federated semantic search — one query fanned out to the search backends your identity can reach, merged, ranked, and provenance-tagged. |
 | `dash --audit <f>` | Serve the live control dashboard. |
 | `room --audit <f>` | Serve the interactive **Control Room** — live network (servers, agents, decision feed) **plus a console**: list/call tools over the mesh, a governed `run_command` terminal, and (opt-in `--local-shell`) a raw shell. |
 | `agent --role <r> <peer:port>` | Run a demo agent app (reader/fetcher/billing/analyst) with its own mesh identity. |

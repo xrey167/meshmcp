@@ -4,12 +4,13 @@
 # insight
 
 ## Purpose
-The **read side** of the firewall: it turns the audit stream into policy. A four-stage pipeline — observe → recommend → simulate → detect — that profiles what agents actually do, generates a least-privilege policy, simulates a candidate policy against real recorded traffic (a CI gate), and detects behavioral drift/anomalies. Backs `meshmcp insight <subcommand>`.
+The **read side** of the firewall: it turns the audit stream into policy. A pipeline — observe → recommend → simulate → detect, with a semantic-similarity assist — that profiles what agents actually do, generates a least-privilege policy, simulates a candidate policy against real recorded traffic (a CI gate), and detects behavioral drift/anomalies. Backs `meshmcp insight <subcommand>`.
 
 ## Key Files
 | File | Description |
 |------|-------------|
-| `profile.go` | Package doc + `observe`: aggregate a hash-chained audit log into per-identity behavior profiles. |
+| `profile.go` | Package doc + `Profile`: aggregate a hash-chained audit log into a per-identity behavior `Corpus`. |
+| `semantic.go` | `SemanticGrouper` (S5): clusters tools by embedding similarity (`meshmcp/embed`) so a renamed-but-equivalent tool isn't flagged as novel and a glob can be proposed per group. |
 | `recommend.go` | `RecommendOptions` + policy synthesis. Round-trip invariant: a policy learned from behavior must not deny that same behavior. |
 | `simulate.go` | `Change` — diff a candidate policy's verdicts against the recorded corpus (what would newly allow/deny). |
 | `detect.go` | `DetectOptions` — anomaly scoring against a learned baseline (off-hours, new tools, volume spikes). |
@@ -26,7 +27,7 @@ The **read side** of the firewall: it turns the audit stream into policy. A four
 ## Dependencies
 
 ### Internal
-- Reads `policy` audit records / `analyze.go` aggregates. Invoked from root `insight.go`.
+- Reads `policy` audit records; `profile.go` aggregates (`Corpus`). Invoked from root `insight.go`.
 
 ### External
 - Standard library only.

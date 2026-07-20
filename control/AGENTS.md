@@ -11,7 +11,7 @@ The managed control plane: a single mesh service that handles node **enrollment*
 |------|-------------|
 | `control.go` | Package doc + the control-plane service: enrollment endpoints, registry, and policy handout. |
 | `netbird.go` | The NetBird API issuer. `Doer` is the injectable `*http.Client` subset used to request setup keys (mockable in tests). |
-| `store.go` | `FilePolicyStore` — named policies persisted as `<name>.yaml` in a directory, served to gateways. |
+| `store.go` | `FilePolicyStore` — named policies persisted as `<name>.yaml` in a directory, served to gateways. Also `StaticEnroll` — the default fixed-credential `EnrollFunc` (swap for `NetBirdIssuer`). |
 
 ## For AI Agents
 

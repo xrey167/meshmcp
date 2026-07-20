@@ -11,10 +11,10 @@ A resumable, exactly-once, in-order session layer over an unreliable mesh connec
 |------|-------------|
 | `frame.go` | Package doc + the wire framing (DATA/ACK frames, sequence numbers) for the resumable protocol. |
 | `endpoint.go` | The shared endpoint `pump`: send/receive, acking, backpressure, and `errRebound` when a connection is replaced by a reattach. |
-| `server.go` | `Server`: manages resumable sessions for one backend definition; detach TTL, reattach, and reconstruction. |
+| `server.go` | `Server`: manages resumable sessions for one backend definition; detach TTL, reattach, reconstruction. Enforces identity binding — a reattach/rehydrate must come from the creator's `PeerKey` (`creatorKey`, else `errSessionIdentity`) (F23). `Server.Steer` injects a server→client notification into a live session (`ErrNoSession` if absent); `Server.Sessions()`/`SessionInfo` enumerate live sessions (caller + age). |
 | `client.go` | `Dialer` and the client half that reconnects and replays missed frames. |
-| `backend.go` | Shared timing knobs and the backend-side session wiring; `SessionStoreMode` (handshake / full / backend). |
-| `store.go` | `PersistedFrame` + the durable file store and ownership **lease** used for cross-process failover. |
+| `backend.go` | Shared timing knobs, the `Meta` caller-identity struct, and the backend-side session wiring; `MigrationMode` (`MigrateHandshake`/`MigrateFull`/`MigrateBackend`). |
+| `store.go` | `PersistedFrame` + the durable file store and ownership **lease** used for cross-process failover; `PersistedSession.CreatorKey` (the identity-binding field checked on failover) and the `SessionStore.List()` enumeration behind the cross-gateway sessions view. |
 | `flock.go` | Advisory file locking (`errLockTimeout`) guarding the shared store. |
 
 ## For AI Agents

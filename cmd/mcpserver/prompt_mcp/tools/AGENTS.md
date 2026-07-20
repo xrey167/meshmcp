@@ -14,7 +14,7 @@ The demo server's tools, one file per tool. Each exposes a `registerX(s *mcp.Ser
 | `fs.go` | Filesystem tools (`list_dir`, `read_file`, `write_file`), all sandboxed to a root. |
 | `runcommand.go` | `run_command` — guarded shell tool; only allow-listed command names run. |
 | `slowcount.go` | `slow_count` — long-running tool, best invoked as a task. |
-| `demo.go` | Canned showcase tools for the mesh agents (`charge`, `fetch` (taint source), `read_customer`, `language`, `code`, `text`). |
+| `demo.go` | Canned showcase tools for the mesh agents (`charge`, `fetch` (taint source), `read_customer`). |
 
 ## For AI Agents
 

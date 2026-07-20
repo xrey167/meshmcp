@@ -45,9 +45,12 @@ set (not both). `peers`, `tools`, and `methods` are lists of matchers.
 
 ### 2.1 Matchers
 
-- **Peer**: `pubkey:<key>` matches a caller's exact cryptographic key; otherwise
-  a shell glob (`path.Match`) against the caller FQDN. `*` matches any. Empty
-  `peers` matches every caller.
+- **Peer**: `pubkey:<key>` matches a caller's exact cryptographic key;
+  `group:<name>` matches any caller the enforcement point's group resolver reports
+  a member of that named group (role/group-based authorization — resolved from the
+  gateway config or a directory/management API, deny if no resolver is attached);
+  otherwise a shell glob (`path.Match`) against the caller FQDN. `*` matches any.
+  Empty `peers` matches every caller.
 - **Tool / Method**: shell glob against the tool name / JSON-RPC method. `*`
   matches any.
 
