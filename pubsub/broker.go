@@ -29,6 +29,7 @@ type Limits struct {
 	MaxLabels         int     `yaml:"max_labels"`          // maximum data-flow labels per event
 	MaxSubsPerPeer    int     `yaml:"max_subs_per_peer"`   // maximum concurrent subscriptions per identity
 	MaxRetainedTopics int     `yaml:"max_retained_topics"` // maximum distinct topics holding a retained last-value
+	MaxGroupPending   int     `yaml:"max_group_pending"`   // maximum backlog of undelivered events per at-least-once consumer group
 	Retain            int     `yaml:"retain"`              // events kept for replay-from-sequence
 	PublishRate       float64 `yaml:"publish_rate"`        // per-peer publish+subscribe requests/second (0 = default, <0 = unlimited)
 	PublishBurst      int     `yaml:"publish_burst"`       // per-peer burst ceiling
@@ -45,6 +46,7 @@ func DefaultLimits() Limits {
 		MaxLabels:         32,
 		MaxSubsPerPeer:    128,
 		MaxRetainedTopics: 4096,
+		MaxGroupPending:   1024,
 		Retain:            1024,
 		PublishRate:       200, // per-peer publish+subscribe requests/second; bounded by default
 		PublishBurst:      400,
@@ -76,6 +78,9 @@ func (l Limits) withDefaults() Limits {
 	}
 	if l.MaxRetainedTopics <= 0 {
 		l.MaxRetainedTopics = d.MaxRetainedTopics
+	}
+	if l.MaxGroupPending <= 0 {
+		l.MaxGroupPending = d.MaxGroupPending
 	}
 	if l.Retain < 0 {
 		l.Retain = 0
@@ -151,6 +156,7 @@ type Broker struct {
 	retainExp map[string]time.Time // optional expiry per retained topic (TTL); absent = never expires
 	groupRR   map[string]uint64    // round-robin cursor per consumer group
 	groupN    map[string]int       // live member count per consumer group (for cursor GC)
+	groupPend map[string][]*Event  // per-group backlog of events no member could take yet (at-least-once)
 	nextSubID uint64
 	ring      *ring
 	dropped   uint64 // aggregate events dropped by backpressure across all subs
@@ -205,6 +211,7 @@ func New(opts Options) *Broker {
 		retainExp: map[string]time.Time{},
 		groupRR:   map[string]uint64{},
 		groupN:    map[string]int{},
+		groupPend: map[string][]*Event{},
 		ring:      newRing(lm.Retain),
 	}
 	// Resume from a persisted stream: continue the sequence and hash chain from
@@ -449,28 +456,124 @@ func (b *Broker) fanoutLocked(ev *Event) {
 		}
 		groups[s.group] = append(groups[s.group], s)
 	}
-	// One copy per group to a member chosen round-robin. Sort members by ID so
-	// the rotation is deterministic regardless of map iteration order. Selection
-	// is capacity-aware: starting at the round-robin cursor, deliver to the first
-	// member whose buffer has room, so a busy/slow member is skipped in favor of
-	// an idle one instead of silently dropping the event on it. Only if *every*
-	// member is full do we fall back to the primary member's backpressure policy.
+	// One copy per group to a member chosen round-robin (see deliverToGroupLocked).
 	for name, members := range groups {
-		sort.Slice(members, func(i, j int) bool { return members[i].ID < members[j].ID })
-		n := uint64(len(members))
-		start := b.groupRR[name] % n
-		b.groupRR[name]++
-		delivered := false
-		for i := uint64(0); i < n; i++ {
-			if b.tryDeliverLocked(members[(start+i)%n], ev) {
-				delivered = true
-				break
-			}
+		b.deliverToGroupLocked(name, members, ev)
+	}
+}
+
+// tryPlaceOnGroupLocked delivers ev to one member of a group, chosen round-robin
+// starting at the group cursor and skipping members that cannot take it right
+// now — buffer full, or (at-least-once) already at their in-flight cap. Records
+// the event in the chosen member's in-flight set for an ack member. Returns true
+// if placed. Must hold b.mu.
+func (b *Broker) tryPlaceOnGroupLocked(name string, members []*Subscription, ev *Event) bool {
+	if len(members) == 0 {
+		return false
+	}
+	sort.Slice(members, func(i, j int) bool { return members[i].ID < members[j].ID })
+	n := uint64(len(members))
+	start := b.groupRR[name] % n
+	b.groupRR[name]++
+	for i := uint64(0); i < n; i++ {
+		s := members[(start+i)%n]
+		if s.ackMode && len(s.inflight) >= b.lm.SubQueue {
+			continue // member has too many un-acked events; leave it to catch up
 		}
-		if !delivered {
-			b.deliverLocked(members[start], ev) // all full: apply the primary's backpressure
+		if b.tryDeliverLocked(s, ev) {
+			if s.ackMode {
+				s.inflight[ev.Seq] = ev
+			}
+			return true
 		}
 	}
+	return false
+}
+
+// deliverToGroupLocked delivers ev to the group named name (its accepting
+// members). Capacity-aware: it prefers a member with room. If none can take it,
+// an at-least-once group holds the event in a bounded backlog for redelivery
+// when a member frees up; a plain group falls back to the primary's backpressure
+// (drop/disconnect), preserving the original at-most-once semantics. Must hold
+// b.mu.
+func (b *Broker) deliverToGroupLocked(name string, members []*Subscription, ev *Event) {
+	if b.tryPlaceOnGroupLocked(name, members, ev) {
+		return
+	}
+	if groupIsAck(members) {
+		b.enqueueGroupPendingLocked(name, ev)
+		return
+	}
+	// Plain group, every member full: apply the primary member's backpressure.
+	sort.Slice(members, func(i, j int) bool { return members[i].ID < members[j].ID })
+	b.deliverLocked(members[0], ev)
+}
+
+// groupIsAck reports whether any member of the group runs at-least-once (so an
+// undeliverable event should be held rather than dropped).
+func groupIsAck(members []*Subscription) bool {
+	for _, s := range members {
+		if s.ackMode {
+			return true
+		}
+	}
+	return false
+}
+
+// enqueueGroupPendingLocked holds ev in the group's bounded backlog. If the
+// backlog is at its cap the oldest is dropped and counted, so a stalled group
+// cannot grow memory without bound (surfaced via Dropped, never silent).
+func (b *Broker) enqueueGroupPendingLocked(name string, ev *Event) {
+	q := b.groupPend[name]
+	if len(q) >= b.lm.MaxGroupPending {
+		q = q[1:] // drop oldest
+		b.dropped++
+	}
+	b.groupPend[name] = append(q, ev)
+}
+
+// drainGroupPendingLocked delivers as much of the group's backlog as members can
+// currently take, in order, stopping at the first event no member can accept
+// (so the backlog stays ordered and bounded). Must hold b.mu.
+func (b *Broker) drainGroupPendingLocked(name string) {
+	if name == "" {
+		return
+	}
+	q := b.groupPend[name]
+	for len(q) > 0 {
+		ev := q[0]
+		var members []*Subscription
+		for _, s := range b.subs {
+			if s.group == name && s.accepts(ev) {
+				members = append(members, s)
+			}
+		}
+		if !b.tryPlaceOnGroupLocked(name, members, ev) {
+			break // no member can take it yet; leave the backlog intact
+		}
+		q = q[1:]
+	}
+	if len(q) == 0 {
+		delete(b.groupPend, name)
+	} else {
+		b.groupPend[name] = q
+	}
+}
+
+// Ack marks a previously delivered event (by sequence) as processed by an
+// at-least-once subscription, releasing its in-flight slot and letting the
+// group's backlog advance onto this member. A no-op for a non-ack subscription
+// or an unknown sequence (idempotent).
+func (b *Broker) Ack(s *Subscription, seq uint64) {
+	if s == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if s.inflight != nil {
+		delete(s.inflight, seq)
+	}
+	b.drainGroupPendingLocked(s.group)
 }
 
 // applyRetainedLocked updates the retained last-value store from an event's own
@@ -639,6 +742,13 @@ type SubOptions struct {
 	// with a Group is refused), since replaying a window to every competing
 	// consumer would duplicate it.
 	Group string
+	// Ack requests at-least-once delivery within a consumer group: each event
+	// delivered to this member is held in-flight until the member calls Ack(seq).
+	// If the member disconnects with un-acked events, they are redelivered to
+	// another group member (so a crashed/rolling worker loses no work while the
+	// group has another member). Requires Group; a member that reaches its
+	// in-flight cap (SubQueue) is skipped by delivery until it acks.
+	Ack bool
 }
 
 // Subscribe authorizes and opens a subscription. Every topic is authorized
@@ -667,10 +777,15 @@ func (b *Broker) Subscribe(id Identity, opts SubOptions) (*Subscription, error) 
 			return nil, fmt.Errorf("group: %w", err)
 		}
 		// Replay to a competing-consumer group would duplicate the window across
-		// members; a group is live-only. Durable per-group cursors are future work.
+		// members; a group is live-only (at-least-once via Ack + redelivery).
 		if opts.Since > 0 {
 			return nil, fmt.Errorf("%w: --since replay is not supported with a consumer group", ErrBadTopic)
 		}
+	}
+	// At-least-once needs a group to redeliver an un-acked event to another
+	// member; ack mode without a group has no fallback consumer.
+	if opts.Ack && opts.Group == "" {
+		return nil, fmt.Errorf("%w: at-least-once (ack) requires a consumer group", ErrBadTopic)
 	}
 
 	clearAll := true
@@ -708,10 +823,14 @@ func (b *Broker) Subscribe(id Identity, opts SubOptions) (*Subscription, error) 
 		clearAll: clearAll,
 		clear:    clear,
 		group:    opts.Group,
+		ackMode:  opts.Ack,
 		bp:       opts.Backpressure,
 		ch:       make(chan *Event, b.lm.SubQueue),
 		closed:   make(chan struct{}),
 		b:        b,
+	}
+	if opts.Ack {
+		s.inflight = map[uint64]*Event{}
 	}
 
 	b.mu.Lock()
@@ -784,6 +903,12 @@ func (b *Broker) Subscribe(id Identity, opts SubOptions) (*Subscription, error) 
 				}
 			}
 		}
+	}
+	// A newly-joined at-least-once member drains any backlog its group accrued
+	// (e.g. events requeued when a peer died), so a replacement worker picks up
+	// where the failed one left off.
+	if s.ackMode {
+		b.drainGroupPendingLocked(s.group)
 	}
 	b.mu.Unlock()
 
@@ -867,13 +992,39 @@ func (b *Broker) closeSubLocked(s *Subscription) {
 		b.perPeer[s.ident.Key] = n
 	}
 	if s.group != "" {
-		if n := b.groupN[s.group] - 1; n <= 0 {
-			// Last member left: drop the group's round-robin cursor so group
+		remaining := b.groupN[s.group] - 1
+		// At-least-once: a departing member's un-acked events are requeued to the
+		// front of the group backlog so another member reprocesses them (a rolling
+		// or crashed worker loses no work). A duplicate is possible if the member
+		// died mid-processing — at-least-once, by design.
+		if s.ackMode && len(s.inflight) > 0 {
+			if remaining > 0 {
+				repend := make([]*Event, 0, len(s.inflight))
+				for _, ev := range s.inflight {
+					repend = append(repend, ev)
+				}
+				sort.Slice(repend, func(i, j int) bool { return repend[i].Seq < repend[j].Seq })
+				b.groupPend[s.group] = append(repend, b.groupPend[s.group]...)
+			} else {
+				// Last member left holding un-acked work — it cannot be redelivered
+				// live. Count it (surfaced, not silent); recover via the event log +
+				// a durable non-group consumer.
+				b.dropped += uint64(len(s.inflight))
+			}
+		}
+		s.inflight = nil
+		if remaining <= 0 {
+			// Last member left: drop the group's cursor and any backlog so group
 			// state stays bounded to live groups.
+			if q := b.groupPend[s.group]; len(q) > 0 {
+				b.dropped += uint64(len(q))
+			}
 			delete(b.groupN, s.group)
 			delete(b.groupRR, s.group)
+			delete(b.groupPend, s.group)
 		} else {
-			b.groupN[s.group] = n
+			b.groupN[s.group] = remaining
+			b.drainGroupPendingLocked(s.group) // hand the requeued work to a survivor
 		}
 	}
 	s.closeOnce.Do(func() { close(s.ch); close(s.closed) })
@@ -895,6 +1046,7 @@ func (b *Broker) Close() {
 	b.perPeer = map[string]int{}
 	b.groupN = map[string]int{}
 	b.groupRR = map[string]uint64{}
+	b.groupPend = map[string][]*Event{}
 	b.retained = map[string]*Event{}
 	b.retainExp = map[string]time.Time{}
 }

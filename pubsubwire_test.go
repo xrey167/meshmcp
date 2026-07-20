@@ -96,3 +96,77 @@ func TestWireSubscribeGroup(t *testing.T) {
 		t.Fatalf("groups=%d, want 1 (both subscribers share one group — proves serveSub passed Group through)", st.Groups)
 	}
 }
+
+// TestWireAckFrame verifies the subscribe wire path parses an inbound ack frame
+// ({"ack":<seq>}) and calls broker.Ack. It observes this through the backlog: an
+// at-least-once member with in-flight cap 1 holds the second job until it acks
+// the first, so receiving the second job over the wire proves the ack was
+// processed.
+func TestWireAckFrame(t *testing.T) {
+	b := pubsub.New(pubsub.Options{Authorizer: pubsub.AllowAll{}, Limits: pubsub.Limits{SubQueue: 1}})
+	defer b.Close()
+
+	bb := newBrokerBackend(b, session.Meta{PeerKey: "wire", PeerFQDN: "wire.x"})
+	defer bb.Close()
+
+	// The subscribe hello plus, later, an ack frame — streamed to the backend's
+	// input via a pipe so we can send the ack after reading the first event.
+	inR, inW := io.Pipe()
+	hello, _ := json.Marshal(helloFrame{Role: "sub", Topics: []string{"jobs"}, Group: "g", Ack: true})
+	go func() {
+		bb.Write(append(hello, '\n'))
+		buf := make([]byte, 256)
+		for {
+			n, e := inR.Read(buf)
+			if n > 0 {
+				bb.Write(append([]byte(nil), buf[:n]...))
+			}
+			if e != nil {
+				return
+			}
+		}
+	}()
+
+	sc := bufio.NewScanner(bb)
+	if !sc.Scan() {
+		t.Fatal("no subscribe ack")
+	}
+
+	// Two jobs; with in-flight cap 1, only the first is delivered — the second is
+	// held in the group backlog until an ack frees the member.
+	b.Publish(pubsub.Identity{Key: "p"}, "jobs", json.RawMessage(`"a"`), nil)
+	b.Publish(pubsub.Identity{Key: "p"}, "jobs", json.RawMessage(`"b"`), nil)
+
+	if !sc.Scan() {
+		t.Fatal("no first job delivered over the wire")
+	}
+	var first pubsub.Event
+	if json.Unmarshal(sc.Bytes(), &first) != nil || first.Seq == 0 {
+		t.Fatalf("bad first event: %s", sc.Bytes())
+	}
+
+	// Ack the first over the wire → the backlog must advance and deliver the
+	// second, proving serveSub parsed the ack frame and called broker.Ack.
+	af, _ := json.Marshal(ackReqFrame{Ack: first.Seq})
+	inW.Write(append(af, '\n'))
+
+	done := make(chan *pubsub.Event, 1)
+	go func() {
+		if sc.Scan() {
+			var ev pubsub.Event
+			json.Unmarshal(sc.Bytes(), &ev)
+			done <- &ev
+		} else {
+			done <- nil
+		}
+	}()
+	select {
+	case ev := <-done:
+		if ev == nil || ev.Seq == first.Seq {
+			t.Fatal("second job not delivered after the wire ack (ack frame not processed)")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the backlog to advance after the wire ack")
+	}
+	inW.Close()
+}

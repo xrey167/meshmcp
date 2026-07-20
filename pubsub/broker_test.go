@@ -431,6 +431,110 @@ func TestConsumerGroupMemberLeave(t *testing.T) {
 	}
 }
 
+// TestAckGroupRedeliversOnLoss is the core at-least-once guarantee: an event
+// delivered to a member that disconnects WITHOUT acking is redelivered to
+// another group member, so a crashed/rolling worker loses no work.
+func TestAckGroupRedeliversOnLoss(t *testing.T) {
+	b := New(Options{Authorizer: AllowAll{}, Limits: Limits{SubQueue: 16}})
+	defer b.Close()
+
+	w1, err := b.Subscribe(id("w1"), SubOptions{Topics: []string{"jobs"}, Group: "g", Ack: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w2, err := b.Subscribe(id("w2"), SubOptions{Topics: []string{"jobs"}, Group: "g", Ack: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w2.Close()
+
+	// Publish one job; the round-robin cursor starts at 0, so w1 (members[0])
+	// receives it.
+	ev, _ := b.Publish(id("p"), "jobs", json.RawMessage(`"job1"`), nil)
+	if g := recv(t, w1); g.Seq != ev.Seq {
+		t.Fatalf("w1 got seq %d, want %d", g.Seq, ev.Seq)
+	}
+
+	// w1 dies WITHOUT acking → the un-acked job is redelivered to w2.
+	w1.Close()
+	if r := recvWithin(w2, 2*time.Second); r == nil || r.Seq != ev.Seq {
+		t.Fatal("un-acked event was not redelivered to the surviving member")
+	}
+}
+
+// TestAckGroupAckReleasesInflight verifies that once a member acks an event, the
+// event is NOT redelivered when that member later leaves (the work was done).
+func TestAckGroupAckReleasesInflight(t *testing.T) {
+	b := New(Options{Authorizer: AllowAll{}, Limits: Limits{SubQueue: 16}})
+	defer b.Close()
+
+	w1, _ := b.Subscribe(id("w1"), SubOptions{Topics: []string{"jobs"}, Group: "g", Ack: true})
+	w2, _ := b.Subscribe(id("w2"), SubOptions{Topics: []string{"jobs"}, Group: "g", Ack: true})
+	defer w2.Close()
+
+	ev, _ := b.Publish(id("p"), "jobs", json.RawMessage(`1`), nil)
+	// Whichever worker got it acks it, then leaves.
+	recvd, other := w1, w2
+	g := recvWithin(w1, 200*time.Millisecond)
+	if g == nil {
+		g = recv(t, w2)
+		recvd, other = w2, w1
+	}
+	b.Ack(recvd, g.Seq)
+	recvd.Close()
+
+	// The acked event must NOT be redelivered.
+	if r := recvWithin(other, 300*time.Millisecond); r != nil {
+		t.Fatalf("acked event should not be redelivered, got seq %d", r.Seq)
+	}
+	_ = ev
+}
+
+// TestAckGroupBacklogDrainsOnAck verifies the bounded backlog: when the only
+// member is at its in-flight cap, further events are held (not dropped) and
+// delivered as the member acks and frees capacity.
+func TestAckGroupBacklogDrainsOnAck(t *testing.T) {
+	// SubQueue=2 → in-flight cap 2. Publish 4 with one member; 2 delivered, 2 held.
+	b := New(Options{Authorizer: AllowAll{}, Limits: Limits{SubQueue: 2}})
+	defer b.Close()
+
+	w, _ := b.Subscribe(id("w"), SubOptions{Topics: []string{"jobs"}, Group: "g", Ack: true})
+	defer w.Close()
+
+	var seqs []uint64
+	for i := 0; i < 4; i++ {
+		ev, _ := b.Publish(id("p"), "jobs", json.RawMessage(fmt.Sprintf("%d", i)), nil)
+		seqs = append(seqs, ev.Seq)
+	}
+	// Drain the two the worker can hold.
+	e0 := recv(t, w)
+	e1 := recv(t, w)
+	// No third yet — backlog is held pending an ack.
+	if r := recvWithin(w, 150*time.Millisecond); r != nil {
+		t.Fatalf("third event should be held until an ack, got seq %d", r.Seq)
+	}
+	// Ack one → backlog advances by one.
+	b.Ack(w, e0.Seq)
+	if r := recvWithin(w, time.Second); r == nil {
+		t.Fatal("backlog did not advance after an ack")
+	}
+	b.Ack(w, e1.Seq)
+	if r := recvWithin(w, time.Second); r == nil {
+		t.Fatal("backlog did not advance after the second ack")
+	}
+	_ = seqs
+}
+
+// TestAckRequiresGroup verifies at-least-once without a group is refused (no
+// peer to redeliver to).
+func TestAckRequiresGroup(t *testing.T) {
+	b := New(Options{Authorizer: AllowAll{}})
+	defer b.Close()
+	if _, err := b.Subscribe(id("w"), SubOptions{Topics: []string{"jobs"}, Ack: true}); !errors.Is(err, ErrBadTopic) {
+		t.Fatalf("ack without group: got %v, want ErrBadTopic", err)
+	}
+}
+
 // TestConsumerGroupRejectsSince verifies --since replay is refused with a group
 // (a group is live-only; replaying a window to every competing consumer would
 // duplicate it).
@@ -727,6 +831,20 @@ func recv(t *testing.T, s *Subscription) *Event {
 		return ev
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for event")
+		return nil
+	}
+}
+
+// recvWithin returns one event or nil if none arrives within d (for tests that
+// assert timing/absence without failing).
+func recvWithin(s *Subscription, d time.Duration) *Event {
+	select {
+	case ev, ok := <-s.C():
+		if !ok {
+			return nil
+		}
+		return ev
+	case <-time.After(d):
 		return nil
 	}
 }

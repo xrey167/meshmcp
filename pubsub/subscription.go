@@ -12,10 +12,12 @@ import (
 type Subscription struct {
 	ID       uint64
 	ident    Identity
-	topics   []string        // topic globs
-	clearAll bool            // cleared for every label
-	clear    map[string]bool // labels this subscription may receive (when !clearAll)
-	group    string          // consumer group ("" = ungrouped: receives every matching event)
+	topics   []string          // topic globs
+	clearAll bool              // cleared for every label
+	clear    map[string]bool   // labels this subscription may receive (when !clearAll)
+	group    string            // consumer group ("" = ungrouped: receives every matching event)
+	ackMode  bool              // at-least-once: delivered events are held in-flight until Ack'd, redelivered on loss
+	inflight map[uint64]*Event // delivered-but-unacked events (ackMode only), keyed by seq
 	bp       Backpressure
 	ch       chan *Event
 	closed   chan struct{}

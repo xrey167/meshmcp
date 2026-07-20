@@ -94,12 +94,24 @@ room, so a busy/slow member is skipped in favor of an idle one rather than
 dropped on. Taint containment still holds — an event is only ever routed to a
 member cleared for its labels (containment is applied *before* group selection).
 
-A group is live-only and scoped to **one broker**: `--since` replay and
-`--durable` cursors are not combined with `--group` (replaying a window to every
-competing consumer would duplicate it), and a group spanning two *federated*
-brokers gets one delivery **per broker** (federation mirrors independently — it
-does not coordinate a global group). For durable or cross-broker load sharing,
-run one `--durable` subscriber per shard against a single broker.
+**At-least-once** groups add `--ack`: an event delivered to a member is held
+in-flight until the member acks it, and **redelivered to another member** if that
+one disconnects first — so a crashed or rolling worker loses no work. The
+`respond` RPC worker acks a request only after its handler succeeds, so a pool of
+`respond --group <g> --ack` workers is a reliable job queue (a failed/crashed
+handler's job is retried on a sibling). When every member is at its in-flight cap,
+further events are held in a **bounded per-group backlog** (`max_group_pending`;
+oldest dropped and counted if it overflows) and drain as members ack. Duplicates
+are possible if a member dies mid-processing — at-least-once, by design.
+
+A group is live-only and scoped to **one broker**: `--since` replay is not
+combined with `--group` (replaying a window to every competing consumer would
+duplicate it), and a group spanning two *federated* brokers gets one delivery
+**per broker** (federation mirrors independently — it does not coordinate a global
+group). At-least-once holds across worker churn while the group keeps ≥1 member;
+if the **last** member leaves holding un-acked work, that work can't be
+redelivered live (it is counted, not silently lost) — recover it with the durable
+`event_log:` plus a `--durable` non-group consumer.
 
 `--durable <file>` makes a subscriber **at-least-once**: it persists the
 last-seen sequence to the file and resumes from it, so with a broker `event_log:`
@@ -135,10 +147,12 @@ meshmcp respond --json 100.x.y.z:9120 rpc.add -- jq 'add'
 
 Run several with `--group` and they become a **pool of competing RPC workers**
 (the request load is shared, one request per worker) — parallelism is "run more
-of me". A handler that fails still returns a reply (its error text), so a
-requester gets a reply or a timeout, never silence. (A responder is just a
-subscribe + publish, so the shell `while read` equivalent works too, using
-`publish --corr`.)
+of me". Add `--ack` for a **reliable job queue**: a request is acked only after
+the handler succeeds, so a crash redelivers it to a sibling worker (at-least-once)
+instead of losing it. Without `--ack`, a failed handler still returns a reply
+(its error text), so an RPC caller gets a reply or a timeout, never silence. (A
+responder is just a subscribe + publish, so the shell `while read` equivalent
+works too, using `publish --corr`.)
 
 `request` allocates a private per-request reply topic by default
 (`_rpc.reply.<id>`) and matches the reply by `corr`, so concurrent requests never

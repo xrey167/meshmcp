@@ -998,6 +998,7 @@ func cmdRespond(args []string) error {
 	o := meshFlags(fs)
 	capFlag := fs.String("capability", "", "present a signed capability grant; @file reads the token from a file")
 	group := fs.String("group", "", "share the request load across a consumer group of responders")
+	ackMode := fs.Bool("ack", false, "at-least-once: ack a request only after the handler succeeds; a crash redelivers it to another worker (requires --group)")
 	rawJSON := fs.Bool("json", false, "treat handler stdout as raw JSON (default: wrap it as a JSON string)")
 	maxBytes := fs.Int64("max-bytes", 1<<20, "maximum handler output size in bytes")
 	var labels stringList
@@ -1007,6 +1008,9 @@ func cmdRespond(args []string) error {
 	}
 	if fs.NArg() < 3 {
 		return errors.New("usage: meshmcp respond [flags] <peer-ip:port> <request-topic> -- <command> [args...]")
+	}
+	if *ackMode && *group == "" {
+		return errors.New("--ack (at-least-once) requires --group (redelivery needs another worker)")
 	}
 	target, reqTopic := fs.Arg(0), fs.Arg(1)
 	handler := fs.Args()[2:]
@@ -1044,13 +1048,27 @@ func cmdRespond(args []string) error {
 		_ = session.NewClient(dial, log.Printf).Run(ctx, &streamPubSink{r: pr})
 	}()
 
-	// handle runs the handler for one request and publishes the reply. Handler
-	// failure still yields a reply (the error text) so a requester is never left
-	// hanging on a crash — it gets a reply or a timeout, not silence.
-	handle := func(ev *pubsub.Event) {
-		if ev.ReplyTo == "" {
-			return // not an RPC request (no reply address)
+	// Ack channel (at-least-once): a pipe whose frames are streamed to the broker
+	// on the subscribe session after the hello, releasing in-flight requests.
+	var apw *io.PipeWriter
+	var apr *io.PipeReader
+	if *ackMode {
+		apr, apw = io.Pipe()
+	}
+	sendAck := func(seq uint64) {
+		if apw == nil {
+			return
 		}
+		b, _ := json.Marshal(ackReqFrame{Ack: seq})
+		apw.Write(append(b, '\n'))
+	}
+
+	// handle runs the handler for one request. On success it publishes the reply
+	// (if the request carried a reply_to) and, in --ack mode, acks the request.
+	// On failure in --ack mode it does NOT ack, so the request is redelivered to
+	// another worker; otherwise it replies with the error text so an RPC caller
+	// is never left hanging.
+	handle := func(ev *pubsub.Event) {
 		cmd := exec.CommandContext(ctx, handler[0], handler[1:]...)
 		cmd.Stdin = bytes.NewReader(ev.Payload)
 		cmd.Stderr = os.Stderr
@@ -1058,24 +1076,35 @@ func cmdRespond(args []string) error {
 		if int64(len(out)) > *maxBytes {
 			out = out[:*maxBytes]
 		}
-		var payload json.RawMessage
-		switch {
-		case herr != nil:
-			msg, _ := json.Marshal(fmt.Sprintf("handler error: %v", herr))
-			payload = msg
+		if herr != nil {
 			log.Printf("handler failed for corr %s: %v", ev.Corr, herr)
-		case *rawJSON && json.Valid(out):
-			payload = append(json.RawMessage(nil), out...)
-		default:
-			enc, _ := json.Marshal(strings.TrimRight(string(out), "\n"))
-			payload = enc
+			if *ackMode {
+				return // no ack → redelivered to another worker
+			}
+			if ev.ReplyTo != "" {
+				msg, _ := json.Marshal(fmt.Sprintf("handler error: %v", herr))
+				writeFrame(pubFrame{Topic: ev.ReplyTo, Corr: ev.Corr, Labels: labels, Payload: msg})
+			}
+			return
 		}
-		writeFrame(pubFrame{Topic: ev.ReplyTo, Corr: ev.Corr, Labels: labels, Payload: payload})
+		if ev.ReplyTo != "" {
+			var payload json.RawMessage
+			if *rawJSON && json.Valid(out) {
+				payload = append(json.RawMessage(nil), out...)
+			} else {
+				enc, _ := json.Marshal(strings.TrimRight(string(out), "\n"))
+				payload = enc
+			}
+			writeFrame(pubFrame{Topic: ev.ReplyTo, Corr: ev.Corr, Labels: labels, Payload: payload})
+		}
+		if *ackMode {
+			sendAck(ev.Seq) // work done — release the in-flight request
+		}
 	}
 
 	// Subscribe to the request topic and dispatch each request to handle().
-	subHello, _ := json.Marshal(helloFrame{Role: "sub", Topics: []string{reqTopic}, Capability: capToken, Group: *group})
-	subStream := &clientStream{out: append(subHello, '\n'), done: make(chan struct{})}
+	subHello, _ := json.Marshal(helloFrame{Role: "sub", Topics: []string{reqTopic}, Capability: capToken, Group: *group, Ack: *ackMode})
+	subStream := &clientStream{out: append(subHello, '\n'), outR: apr, done: make(chan struct{})}
 	first := true
 	var mu sync.Mutex
 	var subErr error
@@ -1107,10 +1136,16 @@ func cmdRespond(args []string) error {
 		<-sig
 		log.Println("stopping responder")
 		subStream.finish()
+		if apw != nil {
+			apw.Close() // unblock Read (parked in the ack pipe) so the session ends
+		}
 		cancel()
 	}()
 
 	runErr := session.NewClient(dial, log.Printf).Run(ctx, subStream)
+	if apw != nil {
+		apw.Close()
+	}
 	pw.Close()
 	mu.Lock()
 	se := subErr
