@@ -123,24 +123,32 @@ and hash-chained — guarantees no ordinary RPC has:
 echo '[2,3]' | meshmcp request --json 100.x.y.z:9120 rpc.add    # prints the reply
 ```
 
-A **responder** is any subscriber to the request topic that publishes its result
-to the event's `reply_to` with the same `corr` (correlation id). In shell:
+A **responder** turns a program into a governed RPC service. `meshmcp respond`
+runs a handler command per request — the request payload on its stdin — and
+publishes the handler's output back to the event's `reply_to` with the same
+`corr`:
 
 ```sh
-# a worker answering rpc.add — one line in, one line out
-meshmcp subscribe 100.x.y.z:9120 'rpc.add' | while read -r ev; do
-  reply=$(jq -r .reply_to <<<"$ev"); corr=$(jq -r .corr <<<"$ev")
-  echo "$(jq '.payload | add' <<<"$ev")" | \
-    meshmcp publish --json --corr "$corr" 100.x.y.z:9120 "$reply"
-done
+# answer rpc.add by summing the JSON array in each request
+meshmcp respond --json 100.x.y.z:9120 rpc.add -- jq 'add'
 ```
+
+Run several with `--group` and they become a **pool of competing RPC workers**
+(the request load is shared, one request per worker) — parallelism is "run more
+of me". A handler that fails still returns a reply (its error text), so a
+requester gets a reply or a timeout, never silence. (A responder is just a
+subscribe + publish, so the shell `while read` equivalent works too, using
+`publish --corr`.)
 
 `request` allocates a private per-request reply topic by default
 (`_rpc.reply.<id>`) and matches the reply by `corr`, so concurrent requests never
-cross-talk; `--reply-topic` overrides it and `--timeout` bounds the wait. RPC is
-still deny-by-default: **both parties must be granted the reply namespace** — the
-requester to *subscribe* `_rpc.reply.*`, the responder to *publish* it — so an
-RPC channel is an explicit policy grant, not ambient.
+cross-talk; `--reply-topic` overrides it, `--timeout` bounds the wait, and
+`--from <wg-key>` pins the reply to a specific responder's proven key (rejects a
+reply from anyone else). RPC is still deny-by-default: **both parties must be
+granted the reply namespace** — the requester to *subscribe* `_rpc.reply.*`, the
+responder to *publish* it — so an RPC channel is an explicit policy grant, not
+ambient. `request` returns the **first** matching reply (single-reply RPC;
+scatter-gather across many responders is not built in).
 
 ## Durability
 
