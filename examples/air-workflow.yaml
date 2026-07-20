@@ -3,25 +3,32 @@
 #
 #   meshmcp air workflow examples/air-workflow.yaml            # run it
 #   meshmcp air workflow examples/air-workflow.yaml --dry-run  # parse + print the plan
+#   meshmcp air workflow examples/air-workflow.yaml --json     # machine-readable run summary
 #
 # Each step is exactly one of: launch (spawn an agent), steer (a live session
-# via a gateway control endpoint), or call (a tool on a backend over the mesh).
-# Every action is governed by the same firewall as any caller and audited.
+# via a gateway control endpoint), call (a tool on a backend), or parallel (run
+# several child steps concurrently). Every action is governed by the same
+# firewall as any caller and audited.
+#
+# on_error: stop (default) aborts on the first failure; continue runs every step.
+# A step's `as:` captures its output (a launch's identity, a call's result) for
+# later `${name.field}` references. `timeout:` bounds a network step. steer/call
+# steps retry connection failures for ~10s, so a launch→steer sequence doesn't
+# race the just-launched agent joining the mesh.
 
 name: nightly-scan
+on_error: stop
 
 steps:
-  # 1. Spawn a fresh reader agent with its own WireGuard identity.
-  - launch:
-      role: reader
-      gateway: 100.64.0.2:9101
+  # 1. Spawn a reader and an analyst concurrently, each with its own WireGuard
+  #    identity. `as:` captures each agent's launch output.
+  - parallel:
+      - launch: { role: reader, gateway: 100.64.0.2:9101 }
+        as: reader
+      - launch: { role: analyst, gateway: 100.64.0.2:9101 }
+        as: analyst
 
-  # 2. Spawn an analyst agent too.
-  - launch:
-      role: analyst
-      gateway: 100.64.0.2:9101
-
-  # 3. Steer a live session on the gateway's fs backend (session id comes from
+  # 2. Steer a live session on the gateway's fs backend (session id comes from
   #    `meshmcp air sessions <control>`), nudging the agent driving it.
   - steer:
       control: 100.64.0.2:9600      # gateway control endpoint (config: control.port)
@@ -30,10 +37,14 @@ steps:
       method: notifications/air/steer
       params:
         text: "focus on customer 42"
+    timeout: 20s
 
-  # 4. Call a tool on a backend over the mesh and log its result.
+  # 3. Call a tool on a backend over the mesh and capture its result. The launch
+  #    identity captured above is available as ${reader.identity}.
   - call:
       target: 100.64.0.2:9101
       tool: summarize
       args:
         topic: "nightly scan"
+        note: "driven by reader ${reader.identity}"
+    as: summary

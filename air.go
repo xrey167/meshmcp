@@ -92,6 +92,7 @@ func airControlHTTP(o *meshOptions, control string) (*http.Client, func(), error
 func cmdAirSessions(args []string) error {
 	fs := flag.NewFlagSet("air sessions", flag.ExitOnError)
 	o := meshFlags(fs)
+	asJSON := fs.Bool("json", false, "print the raw JSON response instead of a table")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -112,6 +113,10 @@ func cmdAirSessions(args []string) error {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("air sessions: %s: %s", resp.Status, body)
+	}
+	if *asJSON {
+		fmt.Println(string(bytes.TrimSpace(body)))
+		return nil
 	}
 	var out struct {
 		Sessions []AirSession `json:"sessions"`
@@ -238,6 +243,8 @@ func cmdAirAgentSteer(args []string) error {
 	typ := fs.String("type", "task", "steer type: task | nudge | cancel")
 	tool := fs.String("tool", "", "type=task: tool to call")
 	text := fs.String("text", "", "type=nudge: guidance text")
+	target := fs.String("target", "", "optional sub-work address, e.g. task:9f2a")
+	id := fs.String("id", "", "optional caller correlation id (audited)")
 	steerArgs := argFlags{}
 	fs.Var(&steerArgs, "arg", "type=task: tool arg key=value (repeatable)")
 	if err := fs.Parse(args); err != nil {
@@ -255,9 +262,9 @@ func cmdAirAgentSteer(args []string) error {
 	default:
 		return fmt.Errorf("air agent-steer: unknown --type %q (want task | nudge | cancel)", *typ)
 	}
-	target := fs.Arg(0)
+	agentAddr := fs.Arg(0)
 
-	env := steerEnvelope{Type: *typ, Tool: *tool, Text: *text}
+	env := steerEnvelope{Type: *typ, Tool: *tool, Text: *text, Target: *target, ID: *id}
 	if len(steerArgs) > 0 {
 		b, _ := json.Marshal(map[string]any(steerArgs))
 		env.Args = b
@@ -274,10 +281,10 @@ func cmdAirAgentSteer(args []string) error {
 
 	pr, pw := io.Pipe()
 	go func() { _, werr := pw.Write(line); pw.CloseWithError(werr) }()
-	dial := func(ctx context.Context) (net.Conn, error) { return client.Dial(ctx, "tcp", target) }
+	dial := func(ctx context.Context) (net.Conn, error) { return client.Dial(ctx, "tcp", agentAddr) }
 	if err := session.NewClient(dial, log.Printf).Run(context.Background(), sendStream{r: pr}); err != nil {
 		return fmt.Errorf("air agent-steer: %w", err)
 	}
-	fmt.Printf("steered %s -> %s\n", *typ, target)
+	fmt.Printf("steered %s -> %s\n", *typ, agentAddr)
 	return nil
 }

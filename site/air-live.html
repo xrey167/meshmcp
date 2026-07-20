@@ -37,7 +37,7 @@
   dialog h3{margin:0 0 4px;font-size:15px}
   dialog .to{font-family:var(--mono);font-size:11px;color:var(--muted);margin-bottom:12px}
   dialog label{display:block;font-size:11px;color:var(--muted);margin:10px 0 4px}
-  dialog input,dialog textarea{width:100%;background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:9px;padding:9px;font-family:var(--sans);font-size:13px}
+  dialog input,dialog textarea,dialog select{width:100%;background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:9px;padding:9px;font-family:var(--sans);font-size:13px}
   dialog input{font-family:var(--mono);font-size:12px}
   dialog .acts{display:flex;gap:8px;margin-top:14px}
   dialog .acts button{flex:1;font-family:var(--mono);font-size:12px;border-radius:9px;padding:9px;cursor:pointer;border:1px solid var(--line);background:var(--panel2);color:var(--text)}
@@ -49,6 +49,7 @@
 <header>
   <h1>🕸️ <span class="m">meshmcp</span> · Air <span class="sub">live</span></h1>
   <span class="sub">served over the mesh · identity-gated · audited</span>
+  <span class="sub" id="you"></span>
   <span class="spacer"></span>
   <button id="refresh">Refresh</button>
 </header>
@@ -62,8 +63,12 @@
 <dialog id="steerDlg">
   <h3>Steer session</h3>
   <div class="to" id="steerTo"></div>
-  <label>method</label>
-  <input id="steerMethod" value="notifications/air/steer">
+  <label>action</label>
+  <select id="steerType">
+    <option value="steer">steer — send guidance</option>
+    <option value="nudge">nudge — augment in flight</option>
+    <option value="cancel">cancel — interrupt</option>
+  </select>
   <label>guidance (text)</label>
   <textarea id="steerText" rows="3" placeholder="re-read customer 42 and summarize"></textarea>
   <div id="steerOut"></div>
@@ -101,6 +106,7 @@
     var el=document.getElementById("sessions");
     try{
       var d=await getJSON("api/sessions");var ss=d.sessions||[];
+      if(d.you){document.getElementById("you").textContent="· acting as "+d.you}
       if(!ss.length){el.innerHTML='<div class="empty">no live sessions</div>';return}
       el.innerHTML=ss.map(function(s,i){
         return '<div class="row"><div class="av" style="background:'+color(s.id)+'">'+esc((s.backend||"").slice(0,2).toUpperCase())+'</div>'+
@@ -123,7 +129,9 @@
   document.getElementById("steerSend").onclick=async function(){
     var out=document.getElementById("steerOut");out.style.color="var(--green)";out.textContent="steering…";
     try{
-      var body={backend:cur.backend,id:cur.id,method:document.getElementById("steerMethod").value,params:{text:document.getElementById("steerText").value}};
+      var type=document.getElementById("steerType").value;
+      var params={type:type,text:document.getElementById("steerText").value};
+      var body={backend:cur.backend,id:cur.id,method:"notifications/air/steer",params:params};
       var r=await fetch("api/steer",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
       var t=await r.text();
       if(!r.ok)throw new Error(r.status+" "+t);
