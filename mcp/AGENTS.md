@@ -10,8 +10,8 @@ A small, dependency-free MCP **server** framework speaking the 2025-06-18 protoc
 | File | Description |
 |------|-------------|
 | `server.go` | `Server`: registration of tools/resources/prompts, the read loop, dispatch, and `Use`/`UseTool` middleware installation. |
-| `session.go` | `outConn` — serializes all writes to the client stream (responses + server-initiated requests) so concurrent handlers can't interleave. |
-| `tasks.go` | The MCP task lifecycle: `start`, status values, `tasks/get`/`tasks/result`/`tasks/cancel`. Threads the composed handler through async execution. |
+| `session.go` | `Session` — the per-connection handle handlers use to send notifications (`Notify`/`Progress`/`Log`); `WithSession`/`SessionFrom`. Backed by `outConn`, which serializes all writes to the client stream so concurrent handlers can't interleave. |
+| `tasks.go` | The MCP task lifecycle: `start`, status values, `tasks/get`/`tasks/result`/`tasks/cancel`/`tasks/steer`. Threads the composed handler through async execution and exposes `SteerChan(ctx)` so a cooperative handler receives mid-flight guidance over a bounded, non-blocking steer buffer. |
 | `middleware.go` | `ToolHandler`, `ToolMiddleware`, `ToolCallInfo`, `withToolCall`/`ToolCallFrom`, `effectiveHandler`, and built-ins `RecoverPanics`/`Timeout`/`LimitConcurrency`. |
 | `http.go` | `WithHTTPHeaders` — attach request headers to a handler context (Streamable-HTTP servers). |
 | `subscriptions.go` | The draft `subscriptions/listen` stream: `handleListen`, `NotifyToolsChanged`/`NotifyPromptsChanged`/`NotifyResourcesChanged`/`NotifyResourceUpdated`, ack + terminal `complete`. Served when used; not advertised in the 2025-06-18 initialize capabilities. |

@@ -1,4 +1,4 @@
-<!-- Generated: 2026-07-17 | Updated: 2026-07-17 -->
+<!-- Generated: 2026-07-17 | Updated: 2026-07-20 -->
 
 # meshmcp
 
@@ -29,6 +29,8 @@ meshmcp is an **identity-native control plane for agent-to-tool (MCP) traffic**.
 | `hookcmd.go` | `hook` — the client-hook firewall (F33): a PreToolUse/PostToolUse/prompt adapter for Claude Code / Cursor / Codex that governs *every* local tool call by policy + DLP + taint + audit (`hook install` prints the settings snippet). |
 | `httppolicy.go` | `httpEnforcer` — per-tool policy + audit for HTTP backends (F16), reusing `policy.Engine`. |
 | `budgetcmd.go` · `statuscmd.go` · `doctorcmd.go` · `configcmd.go` | `budget` / `status` / `doctor` / `config validate` — observability + pre-flight over the audit ledger and config. |
+| `spotlightcmd.go` | `spotlight` — **Mesh Spotlight** (F19): federated semantic search fanned out over the mesh (reuses router discovery + the vectors `search` tool), merged, ranked, provenance-tagged. |
+| `marketcmd.go` · `market.go` | `market` — **Governed plugin marketplace** (F14): sign/publish/list/verify/install Ed25519-signed bundle manifests (`policy.ManifestClaims`); install verifies a pinned authority key + the bundle content hash and records a metered, audited grant. No dynamic loading. |
 | `commands.go` · `auditsink.go` · `httpserve.go` | Plugin subcommand registry (`plugins`, F13/S40); webhook `AuditSink` (F15/S42); hardened loopback HTTP server (S25/S27). |
 | `agent.go` | `agent --role …` — demo agent apps (reader/fetcher/billing/analyst) each with their own mesh identity; `--steer-port` adds a steer inbox (P1). |
 | `air.go` · `airserve.go` · `airworkflow.go` | **Air · Steer** CLI: `air sessions/steer/launch/agent-steer/workflow/serve` — drive live work over the mesh (see `docs/AIR.md`, `docs/AIR-STEER.md`). |

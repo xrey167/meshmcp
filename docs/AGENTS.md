@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-07-17 | Updated: 2026-07-17 -->
+<!-- Generated: 2026-07-17 | Updated: 2026-07-20 -->
 
 # docs
 
@@ -14,6 +14,7 @@ Design documentation and open specifications for meshmcp. Human-facing narrative
 | `SECRETS.md` | The credential broker: identity-gated secret injection. |
 | `PUBSUB.md` | The identity-native event fabric: `pubsub`/`publish`/`subscribe`, per-topic deny-by-default authz, taint containment, hash-chained events. |
 | `EXTENSIONS.md` | Signed capabilities, server middleware, typed function/task client (and why the external "fabric" pack was not merged). |
+| `MARKETPLACE.md` | The governed plugin marketplace (F14): signed bundle manifests, pinned-key + content-hash verification, metered + audited installs — no dynamic loading. |
 | `MCP-APP.md` | Adding meshmcp to Claude Code / Codex as an MCP app. |
 | `MOBILE.md` | How the stack reaches phones (a phone as a human identity / co-sign approver). |
 | `DEMO.md` · `COOKBOOK.md` | The live mesh demo, and 10 worked "what's possible" scenarios with configs + diagrams. |

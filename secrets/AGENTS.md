@@ -16,7 +16,7 @@ An identity-gated credential broker on the mesh. Agents reference a secret **by 
 
 ### Working In This Directory
 - Resolution happens at the enforcement point (inside the `Filter`) and is the **last** step before the backend write — so the resolved value reaches only the backend, never audit or trace.
-- A grant with `block_labels: ["tainted"]` must never resolve once the session is tainted. This taint-refusal is a core security property; keep it covered by `integration_test.go`.
+- A grant with `block_labels: ["tainted"]` must never resolve once the session is tainted. This taint-refusal is a core security property; keep it covered by `broker_test.go` (`TestBrokerTaintBlocksInjection`).
 - Never log or echo a resolved value. Config validation (`secrets check`) proves configs without revealing anything.
 
 ### Testing Requirements

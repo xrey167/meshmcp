@@ -20,6 +20,23 @@ files are relative to the directory you run `meshmcp` from.
 | `router-failover.yaml` | `router` | An upstream with a dead replica first — the router discovers + routes via failover. |
 | `orchestrate.yaml` | `orchestrate` | A server-to-server node whose `research` tool calls another server's tools over the mesh. |
 | `air-workflow.yaml` | `air workflow` | An [Air](../docs/AIR.md) declarative workflow: launch agents, steer a session, call a tool — run in order, governed + audited. |
+| `demo-mesh.yaml` | `serve` | The live showcase gateway: one process fronts four differently-governed backends writing one shared ledger for the Control Room. |
+| `capabilities.yaml` | `serve` | Signed capabilities: a short-lived signed grant upgrades a policy-default deny to allow, subject/audience/tool-bound. |
+| `continuity.yaml` | `serve` | Session handoff (F5): a shared durable store lets a second gateway rehydrate a live session on failover. |
+| `knowledge.yaml` | `serve` | Knowledge graph (F2) + RAG/vector store (F3) backends over the mesh, one shared hash-chained ledger. |
+| `graphrag.yaml` | `graphrag` | GraphRAG bridge (S3): `graph_search` combining vectors (F3) + knowledge graph (F2) over the mesh. |
+| `vectors-shards.yaml` | `router` | Vector-shard compute mesh (S7): several `vectors` backends behind a router for round-robin LB + failover. |
+| `rag-firewall.yaml` | `serve` | Taint-contained RAG (F7): retrieval marks a taint source so egress/write is blocked at the gateway after a search. |
+| `dlp-firewall.yaml` | `serve` | Content-aware DLP hook (F18): scans call arguments; denies or tags the session with a data-flow label a later rule enforces. |
+| `cost-governance.yaml` | `serve` | Cost/budget governance (F29): per-tool cost weights + cost-weighted rate limits; over-budget calls denied inline. |
+| `group-policy.yaml` | `serve` | Group/role-based policy (F17): rules reference `group:<name>` instead of individual keys. |
+| `vault.yaml` | `serve` | Mesh secrets vault (F26): a zero-exposure secrets manager (no `get` tool) plus a backend that references secrets by name. |
+| `scheduler.yaml` | `serve` | Governed scheduler/cron (F27): identity-attributed scheduled tool calls; a worker drains `due` and calls over the mesh. |
+| `bus.yaml` | `serve` | Governed event bus (F28): zero-exposure pub/sub backend; the firewall gates publish vs. poll per topic. |
+| `pubsub.yaml` | `pubsub` | Identity-native pub/sub broker: per-topic authorization, publisher-stamped, hash-chained, audited. |
+| `hooks.yaml` | `serve` | Gateway hooks: emit firewall decisions to the event bus and/or a webhook; observability only, never blocks. |
+| `hook-policy.yaml` | `hook` | Client-hook firewall (F33): governs an LLM client's local tools (Bash/Edit/MCP) with policy + DLP + taint + audit, no mesh join. |
+| `drop.yaml` | `drop` | AirDrop receiver across mesh instances: ACL-gated, content-hash-verified, one audit record per file. |
 
 ## Quick start
 

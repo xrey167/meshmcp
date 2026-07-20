@@ -30,6 +30,7 @@ func cmdApprovals(args []string) error {
 	var approvers stringList
 	fs.Var(&approvers, "approver", "identity allowed to approve (FQDN glob or 'pubkey:<key>'); repeatable; REQUIRED in mesh mode")
 	devices := fs.String("devices", "", "directory to persist push-wake device tokens (enables /v1/devices + notify on new pendings)")
+	notifyWebhook := fs.String("notify-webhook", "", "POST push-wake notifications to this URL instead of logging them (needs --devices; the endpoint fans out to APNs/FCM with its own credentials)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -48,8 +49,16 @@ func cmdApprovals(args []string) error {
 
 	var opts []approvalsOption
 	if *devices != "" {
-		opts = append(opts, withPushWake(&DeviceStore{Dir: *devices}, logNotifier{w: os.Stderr}))
-		log.Printf("push-wake enabled: devices in %s (register via POST /v1/devices)", *devices)
+		var notifier Notifier = logNotifier{w: os.Stderr}
+		delivery := "logging to stderr"
+		if *notifyWebhook != "" {
+			notifier = newWebhookNotifier(*notifyWebhook)
+			delivery = "POST to " + *notifyWebhook
+		}
+		opts = append(opts, withPushWake(&DeviceStore{Dir: *devices}, notifier))
+		log.Printf("push-wake enabled: devices in %s (register via POST /v1/devices; delivery: %s)", *devices, delivery)
+	} else if *notifyWebhook != "" {
+		return fmt.Errorf("meshmcp approvals: --notify-webhook requires --devices")
 	}
 
 	// Local/dev mode: no mesh, a fixed approver identity.

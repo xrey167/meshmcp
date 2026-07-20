@@ -126,7 +126,16 @@ resources, and prompts against a live backend.
 | `meshmcp air <sessions\|steer\|launch\|agent-steer\|workflow\|serve>` | **Air · Steer** — list/steer live sessions, steer/launch agents, run a workflow, or serve the live web page (see [AIR.md](AIR.md)) |
 | `meshmcp pubsub --config <f>` · `publish` · `subscribe <peer:port> <topic>` | Identity-gated, audited **event bus** on the mesh — durable + resumable (see [PUBSUB.md](PUBSUB.md)) |
 | `meshmcp mcp [flags]` | Run meshmcp **as an MCP server** for Claude Code / Codex (see [MCP-APP.md](MCP-APP.md)) |
-| `meshmcp approvals --store <dir>` | Serve the co-sign approver (`--devices <dir>` enables push-wake) |
+| `meshmcp approvals --store <dir>` | Serve the co-sign approver (`--devices <dir>` enables push-wake; `--notify-webhook <url>` delivers pendings to a relay) |
+| `meshmcp audit <verify\|keygen\|export\|receipt\|attest>` | Verify/sign the ledger; export CSV; emit a provenance receipt; build a compliance attestation bundle (F32) |
+| `meshmcp capability <keygen\|issue\|revoke\|list>` | Mint an authority key, sign a short-lived tool grant, revoke/list capability ids (F21) |
+| `meshmcp status --audit <f> [--json]` | Roll up a ledger: per-peer/tool/backend calls + chain verdict (F15) |
+| `meshmcp budget --audit <f> [--by-tool]` | Total cost/quota units consumed per identity — FinOps for the fleet (F29) |
+| `meshmcp config validate --config <f>` · `doctor --config <f>` | Validate a config (globs/windows/enums/DLP); run pre-flight readiness checks |
+| `meshmcp hook --client <c> --config <f>` | Client-hook firewall: govern every local tool call in Claude Code / Cursor / Codex (F33) |
+| `meshmcp plugins` | List the extensions compiled into this build (F13) |
+| `meshmcp spotlight [flags] <query>` | Federated semantic search across the mesh backends you can reach — merged, ranked, provenance-tagged (F19) |
+| `meshmcp market <keygen\|publish\|list\|verify\|install>` | Governed plugin marketplace: signed bundle manifests, pinned-key + content-hash verify, metered + audited installs (F14) |
 
 Shared mesh flags for `connect`/`forward`/`probe`/`ls`/`call`/`read`/`prompt`/`drop`/`push`/`peers`/`fetch`/`air`: `--setup-key` (or `$NB_SETUP_KEY`),
 `--management-url` (or `$NB_MANAGEMENT_URL`), `--device-name`, `--nb-config`
@@ -289,11 +298,11 @@ registry, and bidirectional MCP; stdio + HTTP backends; a CLI (`ls/call/read/pro
 **Shipped since (Wave 2 — see [ROADMAP-HARDENING.md](ROADMAP-HARDENING.md)):**
 - **Capability tokens** — short-lived signed grants, plus a **revocation store** (`capability revoke/list`, F21).
 - **Rate & cost governance** — per-identity quotas and cost accounting; `meshmcp budget` totals spend (F29).
-- **`meshmcp status`** — per-peer/tool/backend call rollup + chain verdict (F15); `budget`, `doctor`, `config validate`, `audit export/receipt`.
+- **`meshmcp status`** — per-peer/tool/backend call rollup + chain verdict (F15); `budget`, `doctor`, `config validate`, `audit export/receipt/attest`.
 - **Federation** — cross-org boundary with policy at the trust seam (already built; F31 SSO mapping is open).
 - **HTTP-backend policy parity** (F16), a **plugin platform** (F13), **fail-closed audit** (F22), **identity-bound sessions** (F23),
   a **client-hook firewall** for Claude Code / Cursor / Codex (F33), and new dark backends **vault/scheduler/bus** (F26–F28).
 
 **Still open:**
 - **Replicated store backend:** Redis/etcd behind the `SessionStore` interface for multi-datacenter HA.
-- Flagships F14 (plugin marketplace), F17 (group-based policy), F19 (Mesh Spotlight), F25 (multi-tenant), F30–F32.
+- Flagships F14 (plugin marketplace), F19 (Mesh Spotlight), F25 (multi-tenant), F30 (live handoff), F31 (federated SSO mapping).

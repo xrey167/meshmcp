@@ -9,12 +9,12 @@ A cross-org federation boundary. It bridges a small set of **explicitly granted*
 ## Key Files
 | File | Description |
 |------|-------------|
-| `boundary.go` | Package doc + the boundary: relays only granted tools from a local upstream to remote-mesh callers, with identity mapping and audit. |
+| `boundary.go` | Package doc + `Boundary`: authorizes and audits cross-org tool calls (`Check`/`Allowed`) and corpus/KG queries (`CheckCorpus`, F12), mapping remote identities to a local principal (`OrgFor`/`Principal`). Default-deny. (The proxying itself lives in root `federate.go`.) |
 
 ## For AI Agents
 
 ### Working In This Directory
-- The boundary is a default-deny surface: a tool not on the grant list must not be listed or callable across the boundary. `boundary_test.go` (`TestFederationBoundaryRelaysGrantedToolOnly`) pins this — keep it.
+- The boundary is a default-deny surface: a tool not on the grant list must not be listed or callable across the boundary. `boundary_test.go` (`TestBoundaryAuthorizesByGrant`) pins this — keep it.
 - Remote identities are mapped to a local identity for policy/audit; preserve that mapping so audit attribution stays meaningful.
 
 ### Testing Requirements

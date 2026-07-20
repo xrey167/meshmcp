@@ -63,8 +63,10 @@ var builtinCommands = []string{
 	"serve", "connect", "forward", "drop", "peers", "fetch", "push", "probe",
 	"ls", "call", "read", "prompt", "functions", "function-call", "router",
 	"orchestrate", "graphrag", "control", "federate", "audit", "capability",
-	"approve", "approvals", "agent", "secrets", "dash", "room", "mcp",
-	"insight", "replay", "config", "status", "budget", "doctor", "hook", "plugins", "version",
+	"approve", "approvals", "agent", "air", "secrets", "dash", "room", "mcp",
+	"pubsub", "publish", "subscribe",
+	"insight", "replay", "config", "status", "budget", "doctor", "hook",
+	"plugins", "spotlight", "market", "version",
 }
 
 // cmdPlugins lists the extensions compiled into this binary: registered plugin

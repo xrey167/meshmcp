@@ -261,16 +261,18 @@ Watch it live with `meshmcp dash --audit audit.jsonl`; re-run a past session wit
 | `hook --client <c> --config <f>` | **Client-hook firewall** (F33): govern *every* local tool call in Claude Code / Cursor / Codex by policy + DLP + taint + audit — `hook install` prints the settings snippet. |
 | `audit verify <f> [--checkpoints --pubkey]` | Verify a log: hash chain, or signatures + Merkle. |
 | `audit keygen [--out f]` | Generate a gateway Ed25519 signing key. |
-| `audit export --in <f>` · `audit receipt --in <f>` | Export the ledger to CSV; emit a verifiable provenance receipt (what a session's tools produced). |
+| `audit export --in <f>` · `audit receipt --in <f>` · `audit attest --audit <f>` | Export the ledger to CSV; emit a verifiable provenance receipt (what a session's tools produced); build a self-describing, independently-verifiable compliance/attestation bundle (F32). |
 | `capability keygen [--out f]` | Generate an Ed25519 authority key backends pin as a trust root. |
 | `capability issue --subject --audience --tool [--ttl]` | Sign a short-lived, subject-bound tool grant (present it with `call --capability @file`). |
 | `capability revoke·list --store <d>` | Revoke a capability id (fails closed everywhere) / list revoked ids. |
 | `approve --store <d> <peer> <tool>` | Human co-sign a held `require_cosign` call from the CLI. |
-| `approvals --store <d> [--approver <id>]` | Serve the phone-friendly co-sign approver over the mesh (`--approver` restricts who may approve). |
+| `approvals --store <d> [--approver <id>] [--devices <d> --notify-webhook <url>]` | Serve the phone-friendly co-sign approver over the mesh (`--approver` restricts who may approve; `--devices` enables push-wake token registration, `--notify-webhook` POSTs each new pending to a relay that fans out to APNs/FCM). |
 | `secrets check --config <f>` | Validate the credential broker config (never prints values). |
 | `status --audit <f>` · `budget --audit <f>` | Roll up a ledger (per-peer/tool/backend + chain verdict); total cost/quota per identity (FinOps). |
 | `config validate --config <f>` · `doctor --config <f>` | Validate a config (globs/windows/enums/DLP) / run pre-flight readiness checks. |
 | `plugins` | List the extensions compiled into this build (F13). |
+| `spotlight [flags] <query>` | **Mesh Spotlight** (F19): federated semantic search — one query fanned out to the search backends your identity can reach, merged, ranked, and provenance-tagged. |
+| `market <keygen\|publish\|list\|verify\|install>` | **Governed plugin marketplace** (F14): publish/discover Ed25519-signed bundle manifests; install verifies against a pinned authority key + the bundle hash and records a metered, audited grant — no dynamic loading. |
 | `dash --audit <f>` | Serve the live control dashboard. |
 | `room --audit <f>` | Serve the interactive **Control Room** — live network (servers, agents, decision feed) **plus a console**: list/call tools over the mesh, a governed `run_command` terminal, and (opt-in `--local-shell`) a raw shell. |
 | `agent --role <r> <peer:port>` | Run a demo agent app (reader/fetcher/billing/analyst) with its own mesh identity. |
@@ -321,6 +323,7 @@ examples/    ready-to-adapt configs        docs/  design docs + open specs
 - **[docs/INSIGHT.md](docs/INSIGHT.md)** — the firewall's read side: observe → recommend → simulate → detect.
 - **[docs/SECRETS.md](docs/SECRETS.md)** — the credential broker: identity-gated secret injection (credential isolation; the agent does not receive the value; a malicious backend stays within the exposure boundary).
 - **[docs/EXTENSIONS.md](docs/EXTENSIONS.md)** — signed capabilities (short-lived, subject-bound tool grants), server middleware, and the typed function/task client.
+- **[docs/MARKETPLACE.md](docs/MARKETPLACE.md)** — the **governed plugin marketplace** (F14): Ed25519-signed bundle manifests, pinned-key + content-hash verification, and metered, audited installs — no dynamic loading.
 - **[protocol/README.md](protocol/README.md)** — granular Go models for the full MCP wire protocol: the 2025-06-18 base schema, the draft revision (server/discover, MRTR, subscriptions, error catalog, sampling tool-use, form/url elicitation, streamable-HTTP + stdio transports, OAuth 2.1 authorization), and the Server Card / Tasks / Apps extensions — plus a client-side response cache. One package per domain, each with round-trip tests.
 - **[docs/spec/](docs/spec/)** — open specs: the [audit-record format](docs/spec/AUDIT-RECORD.md) and the [policy DSL](docs/spec/POLICY-DSL.md), each with a JSON Schema.
 - **[docs/AIR.md](docs/AIR.md)** — **Air**: the AirDrop-native face of meshmcp — discover · drop · push · fetch · steer · launch · approve, across a phone-first web app, the assistant, and native mobile (see the [visual mockup](https://xrey167.github.io/meshmcp/air.html)).

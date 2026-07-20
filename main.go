@@ -69,6 +69,8 @@ Usage:
   meshmcp hook --client <c> --config <file>     PreToolUse hook adapter: govern EVERY tool call in Claude Code/Cursor/Codex by policy+audit
   meshmcp hook install --client <c>             print the hook config to add to a client's settings
   meshmcp plugins                                list extensions compiled into this build
+  meshmcp spotlight [flags] <query>             federated semantic search across authorized mesh backends (F19)
+  meshmcp market <keygen|publish|list|verify|install>  governed plugin marketplace: signed bundle manifests, metered + audited installs (F14)
   meshmcp version
 
 Mesh credentials come from flags, config, or $NB_SETUP_KEY / $NB_MANAGEMENT_URL.
@@ -168,6 +170,10 @@ func main() {
 		err = cmdHook(os.Args[2:])
 	case "plugins":
 		err = cmdPlugins(os.Args[2:])
+	case "spotlight":
+		err = cmdSpotlight(os.Args[2:])
+	case "market":
+		err = cmdMarket(os.Args[2:])
 	case "version":
 		fmt.Println(version)
 	case "-h", "--help", "help":
