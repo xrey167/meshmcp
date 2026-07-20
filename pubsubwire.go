@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"sync"
+	"time"
 
 	"github.com/xrey167/meshmcp/pubsub"
 	"github.com/xrey167/meshmcp/session"
@@ -38,14 +39,31 @@ type helloFrame struct {
 	// Capability is an optional signed token granting topics beyond the
 	// broker's default-deny policy, for the whole session.
 	Capability string `json:"capability,omitempty"`
+	// Group, if set, joins this subscription to a named consumer group: each
+	// matching event goes to exactly one member of the group (load balancing).
+	Group string `json:"group,omitempty"`
+	// Ack requests at-least-once delivery within the group: delivered events are
+	// held in-flight until the subscriber sends an ack frame, and redelivered to
+	// another member if this one disconnects first. Requires Group.
+	Ack bool `json:"ack,omitempty"`
+}
+
+// ackReqFrame is sent by an at-least-once subscriber to release an in-flight
+// event (by sequence) once it has been processed.
+type ackReqFrame struct {
+	Ack uint64 `json:"ack"`
 }
 
 type pubFrame struct {
-	Topic   string          `json:"topic"`
-	Labels  []string        `json:"labels,omitempty"`
-	Retain  bool            `json:"retain,omitempty"`
-	Enc     string          `json:"enc,omitempty"` // payload encoding hint (e.g. "base64")
-	Payload json.RawMessage `json:"payload,omitempty"`
+	Topic        string          `json:"topic"`
+	Labels       []string        `json:"labels,omitempty"`
+	Retain       bool            `json:"retain,omitempty"`
+	RetainTTLSec int             `json:"retain_ttl_sec,omitempty"` // retained last-value expires after this many seconds (0 = never)
+	RetainDelete bool            `json:"retain_delete,omitempty"`  // clear the topic's retained last-value (tombstone)
+	Enc          string          `json:"enc,omitempty"`            // payload encoding hint (e.g. "base64")
+	ReplyTo      string          `json:"reply_to,omitempty"`       // request/reply: topic for the reply
+	Corr         string          `json:"corr,omitempty"`           // request/reply: correlation id echoed on the reply
+	Payload      json.RawMessage `json:"payload,omitempty"`
 }
 
 type ackFrame struct {
@@ -155,6 +173,8 @@ func (bb *brokerBackend) serveSub(hello helloFrame, sc *bufio.Scanner) {
 		Since:        hello.Since,
 		Backpressure: bp,
 		Capability:   hello.Capability,
+		Group:        hello.Group,
+		Ack:          hello.Ack,
 	})
 	if err != nil {
 		bb.writeAck(ackFrame{Error: err.Error()})
@@ -168,10 +188,15 @@ func (bb *brokerBackend) serveSub(hello helloFrame, sc *bufio.Scanner) {
 		sub.Close()
 		return
 	}
-	// Drain the peer's input side so a client-initiated close ends the
-	// subscription promptly.
+	// Read the peer's input side: at-least-once subscribers send ack frames
+	// ({"ack":<seq>}) to release in-flight events; any input also lets a
+	// client-initiated close end the subscription promptly.
 	go func() {
 		for sc.Scan() {
+			var af ackReqFrame
+			if json.Unmarshal(sc.Bytes(), &af) == nil && af.Ack > 0 {
+				bb.broker.Ack(sub, af.Ack)
+			}
 		}
 		sub.Close()
 	}()
@@ -199,10 +224,14 @@ func (bb *brokerBackend) servePub(sc *bufio.Scanner, capToken string) {
 			continue
 		}
 		ev, err := bb.broker.PublishOpts(bb.ident, pf.Topic, pf.Payload, pubsub.PublishOptions{
-			Labels:     pf.Labels,
-			Capability: capToken,
-			Retain:     pf.Retain,
-			Encoding:   pf.Enc,
+			Labels:       pf.Labels,
+			Capability:   capToken,
+			Retain:       pf.Retain,
+			RetainTTL:    time.Duration(pf.RetainTTLSec) * time.Second,
+			RetainDelete: pf.RetainDelete,
+			Encoding:     pf.Enc,
+			ReplyTo:      pf.ReplyTo,
+			Corr:         pf.Corr,
 		})
 		if err != nil {
 			if bb.writeAck(ackFrame{Error: err.Error()}) != nil {
@@ -229,15 +258,17 @@ func (bb *brokerBackend) writeAck(f ackFrame) error {
 
 // clientStream is the local end of a pub/sub session for the CLI clients. It
 // emits a fixed outbound preamble (hello, optionally followed by one publish
-// frame), then feeds every complete inbound line to onLine. Read blocks after
-// the preamble until finish() is called, at which point it returns EOF to end
-// the session gracefully.
+// frame), then feeds every complete inbound line to onLine. After the preamble,
+// Read either blocks until finish() (the common case) or, if outR is set,
+// streams further outbound frames from it (e.g. at-least-once ack frames) until
+// outR reaches EOF.
 type clientStream struct {
 	mu    sync.Mutex
 	out   []byte // remaining preamble bytes
 	inbuf []byte // partial inbound line
 
 	onLine func(line []byte)
+	outR   io.Reader // optional: further outbound frames streamed after the preamble
 
 	done      chan struct{}
 	closeOnce sync.Once
@@ -252,6 +283,11 @@ func (s *clientStream) Read(p []byte) (int, error) {
 		return n, nil
 	}
 	s.mu.Unlock()
+	if s.outR != nil {
+		// Stream additional outbound frames (acks) until the writer closes; a
+		// closed pipe returns EOF, ending the session like finish() would.
+		return s.outR.Read(p)
+	}
 	<-s.done
 	return 0, io.EOF
 }

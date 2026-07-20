@@ -33,6 +33,7 @@ It is a bus that no ordinary message queue can be:
 meshmcp pubsub    --config broker.yaml                run a broker on the mesh
 meshmcp publish   [flags] <peer-ip:port> <topic>      publish one event
 meshmcp subscribe [flags] <peer-ip:port> <topic...>   stream events to stdout
+meshmcp request   [flags] <peer-ip:port> <topic>      publish a request, wait for the reply (RPC)
 ```
 
 Publish reads its payload from stdin (or `--data`), wraps it as a JSON string
@@ -60,6 +61,16 @@ meshmcp publish --retain 100.x.y.z:9120 state.thermostat --data '{"c":21}'
 meshmcp publish --file model.bin 100.x.y.z:9120 artifacts.model
 ```
 
+A retained value can **expire** (`--retain-ttl`, so stale state like presence
+isn't served to a late subscriber) or be **cleared** (`--unretain`, an MQTT-style
+tombstone — the clear still reaches current subscribers, but future ones get no
+retained value):
+
+```sh
+meshmcp publish --retain --retain-ttl 5m 100.x.y.z:9120 state.presence --data '"online"'
+meshmcp publish --unretain 100.x.y.z:9120 state.presence   # clear it
+```
+
 Subscribe streams matching events as newline-delimited JSON and blocks until
 Ctrl-C. Topics are globs; `--since` replays retained events first:
 
@@ -67,6 +78,40 @@ Ctrl-C. Topics are globs; `--since` replays retained events first:
 meshmcp subscribe 100.x.y.z:9120 'alerts.*' 'ops.*'
 meshmcp subscribe --since 41 100.x.y.z:9120 'alerts.prod'
 ```
+
+`--group <name>` joins a **consumer group**: each event is delivered to exactly
+one member of the group instead of to every subscriber, so a pool of workers
+shares the load (competing consumers). Ungrouped subscribers still each get their
+own copy:
+
+```sh
+# three workers share the jobs.* stream; each event goes to one of them
+meshmcp subscribe --group workers 100.x.y.z:9120 'jobs.*'   # run on each worker
+```
+
+Delivery is **capacity-aware**: an event goes to the next member with buffer
+room, so a busy/slow member is skipped in favor of an idle one rather than
+dropped on. Taint containment still holds — an event is only ever routed to a
+member cleared for its labels (containment is applied *before* group selection).
+
+**At-least-once** groups add `--ack`: an event delivered to a member is held
+in-flight until the member acks it, and **redelivered to another member** if that
+one disconnects first — so a crashed or rolling worker loses no work. The
+`respond` RPC worker acks a request only after its handler succeeds, so a pool of
+`respond --group <g> --ack` workers is a reliable job queue (a failed/crashed
+handler's job is retried on a sibling). When every member is at its in-flight cap,
+further events are held in a **bounded per-group backlog** (`max_group_pending`;
+oldest dropped and counted if it overflows) and drain as members ack. Duplicates
+are possible if a member dies mid-processing — at-least-once, by design.
+
+A group is live-only and scoped to **one broker**: `--since` replay is not
+combined with `--group` (replaying a window to every competing consumer would
+duplicate it), and a group spanning two *federated* brokers gets one delivery
+**per broker** (federation mirrors independently — it does not coordinate a global
+group). At-least-once holds across worker churn while the group keeps ≥1 member;
+if the **last** member leaves holding un-acked work, that work can't be
+redelivered live (it is counted, not silently lost) — recover it with the durable
+`event_log:` plus a `--durable` non-group consumer.
 
 `--durable <file>` makes a subscriber **at-least-once**: it persists the
 last-seen sequence to the file and resumes from it, so with a broker `event_log:`
@@ -78,6 +123,47 @@ not exactly-once):
 meshmcp subscribe --durable ./alerts.cursor 100.x.y.z:9120 'alerts.prod'
 ```
 
+## Request/reply (RPC over the bus)
+
+`meshmcp request` turns the bus into an **identity-native RPC transport**: it
+publishes a request and blocks for the correlated reply. Because the request and
+the reply are both ordinary events, every RPC is attributable (stamped with the
+caller's proven key), authorized per topic (deny by default), taint-contained,
+and hash-chained — guarantees no ordinary RPC has:
+
+```sh
+echo '[2,3]' | meshmcp request --json 100.x.y.z:9120 rpc.add    # prints the reply
+```
+
+A **responder** turns a program into a governed RPC service. `meshmcp respond`
+runs a handler command per request — the request payload on its stdin — and
+publishes the handler's output back to the event's `reply_to` with the same
+`corr`:
+
+```sh
+# answer rpc.add by summing the JSON array in each request
+meshmcp respond --json 100.x.y.z:9120 rpc.add -- jq 'add'
+```
+
+Run several with `--group` and they become a **pool of competing RPC workers**
+(the request load is shared, one request per worker) — parallelism is "run more
+of me". Add `--ack` for a **reliable job queue**: a request is acked only after
+the handler succeeds, so a crash redelivers it to a sibling worker (at-least-once)
+instead of losing it. Without `--ack`, a failed handler still returns a reply
+(its error text), so an RPC caller gets a reply or a timeout, never silence. (A
+responder is just a subscribe + publish, so the shell `while read` equivalent
+works too, using `publish --corr`.)
+
+`request` allocates a private per-request reply topic by default
+(`_rpc.reply.<id>`) and matches the reply by `corr`, so concurrent requests never
+cross-talk; `--reply-topic` overrides it, `--timeout` bounds the wait, and
+`--from <wg-key>` pins the reply to a specific responder's proven key (rejects a
+reply from anyone else). RPC is still deny-by-default: **both parties must be
+granted the reply namespace** — the requester to *subscribe* `_rpc.reply.*`, the
+responder to *publish* it — so an RPC channel is an explicit policy grant, not
+ambient. `request` returns the **first** matching reply (single-reply RPC;
+scatter-gather across many responders is not built in).
+
 ## Durability
 
 By default the bus is a live tap: events live in a bounded in-memory ring.
@@ -88,10 +174,12 @@ event_log: ./pubsub-events.jsonl
 ```
 
 Each sealed event is appended to that file in sequence order. On restart the
-broker resumes the **sequence and hash chain** from the log and preloads the
-replay window, so `--since` works across restarts and the chain is continuous.
-Because the events are hash-chained like the audit ledger, the persisted stream
-is externally verifiable — a tampered, reordered, or truncated log is detected:
+broker resumes the **sequence and hash chain** from the log, preloads the replay
+window, and **rebuilds retained last-values** (with their TTLs and tombstones)
+from the stream, so `--since` and retained state both work across restarts and
+the chain is continuous. Because the events are hash-chained like the audit
+ledger, the persisted stream is externally verifiable — a tampered, reordered,
+or truncated log is detected:
 
 ```sh
 meshmcp pubsub verify ./pubsub-events.jsonl
@@ -147,10 +235,13 @@ federate:
 Each mirrored event preserves its original publisher and is tagged with the
 source broker (`origin`), so a bidirectional federation **cannot loop** — a
 mirror is never re-mirrored. Taint labels are preserved across the hop, so
-containment holds mesh-wide. The remote broker must authorize this broker's
-identity to subscribe to the mirrored topics (federation is a granted relation,
-not ambient). Mirroring is best-effort live; pair it with `event_log:` +
-`--durable` subscribers for at-least-once across a broker outage.
+containment holds mesh-wide. **Retained** last-values (and their TTLs and
+tombstones) also cross the hop — the retain intent rides the event — so a
+subscriber on the downstream broker sees the current state a peer retained.
+The remote broker must authorize this broker's identity to subscribe to the
+mirrored topics (federation is a granted relation, not ambient). Mirroring is
+best-effort live; pair it with `event_log:` + `--durable` subscribers for
+at-least-once across a broker outage.
 
 ## Introspection
 
@@ -158,7 +249,7 @@ Query a running broker for a live snapshot:
 
 ```sh
 meshmcp pubsub stats 100.x.y.z:9120
-# subscriptions=7  sequence=12043  retained=4096  dropped=12
+# subscriptions=7  groups=2  sequence=12043  retained=4096  dropped=12
 ```
 
 ---

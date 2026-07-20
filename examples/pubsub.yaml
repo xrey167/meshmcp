@@ -62,6 +62,13 @@ policy:
       topics: ["alerts.*"]
       allow: true
 
+    # Request/reply (RPC over the bus): grant the reply namespace so a requester
+    # may subscribe its reply topic and a responder may publish it. Still
+    # deny-by-default — an RPC channel is an explicit grant, not ambient.
+    - peers: ["analyst-*.netbird.cloud", "pubkey:AbCdEf0123...="]
+      topics: ["_rpc.reply.*", "rpc.*"]
+      allow: true
+
 # Resource caps. Zero fields fall back to conservative defaults.
 limits:
   sub_queue: 256                       # per-subscriber buffer before backpressure
@@ -73,6 +80,7 @@ limits:
   max_subs_per_peer: 128               # one identity cannot pin every global slot
   retain: 4096                         # events kept for --since replay
   max_retained_topics: 4096            # distinct topics that may hold a --retain last-value (bounds retained-map memory)
+  max_group_pending: 1024              # per-group backlog cap for at-least-once (--ack) consumer groups
   publish_rate: 50                     # per-peer publish+subscribe requests/second; 0 = default (200), -1 = unlimited
   publish_burst: 100                   # per-peer burst ceiling
 

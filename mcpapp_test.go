@@ -48,6 +48,16 @@ func TestMCPAppPubsubTools(t *testing.T) {
 	if res, _ := app.toolPubsubStats(context.Background(), []byte(`{"target":"100.64.0.1:9120"}`)); !res.IsError {
 		t.Fatal("pubsub_stats without mesh should error")
 	}
+	// Argument validation for the new publish options happens before the mesh
+	// check, so it surfaces even without a mesh.
+	if res, _ := app.toolPubsubPublish(context.Background(),
+		[]byte(`{"target":"x:1","topic":"t","data":"h","retain":true,"unretain":true}`)); !res.IsError {
+		t.Fatal("retain + unretain together should error")
+	}
+	if res, _ := app.toolPubsubPublish(context.Background(),
+		[]byte(`{"target":"x:1","topic":"t","data":"h","retain_ttl":"notaduration"}`)); !res.IsError {
+		t.Fatal("invalid retain_ttl should error")
+	}
 }
 
 func TestMCPAppNetwork(t *testing.T) {

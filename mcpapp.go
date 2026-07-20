@@ -311,11 +311,15 @@ func (a *meshApp) register(s *mcp.Server) {
 		Name:        "pubsub_publish",
 		Description: "Publish an event to a pub/sub broker topic over the mesh (identity-gated, audited). target is broker-ip:port.",
 		InputSchema: appObj(map[string]any{
-			"target": appStr("broker mesh address, e.g. 100.64.0.5:9120"),
-			"topic":  appStr("topic to publish to, e.g. alerts.prod"),
-			"data":   appStr("event payload (wrapped as a JSON string unless json=true)"),
-			"json":   appBool("treat data as raw JSON (default false)"),
-			"retain": appBool("store as the topic's retained last-value (default false)"),
+			"target":     appStr("broker mesh address, e.g. 100.64.0.5:9120"),
+			"topic":      appStr("topic to publish to, e.g. alerts.prod"),
+			"data":       appStr("event payload (wrapped as a JSON string unless json=true)"),
+			"json":       appBool("treat data as raw JSON (default false)"),
+			"retain":     appBool("store as the topic's retained last-value (default false)"),
+			"retain_ttl": appStr("expire the retained value after this duration, e.g. 5m (implies retain)"),
+			"unretain":   appBool("clear the topic's retained last-value (tombstone; overrides retain)"),
+			"reply_to":   appStr("request/reply: topic a responder should send the reply to"),
+			"corr":       appStr("request/reply: correlation id (echo the request's corr when replying)"),
 		}, "target", "topic", "data"),
 		Handler: a.toolPubsubPublish,
 	})
@@ -330,14 +334,28 @@ func (a *meshApp) register(s *mcp.Server) {
 // toolPubsubPublish publishes one event to a broker over the mesh.
 func (a *meshApp) toolPubsubPublish(ctx context.Context, args json.RawMessage) (mcp.ToolResult, error) {
 	var p struct {
-		Target, Topic, Data string
-		JSON, Retain        bool
+		Target, Topic, Data    string
+		JSON, Retain, Unretain bool
+		RetainTTL              string `json:"retain_ttl"`
+		ReplyTo                string `json:"reply_to"`
+		Corr                   string `json:"corr"`
 	}
 	if err := json.Unmarshal(args, &p); err != nil || p.Target == "" || p.Topic == "" {
 		return errTxt("target and topic are required"), nil
 	}
 	if a.mesh == nil {
 		return errTxt("not joined to the mesh (set NB_SETUP_KEY)"), nil
+	}
+	if p.Unretain && (p.Retain || p.RetainTTL != "") {
+		return errTxt("unretain (clear) cannot be combined with retain/retain_ttl (set)"), nil
+	}
+	ttlSec := 0
+	if p.RetainTTL != "" {
+		d, err := time.ParseDuration(p.RetainTTL)
+		if err != nil || d < 0 {
+			return errTxt("retain_ttl is not a valid non-negative duration (e.g. 5m)"), nil
+		}
+		ttlSec = int(d.Seconds())
 	}
 	var payload json.RawMessage
 	if p.JSON {
@@ -350,7 +368,10 @@ func (a *meshApp) toolPubsubPublish(ctx context.Context, args json.RawMessage) (
 		payload = enc
 	}
 	hello, _ := json.Marshal(helloFrame{Role: "pub"})
-	pf, _ := json.Marshal(pubFrame{Topic: p.Topic, Retain: p.Retain, Payload: payload})
+	pf, _ := json.Marshal(pubFrame{
+		Topic: p.Topic, Retain: p.Retain || ttlSec > 0, RetainTTLSec: ttlSec,
+		RetainDelete: p.Unretain, ReplyTo: p.ReplyTo, Corr: p.Corr, Payload: payload,
+	})
 	preamble := append(append(hello, '\n'), append(pf, '\n')...)
 
 	var mu sync.Mutex

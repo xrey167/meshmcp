@@ -48,7 +48,7 @@ func TestEmitFederated(t *testing.T) {
 	}
 	recv(t, sub) // drain the normal publish
 
-	ev, err := b.EmitFederated("t", json.RawMessage(`2`), nil, "orig-key", "broker-A")
+	ev, err := b.EmitFederated("t", json.RawMessage(`2`), nil, "orig-key", "broker-A", false, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +171,7 @@ func TestFederationRespectsLocalPolicy(t *testing.T) {
 	defer b.Close()
 
 	// A federated event on an explicitly-denied topic is refused.
-	if _, err := b.EmitFederated("secret.keys", json.RawMessage(`1`), nil, "up-key", "broker-B"); !errors.Is(err, ErrDenied) {
+	if _, err := b.EmitFederated("secret.keys", json.RawMessage(`1`), nil, "up-key", "broker-B", false, false, ""); !errors.Is(err, ErrDenied) {
 		t.Fatalf("federated event on locally-denied topic: got %v, want ErrDenied", err)
 	}
 
@@ -179,7 +179,7 @@ func TestFederationRespectsLocalPolicy(t *testing.T) {
 	// even though the upstream asserted none.
 	sub, _ := b.Subscribe(id("s"), SubOptions{Topics: []string{"web.*"}})
 	defer sub.Close()
-	ev, err := b.EmitFederated("web.page", json.RawMessage(`1`), nil, "up-key", "broker-B")
+	ev, err := b.EmitFederated("web.page", json.RawMessage(`1`), nil, "up-key", "broker-B", false, false, "")
 	if err != nil {
 		t.Fatalf("federated web.* event should pass: %v", err)
 	}
@@ -200,6 +200,593 @@ func hasLabel(labels []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// TestConsumerGroupLoadBalance verifies a named consumer group is a competing-
+// consumer set: each live event is delivered to exactly one member, the members
+// share the load (round-robin), and together they see every event with no
+// duplicates.
+func TestConsumerGroupLoadBalance(t *testing.T) {
+	b := New(Options{Authorizer: AllowAll{}, Limits: Limits{SubQueue: 64}})
+	defer b.Close()
+
+	a, err := b.Subscribe(id("a"), SubOptions{Topics: []string{"work"}, Group: "g"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	c, err := b.Subscribe(id("c"), SubOptions{Topics: []string{"work"}, Group: "g"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	const n = 20
+	for i := 0; i < n; i++ {
+		if _, err := b.Publish(id("p"), "work", json.RawMessage(fmt.Sprintf("%d", i)), nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	seen := map[string]int{}
+	drain := func(s *Subscription) int {
+		got := 0
+		for {
+			select {
+			case ev := <-s.C():
+				seen[string(ev.Payload)]++
+				got++
+			default:
+				return got
+			}
+		}
+	}
+	ga, gc := drain(a), drain(c)
+	if ga+gc != n {
+		t.Fatalf("group saw %d events (a=%d c=%d), want %d total", ga+gc, ga, gc, n)
+	}
+	if ga == 0 || gc == 0 {
+		t.Fatalf("load not shared: a=%d c=%d", ga, gc)
+	}
+	for i := 0; i < n; i++ {
+		k := fmt.Sprintf("%d", i)
+		if seen[k] != 1 {
+			t.Fatalf("event %s delivered %d times, want exactly once", k, seen[k])
+		}
+	}
+}
+
+// TestConsumerGroupCapacityAware verifies group delivery prefers a member with
+// buffer room: a member whose buffer is already full is skipped in favor of an
+// idle member instead of dropping the event on the busy one.
+func TestConsumerGroupCapacityAware(t *testing.T) {
+	const q = 4
+	b := New(Options{Authorizer: AllowAll{}, Limits: Limits{SubQueue: q}})
+	defer b.Close()
+
+	busy, _ := b.Subscribe(id("busy"), SubOptions{Topics: []string{"t"}, Group: "g"})
+	defer busy.Close()
+	idle, _ := b.Subscribe(id("idle"), SubOptions{Topics: []string{"t"}, Group: "g"})
+	defer idle.Close()
+
+	// Saturate "busy" by filling its buffer directly (it never drains).
+	b.mu.Lock()
+	for i := 0; i < cap(busy.ch); i++ {
+		busy.ch <- &Event{Topic: "t"}
+	}
+	b.mu.Unlock()
+
+	// Publish exactly idle's capacity worth of events. With "busy" full, every
+	// one must land on "idle" without a drop — rather than being dropped on the
+	// saturated member as blind round-robin would.
+	for i := 0; i < q; i++ {
+		if _, err := b.Publish(id("p"), "t", json.RawMessage(`1`), nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := 0
+	for {
+		select {
+		case <-idle.C():
+			got++
+			continue
+		default:
+		}
+		break
+	}
+	if got != q {
+		t.Fatalf("idle member received %d of %d; capacity-aware routing should send all to the idle member", got, q)
+	}
+	if d := busy.Dropped(); d != 0 {
+		t.Fatalf("busy member dropped %d events; it should have been skipped, not dropped on", d)
+	}
+}
+
+// TestConsumerGroupWithStandalone verifies grouped and ungrouped subscribers
+// coexist: an ungrouped subscriber receives every event, while a group splits
+// the same events across its members (each event: one group copy + one standalone
+// copy).
+func TestConsumerGroupWithStandalone(t *testing.T) {
+	b := New(Options{Authorizer: AllowAll{}, Limits: Limits{SubQueue: 64}})
+	defer b.Close()
+
+	solo, _ := b.Subscribe(id("solo"), SubOptions{Topics: []string{"t"}})
+	defer solo.Close()
+	g1, _ := b.Subscribe(id("g1"), SubOptions{Topics: []string{"t"}, Group: "grp"})
+	defer g1.Close()
+	g2, _ := b.Subscribe(id("g2"), SubOptions{Topics: []string{"t"}, Group: "grp"})
+	defer g2.Close()
+
+	const n = 10
+	for i := 0; i < n; i++ {
+		b.Publish(id("p"), "t", json.RawMessage(fmt.Sprintf("%d", i)), nil)
+	}
+	count := func(s *Subscription) int {
+		got := 0
+		for {
+			select {
+			case <-s.C():
+				got++
+			default:
+				return got
+			}
+		}
+	}
+	if c := count(solo); c != n {
+		t.Fatalf("standalone subscriber saw %d, want all %d", c, n)
+	}
+	if c := count(g1) + count(g2); c != n {
+		t.Fatalf("group saw %d total, want %d (one copy per event)", c, n)
+	}
+}
+
+// TestConsumerGroupTaintContainment verifies group delivery still honors label
+// clearance: a tainted event is only ever routed to a group member cleared for
+// it, never to an uncleared member (containment is applied before group
+// selection).
+func TestConsumerGroupTaintContainment(t *testing.T) {
+	// web.* is tainted; "cleared" is cleared for it, "blind" is not. Both join
+	// the same group.
+	auth := &RuleAuthorizer{Rules: []TopicRule{
+		{Peers: []string{"pubkey:pub"}, Topics: []string{"web.*"}, Allow: true, Taint: true},
+		{Peers: []string{"pubkey:cleared"}, Topics: []string{"web.*"}, Allow: true, ClearTaint: true},
+		{Peers: []string{"pubkey:blind"}, Topics: []string{"web.*"}, Allow: true}, // not cleared
+	}}
+	b := New(Options{Authorizer: auth})
+	defer b.Close()
+
+	cleared, err := b.Subscribe(Identity{Key: "cleared", FQDN: "cleared.x"}, SubOptions{Topics: []string{"web.*"}, Group: "g"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleared.Close()
+	blind, err := b.Subscribe(Identity{Key: "blind", FQDN: "blind.x"}, SubOptions{Topics: []string{"web.*"}, Group: "g"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blind.Close()
+
+	const n = 8
+	for i := 0; i < n; i++ {
+		b.Publish(Identity{Key: "pub", FQDN: "pub.x"}, "web.page", json.RawMessage(`1`), nil)
+	}
+	// Every tainted event must land on the cleared member; the blind member,
+	// though in the group, is never a valid target for a tainted event.
+	got := 0
+	for {
+		select {
+		case <-cleared.C():
+			got++
+			continue
+		default:
+		}
+		break
+	}
+	if got != n {
+		t.Fatalf("cleared member saw %d tainted events, want all %d routed to it", got, n)
+	}
+	select {
+	case ev := <-blind.C():
+		t.Fatalf("uncleared group member received a tainted event: %+v", ev)
+	default:
+	}
+}
+
+// TestConsumerGroupMemberLeave verifies that after a member leaves, all events
+// route to the remaining member (and the group's cursor state is reclaimed once
+// empty).
+func TestConsumerGroupMemberLeave(t *testing.T) {
+	b := New(Options{Authorizer: AllowAll{}, Limits: Limits{SubQueue: 32}})
+	defer b.Close()
+
+	a, _ := b.Subscribe(id("a"), SubOptions{Topics: []string{"t"}, Group: "g"})
+	c, _ := b.Subscribe(id("c"), SubOptions{Topics: []string{"t"}, Group: "g"})
+	a.Close()
+
+	const n = 6
+	for i := 0; i < n; i++ {
+		b.Publish(id("p"), "t", json.RawMessage(`1`), nil)
+	}
+	got := 0
+	for {
+		select {
+		case <-c.C():
+			got++
+			continue
+		default:
+		}
+		break
+	}
+	if got != n {
+		t.Fatalf("remaining member saw %d, want all %d after peer left", got, n)
+	}
+	c.Close()
+	// After all members leave, the group's cursor/count are reclaimed.
+	b.mu.Lock()
+	_, hasRR := b.groupRR["g"]
+	_, hasN := b.groupN["g"]
+	b.mu.Unlock()
+	if hasRR || hasN {
+		t.Fatal("group state not reclaimed after last member left")
+	}
+}
+
+// TestAckGroupRedeliversOnLoss is the core at-least-once guarantee: an event
+// delivered to a member that disconnects WITHOUT acking is redelivered to
+// another group member, so a crashed/rolling worker loses no work.
+func TestAckGroupRedeliversOnLoss(t *testing.T) {
+	b := New(Options{Authorizer: AllowAll{}, Limits: Limits{SubQueue: 16}})
+	defer b.Close()
+
+	w1, err := b.Subscribe(id("w1"), SubOptions{Topics: []string{"jobs"}, Group: "g", Ack: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w2, err := b.Subscribe(id("w2"), SubOptions{Topics: []string{"jobs"}, Group: "g", Ack: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w2.Close()
+
+	// Publish one job; the round-robin cursor starts at 0, so w1 (members[0])
+	// receives it.
+	ev, _ := b.Publish(id("p"), "jobs", json.RawMessage(`"job1"`), nil)
+	if g := recv(t, w1); g.Seq != ev.Seq {
+		t.Fatalf("w1 got seq %d, want %d", g.Seq, ev.Seq)
+	}
+
+	// w1 dies WITHOUT acking → the un-acked job is redelivered to w2.
+	w1.Close()
+	if r := recvWithin(w2, 2*time.Second); r == nil || r.Seq != ev.Seq {
+		t.Fatal("un-acked event was not redelivered to the surviving member")
+	}
+}
+
+// TestAckGroupAckReleasesInflight verifies that once a member acks an event, the
+// event is NOT redelivered when that member later leaves (the work was done).
+func TestAckGroupAckReleasesInflight(t *testing.T) {
+	b := New(Options{Authorizer: AllowAll{}, Limits: Limits{SubQueue: 16}})
+	defer b.Close()
+
+	w1, _ := b.Subscribe(id("w1"), SubOptions{Topics: []string{"jobs"}, Group: "g", Ack: true})
+	w2, _ := b.Subscribe(id("w2"), SubOptions{Topics: []string{"jobs"}, Group: "g", Ack: true})
+	defer w2.Close()
+
+	ev, _ := b.Publish(id("p"), "jobs", json.RawMessage(`1`), nil)
+	// Whichever worker got it acks it, then leaves.
+	recvd, other := w1, w2
+	g := recvWithin(w1, 200*time.Millisecond)
+	if g == nil {
+		g = recv(t, w2)
+		recvd, other = w2, w1
+	}
+	b.Ack(recvd, g.Seq)
+	recvd.Close()
+
+	// The acked event must NOT be redelivered.
+	if r := recvWithin(other, 300*time.Millisecond); r != nil {
+		t.Fatalf("acked event should not be redelivered, got seq %d", r.Seq)
+	}
+	_ = ev
+}
+
+// TestAckGroupBacklogDrainsOnAck verifies the bounded backlog: when the only
+// member is at its in-flight cap, further events are held (not dropped) and
+// delivered as the member acks and frees capacity.
+func TestAckGroupBacklogDrainsOnAck(t *testing.T) {
+	// SubQueue=2 → in-flight cap 2. Publish 4 with one member; 2 delivered, 2 held.
+	b := New(Options{Authorizer: AllowAll{}, Limits: Limits{SubQueue: 2}})
+	defer b.Close()
+
+	w, _ := b.Subscribe(id("w"), SubOptions{Topics: []string{"jobs"}, Group: "g", Ack: true})
+	defer w.Close()
+
+	var seqs []uint64
+	for i := 0; i < 4; i++ {
+		ev, _ := b.Publish(id("p"), "jobs", json.RawMessage(fmt.Sprintf("%d", i)), nil)
+		seqs = append(seqs, ev.Seq)
+	}
+	// Drain the two the worker can hold.
+	e0 := recv(t, w)
+	e1 := recv(t, w)
+	// No third yet — backlog is held pending an ack.
+	if r := recvWithin(w, 150*time.Millisecond); r != nil {
+		t.Fatalf("third event should be held until an ack, got seq %d", r.Seq)
+	}
+	// Ack one → backlog advances by one.
+	b.Ack(w, e0.Seq)
+	if r := recvWithin(w, time.Second); r == nil {
+		t.Fatal("backlog did not advance after an ack")
+	}
+	b.Ack(w, e1.Seq)
+	if r := recvWithin(w, time.Second); r == nil {
+		t.Fatal("backlog did not advance after the second ack")
+	}
+	_ = seqs
+}
+
+// TestAckRequiresGroup verifies at-least-once without a group is refused (no
+// peer to redeliver to).
+func TestAckRequiresGroup(t *testing.T) {
+	b := New(Options{Authorizer: AllowAll{}})
+	defer b.Close()
+	if _, err := b.Subscribe(id("w"), SubOptions{Topics: []string{"jobs"}, Ack: true}); !errors.Is(err, ErrBadTopic) {
+		t.Fatalf("ack without group: got %v, want ErrBadTopic", err)
+	}
+}
+
+// TestConsumerGroupRejectsSince verifies --since replay is refused with a group
+// (a group is live-only; replaying a window to every competing consumer would
+// duplicate it).
+func TestConsumerGroupRejectsSince(t *testing.T) {
+	b := New(Options{Authorizer: AllowAll{}})
+	defer b.Close()
+	if _, err := b.Subscribe(id("a"), SubOptions{Topics: []string{"t"}, Group: "g", Since: 1}); !errors.Is(err, ErrBadTopic) {
+		t.Fatalf("group + since: got %v, want ErrBadTopic", err)
+	}
+}
+
+// TestRequestReplyFields verifies the request/reply correlation fields are
+// stamped onto the sealed event, delivered intact, and covered by the hash
+// chain (they are part of the event, so a tamper would be detected).
+func TestRequestReplyFields(t *testing.T) {
+	b := New(Options{Authorizer: AllowAll{}})
+	defer b.Close()
+	sub, _ := b.Subscribe(id("s"), SubOptions{Topics: []string{"rpc.add"}})
+	defer sub.Close()
+
+	ev, err := b.PublishOpts(id("client"), "rpc.add", json.RawMessage(`[1,2]`),
+		PublishOptions{ReplyTo: "_rpc.reply.abc", Corr: "abc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.ReplyTo != "_rpc.reply.abc" || ev.Corr != "abc" {
+		t.Fatalf("published event missing correlation: %+v", ev)
+	}
+	got := recv(t, sub)
+	if got.ReplyTo != "_rpc.reply.abc" || got.Corr != "abc" {
+		t.Fatalf("delivered event missing correlation: %+v", got)
+	}
+	if err := VerifyChain(b.Retained()); err != nil {
+		t.Fatalf("chain with correlation fields must verify: %v", err)
+	}
+}
+
+// TestRequestReplyRoundTrip exercises the whole RPC pattern on the core: a
+// responder subscribed to the request topic replies to the event's ReplyTo with
+// the same Corr, and the requester (subscribed to the reply topic) matches it.
+// Everything is ordinary per-topic publish/subscribe — RPC needs no special path.
+func TestRequestReplyRoundTrip(t *testing.T) {
+	b := New(Options{Authorizer: AllowAll{}})
+	defer b.Close()
+
+	// Requester listens on its private reply topic; responder listens on the
+	// request topic.
+	reply, err := b.Subscribe(id("client"), SubOptions{Topics: []string{"_rpc.reply.xyz"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reply.Close()
+	requests, err := b.Subscribe(id("server"), SubOptions{Topics: []string{"rpc.echo"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer requests.Close()
+
+	// Requester publishes the request.
+	if _, err := b.PublishOpts(id("client"), "rpc.echo", json.RawMessage(`"ping"`),
+		PublishOptions{ReplyTo: "_rpc.reply.xyz", Corr: "xyz"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Responder receives it and replies to ReplyTo with the same Corr.
+	req := recv(t, requests)
+	if req.ReplyTo == "" || req.Corr == "" {
+		t.Fatalf("responder got a request without correlation: %+v", req)
+	}
+	if _, err := b.PublishOpts(id("server"), req.ReplyTo, json.RawMessage(`"pong"`),
+		PublishOptions{Corr: req.Corr}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Requester matches the reply by Corr.
+	resp := recv(t, reply)
+	if resp.Corr != "xyz" || string(resp.Payload) != `"pong"` {
+		t.Fatalf("requester got wrong reply: %+v", resp)
+	}
+}
+
+// TestRequestReplyValidation verifies the correlation fields are bounded like a
+// topic/label (they are retained and hashed): an over-long reply_to or corr is
+// refused.
+func TestRequestReplyValidation(t *testing.T) {
+	b := New(Options{Authorizer: AllowAll{}, Limits: Limits{MaxTopicLen: 16}})
+	defer b.Close()
+	long := strings.Repeat("x", 17)
+	if _, err := b.PublishOpts(id("c"), "t", json.RawMessage(`1`), PublishOptions{ReplyTo: long}); err == nil {
+		t.Fatal("over-long reply_to should be rejected")
+	}
+	if _, err := b.PublishOpts(id("c"), "t", json.RawMessage(`1`), PublishOptions{Corr: long}); !errors.Is(err, ErrBadTopic) {
+		t.Fatalf("over-long corr: got %v, want ErrBadTopic", err)
+	}
+}
+
+// TestRetainedTTL verifies a retained last-value with a TTL is delivered before
+// it expires and withheld (and evicted) after, using an injected clock.
+func TestRetainedTTL(t *testing.T) {
+	clk := newClock()
+	b := New(Options{Authorizer: AllowAll{}, Now: clk.now})
+	defer b.Close()
+
+	b.PublishOpts(id("p"), "state.presence", json.RawMessage(`"online"`),
+		PublishOptions{Retain: true, RetainTTL: time.Minute})
+
+	// Before expiry: a new subscriber receives it.
+	early, _ := b.Subscribe(id("s1"), SubOptions{Topics: []string{"state.*"}})
+	if ev := recv(t, early); string(ev.Payload) != `"online"` {
+		t.Fatalf("pre-expiry retained = %s, want online", ev.Payload)
+	}
+	early.Close()
+
+	// After expiry: a new subscriber receives nothing, and the entry is evicted.
+	clk.add(2 * time.Minute)
+	late, _ := b.Subscribe(id("s2"), SubOptions{Topics: []string{"state.*"}})
+	defer late.Close()
+	expectNone(t, late)
+	b.mu.Lock()
+	_, stillThere := b.retained["state.presence"]
+	b.mu.Unlock()
+	if stillThere {
+		t.Fatal("expired retained value was not evicted")
+	}
+}
+
+// TestRetainedTombstone verifies an unretain (RetainDelete) clears the topic's
+// retained last-value: the clear event still fans out live, but a later
+// subscriber gets no retained value.
+func TestRetainedTombstone(t *testing.T) {
+	b := New(Options{Authorizer: AllowAll{}})
+	defer b.Close()
+
+	b.PublishOpts(id("p"), "state.k", json.RawMessage(`1`), PublishOptions{Retain: true})
+
+	// A live subscriber sees the tombstone event.
+	live, _ := b.Subscribe(id("live"), SubOptions{Topics: []string{"state.k"}})
+	recv(t, live) // the retained value on connect
+	if _, err := b.PublishOpts(id("p"), "state.k", json.RawMessage(`null`), PublishOptions{RetainDelete: true}); err != nil {
+		t.Fatal(err)
+	}
+	if ev := recv(t, live); string(ev.Payload) != `null` {
+		t.Fatalf("live subscriber should see the clear event, got %s", ev.Payload)
+	}
+	live.Close()
+
+	// A later subscriber gets no retained value for the cleared topic.
+	later, _ := b.Subscribe(id("later"), SubOptions{Topics: []string{"state.k"}})
+	defer later.Close()
+	expectNone(t, later)
+}
+
+// TestRetainedTTLRefreshedOnUpdate verifies re-retaining a topic without a TTL
+// clears a previously set expiry (the value becomes permanent again).
+func TestRetainedTTLRefreshedOnUpdate(t *testing.T) {
+	clk := newClock()
+	b := New(Options{Authorizer: AllowAll{}, Now: clk.now})
+	defer b.Close()
+
+	b.PublishOpts(id("p"), "t", json.RawMessage(`1`), PublishOptions{Retain: true, RetainTTL: time.Minute})
+	b.PublishOpts(id("p"), "t", json.RawMessage(`2`), PublishOptions{Retain: true}) // no TTL: clears expiry
+	clk.add(2 * time.Minute)
+	sub, _ := b.Subscribe(id("s"), SubOptions{Topics: []string{"t"}})
+	defer sub.Close()
+	if ev := recv(t, sub); string(ev.Payload) != `2` {
+		t.Fatalf("retained (no-TTL update) = %s, want 2 (should not have expired)", ev.Payload)
+	}
+}
+
+// TestRetainedFederates verifies a retained last-value carries across a
+// federation hop: mirroring the retained event into a second broker makes it
+// that broker's retained value too (a late local subscriber gets it).
+func TestRetainedFederates(t *testing.T) {
+	up := New(Options{Authorizer: AllowAll{}})
+	defer up.Close()
+	down := New(Options{Authorizer: AllowAll{}})
+	defer down.Close()
+
+	// Publish a retained value on the upstream broker.
+	rev, err := up.PublishOpts(id("p"), "state.k", json.RawMessage(`"v1"`), PublishOptions{Retain: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rev.Retain {
+		t.Fatal("published retained event should carry Retain=true on the event")
+	}
+
+	// The federation runner mirrors it: carry the retain intent from the event.
+	if _, err := down.EmitFederated(rev.Topic, rev.Payload, rev.Labels, rev.Publisher, "up", rev.Retain, rev.RetainDel, rev.ExpiresAt); err != nil {
+		t.Fatal(err)
+	}
+
+	// A subscriber that connects to the DOWNSTREAM broker afterward receives the
+	// federated retained value.
+	sub, _ := down.Subscribe(id("s"), SubOptions{Topics: []string{"state.*"}})
+	defer sub.Close()
+	if ev := recv(t, sub); string(ev.Payload) != `"v1"` {
+		t.Fatalf("downstream retained = %s, want v1 (federated)", ev.Payload)
+	}
+}
+
+// TestRetainedSurvivesRestart verifies retained state is rebuilt from the
+// persisted event log on restart (retain intent rides the event), including a
+// tombstone that must stay cleared.
+func TestRetainedSurvivesRestart(t *testing.T) {
+	var buf bytes.Buffer
+	b1 := New(Options{Authorizer: AllowAll{}, Events: NewEventLog(&buf), Limits: Limits{Retain: 100}})
+	b1.PublishOpts(id("p"), "state.keep", json.RawMessage(`"live"`), PublishOptions{Retain: true})
+	b1.PublishOpts(id("p"), "state.gone", json.RawMessage(`"x"`), PublishOptions{Retain: true})
+	b1.PublishOpts(id("p"), "state.gone", json.RawMessage(`null`), PublishOptions{RetainDelete: true}) // tombstone
+	b1.Close()
+
+	// "Restart": reload the log and seed a fresh broker.
+	seed, err := LoadEvents(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b2 := New(Options{Authorizer: AllowAll{}, Seed: seed, Limits: Limits{Retain: 100}})
+	defer b2.Close()
+
+	sub, _ := b2.Subscribe(id("s"), SubOptions{Topics: []string{"state.*"}})
+	defer sub.Close()
+	// state.keep is restored; state.gone was tombstoned and must not come back.
+	ev := recv(t, sub)
+	if ev.Topic != "state.keep" || string(ev.Payload) != `"live"` {
+		t.Fatalf("restored retained = %+v, want state.keep=live", ev)
+	}
+	expectNone(t, sub) // no second retained value (the tombstoned one stays gone)
+}
+
+// TestRetainedExpirySweptAtCap verifies an expired retained value is actively
+// swept to make room when a new topic would otherwise hit the retained cap.
+func TestRetainedExpirySweptAtCap(t *testing.T) {
+	clk := newClock()
+	b := New(Options{Authorizer: AllowAll{}, Now: clk.now, Limits: Limits{MaxRetainedTopics: 1}})
+	defer b.Close()
+
+	b.PublishOpts(id("p"), "a", json.RawMessage(`1`), PublishOptions{Retain: true, RetainTTL: time.Minute})
+	clk.add(2 * time.Minute) // "a" lapses
+
+	// Retaining a new topic at the cap sweeps the lapsed "a" to make room.
+	b.PublishOpts(id("p"), "b", json.RawMessage(`2`), PublishOptions{Retain: true})
+	b.mu.Lock()
+	_, hasA := b.retained["a"]
+	_, hasB := b.retained["b"]
+	b.mu.Unlock()
+	if hasA {
+		t.Fatal("expired retained value should have been swept at cap pressure")
+	}
+	if !hasB {
+		t.Fatal("new retained value should have taken the freed slot")
+	}
 }
 
 // fakeClock is a settable clock for deterministic time-dependent tests.
@@ -244,6 +831,20 @@ func recv(t *testing.T, s *Subscription) *Event {
 		return ev
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for event")
+		return nil
+	}
+}
+
+// recvWithin returns one event or nil if none arrives within d (for tests that
+// assert timing/absence without failing).
+func recvWithin(s *Subscription, d time.Duration) *Event {
+	select {
+	case ev, ok := <-s.C():
+		if !ok {
+			return nil
+		}
+		return ev
+	case <-time.After(d):
 		return nil
 	}
 }
