@@ -1029,3 +1029,39 @@ identified mesh peer. The steer method was unrestricted.
 ### Commit
 
 `air: default-deny control ACL + steer-method allowlist`
+
+---
+
+## F-P8.2 · Secret injection regex-replaces across the whole message — FIXED
+
+**Severity:** Medium (a marker outside declared arguments could be substituted;
+injection was not bound to a declared argument location).
+
+**Component:** `secrets/broker.go`.
+
+**Reproduced:** Yes. `Resolve` ran `refRe.ReplaceAllFunc` over the entire raw
+JSON line, so a `{{secret:NAME}}` marker anywhere (method, id, params.name,
+_meta) would be resolved, and there was no argument-location binding.
+
+### Fix
+
+- Injection is **confined to `params.arguments`**: the request is parsed, and
+  markers are collected and substituted only in string values within arguments.
+  A marker anywhere else is left literal and never resolved.
+- `replaceMarkers` rebuilds the arguments value and `json.Marshal` re-escapes
+  each secret, so a value with quotes/backslashes/newlines cannot break the
+  message.
+- New `Grant.Locations` binds a grant to declared argument paths (dotted globs,
+  e.g. `headers.*`); a secret reference at a non-matching location is denied.
+
+### Tests (`secrets/broker_test.go`)
+
+- `TestBrokerOnlyInjectsIntoArguments` — a marker in `params.name` stays literal;
+  the argument marker is injected.
+- `TestBrokerLocationBinding` — allowed at `headers.*`, denied elsewhere.
+- `TestBrokerNestedAndMultiple` — nested objects/arrays, multiple secrets,
+  Unicode. Existing broker tests still pass.
+
+### Commit
+
+`secrets: inject only into declared argument locations, not whole-message regex`

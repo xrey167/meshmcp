@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/xrey167/meshmcp/policy"
@@ -29,6 +30,11 @@ type Grant struct {
 	Secrets []string `yaml:"secrets"`
 	// Tools restricts injection to these tool-name globs (empty = any tool).
 	Tools []string `yaml:"tools"`
+	// Locations restricts injection to these argument paths (dotted globs within
+	// params.arguments, e.g. "headers.Authorization" or "items.*.token"). Empty =
+	// any location within arguments. A secret reference at a non-matching
+	// location is denied — binding a grant to the declared argument location.
+	Locations []string `yaml:"locations"`
 	// BlockLabels refuse injection when the session carries any of these
 	// data-flow labels — e.g. ["tainted"] so untrusted content can never
 	// trigger a credential use.
@@ -57,58 +63,155 @@ func (b *Broker) Resolve(caller policy.Caller, tool string, line []byte, labels 
 	if !bytes.Contains(line, refMarker) {
 		return line, nil, true, ""
 	}
-
-	// Collect the distinct referenced names.
-	names := map[string]bool{}
-	for _, m := range refRe.FindAllSubmatch(line, -1) {
-		names[string(m[1])] = true
+	// Parse the request and locate params.arguments — the ONLY place a secret is
+	// injected. A marker anywhere else (method, id, params.name, _meta) is left
+	// as a literal and never resolved, so a caller cannot smuggle a secret out of
+	// a non-argument field.
+	var msg map[string]json.RawMessage
+	if json.Unmarshal(line, &msg) != nil {
+		return line, nil, true, "" // not our shape; nothing to inject
+	}
+	var params map[string]json.RawMessage
+	if raw, has := msg["params"]; !has || json.Unmarshal(raw, &params) != nil {
+		return line, nil, true, ""
+	}
+	argsRaw, has := params["arguments"]
+	if !has {
+		return line, nil, true, "" // no argument surface
+	}
+	var args any
+	if json.Unmarshal(argsRaw, &args) != nil {
+		return line, nil, true, ""
 	}
 
-	// Authorize and resolve every name up front, so a denial blocks the whole
-	// call before any value is substituted.
-	values := make(map[string]string, len(names))
-	for name := range names {
-		allowed, why := b.authorize(caller, name, tool, labels)
+	// Pass 1: collect marker occurrences (secret name + dotted path) within
+	// arguments only.
+	var sites []markerSite
+	collectMarkers(args, "", &sites)
+	if len(sites) == 0 {
+		return line, nil, true, "" // markers only outside arguments: leave literal
+	}
+
+	// Authorize + resolve every referenced secret up front (binding to the
+	// argument location), so a denial blocks the whole call before substitution.
+	values := map[string]string{}
+	for _, s := range sites {
+		allowed, why := b.authorize(caller, s.name, tool, s.path, labels)
 		if !allowed {
-			b.record(caller, tool, name, "deny", why)
+			b.record(caller, tool, s.name, "deny", why)
 			return nil, nil, false, why
 		}
-		v, found := b.store.Get(name)
+		if _, done := values[s.name]; done {
+			continue
+		}
+		v, found := b.store.Get(s.name)
 		if !found {
-			reason = fmt.Sprintf("secret %q is not available in the store", name)
-			b.record(caller, tool, name, "deny", "unavailable")
+			reason = fmt.Sprintf("secret %q is not available in the store", s.name)
+			b.record(caller, tool, s.name, "deny", "unavailable")
 			return nil, nil, false, reason
 		}
-		values[name] = v
+		values[s.name] = v
 	}
 
-	// Substitute inside the (JSON) line, JSON-escaping each value so a value
-	// containing quotes/backslashes/newlines cannot break the message or
-	// escape its string context.
-	out = refRe.ReplaceAllFunc(line, func(m []byte) []byte {
-		name := string(refRe.FindSubmatch(m)[1])
-		return []byte(jsonInner(values[name]))
-	})
-	// Report the injected values (raw AND the JSON-escaped inner form that
-	// actually appears in the wire line) so the filter can scrub either form a
-	// backend might echo back. These bytes are for in-memory redaction only —
-	// they are never audited, traced, or logged.
-	for name := range names {
-		raw := values[name]
+	// Pass 2: substitute markers inside arguments only. json.Marshal re-escapes
+	// each value, so a value with quotes/backslashes/newlines can never break the
+	// message or escape its string context.
+	newArgs := replaceMarkers(args, values)
+	nb, err := json.Marshal(newArgs)
+	if err != nil {
+		return nil, nil, false, "secret injection failed to re-encode arguments"
+	}
+	params["arguments"] = nb
+	pb, _ := json.Marshal(params)
+	msg["params"] = pb
+	ob, _ := json.Marshal(msg)
+	if len(line) > 0 && line[len(line)-1] == '\n' {
+		ob = append(ob, '\n') // preserve line framing for the backend
+	}
+
+	// Report the injected values (raw AND JSON-escaped form) so the filter can
+	// scrub either form a backend might echo back. In-memory redaction only —
+	// never audited, traced, or logged.
+	seen := map[string]bool{}
+	for _, s := range sites {
+		if seen[s.name] {
+			continue
+		}
+		seen[s.name] = true
+		raw := values[s.name]
 		injected = append(injected, []byte(raw))
 		if esc := jsonInner(raw); esc != raw {
 			injected = append(injected, []byte(esc))
 		}
-		b.record(caller, tool, name, "allow", "injected")
+		b.record(caller, tool, s.name, "allow", "injected")
 	}
-	return out, injected, true, ""
+	return ob, injected, true, ""
+}
+
+// markerSite is one secret-reference occurrence within arguments.
+type markerSite struct {
+	name string // secret name
+	path string // dotted path within arguments (e.g. "headers.Authorization")
+}
+
+func joinPath(base, seg string) string {
+	if base == "" {
+		return seg
+	}
+	return base + "." + seg
+}
+
+// collectMarkers walks a decoded arguments value and records every secret
+// reference found in a STRING value, with its dotted path.
+func collectMarkers(v any, path string, out *[]markerSite) {
+	switch t := v.(type) {
+	case map[string]any:
+		for k, val := range t {
+			collectMarkers(val, joinPath(path, k), out)
+		}
+	case []any:
+		for i, val := range t {
+			collectMarkers(val, joinPath(path, strconv.Itoa(i)), out)
+		}
+	case string:
+		for _, m := range refRe.FindAllStringSubmatch(t, -1) {
+			*out = append(*out, markerSite{name: m[1], path: path})
+		}
+	}
+}
+
+// replaceMarkers returns a copy of v with every secret marker in a string value
+// replaced by its resolved value.
+func replaceMarkers(v any, values map[string]string) any {
+	switch t := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, val := range t {
+			out[k] = replaceMarkers(val, values)
+		}
+		return out
+	case []any:
+		out := make([]any, len(t))
+		for i, val := range t {
+			out[i] = replaceMarkers(val, values)
+		}
+		return out
+	case string:
+		return refRe.ReplaceAllStringFunc(t, func(m string) string {
+			name := refRe.FindStringSubmatch(m)[1]
+			return values[name]
+		})
+	default:
+		return v
+	}
 }
 
 // authorize reports whether caller may inject secret into tool given the
 // session labels. It distinguishes "no grant" from "blocked by label" so the
 // denial reason is actionable.
-func (b *Broker) authorize(caller policy.Caller, secret, tool string, labels map[string]bool) (bool, string) {
+func (b *Broker) authorize(caller policy.Caller, secret, tool, path string, labels map[string]bool) (bool, string) {
 	matchedButBlocked := ""
+	matchedButLocation := false
 	for _, g := range b.grants {
 		if !matchPeer(g.Peers, caller.Peer, caller.PeerKey) {
 			continue
@@ -119,6 +222,10 @@ func (b *Broker) authorize(caller policy.Caller, secret, tool string, labels map
 		if len(g.Tools) > 0 && !matchGlob(g.Tools, tool) {
 			continue
 		}
+		if len(g.Locations) > 0 && !matchGlob(g.Locations, path) {
+			matchedButLocation = true
+			continue // this grant restricts locations and this one doesn't match
+		}
 		if blocked := firstPresent(g.BlockLabels, labels); blocked != "" {
 			matchedButBlocked = fmt.Sprintf("secret %q blocked: session carries label %q", secret, blocked)
 			continue
@@ -127,6 +234,9 @@ func (b *Broker) authorize(caller policy.Caller, secret, tool string, labels map
 	}
 	if matchedButBlocked != "" {
 		return false, matchedButBlocked
+	}
+	if matchedButLocation {
+		return false, fmt.Sprintf("secret %q not permitted at argument location %q", secret, path)
 	}
 	return false, fmt.Sprintf("secret %q not granted to %s", secret, callerName(caller))
 }
