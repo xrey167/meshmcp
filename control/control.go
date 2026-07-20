@@ -13,6 +13,7 @@ package control
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 
@@ -31,7 +32,7 @@ type EnrollRequest struct {
 type EnrollResponse struct {
 	ManagementURL string `json:"management_url"`
 	SetupKey      string `json:"setup_key"`
-	Registry      string `json:"registry,omitempty"`  // shared registry dir, if centralized
+	Registry      string `json:"registry,omitempty"` // shared registry dir, if centralized
 	ControlNode   string `json:"control_node,omitempty"`
 }
 
@@ -48,12 +49,45 @@ type PolicyStore interface {
 	List() ([]string, error)
 }
 
-// Server bundles the control-plane capabilities. Any field may be nil, in
-// which case the corresponding routes report 501.
+// maxControlBody caps a privileged request body so a caller cannot exhaust
+// memory on the control plane.
+const maxControlBody = 1 << 20 // 1 MiB
+
+// ControlAudit is one privileged-action record: who (actor WireGuard key), what
+// (action + target), the result, and a correlation id tying an allow/deny to a
+// specific request.
+type ControlAudit struct {
+	Actor  string `json:"actor_key"`
+	FQDN   string `json:"actor_fqdn,omitempty"`
+	Action string `json:"action"`
+	Target string `json:"target,omitempty"`
+	Result string `json:"result"` // "allow" | "deny"
+	Reason string `json:"reason,omitempty"`
+	Corr   string `json:"correlation_id"`
+}
+
+// AuditSink records privileged control-plane actions. Implementations must not
+// block the request path.
+type AuditSink interface {
+	Record(ControlAudit)
+}
+
+// Server bundles the control-plane capabilities. Any capability field (Reg,
+// Policies, Enroll) may be nil, in which case its routes report 501.
+//
+// Auth and Identify are the authorization controls. The control plane is
+// default-deny: with either nil, every privileged route fails closed (403),
+// because WireGuard membership authenticates a peer but does not authorize
+// administration. Identify derives the caller's WireGuard key from the
+// transport; Auth maps that key to roles. Caller identity supplied in headers or
+// the request body is ignored.
 type Server struct {
 	Reg      registry.Registry
 	Policies PolicyStore
 	Enroll   EnrollFunc
+	Auth     Authorizer
+	Identify IdentityResolver
+	Audit    AuditSink
 }
 
 // Handler returns the control-plane HTTP handler.
@@ -63,8 +97,46 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/registry", s.handleRegistry)
 	mux.HandleFunc("/v1/policy/", s.handlePolicy)
 	mux.HandleFunc("/v1/policies", s.handlePolicyList)
+	// healthz is an unauthenticated liveness probe: it reveals no state.
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { fmt.Fprintln(w, "ok") })
 	return mux
+}
+
+func (s *Server) audit(rec ControlAudit) {
+	if s.Audit != nil {
+		s.Audit.Record(rec)
+	}
+}
+
+// authorize enforces default-deny RBAC for a privileged action. It derives the
+// caller identity from the transport (never headers/body), checks the required
+// role, audits the allow or deny with a correlation id, and writes a 403 on
+// denial. It returns the identity and true only when the caller is authorized.
+func (s *Server) authorize(w http.ResponseWriter, r *http.Request, role Role, action, target string) (Identity, bool) {
+	corr := newCorrelationID()
+	w.Header().Set("X-Control-Correlation-Id", corr)
+
+	// Fail closed on a misconfigured control plane: without both an identity
+	// resolver and an authorizer we cannot make an authorization decision, so we
+	// must deny rather than admit every reachable peer.
+	if s.Identify == nil || s.Auth == nil {
+		s.audit(ControlAudit{Action: action, Target: target, Result: "deny", Reason: "control authorization not configured", Corr: corr})
+		http.Error(w, "forbidden: control authorization not configured (fail-closed)", http.StatusForbidden)
+		return Identity{}, false
+	}
+	id, ok := s.Identify(r.RemoteAddr)
+	if !ok || id.PubKey == "" {
+		s.audit(ControlAudit{Action: action, Target: target, Result: "deny", Reason: "caller could not be attributed to a mesh peer", Corr: corr})
+		http.Error(w, "forbidden: unattributable caller", http.StatusForbidden)
+		return Identity{}, false
+	}
+	if !s.Auth.HasRole(id.PubKey, role) {
+		s.audit(ControlAudit{Actor: id.PubKey, FQDN: id.FQDN, Action: action, Target: target, Result: "deny", Reason: "missing role " + string(role), Corr: corr})
+		http.Error(w, "forbidden: caller lacks role "+string(role), http.StatusForbidden)
+		return Identity{}, false
+	}
+	s.audit(ControlAudit{Actor: id.PubKey, FQDN: id.FQDN, Action: action, Target: target, Result: "allow", Corr: corr})
+	return id, true
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -82,10 +154,24 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "enrollment not configured", http.StatusNotImplemented)
 		return
 	}
-	var req EnrollRequest
-	_ = json.NewDecoder(r.Body).Decode(&req)
+	// Issuing a setup key hands a caller the credential to join the mesh — a
+	// privileged action gated by enrollment.issue, not something any reachable
+	// peer may do. (A true unjoined-node bootstrap uses a separate one-time
+	// credential flow; that redesign is tracked in the router/enrollment spec.)
+	req := EnrollRequest{}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxControlBody))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		http.Error(w, "invalid enroll request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
 	if req.Node == "" {
 		http.Error(w, "node is required", http.StatusBadRequest)
+		return
+	}
+	// The node label is caller-supplied and is NOT identity; authorize the
+	// transport-proven caller before issuing anything.
+	if _, ok := s.authorize(w, r, RoleEnrollmentIssue, "enroll.issue", req.Node); !ok {
 		return
 	}
 	resp, err := s.Enroll(req)
@@ -105,6 +191,9 @@ func (s *Server) handleRegistry(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
+		if _, ok := s.authorize(w, r, RoleRegistryRead, "registry.list", ""); !ok {
+			return
+		}
 		m, err := s.Reg.Lookup()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -112,9 +201,21 @@ func (s *Server) handleRegistry(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, m)
 	case http.MethodPost, http.MethodDelete:
-		var e struct{ Name, Addr string }
-		if json.NewDecoder(r.Body).Decode(&e) != nil || e.Name == "" || e.Addr == "" {
+		var e struct {
+			Name string `json:"name"`
+			Addr string `json:"addr"`
+		}
+		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxControlBody))
+		dec.DisallowUnknownFields()
+		if dec.Decode(&e) != nil || e.Name == "" || e.Addr == "" {
 			http.Error(w, "name and addr are required", http.StatusBadRequest)
+			return
+		}
+		action := "registry.register"
+		if r.Method == http.MethodDelete {
+			action = "registry.deregister"
+		}
+		if _, ok := s.authorize(w, r, RoleRegistryWrite, action, e.Name+" "+e.Addr); !ok {
 			return
 		}
 		var err error
@@ -142,12 +243,15 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := strings.TrimPrefix(r.URL.Path, "/v1/policy/")
-	if name == "" || strings.Contains(name, "/") {
-		http.Error(w, "policy name required", http.StatusBadRequest)
+	if err := validPolicyName(name); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	switch r.Method {
 	case http.MethodGet:
+		if _, ok := s.authorize(w, r, RolePolicyRead, "policy.get", name); !ok {
+			return
+		}
 		raw, err := s.Policies.Get(name)
 		if err != nil {
 			http.Error(w, "no such policy", http.StatusNotFound)
@@ -156,15 +260,17 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/x-yaml")
 		_, _ = w.Write(raw)
 	case http.MethodPut:
-		buf := make([]byte, 0, 4096)
-		tmp := make([]byte, 4096)
-		for {
-			n, err := r.Body.Read(tmp)
-			buf = append(buf, tmp[:n]...)
-			if err != nil {
-				break
-			}
+		if _, ok := s.authorize(w, r, RolePolicyWrite, "policy.put", name); !ok {
+			return
 		}
+		buf, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxControlBody))
+		if err != nil {
+			http.Error(w, "policy body too large or unreadable", http.StatusBadRequest)
+			return
+		}
+		// Run the COMPLETE policy validation (not just YAML unmarshalling), with
+		// strict decoding, so the control plane never distributes a policy a
+		// gateway would reject or that contains a silently-disabled rule.
 		if err := ValidatePolicy(buf); err != nil {
 			http.Error(w, "invalid policy: "+err.Error(), http.StatusBadRequest)
 			return
@@ -184,6 +290,10 @@ func (s *Server) handlePolicyList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "policy distribution not configured", http.StatusNotImplemented)
 		return
 	}
+	// Listing policy names is sensitive administrative state.
+	if _, ok := s.authorize(w, r, RolePolicyRead, "policy.list", ""); !ok {
+		return
+	}
 	names, err := s.Policies.List()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -192,11 +302,40 @@ func (s *Server) handlePolicyList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, names)
 }
 
-// ValidatePolicy checks that raw YAML parses into a policy.Policy.
-func ValidatePolicy(raw []byte) error {
-	var p policy.Policy
-	if err := yaml.Unmarshal(raw, &p); err != nil {
-		return err
+// validPolicyName rejects empty names and any name that could escape the policy
+// store (path separators, "..", NUL, leading dots, or unusual characters).
+func validPolicyName(name string) error {
+	if name == "" {
+		return fmt.Errorf("policy name required")
+	}
+	if len(name) > 128 {
+		return fmt.Errorf("policy name too long")
+	}
+	if name == "." || name == ".." || strings.HasPrefix(name, ".") {
+		return fmt.Errorf("invalid policy name")
+	}
+	if strings.ContainsAny(name, "/\\\x00") || strings.Contains(name, "..") {
+		return fmt.Errorf("invalid policy name")
+	}
+	for _, c := range name {
+		if !(c == '-' || c == '_' || c == '.' ||
+			(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+			return fmt.Errorf("invalid policy name: only [A-Za-z0-9._-] are allowed")
+		}
 	}
 	return nil
+}
+
+// ValidatePolicy strictly decodes raw YAML into a policy.Policy (rejecting
+// unknown fields) and runs the complete policy validation, so a mistyped or
+// unenforceable policy is rejected before storage rather than failing open at a
+// gateway later.
+func ValidatePolicy(raw []byte) error {
+	dec := yaml.NewDecoder(strings.NewReader(string(raw)))
+	dec.KnownFields(true)
+	var p policy.Policy
+	if err := dec.Decode(&p); err != nil {
+		return err
+	}
+	return p.Validate()
 }

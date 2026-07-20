@@ -238,3 +238,101 @@ unchanged.
 ### Commit
 
 `policy: honest four-state audit verification (sealed/trusted/unsealed/invalid)`
+
+---
+
+## F-P2 · Control plane authorizes any reachable mesh peer — REPRODUCED, FIXED
+
+**Severity:** Critical (privilege escalation; any mesh peer could mint join
+credentials, rewrite policy, and mutate the service registry).
+
+**Component:** `control/control.go` (handlers) and `control.go` (`cmdControl`).
+
+**Reproduced:** Yes. The handler performed **no authorization at all**: any peer
+that could reach the mesh port could `POST /v1/enroll` (mint a setup key),
+`POST/DELETE /v1/registry` (register/deregister services), `PUT /v1/policy/<name>`
+(replace a distributed policy), and `GET /v1/policies` / `GET /v1/policy/<name>`
+(read administrative state). WireGuard membership was treated as full admin.
+
+### Root cause
+
+`Server.Handler` wired the routes directly to handlers with no identity check.
+The engineering principle "WireGuard membership is authentication, not
+authorization" was violated: reaching the port was sufficient to administer the
+mesh. Additional gaps: policy `PUT` validated only that YAML parsed (not the
+full policy validator), no request-body limits, no strict/unknown-field
+rejection, and the policy name was taken from the URL with only a `/` check
+(weak path-traversal defense).
+
+### Fix
+
+`control/auth.go` (new) + `control/control.go`:
+
+- **Default-deny RBAC** with six roles (`control.admin`, `enrollment.issue`,
+  `registry.read`, `registry.write`, `policy.read`, `policy.write`; admin
+  implies all). `StaticAuthorizer` maps a **WireGuard public key** (the durable
+  identity) to roles; unknown keys hold nothing.
+- **Transport-derived identity.** `Server.Identify` resolves the caller's
+  WireGuard key from the mesh source address (`client.IdentityForIP`), never
+  from headers or the body. Every privileged handler calls `authorize(role)`
+  first.
+- **Fail closed.** With no authorizer/resolver configured, every privileged
+  route returns 403. `cmdControl` **refuses to start** when privileged routes
+  are exposed without an `--acl` (no silent fall-back).
+- **Audited.** Every allow and deny records actor key, action, target, result,
+  reason, and a per-request correlation id.
+- **Hardening:** 1 MiB body limits (`MaxBytesReader`), strict JSON decoding
+  (`DisallowUnknownFields`), strict policy-name validation (rejects `/`, `\`,
+  `..`, leading dot, NUL, non-`[A-Za-z0-9._-]`), and `ValidatePolicy` now uses
+  strict YAML (`KnownFields(true)`) **and** the complete `policy.Validate()`.
+- **ACL loader** (`LoadAuthorizer`) uses strict YAML and rejects unknown fields,
+  unknown roles, empty keys, and an empty grant set, so a typo fails startup.
+- Enrollment is gated by `enrollment.issue`; the node label in the body is
+  documented as a non-identity label. (A true one-time unjoined-node bootstrap
+  credential flow remains a Phase-2 follow-up — see residual risk.)
+
+### Tests (`control/control_rbac_test.go`)
+
+- `TestControlOrdinaryPeerCannotMutate` — an identified peer with no roles gets
+  403 on all seven privileged operations; registry and policy state stay empty;
+  every denial is audited with the actor key + correlation id.
+- `TestControlFailsClosedWithoutAuth` — no authorizer ⇒ all privileged routes
+  403; `/healthz` stays open.
+- `TestControlRoleGranularity` — `registry.write` does not grant `registry.read`.
+- `TestControlIgnoresBodyIdentity` — a body naming an admin actor does not elevate.
+- `TestControlUnattributableCallerDenied` — a caller the transport cannot map is denied.
+- `TestValidPolicyName`, `TestLoadAuthorizerStrict` — traversal and strict-ACL cases.
+
+Existing happy-path tests now run as an admin caller and pass unchanged.
+
+### Commands run
+
+- `go test ./control/` and `go test -race ./control/` — pass.
+- `go build ./...`, `go vet ./control/ .` — clean.
+- Full suite green except the pre-existing `mcp:TestTaskSteer` flake.
+
+### Compatibility impact
+
+`meshmcp control` now **requires `--acl <file>`** when it serves any privileged
+route; it exits with an error otherwise (previously it served them unauthed).
+The local `--addr` dev listener has no mesh transport identity, so its
+privileged routes fail closed (403). Example ACL: `examples/control-acl.yaml`.
+Migration noted for operators.
+
+### Residual risk / follow-ups (documented, not yet done)
+
+- **Bootstrap flow:** an unjoined node still authenticates enrollment via its
+  mesh identity; a separate one-time, short-lived, narrowly-scoped bootstrap
+  credential is the intended design and remains a follow-up.
+- **Optimistic concurrency** on policy replacement (version/ETag) is not yet
+  implemented.
+- The Air control endpoint (PR #9) is a separate surface with its own ACL work.
+
+### Definition-of-Done item satisfied
+
+- *"Ordinary mesh peers cannot mutate control or approval state"* (control half;
+  the approval-plane half is Phase 2.2 / Phase 3).
+
+### Commit
+
+`control: default-deny transport-derived RBAC on the control plane`

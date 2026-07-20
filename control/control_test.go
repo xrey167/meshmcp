@@ -5,12 +5,34 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/xrey167/meshmcp/registry"
 )
 
-func newTestServer(t *testing.T) (*Server, *httptest.Server) {
+// captureAudit records the control-plane decisions for assertions.
+type captureAudit struct {
+	mu   sync.Mutex
+	recs []ControlAudit
+}
+
+func (c *captureAudit) Record(rec ControlAudit) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.recs = append(c.recs, rec)
+}
+
+func (c *captureAudit) snapshot() []ControlAudit {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]ControlAudit(nil), c.recs...)
+}
+
+// newTestServerWith builds a control server that identifies every caller as
+// callerKey and authorizes with the given grants. A blank callerKey simulates
+// an unattributable caller.
+func newTestServerWith(t *testing.T, callerKey string, grants map[string][]Role) (*Server, *captureAudit, *httptest.Server) {
 	t.Helper()
 	reg, err := registry.NewFileRegistry(t.TempDir())
 	if err != nil {
@@ -20,12 +42,33 @@ func newTestServer(t *testing.T) (*Server, *httptest.Server) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	auth, err := NewStaticAuthorizer(grants)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aud := &captureAudit{}
 	s := &Server{
 		Reg:      reg,
 		Policies: ps,
 		Enroll:   StaticEnroll("https://mgmt.example", "SETUP-KEY-123", "/shared/registry", "control-1"),
+		Auth:     auth,
+		Identify: func(string) (Identity, bool) {
+			if callerKey == "" {
+				return Identity{}, false
+			}
+			return Identity{PubKey: callerKey, FQDN: "caller.netbird.cloud"}, true
+		},
+		Audit: aud,
 	}
-	return s, httptest.NewServer(s.Handler())
+	return s, aud, httptest.NewServer(s.Handler())
+}
+
+// newTestServer keeps the original signature for the existing happy-path tests,
+// running them as an admin caller.
+func newTestServer(t *testing.T) (*Server, *httptest.Server) {
+	t.Helper()
+	s, _, ts := newTestServerWith(t, "ADMIN-KEY", map[string][]Role{"ADMIN-KEY": {RoleAdmin}})
+	return s, ts
 }
 
 func TestEnroll(t *testing.T) {

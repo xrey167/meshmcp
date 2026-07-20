@@ -1,12 +1,15 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/xrey167/meshmcp/control"
@@ -32,11 +35,31 @@ func cmdControl(args []string) error {
 	nbGroups := fs.String("enroll-groups", "", "comma-separated NetBird groups to place enrolled nodes in")
 	nbTTL := fs.Duration("enroll-ttl", 24*time.Hour, "issued key expiry")
 	enrollAudit := fs.String("enroll-audit", "", "tamper-evident enrollment audit log (JSONL)")
+	aclPath := fs.String("acl", "", "operator ACL file (YAML: grants: {<wg-pubkey>: [roles]}) — REQUIRED for privileged routes")
+	controlAudit := fs.String("control-audit", "", "audit log for privileged control-plane actions (JSONL; defaults to stderr)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
 	srv := &control.Server{}
+
+	// Load the operator ACL. The control plane is default-deny: privileged
+	// routes (enroll/registry/policy) require an ACL, so a missing or malformed
+	// ACL is a startup error, never a silent fall-back to "any mesh peer".
+	if *aclPath != "" {
+		raw, err := os.ReadFile(*aclPath)
+		if err != nil {
+			return fmt.Errorf("read control ACL %s: %w", *aclPath, err)
+		}
+		auth, err := control.LoadAuthorizer(raw)
+		if err != nil {
+			return fmt.Errorf("control ACL %s: %w", *aclPath, err)
+		}
+		srv.Auth = auth
+		log.Printf("control ACL loaded from %s (admins: %v)", *aclPath, auth.KeysWithRole(control.RoleAdmin))
+	}
+	// Privileged control-plane audit sink.
+	srv.Audit = newControlAuditSink(*controlAudit)
 	if *regDir != "" {
 		reg, err := registry.NewFileRegistry(*regDir)
 		if err != nil {
@@ -101,11 +124,21 @@ func cmdControl(args []string) error {
 		}
 	}
 
+	// Fail closed at startup: if any privileged capability is exposed, an ACL is
+	// mandatory. A control plane that serves enrollment/registry/policy without
+	// an authorizer would authorize every reachable mesh peer.
+	if (srv.Reg != nil || srv.Policies != nil || srv.Enroll != nil) && srv.Auth == nil {
+		return fmt.Errorf("control plane exposes privileged routes but no --acl was provided: refusing to start (WireGuard membership is not authorization). Provide --acl <file> granting roles per WireGuard public key")
+	}
+
 	handler := srv.Handler()
 
-	// Dev/testing path: bind a plain local port, no mesh.
+	// Dev/testing path: bind a plain local port, no mesh. There is no mesh
+	// transport to derive identity from here, so Identify stays nil and every
+	// privileged route fails closed (403). This listener is not a substitute for
+	// the mesh and must not be exposed as an administrative endpoint.
 	if *addr != "" {
-		log.Printf("control plane on http://%s (LOCAL, not on the mesh)", *addr)
+		log.Printf("control plane on http://%s (LOCAL, not on the mesh — privileged routes are DENIED, no transport identity)", *addr)
 		return http.ListenAndServe(*addr, handler)
 	}
 
@@ -115,6 +148,17 @@ func cmdControl(args []string) error {
 		return err
 	}
 	defer stopMesh(client)
+
+	// Derive the caller identity from the authenticated mesh transport (source
+	// address -> WireGuard public key), never from headers or the request body.
+	srv.Identify = func(remote string) (control.Identity, bool) {
+		pubKey, fqdn := peerIdentityStr(client, remote)
+		if pubKey == "" {
+			return control.Identity{}, false
+		}
+		return control.Identity{PubKey: pubKey, FQDN: fqdn}, true
+	}
+
 	if st, err := client.Status(); err == nil {
 		ip := strings.SplitN(st.LocalPeerState.IP, "/", 2)[0]
 		log.Printf("control plane up: %s (%s) on mesh port %d", ip, st.LocalPeerState.FQDN, *port)
@@ -126,4 +170,32 @@ func cmdControl(args []string) error {
 	}
 	defer ln.Close()
 	return http.Serve(ln, handler)
+}
+
+// controlAuditSink writes privileged control-plane decisions as JSON lines to a
+// file (or stderr). It is best-effort observability layered on the 403 that the
+// authorization check already enforced.
+type controlAuditSink struct {
+	mu  sync.Mutex
+	w   io.Writer
+	enc *json.Encoder
+}
+
+func newControlAuditSink(path string) *controlAuditSink {
+	var w io.Writer = os.Stderr
+	if path != "" {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			log.Printf("control audit: cannot open %s (%v); logging privileged actions to stderr", path, err)
+		} else {
+			w = f
+		}
+	}
+	return &controlAuditSink{w: w, enc: json.NewEncoder(w)}
+}
+
+func (s *controlAuditSink) Record(rec control.ControlAudit) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_ = s.enc.Encode(rec)
 }
