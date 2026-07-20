@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+# Least privilege: CI only needs to read the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Build, vet, and test (including the race detector) on all three platforms,
+  # so stdio/HTTP behavior and concurrency are exercised cross-OS.
+  test:
+    name: build & test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      # actions/checkout v4.2.2, pinned by commit SHA.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      # actions/setup-go v5.2.0, pinned by commit SHA.
+      - uses: actions/setup-go@3041bf56c941b39c61721a86cd11f3bb1338122a
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: go build
+        run: go build ./...
+      - name: go vet
+        run: go vet ./...
+      - name: go test
+        run: go test ./...
+      - name: go test -race
+        run: go test -race ./...
+
+  # Formatting, static analysis, vulnerability scanning, module verification,
+  # and a fuzz smoke test — Linux only (bash), keeps the matrix fast.
+  checks:
+    name: lint, vuln & fuzz
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-go@3041bf56c941b39c61721a86cd11f3bb1338122a
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l . | grep -v '/vendor/' || true)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go mod verify
+        run: go mod verify
+
+      - name: staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@2024.1.1 ./...
+
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+
+      - name: fuzz smoke (policy classification boundary)
+        run: go test ./policy/ -run '^$' -fuzz FuzzFilterClassification -fuzztime 30s

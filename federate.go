@@ -22,12 +22,12 @@ import (
 // MCP server to remote orgs on other meshes, admitting only granted tools and
 // auditing every crossing.
 type FederateConfig struct {
-	Mesh     MeshConfig            `yaml:"mesh"`
-	Port     int                   `yaml:"port"`     // mesh port remote orgs connect to
-	Upstream string                `yaml:"upstream"` // local MCP server addr to expose (mesh addr)
-	Audit    string                `yaml:"audit"`    // crossing audit log (JSONL, hash-chained)
-	Grants   []federation.Grant    `yaml:"grants"`
-	Mappings []federation.Mapping  `yaml:"mappings"`
+	Mesh     MeshConfig           `yaml:"mesh"`
+	Port     int                  `yaml:"port"`     // mesh port remote orgs connect to
+	Upstream string               `yaml:"upstream"` // local MCP server addr to expose (mesh addr)
+	Audit    string               `yaml:"audit"`    // crossing audit log (JSONL, hash-chained)
+	Grants   []federation.Grant   `yaml:"grants"`
+	Mappings []federation.Mapping `yaml:"mappings"`
 }
 
 // cmdFederate runs a federation boundary as a mesh peer.

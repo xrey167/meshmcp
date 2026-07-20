@@ -27,12 +27,12 @@ type Change struct {
 
 // SimResult is the diff of a candidate policy against recorded traffic.
 type SimResult struct {
-	Total       int      `json:"total"`        // decisions simulated
-	Matched     int      `json:"matched"`      // identical verdict
-	Coverage    float64  `json:"coverage"`     // fraction matched by an explicit rule (not the default)
-	Regressions []Change `json:"regressions"`  // was allow → now deny (breaks working traffic)
-	NowCosign   []Change `json:"now_cosign"`   // was allow → now cosign (adds a human gate)
-	Loosened    []Change `json:"loosened"`     // was deny → now allow (widens access)
+	Total       int      `json:"total"`       // decisions simulated
+	Matched     int      `json:"matched"`     // identical verdict
+	Coverage    float64  `json:"coverage"`    // fraction matched by an explicit rule (not the default)
+	Regressions []Change `json:"regressions"` // was allow → now deny (breaks working traffic)
+	NowCosign   []Change `json:"now_cosign"`  // was allow → now cosign (adds a human gate)
+	Loosened    []Change `json:"loosened"`    // was deny → now allow (widens access)
 }
 
 // OK reports whether the candidate policy introduces no regressions.

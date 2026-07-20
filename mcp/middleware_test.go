@@ -84,7 +84,7 @@ func TestLimitConcurrency(t *testing.T) {
 }
 
 func TestTimeoutPropagates(t *testing.T) {
-	h := Timeout(10*time.Millisecond)(func(ctx context.Context, _ json.RawMessage) (ToolResult, error) {
+	h := Timeout(10 * time.Millisecond)(func(ctx context.Context, _ json.RawMessage) (ToolResult, error) {
 		<-ctx.Done()
 		return ToolResult{}, ctx.Err()
 	})

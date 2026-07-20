@@ -20,35 +20,35 @@ import (
 
 // ToolProfile is one identity's observed usage of one tool.
 type ToolProfile struct {
-	Tool     string   `json:"tool"`
-	Calls    int      `json:"calls"`
-	Allowed  int      `json:"allowed"`
-	Denied   int      `json:"denied"`
-	Cosign   int      `json:"cosign"`
-	PerMinP50 int     `json:"per_min_p50"` // median calls in an active minute
-	PerMinP99 int     `json:"per_min_p99"` // 99th-percentile calls in an active minute
-	Labels   []string `json:"labels,omitempty"` // labels this tool emits (from the policy in effect)
+	Tool      string   `json:"tool"`
+	Calls     int      `json:"calls"`
+	Allowed   int      `json:"allowed"`
+	Denied    int      `json:"denied"`
+	Cosign    int      `json:"cosign"`
+	PerMinP50 int      `json:"per_min_p50"`      // median calls in an active minute
+	PerMinP99 int      `json:"per_min_p99"`      // 99th-percentile calls in an active minute
+	Labels    []string `json:"labels,omitempty"` // labels this tool emits (from the policy in effect)
 
 	perMinute map[int64]int // active-minute -> count (internal, for percentiles)
 }
 
 // IdentityProfile is the observed behavioral fingerprint of one caller.
 type IdentityProfile struct {
-	Peer          string          `json:"peer"`
-	PeerKey       string          `json:"peer_key,omitempty"`
-	Calls         int             `json:"calls"`
-	Allowed       int             `json:"allowed"`
-	Denied        int             `json:"denied"`
-	Cosign        int             `json:"cosign"`
-	Tools         []*ToolProfile  `json:"tools"`
-	Methods       map[string]int  `json:"methods,omitempty"`
-	Hours         [24]int         `json:"hours"`         // activity histogram by UTC hour
-	Days          [7]int          `json:"days"`          // 0=Sun..6=Sat
-	FirstSeen     string          `json:"first_seen,omitempty"`
-	LastSeen      string          `json:"last_seen,omitempty"`
-	EmittedLabels []string        `json:"emitted_labels,omitempty"` // labels this identity ever produced
-	DeniedByLabel int             `json:"denied_by_label,omitempty"`
-	HasTimes      bool            `json:"has_times"`
+	Peer          string         `json:"peer"`
+	PeerKey       string         `json:"peer_key,omitempty"`
+	Calls         int            `json:"calls"`
+	Allowed       int            `json:"allowed"`
+	Denied        int            `json:"denied"`
+	Cosign        int            `json:"cosign"`
+	Tools         []*ToolProfile `json:"tools"`
+	Methods       map[string]int `json:"methods,omitempty"`
+	Hours         [24]int        `json:"hours"` // activity histogram by UTC hour
+	Days          [7]int         `json:"days"`  // 0=Sun..6=Sat
+	FirstSeen     string         `json:"first_seen,omitempty"`
+	LastSeen      string         `json:"last_seen,omitempty"`
+	EmittedLabels []string       `json:"emitted_labels,omitempty"` // labels this identity ever produced
+	DeniedByLabel int            `json:"denied_by_label,omitempty"`
+	HasTimes      bool           `json:"has_times"`
 
 	toolIdx map[string]*ToolProfile
 	labels  map[string]bool

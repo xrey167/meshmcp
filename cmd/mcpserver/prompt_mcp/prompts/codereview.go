@@ -28,4 +28,3 @@ func registerCodeReview(s *mcp.Server) {
 		},
 	})
 }
-

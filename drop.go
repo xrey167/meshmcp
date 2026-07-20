@@ -529,16 +529,16 @@ func shortKey(k string) string {
 // DropConfig configures a drop receiver: it joins the mesh, listens on a mesh
 // port, admits only senders matching Allow, and writes received files to Dir.
 type DropConfig struct {
-	Mesh       MeshConfig `yaml:"mesh"`
-	ListenPort int        `yaml:"listen_port"`
-	Dir        string     `yaml:"dir"`       // destination directory for received files
-	Allow      []string   `yaml:"allow"`     // sender ACL: FQDN globs or "pubkey:<key>"; empty = any mesh peer
-	AuditLog     string   `yaml:"audit_log"`      // JSONL hash-chained log; one record per received file
-	MaxBytes     int64    `yaml:"max_bytes"`      // per-file size cap (0 = unlimited)
-	MaxFiles     int      `yaml:"max_files"`      // files per transfer (<=0 = default)
-	MaxTotalBytes int64   `yaml:"max_total_bytes"` // aggregate bytes per transfer (<=0 = default)
-	CAS          bool     `yaml:"cas"`            // store received files by content hash (dedup) and serve `fetch`
-	FetchPort    int      `yaml:"fetch_port"`     // if >0 and cas, serve fetch-by-hash on this mesh port
+	Mesh          MeshConfig `yaml:"mesh"`
+	ListenPort    int        `yaml:"listen_port"`
+	Dir           string     `yaml:"dir"`             // destination directory for received files
+	Allow         []string   `yaml:"allow"`           // sender ACL: FQDN globs or "pubkey:<key>"; empty = any mesh peer
+	AuditLog      string     `yaml:"audit_log"`       // JSONL hash-chained log; one record per received file
+	MaxBytes      int64      `yaml:"max_bytes"`       // per-file size cap (0 = unlimited)
+	MaxFiles      int        `yaml:"max_files"`       // files per transfer (<=0 = default)
+	MaxTotalBytes int64      `yaml:"max_total_bytes"` // aggregate bytes per transfer (<=0 = default)
+	CAS           bool       `yaml:"cas"`             // store received files by content hash (dedup) and serve `fetch`
+	FetchPort     int        `yaml:"fetch_port"`      // if >0 and cas, serve fetch-by-hash on this mesh port
 }
 
 // limits returns the effective per-transfer bounds, applying defaults so a

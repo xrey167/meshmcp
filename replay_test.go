@@ -27,7 +27,7 @@ func echoAddBackend(in io.Reader, out io.Writer, wrong bool) {
 			ID     json.RawMessage `json:"id"`
 			Method string          `json:"method"`
 			Params struct {
-				Name      string `json:"name"`
+				Name      string             `json:"name"`
 				Arguments struct{ A, B int } `json:"arguments"`
 			} `json:"params"`
 		}
