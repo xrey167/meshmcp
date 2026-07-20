@@ -263,3 +263,51 @@ func TestApprovalArgsHashIntegerPrecision(t *testing.T) {
 		t.Fatal("key order must not change the canonical hash")
 	}
 }
+
+// TestApprovalSessionBinding: an approval granted for one session must not be
+// consumed under a different session.
+func TestApprovalSessionBinding(t *testing.T) {
+	s, _ := mkStore(t, time.Minute)
+	now := time.Unix(1000, 0)
+	reqA := ApprovalRequest{PeerKey: "p", Backend: "b", Tool: "t", ArgsHash: canonicalArgsHash([]byte(`{}`)), Session: "sessA"}
+	if _, err := s.Grant(reqA, "op", "", now); err != nil {
+		t.Fatal(err)
+	}
+	reqB := reqA
+	reqB.Session = "sessB"
+	if ok, _ := s.ConsumeApproval(reqB, now); ok {
+		t.Fatal("approval for sessA must not be consumed under sessB")
+	}
+	if ok, why := s.ConsumeApproval(reqA, now); !ok {
+		t.Fatalf("approval for sessA should consume under sessA: %s", why)
+	}
+}
+
+// TestApprovalPolicyHashBinding: an approval granted under one policy version is
+// not honored after the policy changes.
+func TestApprovalPolicyHashBinding(t *testing.T) {
+	s, _ := mkStore(t, time.Minute)
+	now := time.Unix(1000, 0)
+	base := ApprovalRequest{PeerKey: "p", Backend: "b", Tool: "t", ArgsHash: canonicalArgsHash([]byte(`{}`))}
+
+	// Consume under a different policy hash → rejected (and, being single-use,
+	// the claimed approval is spent).
+	if _, err := s.Grant(base, "op", "policy-v1", now); err != nil {
+		t.Fatal(err)
+	}
+	underV2 := base
+	underV2.PolicyHash = "policy-v2"
+	if ok, why := s.ConsumeApproval(underV2, now); ok {
+		t.Fatalf("approval under policy-v1 must not be honored under policy-v2 (got %q)", why)
+	}
+
+	// A fresh grant consumes under the matching policy hash.
+	if _, err := s.Grant(base, "op", "policy-v1", now); err != nil {
+		t.Fatal(err)
+	}
+	underV1 := base
+	underV1.PolicyHash = "policy-v1"
+	if ok, why := s.ConsumeApproval(underV1, now); !ok {
+		t.Fatalf("approval should consume under the matching policy: %s", why)
+	}
+}

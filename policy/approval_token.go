@@ -61,7 +61,10 @@ type ApprovalRequest struct {
 	Backend  string
 	Tool     string
 	ArgsHash string
-	Session  string // optional session id
+	Session  string // optional session id — bound into the approval when set
+	// PolicyHash, when set on both the request and the token, must match: an
+	// approval granted under one policy version is not honored under another.
+	PolicyHash string
 }
 
 // NewApprovalRequest builds a request from a caller, tool, and raw arguments.
@@ -76,7 +79,7 @@ func NewApprovalRequest(peerKey, backend, tool string, args []byte, session stri
 // arguments yields a different key, so an approval for one operation cannot be
 // found for another.
 func (r ApprovalRequest) bindingKey() string {
-	h := sha256.Sum256([]byte(r.PeerKey + "\x00" + r.Backend + "\x00" + r.Tool + "\x00" + r.ArgsHash))
+	h := sha256.Sum256([]byte(r.PeerKey + "\x00" + r.Backend + "\x00" + r.Tool + "\x00" + r.ArgsHash + "\x00" + r.Session))
 	return hex.EncodeToString(h[:])
 }
 
@@ -105,7 +108,7 @@ func (t ApprovalToken) signingBytes() []byte {
 }
 
 func (t ApprovalToken) request() ApprovalRequest {
-	return ApprovalRequest{PeerKey: t.PeerKey, Backend: t.Backend, Tool: t.Tool, ArgsHash: t.ArgsHash, Session: t.Session}
+	return ApprovalRequest{PeerKey: t.PeerKey, Backend: t.Backend, Tool: t.Tool, ArgsHash: t.ArgsHash, Session: t.Session, PolicyHash: t.PolicyHash}
 }
 
 // RequestApprovalStore atomically consumes a single-use, argument-bound
@@ -234,9 +237,16 @@ func (s *FileApprovalStore) ConsumeApproval(req ApprovalRequest, now time.Time) 
 		return false, "operation was explicitly denied"
 	}
 	// Defense in depth: the token's own fields must match the request (the
-	// filename already binds them, this catches tampering/collisions).
+	// filename already binds peer/backend/tool/args/session; this catches
+	// tampering/collisions).
 	if tok.request().bindingKey() != req.bindingKey() {
 		return false, "approval does not match this request"
+	}
+	// Policy binding: when both the token and the request carry a policy hash,
+	// they must match — an approval granted under one policy version is not
+	// honored after the policy changes.
+	if req.PolicyHash != "" && tok.PolicyHash != "" && tok.PolicyHash != req.PolicyHash {
+		return false, "policy changed since the approval was granted"
 	}
 	if now.Unix() > tok.ExpiresAt {
 		return false, "approval expired"

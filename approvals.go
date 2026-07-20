@@ -130,6 +130,11 @@ func approvalsHandler(ps *policy.FilePending, approver func(*http.Request) strin
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/v1/pending", func(w http.ResponseWriter, r *http.Request) {
+		// Enumerating every held request is approver-only state.
+		if authorized != nil && !authorized(r) {
+			http.Error(w, "forbidden: not an authorized approver", http.StatusForbidden)
+			return
+		}
 		list, err := ps.List()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -195,6 +200,11 @@ func approvalsHandler(ps *policy.FilePending, approver func(*http.Request) strin
 			http.Error(w, "peer and tool are required", http.StatusBadRequest)
 			return
 		}
+		// NOTE: /v1/request is the framework-facing "ask for approval" endpoint —
+		// a proxy (e.g. the Air web-proxy) legitimately registers a request on
+		// behalf of a named agent, so the body Peer is honored here. The security
+		// controls are downstream: approve/deny are approver-ACL gated, and a
+		// granted approval is request-bound and single-use.
 		// Fresh request: clear any stale decision, then record it pending.
 		_ = policy.Revoke(ps.Dir, body.Peer, body.Tool)
 		_ = policy.ClearDeny(ps.Dir, body.Peer, body.Tool)
@@ -238,6 +248,12 @@ func approvalsHandler(ps *policy.FilePending, approver func(*http.Request) strin
 		peer, tool := r.URL.Query().Get("peer"), r.URL.Query().Get("tool")
 		if peer == "" || tool == "" {
 			http.Error(w, "peer and tool query params are required", http.StatusBadRequest)
+			return
+		}
+		// A requester may poll only its OWN (peer, tool); an authorized approver
+		// may poll any. This prevents a peer probing another peer's approvals.
+		if authorized != nil && approver(r) != peer && !authorized(r) {
+			http.Error(w, "forbidden: not the requester or an authorized approver", http.StatusForbidden)
 			return
 		}
 		state := "unknown"

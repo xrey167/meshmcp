@@ -190,3 +190,35 @@ func TestApprovalsRequiresApproverACLInMeshMode(t *testing.T) {
 		t.Fatalf("expected a fail-closed startup error requiring --approver, got %v", err)
 	}
 }
+
+// TestApprovalsEndpointsProtected verifies the pending/status/request endpoints
+// are not equivalently open: enumerating pending is approver-only, status is
+// requester-or-approver, and a request is attributed to the transport identity
+// (an agent cannot forge a request as another peer).
+func TestApprovalsEndpointsProtected(t *testing.T) {
+	dir := t.TempDir()
+	ps := &policy.FilePending{Dir: dir}
+	_ = ps.Record(policy.Pending{Peer: "victim.mesh", Backend: "pay", Tool: "wire", RPCID: "1"})
+
+	// Caller identity is "intruder.mesh"; it is NOT an authorized approver.
+	h := approvalsHandler(ps,
+		func(*http.Request) string { return "intruder.mesh" },
+		func(*http.Request) bool { return false },
+		time.Now)
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	// /v1/pending: enumerating all held requests is approver-only → 403.
+	if resp, _ := http.Get(ts.URL + "/v1/pending"); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("/v1/pending should be approver-only (403), got %d", resp.StatusCode)
+	}
+
+	// /v1/status for another peer → 403 (not the requester, not an approver).
+	if resp, _ := http.Get(ts.URL + "/v1/status?peer=victim.mesh&tool=wire"); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("polling another peer's status should be 403, got %d", resp.StatusCode)
+	}
+	// /v1/status for the caller's OWN identity → allowed.
+	if resp, _ := http.Get(ts.URL + "/v1/status?peer=intruder.mesh&tool=wire"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("polling own status should be allowed, got %d", resp.StatusCode)
+	}
+}

@@ -962,3 +962,36 @@ checkpoint chain (`prev_checkpoint: ""`) began in the same file.
 ### Commit
 
 `serve: seed audit + checkpoint chain from the verified tail on restart`
+
+---
+
+## F-P3.1 · Approval binding gaps + unprotected approver endpoints (review) — FIXED
+
+**Component:** `policy/approval_token.go`, `policy/engine.go`, `approvals.go`.
+
+Review follow-ups on the request-bound approval work:
+
+- **Session binding.** `bindingKey` now includes the session id, so an approval
+  for one session cannot be consumed under another. Test:
+  `TestApprovalSessionBinding`.
+- **Policy-version binding.** `ApprovalToken`/`ApprovalRequest` carry a policy
+  hash; `ConsumeApproval` rejects a token whose policy hash differs from the
+  request's (both non-empty) — an approval granted under one policy is not
+  honored after the policy changes. The engine computes and passes its policy
+  hash (`Engine.PolicyHash`, cached). Test: `TestApprovalPolicyHashBinding`.
+- **Approver endpoint protection.** `/v1/pending` (enumerating every held
+  request) is now approver-ACL-only; `/v1/status` is restricted to the requester
+  (own peer) or an authorized approver, so a peer cannot probe another's
+  approvals. `/v1/request` remains the framework-facing ask (a proxy legitimately
+  registers on behalf of a named agent); its security controls are downstream
+  (approve/deny are ACL-gated; grants are request-bound + single-use). Test:
+  `TestApprovalsEndpointsProtected`.
+
+Remaining (tracked): the approver service does not yet *grant* a request-bound
+token (Pending would need to carry the argument hash), and `serve.go` does not
+yet attach a `FileApprovalStore` — production still uses the legacy ambient
+grant. That end-to-end grant wiring is the next narrow commit.
+
+### Commit
+
+`approvals: session + policy-version binding; protect pending/status endpoints`
