@@ -160,6 +160,7 @@ type Broker struct {
 // Stats is a point-in-time snapshot of a broker's activity, for introspection.
 type Stats struct {
 	Subscriptions int    `json:"subscriptions"` // open subscriptions now
+	Groups        int    `json:"groups"`        // active consumer groups now
 	Sequence      uint64 `json:"sequence"`      // last published event's sequence
 	Retained      int    `json:"retained"`      // events held for replay
 	Dropped       uint64 `json:"dropped"`       // events dropped by backpressure (lifetime)
@@ -171,6 +172,7 @@ func (b *Broker) Stats() Stats {
 	defer b.mu.Unlock()
 	return Stats{
 		Subscriptions: len(b.subs),
+		Groups:        len(b.groupN),
 		Sequence:      b.seq,
 		Retained:      b.ring.n,
 		Dropped:       b.dropped,
@@ -219,6 +221,16 @@ func New(opts Options) *Broker {
 		for _, ev := range opts.Seed[start:] {
 			b.ring.add(ev)
 		}
+		// Rebuild the retained last-value store from the persisted stream, so
+		// retained state (and its TTLs/tombstones) survives a restart. Applied in
+		// sequence order over the whole seed — a retained value can predate the
+		// ring window — then lapsed TTLs are pruned against the current clock.
+		for i := range opts.Seed {
+			if ev := &opts.Seed[i]; ev.Retain || ev.RetainDel {
+				b.applyRetainedLocked(ev)
+			}
+		}
+		b.sweepExpiredRetainedLocked()
 	}
 	return b
 }
@@ -371,6 +383,12 @@ func (b *Broker) PublishOpts(id Identity, topic string, payload json.RawMessage,
 		return nil, ErrClosed
 	}
 	b.seq++
+	// Resolve the TTL to an absolute expiry now, so the retained value expires at
+	// the same instant on every broker it federates to and after a restart.
+	expiresAt := ""
+	if o.Retain && o.RetainTTL > 0 {
+		expiresAt = b.now().Add(o.RetainTTL).UTC().Format(time.RFC3339Nano)
+	}
 	ev := &Event{
 		Topic:     topic,
 		Seq:       b.seq,
@@ -381,6 +399,9 @@ func (b *Broker) PublishOpts(id Identity, topic string, payload json.RawMessage,
 		Enc:       o.Encoding,
 		ReplyTo:   o.ReplyTo,
 		Corr:      o.Corr,
+		Retain:    o.Retain && !o.RetainDelete,
+		RetainDel: o.RetainDelete,
+		ExpiresAt: expiresAt,
 		Payload:   payload,
 		PrevHash:  b.prev,
 	}
@@ -392,25 +413,9 @@ func (b *Broker) PublishOpts(id Identity, topic string, payload json.RawMessage,
 	ev.Hash = h
 	b.prev = h
 	b.ring.add(*ev)
-	switch {
-	case o.RetainDelete:
-		// Tombstone: clear the topic's retained last-value (the event still fans
-		// out live below, so current subscribers see the clear).
-		delete(b.retained, topic)
-		delete(b.retainExp, topic)
-	case o.Retain:
-		// Bound the retained map: a new topic is only retained while under the
-		// cap (an existing topic always updates). Prevents unbounded growth from
-		// a publisher retaining to an unbounded topic space.
-		if _, exists := b.retained[topic]; exists || len(b.retained) < b.lm.MaxRetainedTopics {
-			b.retained[topic] = ev
-			if o.RetainTTL > 0 {
-				b.retainExp[topic] = b.now().Add(o.RetainTTL)
-			} else {
-				delete(b.retainExp, topic) // an update without a TTL clears any prior expiry
-			}
-		}
-	}
+	// The retain intent rides the event, so a single helper applies it whether
+	// the event came from a publish, a federated mirror, or a restart replay.
+	b.applyRetainedLocked(ev)
 	// Persist the sealed event in sequence order (best-effort per-event, like
 	// the audit ledger; a failed append degrades durability but never blocks
 	// delivery). Held under b.mu so the on-disk order matches the chain.
@@ -444,13 +449,73 @@ func (b *Broker) fanoutLocked(ev *Event) {
 		}
 		groups[s.group] = append(groups[s.group], s)
 	}
-	// One copy per group to a round-robin member. Sort members by ID so the
-	// rotation is deterministic regardless of map iteration order.
+	// One copy per group to a member chosen round-robin. Sort members by ID so
+	// the rotation is deterministic regardless of map iteration order. Selection
+	// is capacity-aware: starting at the round-robin cursor, deliver to the first
+	// member whose buffer has room, so a busy/slow member is skipped in favor of
+	// an idle one instead of silently dropping the event on it. Only if *every*
+	// member is full do we fall back to the primary member's backpressure policy.
 	for name, members := range groups {
 		sort.Slice(members, func(i, j int) bool { return members[i].ID < members[j].ID })
-		idx := b.groupRR[name] % uint64(len(members))
+		n := uint64(len(members))
+		start := b.groupRR[name] % n
 		b.groupRR[name]++
-		b.deliverLocked(members[idx], ev)
+		delivered := false
+		for i := uint64(0); i < n; i++ {
+			if b.tryDeliverLocked(members[(start+i)%n], ev) {
+				delivered = true
+				break
+			}
+		}
+		if !delivered {
+			b.deliverLocked(members[start], ev) // all full: apply the primary's backpressure
+		}
+	}
+}
+
+// applyRetainedLocked updates the retained last-value store from an event's own
+// retain intent (Retain / RetainDel / ExpiresAt). Because the intent is carried
+// on the event, the same logic serves a fresh publish, a federated mirror, and a
+// restart replay — so retained state is durable and federatable, not a
+// broker-local side effect. Must hold b.mu.
+func (b *Broker) applyRetainedLocked(ev *Event) {
+	switch {
+	case ev.RetainDel:
+		// Tombstone: clear the topic's retained last-value. The event still fans
+		// out live, so current subscribers observe the clear.
+		delete(b.retained, ev.Topic)
+		delete(b.retainExp, ev.Topic)
+	case ev.Retain:
+		// Bound the retained map. If a new topic would exceed the cap, first drop
+		// any lapsed (TTL-expired) entries to make room — an active sweep bounded
+		// to the moment it actually matters (at capacity).
+		if _, exists := b.retained[ev.Topic]; !exists && len(b.retained) >= b.lm.MaxRetainedTopics {
+			b.sweepExpiredRetainedLocked()
+		}
+		if _, exists := b.retained[ev.Topic]; exists || len(b.retained) < b.lm.MaxRetainedTopics {
+			b.retained[ev.Topic] = ev
+			if ev.ExpiresAt != "" {
+				if t, err := time.Parse(time.RFC3339Nano, ev.ExpiresAt); err == nil {
+					b.retainExp[ev.Topic] = t
+				} else {
+					delete(b.retainExp, ev.Topic)
+				}
+			} else {
+				delete(b.retainExp, ev.Topic) // an update without a TTL clears any prior expiry
+			}
+		}
+	}
+}
+
+// sweepExpiredRetainedLocked drops every retained value whose TTL has lapsed.
+// Must hold b.mu.
+func (b *Broker) sweepExpiredRetainedLocked() {
+	now := b.now()
+	for topic, exp := range b.retainExp {
+		if now.After(exp) {
+			delete(b.retained, topic)
+			delete(b.retainExp, topic)
+		}
 	}
 }
 
@@ -462,14 +527,24 @@ func (b *Broker) fanoutLocked(ev *Event) {
 // to each subscriber's label clearance, and audited. source names the event's
 // Publisher (a system identifier, not a WireGuard key).
 func (b *Broker) EmitInternal(source, topic string, payload json.RawMessage, labels []string) (*Event, error) {
-	return b.emitTrusted(topic, payload, labels, source, "")
+	return b.emitTrusted(topic, payload, labels, source, "", retainSpec{})
+}
+
+// retainSpec carries the retain intent through the trusted-emission path so a
+// federated or internal event can set/clear a retained last-value the same way
+// a publish does.
+type retainSpec struct {
+	set bool   // store as the topic's retained last-value
+	del bool   // clear the retained last-value (tombstone)
+	exp string // absolute RFC3339 expiry, or "" for none
 }
 
 // EmitFederated mirrors an event received from another broker into this one. It
 // preserves the original publisher for attribution and sets Origin to the
 // source broker so the event is never re-mirrored (loop prevention across a
 // federation mesh). Like EmitInternal, it is a trusted operator path.
-func (b *Broker) EmitFederated(topic string, payload json.RawMessage, labels []string, publisher, origin string) (*Event, error) {
+func (b *Broker) EmitFederated(topic string, payload json.RawMessage, labels []string, publisher, origin string, retain, retainDel bool, expiresAt string) (*Event, error) {
+	r := retainSpec{set: retain, del: retainDel, exp: expiresAt}
 	// Rate-limit federated ingestion per origin peer, so a compromised or lax
 	// upstream cannot flood this broker (federated events otherwise bypass the
 	// per-publisher token bucket).
@@ -488,12 +563,12 @@ func (b *Broker) EmitFederated(topic string, payload json.RawMessage, labels []s
 		return nil, fmt.Errorf("%w: federated topic %q denied by local policy", ErrDenied, topic)
 	}
 	labels = unionLabels(labels, dec.Labels)
-	return b.emitTrusted(topic, payload, labels, publisher, origin)
+	return b.emitTrusted(topic, payload, labels, publisher, origin, r)
 }
 
 // emitTrusted is the shared trusted-emission core (bypasses per-topic authz +
 // rate limit, still validated/capped/sealed/retained/fanned-out; not audited).
-func (b *Broker) emitTrusted(topic string, payload json.RawMessage, labels []string, publisher, origin string) (*Event, error) {
+func (b *Broker) emitTrusted(topic string, payload json.RawMessage, labels []string, publisher, origin string, r retainSpec) (*Event, error) {
 	if err := validateTopic(topic, b.lm.MaxTopicLen); err != nil {
 		return nil, err
 	}
@@ -518,6 +593,9 @@ func (b *Broker) emitTrusted(topic string, payload json.RawMessage, labels []str
 		Publisher: publisher,
 		Labels:    labels,
 		Origin:    origin,
+		Retain:    r.set && !r.del,
+		RetainDel: r.del,
+		ExpiresAt: r.exp,
 		Payload:   payload,
 		PrevHash:  b.prev,
 	}
@@ -532,6 +610,7 @@ func (b *Broker) emitTrusted(topic string, payload json.RawMessage, labels []str
 	if b.events != nil {
 		_ = b.events.append(*ev)
 	}
+	b.applyRetainedLocked(ev)
 	b.fanoutLocked(ev)
 	b.mu.Unlock()
 
@@ -722,6 +801,19 @@ func (b *Broker) Unsubscribe(s *Subscription) {
 	b.mu.Lock()
 	b.closeSubLocked(s)
 	b.mu.Unlock()
+}
+
+// tryDeliverLocked attempts a non-blocking enqueue of ev to s and reports
+// whether it succeeded. Unlike deliverLocked it never drops, disconnects, or
+// evicts — a full buffer just returns false. Used by consumer-group fan-out to
+// prefer a member with capacity. Must be called with b.mu held.
+func (b *Broker) tryDeliverLocked(s *Subscription, ev *Event) bool {
+	select {
+	case s.ch <- ev:
+		return true
+	default:
+		return false
+	}
 }
 
 // deliverLocked enqueues ev to s without ever blocking the caller (the

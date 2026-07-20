@@ -48,7 +48,7 @@ func TestEmitFederated(t *testing.T) {
 	}
 	recv(t, sub) // drain the normal publish
 
-	ev, err := b.EmitFederated("t", json.RawMessage(`2`), nil, "orig-key", "broker-A")
+	ev, err := b.EmitFederated("t", json.RawMessage(`2`), nil, "orig-key", "broker-A", false, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +171,7 @@ func TestFederationRespectsLocalPolicy(t *testing.T) {
 	defer b.Close()
 
 	// A federated event on an explicitly-denied topic is refused.
-	if _, err := b.EmitFederated("secret.keys", json.RawMessage(`1`), nil, "up-key", "broker-B"); !errors.Is(err, ErrDenied) {
+	if _, err := b.EmitFederated("secret.keys", json.RawMessage(`1`), nil, "up-key", "broker-B", false, false, ""); !errors.Is(err, ErrDenied) {
 		t.Fatalf("federated event on locally-denied topic: got %v, want ErrDenied", err)
 	}
 
@@ -179,7 +179,7 @@ func TestFederationRespectsLocalPolicy(t *testing.T) {
 	// even though the upstream asserted none.
 	sub, _ := b.Subscribe(id("s"), SubOptions{Topics: []string{"web.*"}})
 	defer sub.Close()
-	ev, err := b.EmitFederated("web.page", json.RawMessage(`1`), nil, "up-key", "broker-B")
+	ev, err := b.EmitFederated("web.page", json.RawMessage(`1`), nil, "up-key", "broker-B", false, false, "")
 	if err != nil {
 		t.Fatalf("federated web.* event should pass: %v", err)
 	}
@@ -253,6 +253,52 @@ func TestConsumerGroupLoadBalance(t *testing.T) {
 		if seen[k] != 1 {
 			t.Fatalf("event %s delivered %d times, want exactly once", k, seen[k])
 		}
+	}
+}
+
+// TestConsumerGroupCapacityAware verifies group delivery prefers a member with
+// buffer room: a member whose buffer is already full is skipped in favor of an
+// idle member instead of dropping the event on the busy one.
+func TestConsumerGroupCapacityAware(t *testing.T) {
+	const q = 4
+	b := New(Options{Authorizer: AllowAll{}, Limits: Limits{SubQueue: q}})
+	defer b.Close()
+
+	busy, _ := b.Subscribe(id("busy"), SubOptions{Topics: []string{"t"}, Group: "g"})
+	defer busy.Close()
+	idle, _ := b.Subscribe(id("idle"), SubOptions{Topics: []string{"t"}, Group: "g"})
+	defer idle.Close()
+
+	// Saturate "busy" by filling its buffer directly (it never drains).
+	b.mu.Lock()
+	for i := 0; i < cap(busy.ch); i++ {
+		busy.ch <- &Event{Topic: "t"}
+	}
+	b.mu.Unlock()
+
+	// Publish exactly idle's capacity worth of events. With "busy" full, every
+	// one must land on "idle" without a drop — rather than being dropped on the
+	// saturated member as blind round-robin would.
+	for i := 0; i < q; i++ {
+		if _, err := b.Publish(id("p"), "t", json.RawMessage(`1`), nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := 0
+	for {
+		select {
+		case <-idle.C():
+			got++
+			continue
+		default:
+		}
+		break
+	}
+	if got != q {
+		t.Fatalf("idle member received %d of %d; capacity-aware routing should send all to the idle member", got, q)
+	}
+	if d := busy.Dropped(); d != 0 {
+		t.Fatalf("busy member dropped %d events; it should have been skipped, not dropped on", d)
 	}
 }
 
@@ -551,6 +597,91 @@ func TestRetainedTTLRefreshedOnUpdate(t *testing.T) {
 	defer sub.Close()
 	if ev := recv(t, sub); string(ev.Payload) != `2` {
 		t.Fatalf("retained (no-TTL update) = %s, want 2 (should not have expired)", ev.Payload)
+	}
+}
+
+// TestRetainedFederates verifies a retained last-value carries across a
+// federation hop: mirroring the retained event into a second broker makes it
+// that broker's retained value too (a late local subscriber gets it).
+func TestRetainedFederates(t *testing.T) {
+	up := New(Options{Authorizer: AllowAll{}})
+	defer up.Close()
+	down := New(Options{Authorizer: AllowAll{}})
+	defer down.Close()
+
+	// Publish a retained value on the upstream broker.
+	rev, err := up.PublishOpts(id("p"), "state.k", json.RawMessage(`"v1"`), PublishOptions{Retain: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rev.Retain {
+		t.Fatal("published retained event should carry Retain=true on the event")
+	}
+
+	// The federation runner mirrors it: carry the retain intent from the event.
+	if _, err := down.EmitFederated(rev.Topic, rev.Payload, rev.Labels, rev.Publisher, "up", rev.Retain, rev.RetainDel, rev.ExpiresAt); err != nil {
+		t.Fatal(err)
+	}
+
+	// A subscriber that connects to the DOWNSTREAM broker afterward receives the
+	// federated retained value.
+	sub, _ := down.Subscribe(id("s"), SubOptions{Topics: []string{"state.*"}})
+	defer sub.Close()
+	if ev := recv(t, sub); string(ev.Payload) != `"v1"` {
+		t.Fatalf("downstream retained = %s, want v1 (federated)", ev.Payload)
+	}
+}
+
+// TestRetainedSurvivesRestart verifies retained state is rebuilt from the
+// persisted event log on restart (retain intent rides the event), including a
+// tombstone that must stay cleared.
+func TestRetainedSurvivesRestart(t *testing.T) {
+	var buf bytes.Buffer
+	b1 := New(Options{Authorizer: AllowAll{}, Events: NewEventLog(&buf), Limits: Limits{Retain: 100}})
+	b1.PublishOpts(id("p"), "state.keep", json.RawMessage(`"live"`), PublishOptions{Retain: true})
+	b1.PublishOpts(id("p"), "state.gone", json.RawMessage(`"x"`), PublishOptions{Retain: true})
+	b1.PublishOpts(id("p"), "state.gone", json.RawMessage(`null`), PublishOptions{RetainDelete: true}) // tombstone
+	b1.Close()
+
+	// "Restart": reload the log and seed a fresh broker.
+	seed, err := LoadEvents(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b2 := New(Options{Authorizer: AllowAll{}, Seed: seed, Limits: Limits{Retain: 100}})
+	defer b2.Close()
+
+	sub, _ := b2.Subscribe(id("s"), SubOptions{Topics: []string{"state.*"}})
+	defer sub.Close()
+	// state.keep is restored; state.gone was tombstoned and must not come back.
+	ev := recv(t, sub)
+	if ev.Topic != "state.keep" || string(ev.Payload) != `"live"` {
+		t.Fatalf("restored retained = %+v, want state.keep=live", ev)
+	}
+	expectNone(t, sub) // no second retained value (the tombstoned one stays gone)
+}
+
+// TestRetainedExpirySweptAtCap verifies an expired retained value is actively
+// swept to make room when a new topic would otherwise hit the retained cap.
+func TestRetainedExpirySweptAtCap(t *testing.T) {
+	clk := newClock()
+	b := New(Options{Authorizer: AllowAll{}, Now: clk.now, Limits: Limits{MaxRetainedTopics: 1}})
+	defer b.Close()
+
+	b.PublishOpts(id("p"), "a", json.RawMessage(`1`), PublishOptions{Retain: true, RetainTTL: time.Minute})
+	clk.add(2 * time.Minute) // "a" lapses
+
+	// Retaining a new topic at the cap sweeps the lapsed "a" to make room.
+	b.PublishOpts(id("p"), "b", json.RawMessage(`2`), PublishOptions{Retain: true})
+	b.mu.Lock()
+	_, hasA := b.retained["a"]
+	_, hasB := b.retained["b"]
+	b.mu.Unlock()
+	if hasA {
+		t.Fatal("expired retained value should have been swept at cap pressure")
+	}
+	if !hasB {
+		t.Fatal("new retained value should have taken the freed slot")
 	}
 }
 

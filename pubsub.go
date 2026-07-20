@@ -187,8 +187,8 @@ func cmdPubsubStats(args []string) error {
 	}
 	var st pubsub.Stats
 	if json.Unmarshal([]byte(resp), &st) == nil {
-		fmt.Printf("subscriptions=%d  sequence=%d  retained=%d  dropped=%d\n",
-			st.Subscriptions, st.Sequence, st.Retained, st.Dropped)
+		fmt.Printf("subscriptions=%d  groups=%d  sequence=%d  retained=%d  dropped=%d\n",
+			st.Subscriptions, st.Groups, st.Sequence, st.Retained, st.Dropped)
 	} else {
 		fmt.Println(resp)
 	}
@@ -384,7 +384,7 @@ func runFederation(mesh *embed.Client, local *pubsub.Broker, peer string, topics
 			if ev.Origin != "" {
 				return // already federated elsewhere — do not re-mirror (loop guard)
 			}
-			_, _ = local.EmitFederated(ev.Topic, ev.Payload, ev.Labels, ev.Publisher, peer)
+			_, _ = local.EmitFederated(ev.Topic, ev.Payload, ev.Labels, ev.Publisher, peer, ev.Retain, ev.RetainDel, ev.ExpiresAt)
 		}
 		bridge := make(chan struct{})
 		go func() {

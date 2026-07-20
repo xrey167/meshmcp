@@ -61,6 +61,9 @@ type Event struct {
 	Origin    string          `json:"origin,omitempty"`         // set when mirrored from another broker (federation); prevents re-mirroring loops
 	ReplyTo   string          `json:"reply_to,omitempty"`       // request/reply: topic a responder should publish the reply to; opaque to the broker
 	Corr      string          `json:"corr,omitempty"`           // request/reply: correlation id echoed on the reply so a requester matches it; opaque to the broker
+	Retain    bool            `json:"retain,omitempty"`         // store as the topic's retained last-value (the retain intent rides the event, so retained state is durable + federatable)
+	RetainDel bool            `json:"retain_del,omitempty"`     // clear the topic's retained last-value (tombstone)
+	ExpiresAt string          `json:"expires_at,omitempty"`     // absolute RFC3339 expiry for the retained value (TTL, resolved at publish so it survives restart/federation)
 	Payload   json.RawMessage `json:"payload,omitempty"`
 
 	PrevHash string `json:"prev_hash"`

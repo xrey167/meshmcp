@@ -89,11 +89,17 @@ own copy:
 meshmcp subscribe --group workers 100.x.y.z:9120 'jobs.*'   # run on each worker
 ```
 
-A group is live-only and scoped to one broker: taint containment still holds (an
-event is only ever routed to a member cleared for its labels), but `--since`
-replay and `--durable` cursors are not combined with `--group` (replaying a
-window to every competing consumer would duplicate it). For durable load
-sharing, run one `--durable` subscriber per shard instead.
+Delivery is **capacity-aware**: an event goes to the next member with buffer
+room, so a busy/slow member is skipped in favor of an idle one rather than
+dropped on. Taint containment still holds — an event is only ever routed to a
+member cleared for its labels (containment is applied *before* group selection).
+
+A group is live-only and scoped to **one broker**: `--since` replay and
+`--durable` cursors are not combined with `--group` (replaying a window to every
+competing consumer would duplicate it), and a group spanning two *federated*
+brokers gets one delivery **per broker** (federation mirrors independently — it
+does not coordinate a global group). For durable or cross-broker load sharing,
+run one `--durable` subscriber per shard against a single broker.
 
 `--durable <file>` makes a subscriber **at-least-once**: it persists the
 last-seen sequence to the file and resumes from it, so with a broker `event_log:`
@@ -146,10 +152,12 @@ event_log: ./pubsub-events.jsonl
 ```
 
 Each sealed event is appended to that file in sequence order. On restart the
-broker resumes the **sequence and hash chain** from the log and preloads the
-replay window, so `--since` works across restarts and the chain is continuous.
-Because the events are hash-chained like the audit ledger, the persisted stream
-is externally verifiable — a tampered, reordered, or truncated log is detected:
+broker resumes the **sequence and hash chain** from the log, preloads the replay
+window, and **rebuilds retained last-values** (with their TTLs and tombstones)
+from the stream, so `--since` and retained state both work across restarts and
+the chain is continuous. Because the events are hash-chained like the audit
+ledger, the persisted stream is externally verifiable — a tampered, reordered,
+or truncated log is detected:
 
 ```sh
 meshmcp pubsub verify ./pubsub-events.jsonl
@@ -205,10 +213,13 @@ federate:
 Each mirrored event preserves its original publisher and is tagged with the
 source broker (`origin`), so a bidirectional federation **cannot loop** — a
 mirror is never re-mirrored. Taint labels are preserved across the hop, so
-containment holds mesh-wide. The remote broker must authorize this broker's
-identity to subscribe to the mirrored topics (federation is a granted relation,
-not ambient). Mirroring is best-effort live; pair it with `event_log:` +
-`--durable` subscribers for at-least-once across a broker outage.
+containment holds mesh-wide. **Retained** last-values (and their TTLs and
+tombstones) also cross the hop — the retain intent rides the event — so a
+subscriber on the downstream broker sees the current state a peer retained.
+The remote broker must authorize this broker's identity to subscribe to the
+mirrored topics (federation is a granted relation, not ambient). Mirroring is
+best-effort live; pair it with `event_log:` + `--durable` subscribers for
+at-least-once across a broker outage.
 
 ## Introspection
 
@@ -216,7 +227,7 @@ Query a running broker for a live snapshot:
 
 ```sh
 meshmcp pubsub stats 100.x.y.z:9120
-# subscriptions=7  sequence=12043  retained=4096  dropped=12
+# subscriptions=7  groups=2  sequence=12043  retained=4096  dropped=12
 ```
 
 ---
