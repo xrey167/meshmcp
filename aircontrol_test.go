@@ -12,9 +12,10 @@ import (
 
 // fakeAirControl is an in-memory airController for handler tests.
 type fakeAirControl struct {
-	list   []AirSession
-	steers []string // "backend/id/method" of accepted steers
-	err    error    // returned by steer
+	list     []AirSession
+	steers   []string // "backend/id/method" of accepted steers
+	handoffs []string // "backend/id/newkey" of accepted handoffs
+	err      error    // returned by steer/handoff
 }
 
 func (f *fakeAirControl) sessions() []AirSession { return f.list }
@@ -23,6 +24,14 @@ func (f *fakeAirControl) steer(backend, id, method string, _ any) error {
 		return f.err
 	}
 	f.steers = append(f.steers, backend+"/"+id+"/"+method)
+	return nil
+}
+
+func (f *fakeAirControl) handoff(backend, id, newKey string) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.handoffs = append(f.handoffs, backend+"/"+id+"/"+newKey)
 	return nil
 }
 
@@ -116,5 +125,46 @@ func TestAirControlSteerBadRequest(t *testing.T) {
 	newTestHandler(c, true).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/v1/steer", nil))
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("GET /v1/steer = %d, want 405", rr.Code)
+	}
+}
+
+func TestAirControlHandoffRoutes(t *testing.T) {
+	c := &fakeAirControl{}
+	h := newTestHandler(c, true)
+	body := `{"backend":"fs","id":"9f2a","new_key":"bob-key"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/handoff", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("handoff: want 200, got %d (%s)", rr.Code, rr.Body)
+	}
+	if len(c.handoffs) != 1 || c.handoffs[0] != "fs/9f2a/bob-key" {
+		t.Fatalf("handoff not routed: %v", c.handoffs)
+	}
+}
+
+func TestAirControlHandoffACLDeny(t *testing.T) {
+	c := &fakeAirControl{}
+	h := newTestHandler(c, false)
+	req := httptest.NewRequest(http.MethodPost, "/v1/handoff", strings.NewReader(`{"backend":"fs","id":"x","new_key":"k"}`))
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("unauthorized handoff: want 403, got %d", rr.Code)
+	}
+	if len(c.handoffs) != 0 {
+		t.Fatalf("denied handoff must not route: %v", c.handoffs)
+	}
+}
+
+func TestAirControlHandoffBadRequest(t *testing.T) {
+	c := &fakeAirControl{}
+	h := newTestHandler(c, true)
+	// missing new_key
+	req := httptest.NewRequest(http.MethodPost, "/v1/handoff", strings.NewReader(`{"backend":"fs","id":"x"}`))
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("missing new_key: want 400, got %d", rr.Code)
 	}
 }

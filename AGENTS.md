@@ -34,7 +34,7 @@ meshmcp is an **identity-native control plane for agent-to-tool (MCP) traffic**.
 | `commands.go` · `auditsink.go` · `httpserve.go` | Plugin subcommand registry (`plugins`, F13/S40); webhook `AuditSink` (F15/S42); hardened loopback HTTP server (S25/S27). |
 | `agent.go` | `agent --role …` — demo agent apps (reader/fetcher/billing/analyst) each with their own mesh identity; `--steer-port` adds a steer inbox (P1). |
 | `air.go` · `airserve.go` · `airworkflow.go` | **Air · Steer** CLI: `air sessions/steer/launch/agent-steer/workflow/serve` — drive live work over the mesh (see `docs/AIR.md`, `docs/AIR-STEER.md`). |
-| `aircontrol.go` | The gateway Air control endpoint (`/v1/sessions`, `/v1/steer`) served by `serve` when a `control:` block is set. |
+| `aircontrol.go` | The gateway Air control endpoint (`/v1/sessions`, `/v1/steer`, `/v1/handoff`) served by `serve` when a `control:` block is set. |
 | `steerenvelope.go` · `steerinbox.go` | The agent steer inbox: envelope wire type + the drop-receiver-style factory that feeds `runAgentLoop`. |
 | `pushwake.go` | Push-wake seam: device registry + `Notifier` (vendor APNs/FCM pluggable), wired into `approvals`. |
 | `drop.go` · `push.go` · `cas.go` · `peers.go` | AirDrop payload layer: `drop` / `push` / `fetch` / `peers`, resumable + audited. |

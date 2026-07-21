@@ -35,6 +35,8 @@ func cmdAir(args []string) error {
 		return cmdAirSessions(args[1:])
 	case "steer":
 		return cmdAirSteer(args[1:])
+	case "handoff":
+		return cmdAirHandoff(args[1:])
 	case "launch":
 		return cmdAirLaunch(args[1:])
 	case "agent-steer":
@@ -46,7 +48,7 @@ func cmdAir(args []string) error {
 	case "-h", "--help", "help":
 		return airUsage()
 	default:
-		return fmt.Errorf("meshmcp air: unknown subcommand %q (want sessions | steer | launch | agent-steer | workflow | serve)", args[0])
+		return fmt.Errorf("meshmcp air: unknown subcommand %q (want sessions | steer | handoff | launch | agent-steer | workflow | serve)", args[0])
 	}
 }
 
@@ -56,6 +58,8 @@ func airUsage() error {
   air sessions <control-ip:port>                         list live sessions on a gateway
   air steer    <control-ip:port> --backend b --session id [--method m] [--param k=v]
                                                           steer a live session
+  air handoff  <control-ip:port> --backend b --session id --to <pubkey>
+                                                          hand a live session to another identity (F30)
   air launch   --role <role> [--nb-config dir] <gateway-ip:port>
                                                           spawn a new agent identity
   air agent-steer <agent-ip:port> --type task|nudge|cancel [--tool t --arg k=v | --text s]
@@ -166,6 +170,45 @@ func cmdAirSteer(args []string) error {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("air steer: %s: %s", resp.Status, body)
+	}
+	fmt.Println(string(bytes.TrimSpace(body)))
+	return nil
+}
+
+// cmdAirHandoff transfers a live session to another cryptographic identity via
+// the gateway's Air control endpoint (F30). The gateway re-binds the session so
+// the target may reattach and the former owner cannot; the move is ACL-gated and
+// audited on the gateway side.
+func cmdAirHandoff(args []string) error {
+	fs := flag.NewFlagSet("air handoff", flag.ExitOnError)
+	o := meshFlags(fs)
+	backend := fs.String("backend", "", "backend name the session belongs to (from air sessions)")
+	sessionID := fs.String("session", "", "session id to hand off")
+	to := fs.String("to", "", "WireGuard public key of the identity to hand the session to")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: meshmcp air handoff [flags] <control-ip:port> --backend <b> --session <id> --to <pubkey>")
+	}
+	if *backend == "" || *sessionID == "" || *to == "" {
+		return errors.New("air handoff: --backend, --session and --to are required")
+	}
+	hc, cleanup, err := airControlHTTP(o, fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	reqBody, _ := json.Marshal(map[string]any{"backend": *backend, "id": *sessionID, "new_key": *to})
+	resp, err := hc.Post("http://air-control/v1/handoff", "application/json", bytes.NewReader(reqBody))
+	if err != nil {
+		return fmt.Errorf("air handoff: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("air handoff: %s: %s", resp.Status, body)
 	}
 	fmt.Println(string(bytes.TrimSpace(body)))
 	return nil

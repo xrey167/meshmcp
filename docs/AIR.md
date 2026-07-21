@@ -180,6 +180,7 @@ the session ones) wrap the same commands the way `drop_file` wraps `drop`:
 |---|---|---|---|
 | `air_sessions` | ships | `GET /v1/sessions` → `Server.Sessions()` | "List the live sessions." |
 | `air_steer` | ships | `POST /v1/steer` → `Server.Steer` | "Steer session 9f2a on fs to re-read customer 42." |
+| `air_handoff` | ships | `POST /v1/handoff` → `Server.Handoff` | "Hand session 9f2a on fs to bob-key." |
 | `air_tasks` | ships | `mcpclient.ListTasks` | "What tasks are running on the analyst?" |
 | `air_task_steer` | ships | `mcpclient.SteerTask` → `tasks/steer` | "Nudge task-17 to focus on the API." |
 | `air_peers` · `air_push` · `air_fetch` | ships | `client.Status()` · `sendData` · `fetchBlob` | "Who's on the mesh?" / "Push this task." / "Fetch blob `<sha>`." |

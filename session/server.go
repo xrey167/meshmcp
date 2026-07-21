@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -75,9 +76,26 @@ type serverSession struct {
 
 	sendMu sync.Mutex // serializes peer-bound Sends so a Steer lands on a line boundary
 
+	keyMu sync.Mutex // guards creatorKey (mutable after a Handoff, F30)
+
 	cmu         sync.Mutex // guards replay / captureDone
 	replay      []byte     // captured client->backend bytes to replay on migration
 	captureDone bool       // handshake captured (handshake mode)
+}
+
+// getCreatorKey / setCreatorKey guard creatorKey, which is immutable after
+// creation EXCEPT across a Handoff (F30). keyMu is a leaf lock (never held while
+// acquiring s.mu or cmu), so these are safe from any goroutine.
+func (ss *serverSession) getCreatorKey() string {
+	ss.keyMu.Lock()
+	defer ss.keyMu.Unlock()
+	return ss.creatorKey
+}
+
+func (ss *serverSession) setCreatorKey(k string) {
+	ss.keyMu.Lock()
+	defer ss.keyMu.Unlock()
+	ss.creatorKey = k
 }
 
 // sendLines forwards complete-line data to the peer, chunked to the frame cap,
@@ -176,7 +194,7 @@ func (s *Server) attach(id sessionID, meta Meta) (*serverSession, bool, error) {
 			// cryptographic identity that opened it. Otherwise any mesh peer
 			// that learns a session id (they are logged and shared for
 			// migration) could take over the backend and its buffered output.
-			if sess.creatorKey != meta.PeerKey {
+			if sess.getCreatorKey() != meta.PeerKey {
 				return nil, false, errSessionIdentity
 			}
 			if sess.reaper != nil {
@@ -290,7 +308,7 @@ func (s *Server) checkpoint(sess *serverSession) {
 	sess.cmu.Unlock()
 	ps := sess.ep.snapshot(replay, countRequests(replay))
 	ps.Owner = s.instance
-	ps.CreatorKey = sess.creatorKey
+	ps.CreatorKey = sess.getCreatorKey()
 	_ = s.store.Save(ps)
 }
 
@@ -463,6 +481,33 @@ func (s *Server) Steer(id string, method string, params any) error {
 		return err
 	}
 	return sess.sendLines(append(line, '\n'))
+}
+
+// Handoff transfers ownership of a live session to a new cryptographic identity
+// (F30, Continuity 2.0). It re-binds the session's creatorKey so the target may
+// reattach and the former owner can no longer (the F23 identity binding still
+// rejects everyone else), and persists the change so the transfer survives a
+// gateway failover. It is a GOVERNED operation: the caller (the control plane)
+// authorizes and audits WHO may hand a session off, so this is an authorized
+// move, not a takeover. Returns ErrNoSession if the id is not live here.
+func (s *Server) Handoff(id string, newCreatorKey string) error {
+	if newCreatorKey == "" {
+		return fmt.Errorf("session: handoff requires a target identity key")
+	}
+	sid, err := parseSessionID(id)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	sess, ok := s.sessions[sid]
+	s.mu.Unlock()
+	if !ok {
+		return ErrNoSession
+	}
+	sess.setCreatorKey(newCreatorKey)
+	s.checkpoint(sess) // persist the new CreatorKey so a failover honors it
+	s.logf("session %s: handed off to %s", id, newCreatorKey)
+	return nil
 }
 
 func randID() (sessionID, error) {

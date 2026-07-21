@@ -53,11 +53,12 @@ Shipped in this branch (tested, `CGO_ENABLED=1 go build/vet/test ./... -race` gr
   **F17** (group-based policy — `group:<name>` peers), **F32** (compliance & attestation pack —
   `audit attest`), **F33** (client hook adapters — govern every LLM tool call; + `audit receipt`),
   **F19** (Mesh Spotlight — federated semantic search: `meshmcp spotlight`),
-  **F14** (governed plugin marketplace — signed bundle manifests, metered + audited installs: `meshmcp market`).
+  **F14** (governed plugin marketplace — signed bundle manifests, metered + audited installs: `meshmcp market`),
+  **F30** (continuity 2.0 — governed live-session handoff by identity: `air handoff` / `Server.Handoff`).
 - Minors: **S11–S18, S20, S22–S43, S47–S48, S52** (plus `config validate`, `status`, `doctor`,
   `audit export`, `audit receipt`).
 
-Forward backlog: flagships **F25, F30, F31** and minors **S19, S21, S33, S44–S46,
+Forward backlog: flagships **F25, F31** and minors **S19, S21, S33, S44–S46,
 S49–S51, S53–S60**.
 
 ---

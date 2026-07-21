@@ -11,7 +11,8 @@ import (
 )
 
 // The Air control endpoint exposes a gateway's live resumable sessions over the
-// mesh: list them (GET /v1/sessions) and steer one (POST /v1/steer). It listens
+// mesh: list them (GET /v1/sessions), steer one (POST /v1/steer), and hand one
+// off to another identity (POST /v1/handoff, F30). It listens
 // only on the mesh, resolves the caller's WireGuard identity, gates on an ACL,
 // and audits every steer — so it is just another governed mesh client, not a
 // backdoor. The steer itself is the line-safe server->client notification P2
@@ -31,6 +32,7 @@ type AirSession struct {
 type airController interface {
 	sessions() []AirSession
 	steer(backend, id, method string, params any) error
+	handoff(backend, id, newKey string) error
 }
 
 // airControlHandler builds the control surface. identify resolves the caller's
@@ -89,6 +91,41 @@ func airControlHandler(c airController, identify func(*http.Request) (pubkey, fq
 		}
 	})
 
+	mux.HandleFunc("/v1/handoff", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		pubKey, fqdn := identify(r)
+		if !allow.allows(pubKey, fqdn) {
+			http.Error(w, "not permitted", http.StatusForbidden)
+			return
+		}
+		var body struct {
+			Backend string `json:"backend"`
+			ID      string `json:"id"`
+			NewKey  string `json:"new_key"`
+		}
+		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body) != nil || body.Backend == "" || body.ID == "" || body.NewKey == "" {
+			http.Error(w, "backend, id and new_key are required", http.StatusBadRequest)
+			return
+		}
+		err := c.handoff(body.Backend, body.ID, body.NewKey)
+		if audit != nil {
+			// A handoff is a governed re-binding — record it like a steer, with
+			// the session id as the tool and "session/handoff" as the method.
+			audit(airSteerAudit{Backend: body.Backend, Peer: fqdnOr(fqdn), PeerKey: pubKey, Session: body.ID, Method: "session/handoff", OK: err == nil})
+		}
+		switch {
+		case err == nil:
+			writeJSONResp(w, http.StatusOK, map[string]any{"status": "handed-off", "backend": body.Backend, "id": body.ID, "to": body.NewKey, "by": fqdnOr(fqdn)})
+		case err == session.ErrNoSession || err == errNoBackend:
+			http.Error(w, err.Error(), http.StatusNotFound)
+		default:
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		}
+	})
+
 	return mux
 }
 
@@ -133,6 +170,16 @@ func (g *gatewayAirControl) steer(backend, id, method string, params any) error 
 		return errNoBackend
 	}
 	return srv.Steer(id, method, params)
+}
+
+func (g *gatewayAirControl) handoff(backend, id, newKey string) error {
+	g.mu.Lock()
+	srv, ok := g.servers[backend]
+	g.mu.Unlock()
+	if !ok {
+		return errNoBackend
+	}
+	return srv.Handoff(id, newKey)
 }
 
 // airSteerAudit is one control-endpoint steer, recorded in the shared ledger.

@@ -226,7 +226,7 @@ Watch it live with `meshmcp dash --audit audit.jsonl`; re-run a past session wit
 | `peers` | List reachable mesh identities — the "who can I drop to" view. |
 | `fetch <peer:port> <sha256>` | Fetch a blob by content hash from a peer's content-addressed store. |
 | `push <peer:port>` | Push a stdin payload (clipboard / a task) to a peer's inbox over the resumable channel. |
-| `air <sessions·steer·launch·agent-steer·workflow·serve>` | **Air · Steer**: list/steer a gateway's live sessions, steer a running agent, launch an agent, run a declarative workflow, or serve the live Air web page — all governed + audited. |
+| `air <sessions·steer·handoff·launch·agent-steer·workflow·serve>` | **Air · Steer**: list/steer a gateway's live sessions, **hand a live session to another identity** (F30), steer a running agent, launch an agent, run a declarative workflow, or serve the live Air web page — all governed + audited. |
 | `pubsub --config <f>` · `publish` · `subscribe <peer:port> <topic>` | Identity-gated, audited **event bus** on the mesh — durable + resumable; `publish`/`subscribe` a broker topic (see [docs/PUBSUB.md](docs/PUBSUB.md)). |
 | `graphrag --config <f>` | Serve `graph_search`: vector retrieval + knowledge-graph entity expansion over the mesh. |
 | `ls · call · read · prompt <peer:port>` | Drive tools / resources / prompts from the terminal. |
