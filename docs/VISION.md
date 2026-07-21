@@ -54,8 +54,9 @@ A denied-by-budget response is the same inline-error mechanism as a policy deny.
 a trust boundary, with policy at the seam. An agent in org A calls a vetted tool in org B,
 every call audited on both sides, nothing else reachable. B2B tool-sharing with no public
 surface.
-> **Status:** backlog — the governed plugin/tool marketplace (**F14**) and SSO-mapped
-> federation (**F31**) are not yet built; the federation boundary itself (`federation/`) is.
+> **Status:** shipped — the governed plugin/tool marketplace (**F14**, `meshmcp market`) and
+> SSO-mapped federation (**F31**, `federation.OIDCVerifier`/`Boundary.OrgForSSO`) are built on the
+> federation boundary (`federation/`).
 
 **Phase 7 — observability plane.** `meshmcp status` → live sessions, peers, per-tool call
 rates; the audit stream shipped to any sink (OTel, a SIEM). "Who called what, from where,
@@ -67,11 +68,11 @@ when" becomes queryable for an entire agent fleet.
 > **[ROADMAP-HARDENING.md](ROADMAP-HARDENING.md)** (Wave 2), most of them now **shipped**:
 > Phase 4 → **F21 ✓** (capability revocation lifecycle), Phase 5 → **F29 ✓** (cost & budget
 > governance), Phase 7 → **F15 ✓** (observability plane — `status` + webhook sink); Phase 6 →
-> **F14 / F31** (plugin marketplace, SSO-mapped federation) remains **backlog**. Wave 2 also
+> **F14 / F31** (plugin marketplace, SSO-mapped federation) are **shipped**. Wave 2 also
 > shipped the compile-time **plugin platform** (F13), HTTP-backend policy parity (F16),
 > group-based policy (F17), identity-bound sessions (F23), the mesh vault / scheduler / event
 > bus (F26–F28), an attestation pack (F32), client-hook adapters (F33), and most of the
-> hardening sweep — flagships F13–F33 (F14/F19/F25/F30/F31 still open) + minors S11–S60.
+> hardening sweep — flagships F13–F33 (only F25 still open) + minors S11–S60.
 
 ## Where it goes — wilder (still grounded in the primitives)
 

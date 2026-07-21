@@ -85,6 +85,38 @@ func (b *Boundary) OrgFor(peerFQDN, peerKey string) string {
 	return ""
 }
 
+// OrgForSSO resolves a verified OIDC identity (F31) to an org via mappings whose
+// Match is "oidc:<sub>", "email:<glob>", or "group:<name>". This lets a user's
+// IdP subject / email / directory group drive cross-org policy, reusing the same
+// Mapping table as key/FQDN identities. Returns "" if none match (denied).
+func (b *Boundary) OrgForSSO(c OIDCClaims) string {
+	for _, m := range b.mappings {
+		if sub, ok := strings.CutPrefix(m.Match, "oidc:"); ok {
+			if sub == c.Subject && c.Subject != "" {
+				return m.Org
+			}
+			continue
+		}
+		if em, ok := strings.CutPrefix(m.Match, "email:"); ok {
+			if c.Email != "" {
+				if ok2, _ := path.Match(em, c.Email); ok2 {
+					return m.Org
+				}
+			}
+			continue
+		}
+		if grp, ok := strings.CutPrefix(m.Match, "group:"); ok {
+			for _, g := range c.Groups {
+				if g == grp {
+					return m.Org
+				}
+			}
+			continue
+		}
+	}
+	return ""
+}
+
 // Principal returns the local principal to stamp for an org (falls back to the
 // org id).
 func (b *Boundary) Principal(org string) string {

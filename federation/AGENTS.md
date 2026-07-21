@@ -10,6 +10,7 @@ A cross-org federation boundary. It bridges a small set of **explicitly granted*
 | File | Description |
 |------|-------------|
 | `boundary.go` | Package doc + `Boundary`: authorizes and audits cross-org tool calls (`Check`/`Allowed`) and corpus/KG queries (`CheckCorpus`, F12), mapping remote identities to a local principal (`OrgFor`/`Principal`). Default-deny. (The proxying itself lives in root `federate.go`.) |
+| `oidc.go` | Federated SSO (F31): `OIDCVerifier` verifies an external IdP ID token (RS256, fail-closed on signer/issuer/audience/expiry) and `Boundary.OrgForSSO` maps the verified subject/email/group to an org via the same `Mapping` table — so directory identity drives cross-org policy. |
 
 ## For AI Agents
 
