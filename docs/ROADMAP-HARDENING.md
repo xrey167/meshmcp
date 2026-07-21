@@ -55,11 +55,12 @@ Shipped in this branch (tested, `CGO_ENABLED=1 go build/vet/test ./... -race` gr
   **F19** (Mesh Spotlight — federated semantic search: `meshmcp spotlight`),
   **F14** (governed plugin marketplace — signed bundle manifests, metered + audited installs: `meshmcp market`),
   **F30** (continuity 2.0 — governed live-session handoff by identity: `air handoff` / `Server.Handoff`),
-  **F31** (federated SSO — OIDC ID-token verification + subject/email/group→org mapping at the federation boundary: `federation.OIDCVerifier` / `Boundary.OrgForSSO`).
+  **F31** (federated SSO — OIDC ID-token verification + subject/email/group→org mapping at the federation boundary: `federation.OIDCVerifier` / `Boundary.OrgForSSO`),
+  **F25** (multi-tenant control plane — per-tenant isolated policy/registry stores keyed by caller identity: `control.TenantServer`).
 - Minors: **S11–S18, S20, S22–S43, S47–S48, S52** (plus `config validate`, `status`, `doctor`,
   `audit export`, `audit receipt`).
 
-Forward backlog: flagship **F25** and minors **S19, S21, S33, S44–S46,
+Forward backlog (flagships): none — F13–F33 all shipped. Remaining minors: **S19, S21, S33, S44–S46,
 S49–S51, S53–S60**.
 
 ---

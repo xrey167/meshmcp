@@ -12,6 +12,7 @@ The managed control plane: a single mesh service that handles node **enrollment*
 | `control.go` | Package doc + the control-plane service: enrollment endpoints, registry, and policy handout. |
 | `netbird.go` | The NetBird API issuer. `Doer` is the injectable `*http.Client` subset used to request setup keys (mockable in tests). |
 | `store.go` | `FilePolicyStore` — named policies persisted as `<name>.yaml` in a directory, served to gateways. Also `StaticEnroll` — the default fixed-credential `EnrollFunc` (swap for `NetBirdIssuer`). |
+| `tenant.go` | Multi-tenant control plane (F25): `TenantServer` resolves each request to a tenant by caller identity and dispatches to that tenant's own scoped `Server` (per-tenant policy store + registry under `baseDir/<tenant>/…`), so no route crosses a tenant boundary. `NewFileTenantServer` builds the file-backed form. |
 
 ## For AI Agents
 

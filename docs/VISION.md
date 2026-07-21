@@ -72,7 +72,7 @@ when" becomes queryable for an entire agent fleet.
 > shipped the compile-time **plugin platform** (F13), HTTP-backend policy parity (F16),
 > group-based policy (F17), identity-bound sessions (F23), the mesh vault / scheduler / event
 > bus (F26–F28), an attestation pack (F32), client-hook adapters (F33), and most of the
-> hardening sweep — flagships F13–F33 (only F25 still open) + minors S11–S60.
+> hardening sweep — flagships F13–F33 (all shipped) + minors S11–S60.
 
 ## Where it goes — wilder (still grounded in the primitives)
 
