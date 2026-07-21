@@ -636,16 +636,15 @@ the lease API is additive.
 
 ### Residual risk / follow-up
 
-- The session **server** still checkpoints via unconditional `Save`; routing its
-  failover through `AcquireLease` (lease-expiry-driven takeover) and fencing
-  every backend write via `SaveIfOwned` is the remaining integration step, and
-  needs the migration tests updated for lease-gated takeover. The invariant is
-  established and enforceable at the store layer today.
+- Store-layer primitive only; the server-side wiring (checkpoints through
+  `SaveIfOwned`, fence-on-supersede, takeover-on-reattach) lands in **F-P6.1w**
+  below. Now closed.
 
 ### Definition-of-Done item satisfied
 
 - *"Two gateways cannot concurrently own the same production session"* — enforced
-  and proven at the store layer (server wiring is the documented follow-up).
+  and proven at the store layer here, then wired into the running server in
+  **F-P6.1w**.
 
 ### Commit
 
@@ -1104,3 +1103,83 @@ Full tool policy at the router and signed, hop-bound delegation to upstreams
 ### Commit
 
 `router: default-deny caller ACL (close open confused-deputy exposure)`
+
+---
+
+## F-P6.1w · Session ownership lease wired into the running server — FIXED (wired)
+
+**Severity:** High (until wired, the CAS lease existed but the server still
+checkpointed via unconditional `Save`: two gateways could still both write — and
+thus both execute — the same session, and a superseded gateway was never fenced).
+
+**Component:** `session/server.go`, `session/store.go`.
+
+**Reproduced:** Yes. Before this change `Server.checkpoint` called
+`s.store.Save(ps)` unconditionally, so a gateway that had been superseded kept
+overwriting the new owner's persisted state.
+
+### Fix (runtime wiring)
+
+- `Server` detects a lease-capable store (`WithStore` type-asserts `LeaseStore`)
+  and records the fencing generation it holds per session (`serverSession.leaseGen`).
+- **Open (fresh session):** `attach` calls `AcquireLease(id, instance, 0, ttl, now)`
+  before pumping; a store error degrades to serving without migration rather than
+  failing the client.
+- **Reattach / failover:** `rehydrate` calls a new **`TakeoverLease`** primitive
+  *before* spawning the backend. `attach` has already verified the reattach
+  carries the session **creator's** transport identity, so this is an authorized
+  takeover: it bumps the fencing generation (fencing the previous gateway) and,
+  among racing takers, only one wins the generation CAS. A lost race fails the
+  reattach cleanly with no wasted backend spawn.
+- **Every checkpoint:** writes go through `SaveIfOwned(ps, instance, leaseGen)`.
+  When it reports the lease is no longer held, the gateway logs the supersede and
+  **yields the session** (`go s.remove`), so a fenced gateway stops serving and
+  the same session is never driven by two gateways at once.
+- `TakeoverLease` is deliberately distinct from `AcquireLease`: unlike acquire it
+  does not refuse a still-*live* lease (a client-driven migration must not wait
+  out the whole TTL), but it keeps the generation CAS so a takeover can never
+  split-brain into two owners. It is gated on a verified creator-identity
+  reattach — it is not a general lease-steal.
+
+### Tests
+
+- `session/lease_cas_test.go`
+  - `TestLeaseTakeover` — `AcquireLease` cannot steal a live lease, but an
+    identity-bound `TakeoverLease` can, bumps the generation, fences the old
+    owner, and rejects a stale-generation takeover.
+  - `TestLeaseConcurrentTakeoverLiveSingleWinner` — 24 gateways racing to take
+    over the same *live* lease: exactly one wins.
+- `session/server_lease_test.go`
+  - `TestServerCheckpointFencedAfterTakeover` — once a second gateway takes the
+    session over, the original gateway's `checkpoint` is fenced and cannot
+    overwrite the new owner's persisted state.
+- `session/migration_test.go` — `TestSessionMigratesAcrossGateways` still passes,
+  now exercising the full acquire → takeover → `SaveIfOwned` path end-to-end
+  (unchanged assertions; not weakened).
+
+### Compatibility impact
+
+None. A store that does not implement `LeaseStore` still uses the best-effort
+`Save` path. `MemStore`/`FileStore` gain `TakeoverLease`; all prior session and
+lease tests are unchanged.
+
+### Residual risk / follow-up
+
+- The lease TTL equals the session TTL and is not renewed per-checkpoint, so a
+  session served continuously past its TTL runs on a lapsed (but still owned)
+  lease; writes still succeed via owner+generation match, and takeover still
+  requires an authenticated reattach, so this is benign. Per-checkpoint renewal
+  is a cheap future refinement.
+- `FileStore`'s CAS is single-host (cross-process file lock), not distributed HA
+  — already documented on `LeaseStore`.
+
+### Definition-of-Done item satisfied
+
+- *"Two gateways cannot concurrently own the same production session"* — now
+  enforced in the running server: fresh sessions acquire, reattaches take over
+  with a fencing generation bump, and every checkpoint is lease-gated so a
+  superseded gateway is fenced out of writes and yields.
+
+### Commit
+
+`session: wire CAS ownership lease + fencing into the running server`

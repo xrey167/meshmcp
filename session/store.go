@@ -127,11 +127,44 @@ func canAcquire(cur PersistedSession, exists bool, owner string, expectedGen uin
 	return cur.Generation + 1, true
 }
 
+// canTakeover is AcquireLease's decision for an identity-bound session reattach
+// (migration/failover): unlike canAcquire it does NOT refuse a still-live lease,
+// because the trigger is the session's own creator reattaching to a new gateway.
+// It still enforces the generation compare-and-swap, so among several gateways
+// racing to take over the same session exactly one wins, and the generation bump
+// fences the previous owner.
+func canTakeover(cur PersistedSession, exists bool, expectedGen uint64) (uint64, bool) {
+	if !exists {
+		if expectedGen != 0 {
+			return 0, false
+		}
+		return 1, true
+	}
+	if cur.Generation != expectedGen {
+		return 0, false // the generation moved under us (lost the takeover race)
+	}
+	return cur.Generation + 1, true
+}
+
 func (s *MemStore) AcquireLease(id, owner string, expectedGen uint64, ttl time.Duration, now time.Time) (Lease, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cur, exists := s.m[id]
 	newGen, ok := canAcquire(cur, exists, owner, expectedGen, now)
+	if !ok {
+		return Lease{}, false, nil
+	}
+	exp := now.Add(ttl)
+	cur.ID, cur.Owner, cur.Generation, cur.LeaseExpiry = id, owner, newGen, exp.UnixNano()
+	s.m[id] = cur
+	return Lease{SessionID: id, Owner: owner, Generation: newGen, Expiry: exp}, true, nil
+}
+
+func (s *MemStore) TakeoverLease(id, owner string, expectedGen uint64, ttl time.Duration, now time.Time) (Lease, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cur, exists := s.m[id]
+	newGen, ok := canTakeover(cur, exists, expectedGen)
 	if !ok {
 		return Lease{}, false, nil
 	}
@@ -204,6 +237,15 @@ type Lease struct {
 // etcd, or Redis with appropriate transaction semantics).
 type LeaseStore interface {
 	AcquireLease(id, owner string, expectedGen uint64, ttl time.Duration, now time.Time) (Lease, bool, error)
+	// TakeoverLease forcibly acquires the lease for an authenticated session
+	// reattach (migration/failover). Unlike AcquireLease it does not refuse a
+	// still-live lease, because the trigger is the session's own creator (an
+	// identity verified at the transport by the caller) reattaching to a new
+	// gateway. It still enforces the generation compare-and-swap, so exactly one
+	// of several racing takers wins and the generation bump fences the previous
+	// owner. Callers MUST gate this on a verified creator-identity reattach; it is
+	// not a general lease-steal.
+	TakeoverLease(id, owner string, expectedGen uint64, ttl time.Duration, now time.Time) (Lease, bool, error)
 	RenewLease(id, owner string, gen uint64, ttl time.Duration, now time.Time) (Lease, bool, error)
 	ReleaseLease(id, owner string, gen uint64) (bool, error)
 	// SaveIfOwned writes ps only if (owner, gen) still hold the lease; otherwise
@@ -381,6 +423,29 @@ func (s *FileStore) AcquireLease(id, owner string, expectedGen uint64, ttl time.
 			return err
 		}
 		newGen, allowed := canAcquire(cur, exists, owner, expectedGen, now)
+		if !allowed {
+			return nil
+		}
+		exp := now.Add(ttl)
+		cur.ID, cur.Owner, cur.Generation, cur.LeaseExpiry = id, owner, newGen, exp.UnixNano()
+		if err := s.writeUnlocked(cur); err != nil {
+			return err
+		}
+		lease, ok = Lease{SessionID: id, Owner: owner, Generation: newGen, Expiry: exp}, true
+		return nil
+	})
+	return lease, ok, err
+}
+
+func (s *FileStore) TakeoverLease(id, owner string, expectedGen uint64, ttl time.Duration, now time.Time) (Lease, bool, error) {
+	var lease Lease
+	var ok bool
+	err := s.withLock(func() error {
+		cur, exists, err := s.readUnlocked(id)
+		if err != nil {
+			return err
+		}
+		newGen, allowed := canTakeover(cur, exists, expectedGen)
 		if !allowed {
 			return nil
 		}

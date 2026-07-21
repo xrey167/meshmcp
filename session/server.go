@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -27,6 +28,7 @@ type Server struct {
 	ttl      time.Duration
 	logf     func(string, ...any)
 	store    SessionStore  // optional: enables cross-gateway session migration
+	lease    LeaseStore    // set when store also supports CAS ownership leases
 	migMode  MigrationMode // how a resumed backend is reconstructed
 	instance string        // this gateway's lease owner id
 
@@ -41,6 +43,12 @@ type Server struct {
 func (s *Server) WithStore(store SessionStore, mode MigrationMode) *Server {
 	s.store = store
 	s.migMode = mode
+	// When the store supports compare-and-swap ownership leases, checkpoints go
+	// through SaveIfOwned so a superseded gateway is fenced and two gateways can
+	// never both write (and thus never both execute) the same session.
+	if ls, ok := store.(LeaseStore); ok {
+		s.lease = ls
+	}
 	return s
 }
 
@@ -72,6 +80,8 @@ type serverSession struct {
 
 	meta      Meta      // caller identity (for enumeration)
 	createdAt time.Time // when this session was opened/rehydrated here (for age)
+
+	leaseGen uint64 // fencing generation of the lease this gateway holds (0 = none)
 
 	sendMu sync.Mutex // serializes peer-bound Sends so a Steer lands on a line boundary
 
@@ -223,6 +233,16 @@ func (s *Server) attach(id sessionID, meta Meta) (*serverSession, bool, error) {
 		meta:       meta,
 		createdAt:  time.Now(),
 	}
+	// Claim the ownership lease for this brand-new session so its checkpoints
+	// write through SaveIfOwned. A store error here degrades to serving without
+	// migration (leaseGen stays 0) rather than failing the client's request.
+	if s.lease != nil {
+		if l, ok, err := s.lease.AcquireLease(newID.String(), s.instance, 0, s.ttl, time.Now()); err == nil && ok {
+			sess.leaseGen = l.Generation
+		} else {
+			s.logf("session %s: could not acquire lease (ok=%v err=%v); serving without migration", newID, ok, err)
+		}
+	}
 	s.sessions[newID] = sess
 	s.pump(sess)
 	s.logf("session %s: opened by %s", newID, meta.PeerFQDN)
@@ -237,6 +257,21 @@ func (s *Server) rehydrate(ps PersistedSession, meta Meta) (*serverSession, erro
 	ep, err := restoreEndpoint(ps)
 	if err != nil {
 		return nil, err
+	}
+	// Take over the ownership lease before spawning a backend. attach() already
+	// verified this reattach carries the session creator's identity, so this is an
+	// authorized takeover: it bumps the fencing generation (fencing the previous
+	// gateway out of SaveIfOwned) and, if several gateways race, only one wins.
+	var leaseGen uint64
+	if s.lease != nil {
+		l, ok, err := s.lease.TakeoverLease(ps.ID, s.instance, ps.Generation, s.ttl, time.Now())
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, fmt.Errorf("session %s: lost the takeover race", ps.ID)
+		}
+		leaseGen = l.Generation
 	}
 	// Tell the fresh backend which session it is, so a backend-managed
 	// (EventStore) backend can restore its own state.
@@ -271,6 +306,7 @@ func (s *Server) rehydrate(ps PersistedSession, meta Meta) (*serverSession, erro
 		createdAt:   time.Now(),
 		replay:      ps.Replay,
 		captureDone: true,
+		leaseGen:    leaseGen,
 	}
 	s.sessions[ep.id] = sess
 	s.pump(sess)
@@ -291,6 +327,23 @@ func (s *Server) checkpoint(sess *serverSession) {
 	ps := sess.ep.snapshot(replay, countRequests(replay))
 	ps.Owner = s.instance
 	ps.CreatorKey = sess.creatorKey
+
+	// Lease-gated store: write only while we still hold the lease. If SaveIfOwned
+	// reports we no longer own it, another gateway took the session over — we are
+	// fenced and must stop serving so the same session is never executed twice.
+	if s.lease != nil && sess.leaseGen > 0 {
+		ok, err := s.lease.SaveIfOwned(ps, s.instance, sess.leaseGen)
+		if err != nil {
+			s.logf("session %s: checkpoint write error: %v", sess.ep.id, err)
+			return
+		}
+		if !ok {
+			s.logf("session %s: fenced (lease taken over by another gateway); yielding", sess.ep.id)
+			go s.remove(sess.ep.id)
+		}
+		return
+	}
+	// No lease support (or lease not held): best-effort save, no fencing.
 	_ = s.store.Save(ps)
 }
 
