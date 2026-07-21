@@ -227,6 +227,32 @@ func TestConfigApprovalKeyRequiresCosignStore(t *testing.T) {
 	}
 }
 
+// TestConfigControlRequiresAllowList is the Air-control default-deny guard: the
+// session list/steer endpoint is privileged, so enabling it (control.port) with
+// no control.allow must fail startup rather than silently admit any mesh peer.
+func TestConfigControlRequiresAllowList(t *testing.T) {
+	base := `backends:
+  - name: fs
+    port: 9101
+    stdio: ["echo"]
+`
+	// control enabled, no allow list → error.
+	noAllow := base + `control:
+  port: 9700
+`
+	if err := writeAndLoad(t, noAllow); err == nil || !strings.Contains(err.Error(), "allow list") {
+		t.Fatalf("control endpoint without allow list must fail startup, got %v", err)
+	}
+	// control enabled with an allow list → loads.
+	withAllow := base + `control:
+  port: 9700
+  allow: ["pubkey:KEY"]
+`
+	if err := writeAndLoad(t, withAllow); err != nil {
+		t.Fatalf("control endpoint with an allow list should load: %v", err)
+	}
+}
+
 func writeAndLoad(t *testing.T, body string) error {
 	t.Helper()
 	f := t.TempDir() + "/config.yaml"

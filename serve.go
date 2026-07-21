@@ -220,15 +220,9 @@ func cmdServe(args []string) error {
 			return fmt.Errorf("control: listen on mesh port %d: %w", cfg.Control.Port, err)
 		}
 		listeners = append(listeners, ln)
-		// The Air control endpoint lists and steers live sessions — privileged.
-		// Refuse to expose it without an explicit allowlist (default-deny), rather
-		// than silently admitting any mesh peer.
-		if len(cfg.Control.Allow) == 0 {
-			wg.Wait()
-			return fmt.Errorf("air control endpoint is enabled but has no allow list: refusing to start (set control.allow to the WireGuard keys/FQDNs permitted to steer)")
-		}
-		// Each backend's own allow list, so the control endpoint re-checks the
-		// target backend's ACL (not just the global Control.Allow) on list/steer.
+		// A non-empty control.allow is guaranteed by loadConfig (default-deny);
+		// each backend's own allow list adds depth, so the control endpoint
+		// re-checks the target backend's ACL (not just the global Control.Allow).
 		backendACLs := map[string]acl{}
 		for _, b := range cfg.Backends {
 			backendACLs[b.Name] = newACL(b.Allow)

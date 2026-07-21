@@ -21,7 +21,7 @@ trace:
 # Reach it with `meshmcp air sessions <mesh-ip>:9600` or the air_sessions tool.
 # control:
 #   port: 9600
-#   allow: ["laptop-*.netbird.cloud"]   # empty = any mesh peer
+#   allow: ["laptop-*.netbird.cloud"]   # REQUIRED when control is enabled (default-deny)
 
 mesh:
   device_name: meshmcp-gw          # peer name shown in the NetBird dashboard

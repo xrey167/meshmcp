@@ -60,7 +60,7 @@ type Config struct {
 // WireGuard identity, gates on Allow, and audits every steer.
 type ControlConfig struct {
 	Port  int      `yaml:"port"`  // mesh port to serve the control endpoint on
-	Allow []string `yaml:"allow"` // identities permitted to list/steer (FQDN globs or pubkey:<key>); empty = any mesh peer
+	Allow []string `yaml:"allow"` // identities permitted to list/steer (FQDN globs or pubkey:<key>); required (default-deny — empty is a startup error)
 }
 
 // TraceConfig turns on a gateway-wide trace of every MCP message (both
@@ -360,6 +360,13 @@ func loadConfig(path string) (*Config, error) {
 		}
 		if other, dup := seen[cfg.Control.Port]; dup {
 			return nil, fmt.Errorf("control: port %d already used by backend %q", cfg.Control.Port, other)
+		}
+		// The Air control endpoint lists and steers live sessions — privileged.
+		// Refuse to expose it without an explicit allow list (default-deny) rather
+		// than silently admitting any mesh peer. Per-backend ACLs add depth, but
+		// the global endpoint must not be open by omission.
+		if len(cfg.Control.Allow) == 0 {
+			return nil, fmt.Errorf("control: the Air control endpoint is enabled but has no allow list — set control.allow to the WireGuard keys/FQDNs permitted to list/steer (default-deny)")
 		}
 	}
 	return &cfg, nil
