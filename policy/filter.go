@@ -407,9 +407,12 @@ func (f *Filter) handleToolCall(line []byte, tool string, id, args json.RawMessa
 		// Record the held request so a human (e.g. a phone on the mesh) can
 		// see and approve it — the co-sign becomes an inbox, not a silent deny.
 		if f.pending != nil {
+			// Carry the argument + policy binding so an approver can mint a
+			// request-bound approval for exactly these arguments under this policy.
 			_ = f.pending.Record(Pending{
 				Peer: f.caller.Peer, PeerKey: f.caller.PeerKey, Backend: f.caller.Backend,
 				Tool: tool, RPCID: string(id),
+				ArgsHash: canonicalArgsHash(args), PolicyHash: f.eng.PolicyHash(),
 			})
 		}
 		f.writeDenial(id, fmt.Sprintf("tool %q requires a human co-sign on the mesh: %s", tool, dec.Reason))

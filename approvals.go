@@ -31,6 +31,8 @@ func cmdApprovals(args []string) error {
 	fs.Var(&approvers, "approver", "identity allowed to approve (FQDN glob or 'pubkey:<key>'); repeatable; REQUIRED in mesh mode")
 	devices := fs.String("devices", "", "directory to persist push-wake device tokens (enables /v1/devices + notify on new pendings)")
 	notifyWebhook := fs.String("notify-webhook", "", "POST push-wake notifications to this URL instead of logging them (needs --devices; the endpoint fans out to APNs/FCM with its own credentials)")
+	approvalKey := fs.String("approval-key", "", "Ed25519 key file shared with the gateway; when set, /v1/approve mints signed, single-use, argument-bound approvals (must match the backend's approval_signing_key)")
+	ttlApprovalSec := fs.Int("approval-ttl", 0, "TTL in seconds for a minted request-bound approval (0 = default 5m, capped at 1h)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -59,6 +61,18 @@ func cmdApprovals(args []string) error {
 		log.Printf("push-wake enabled: devices in %s (register via POST /v1/devices; delivery: %s)", *devices, delivery)
 	} else if *notifyWebhook != "" {
 		return fmt.Errorf("meshmcp approvals: --notify-webhook requires --devices")
+	}
+	// Request-bound approvals: load the shared signing key (fail closed — a
+	// configured-but-unreadable key is a security-config error, not a fallback to
+	// the weaker ambient grant).
+	if *approvalKey != "" {
+		signer, err := policy.LoadSigner(*approvalKey)
+		if err != nil {
+			return fmt.Errorf("meshmcp approvals: --approval-key %s: %w", *approvalKey, err)
+		}
+		reqStore := policy.NewFileApprovalStore(*store, time.Duration(*ttlApprovalSec)*time.Second, signer)
+		opts = append(opts, withRequestBound(reqStore))
+		log.Printf("request-bound approvals enabled (signer %s); /v1/approve mints single-use, argument-bound tokens", signer.PubKeyHex()[:16])
 	}
 
 	// Local/dev mode: no mesh, a fixed approver identity.
@@ -108,6 +122,7 @@ func cmdApprovals(args []string) error {
 type approvalsOpts struct {
 	devices  *DeviceStore
 	notifier Notifier
+	reqStore *policy.FileApprovalStore // set: /v1/approve also mints a request-bound token
 }
 
 // approvalsOption configures approvalsHandler without breaking its callers.
@@ -117,6 +132,13 @@ type approvalsOption func(*approvalsOpts)
 // registered devices when a new approval request is recorded.
 func withPushWake(d *DeviceStore, n Notifier) approvalsOption {
 	return func(o *approvalsOpts) { o.devices, o.notifier = d, n }
+}
+
+// withRequestBound makes /v1/approve additionally mint a signed, single-use,
+// argument-bound approval (consumed by the gateway's DecideToolCallBound) for
+// the exact held call — the request-bound half of the co-sign flow.
+func withRequestBound(store *policy.FileApprovalStore) approvalsOption {
+	return func(o *approvalsOpts) { o.reqStore = store }
 }
 
 // approvalsHandler builds the approver HTTP surface. approver resolves the
@@ -164,6 +186,22 @@ func approvalsHandler(ps *policy.FilePending, approver func(*http.Request) strin
 			}
 			who := approver(r)
 			if grant {
+				// Mint the request-bound approval BEFORE clearing the pending record
+				// (it holds the argument + policy binding). A configured request-bound
+				// store makes the grant argument-scoped and single-use; a failure here
+				// must fail the approval rather than silently fall back to the weaker
+				// ambient grant.
+				if opt.reqStore != nil {
+					p, ok := ps.Get(body.Peer, body.Tool)
+					if !ok || p.ArgsHash == "" {
+						http.Error(w, "no held request-bound call for this peer+tool", http.StatusConflict)
+						return
+					}
+					if _, err := opt.reqStore.Grant(p.ApprovalRequest(), who, p.PolicyHash, now()); err != nil {
+						http.Error(w, "request-bound grant failed: "+err.Error(), http.StatusInternalServerError)
+						return
+					}
+				}
 				if err := policy.Grant(ps.Dir, body.Peer, body.Tool, who, now()); err != nil {
 					http.Error(w, err.Error(), http.StatusInternalServerError)
 					return

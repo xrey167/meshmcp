@@ -195,6 +195,38 @@ func TestConfigStrictRejectsSecurityTypos(t *testing.T) {
 	}
 }
 
+// TestConfigApprovalKeyRequiresCosignStore is the F-P3.2 config guard: enabling
+// request-bound approvals (approval_signing_key) without the shared cosign_store
+// the approver writes to is a security-config error and must fail startup, not
+// silently fall back to the weaker ambient co-sign.
+func TestConfigApprovalKeyRequiresCosignStore(t *testing.T) {
+	// approval_signing_key with no cosign_store → error.
+	bad := `backends:
+  - name: fs
+    port: 9101
+    stdio: ["echo"]
+    approval_signing_key: "/tmp/approval.key"
+    policy:
+      default_allow: false
+`
+	if err := writeAndLoad(t, bad); err == nil || !strings.Contains(err.Error(), "cosign_store") {
+		t.Fatalf("approval_signing_key without cosign_store must fail startup, got %v", err)
+	}
+	// With a cosign_store → the pairing is accepted at config time.
+	good := `backends:
+  - name: fs
+    port: 9101
+    stdio: ["echo"]
+    cosign_store: "./cosign"
+    approval_signing_key: "/tmp/approval.key"
+    policy:
+      default_allow: false
+`
+	if err := writeAndLoad(t, good); err != nil {
+		t.Fatalf("approval_signing_key with cosign_store should validate: %v", err)
+	}
+}
+
 func writeAndLoad(t *testing.T, body string) error {
 	t.Helper()
 	f := t.TempDir() + "/config.yaml"

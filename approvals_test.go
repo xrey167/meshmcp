@@ -195,6 +195,91 @@ func TestApprovalsRequiresApproverACLInMeshMode(t *testing.T) {
 // are not equivalently open: enumerating pending is approver-only, status is
 // requester-or-approver, and a request is attributed to the transport identity
 // (an agent cannot forge a request as another peer).
+// TestApproverMintsRequestBoundApproval is the F-P3.2 regression: when the
+// approver is configured with the shared signing key, /v1/approve mints a
+// signed, single-use approval bound to the held call's EXACT arguments + policy
+// (read from the pending record the gateway filter wrote) — not an ambient
+// (peer, tool) grant. This is the missing runtime link between the request-bound
+// primitive and the human approver.
+func TestApproverMintsRequestBoundApproval(t *testing.T) {
+	dir := t.TempDir()
+	ps := &policy.FilePending{Dir: dir}
+
+	// The approver signs; the gateway (sharing the key) verifies. Store lives in
+	// the same directory the gateway reads.
+	signer, err := policy.GenerateSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqStore := policy.NewFileApprovalStore(dir, time.Minute, signer)
+
+	// A held require_cosign call, exactly as the gateway filter records it:
+	// carrying the requesting peer's key + the argument and policy binding.
+	args := []byte(`{"amount":10}`)
+	argsHash := policy.NewApprovalRequest("AGENTKEY", "pay", "transfer", args, "").ArgsHash
+	_ = ps.Record(policy.Pending{
+		Peer: "agent.mesh", PeerKey: "AGENTKEY", Backend: "pay", Tool: "transfer",
+		ArgsHash: argsHash, PolicyHash: "POLICYV1",
+	})
+
+	fixedNow := time.Unix(1000, 0)
+	h := approvalsHandler(ps, func(*http.Request) string { return "approver.mesh" }, nil,
+		func() time.Time { return fixedNow }, withRequestBound(reqStore))
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	post(t, ts.URL+"/v1/approve", `{"peer":"agent.mesh","tool":"transfer"}`)
+
+	// A DIFFERENT-argument call is not covered by the minted approval (test the
+	// negative first — it must not consume the real token).
+	diff := policy.ApprovalRequest{
+		PeerKey: "AGENTKEY", Backend: "pay", Tool: "transfer", PolicyHash: "POLICYV1",
+		ArgsHash: policy.NewApprovalRequest("AGENTKEY", "pay", "transfer", []byte(`{"amount":999}`), "").ArgsHash,
+	}
+	if ok, _ := reqStore.ConsumeApproval(diff, fixedNow); ok {
+		t.Fatal("a request-bound approval must not authorize a different-argument call")
+	}
+	// The EXACT held call is authorized, once (single-use). (Policy-version
+	// binding is covered separately by policy.TestApprovalPolicyHashBinding; it
+	// shares this binding key, so consuming it here would spend the single-use
+	// token before the exact-match assertion.)
+	exact := policy.ApprovalRequest{PeerKey: "AGENTKEY", Backend: "pay", Tool: "transfer", ArgsHash: argsHash, PolicyHash: "POLICYV1"}
+	if ok, reason := reqStore.ConsumeApproval(exact, fixedNow); !ok {
+		t.Fatalf("the approver-minted approval should authorize the exact held call: %s", reason)
+	}
+	if ok, _ := reqStore.ConsumeApproval(exact, fixedNow); ok {
+		t.Fatal("a request-bound approval is single-use; a replay must not be honored")
+	}
+	// The held request was cleared by the approval.
+	if _, ok := ps.Get("agent.mesh", "transfer"); ok {
+		t.Fatal("approving should have cleared the pending record")
+	}
+}
+
+// TestApproverRequestBoundNoHeldCall: with a request-bound store configured, an
+// approve for which there is no held call (no argument binding to sign) must
+// fail closed rather than mint an unbound or ambient-only grant.
+func TestApproverRequestBoundNoHeldCall(t *testing.T) {
+	dir := t.TempDir()
+	ps := &policy.FilePending{Dir: dir}
+	signer, _ := policy.GenerateSigner()
+	reqStore := policy.NewFileApprovalStore(dir, time.Minute, signer)
+
+	h := approvalsHandler(ps, func(*http.Request) string { return "approver.mesh" }, nil,
+		time.Now, withRequestBound(reqStore))
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/v1/approve", "application/json",
+		strings.NewReader(`{"peer":"ghost.mesh","tool":"transfer"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("approving with no held request-bound call should fail closed (409), got %d", resp.StatusCode)
+	}
+}
+
 func TestApprovalsEndpointsProtected(t *testing.T) {
 	dir := t.TempDir()
 	ps := &policy.FilePending{Dir: dir}

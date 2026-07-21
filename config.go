@@ -156,6 +156,13 @@ type Backend struct {
 	// CosignTTLSeconds bounds how long a co-sign approval stays valid
 	// (0 = no expiry).
 	CosignTTLSeconds int `yaml:"cosign_ttl_seconds"`
+	// ApprovalSigningKey, when set, upgrades require_cosign from ambient
+	// (peer, tool) grants to request-bound approvals: a held call is released only
+	// by a signed, single-use token bound to its exact arguments (and policy
+	// version). It is the Ed25519 key file SHARED with the approver
+	// (`meshmcp approvals --approval-key`); the gateway pins its public key to
+	// trust minted approvals. Requires cosign_store + a policy.
+	ApprovalSigningKey string `yaml:"approval_signing_key"`
 	// Secrets configures the credential broker: agents reference secrets by
 	// name ({{secret:NAME}}) and the gateway injects the value by identity,
 	// so the agent never holds the raw credential. Only valid for stdio
@@ -290,6 +297,9 @@ func loadConfig(path string) (*Config, error) {
 		}
 		if b.CosignStore != "" && b.Policy == nil {
 			return nil, fmt.Errorf("backend %q: cosign_store requires a policy", b.Name)
+		}
+		if b.ApprovalSigningKey != "" && b.CosignStore == "" {
+			return nil, fmt.Errorf("backend %q: approval_signing_key requires cosign_store (the shared approval directory)", b.Name)
 		}
 		if b.AuditCheckpoints != "" && b.AuditSigningKey == "" {
 			return nil, fmt.Errorf("backend %q: audit_checkpoints requires audit_signing_key", b.Name)

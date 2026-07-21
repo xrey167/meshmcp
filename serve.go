@@ -431,6 +431,19 @@ func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer, h
 	if b.CosignStore != "" {
 		pending = &policy.FilePending{Dir: b.CosignStore, TTL: time.Duration(b.CosignTTLSeconds) * time.Second}
 	}
+	// Request-bound approvals: when a shared approval signing key is configured,
+	// a require_cosign call is released only by a signed, single-use token bound
+	// to its exact arguments + policy — not an ambient (peer, tool) grant. Load
+	// the key fail-closed (a configured-but-unreadable key is a security-config
+	// error, never a silent downgrade to the weaker ambient path).
+	if eng != nil && b.ApprovalSigningKey != "" {
+		signer, err := policy.LoadSigner(b.ApprovalSigningKey)
+		if err != nil {
+			log.Fatalf("backend %q: approval_signing_key %s: %v", b.Name, b.ApprovalSigningKey, err)
+		}
+		eng.SetRequestApprovals(policy.NewFileApprovalStore(b.CosignStore, time.Duration(b.CosignTTLSeconds)*time.Second, signer))
+		log.Printf("backend %q: request-bound approvals enabled (approver key %s…); ambient co-sign no longer releases held calls", b.Name, signer.PubKeyHex()[:16])
+	}
 	// One credential broker per backend, sharing the backend's (hash-chained)
 	// audit so secret use lands in the same tamper-evident record.
 	var broker *secrets.Broker

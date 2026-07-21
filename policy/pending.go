@@ -16,17 +16,38 @@ import (
 // approves or denies them, which is how the co-sign flow becomes an actual
 // inbox rather than a silent deny.
 type Pending struct {
-	Peer      string `json:"peer"`
-	PeerKey   string `json:"peer_key,omitempty"`
-	Backend   string `json:"backend"`
-	Tool      string `json:"tool"`
-	RPCID     string `json:"rpc_id,omitempty"`
-	Requested string `json:"requested"` // RFC3339
+	Peer    string `json:"peer"`
+	PeerKey string `json:"peer_key,omitempty"`
+	Backend string `json:"backend"`
+	Tool    string `json:"tool"`
+	RPCID   string `json:"rpc_id,omitempty"`
+	// ArgsHash is the canonical hash of the exact arguments the held call carried,
+	// and PolicyHash the policy version in force when it was held. They let an
+	// approver mint a request-bound approval (FileApprovalStore.Grant) that the
+	// gateway consumes only for THESE arguments under THIS policy — turning the
+	// approver into the request-bound signer without giving it the raw arguments
+	// or a copy of the policy.
+	ArgsHash   string `json:"args_hash,omitempty"`
+	PolicyHash string `json:"policy_hash,omitempty"`
+	Requested  string `json:"requested"` // RFC3339
 }
 
 // Key identifies the (peer, tool) a pending request is about — the same key
 // CosignKey uses, so approving a pending grants exactly that call.
 func (p Pending) Key() string { return CosignKey(p.Peer, p.Tool) }
+
+// ApprovalRequest rebuilds the exact request-bound operation this held call
+// represents, so an approver can Grant a signed approval bound to it. Session is
+// intentionally left unset to match the gateway's DecideToolCallBound request.
+func (p Pending) ApprovalRequest() ApprovalRequest {
+	return ApprovalRequest{
+		PeerKey:    p.PeerKey,
+		Backend:    p.Backend,
+		Tool:       p.Tool,
+		ArgsHash:   p.ArgsHash,
+		PolicyHash: p.PolicyHash,
+	}
+}
 
 // PendingStore records and lists held co-sign requests.
 type PendingStore interface {
@@ -97,6 +118,28 @@ func (s *FilePending) List() ([]Pending, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Requested > out[j].Requested })
 	return out, nil
+}
+
+// Get returns the (non-expired) pending record for (peer, tool), so an approver
+// can read its request-bound binding (ArgsHash/PolicyHash) before granting.
+func (s *FilePending) Get(peer, tool string) (Pending, bool) {
+	if s == nil || s.Dir == "" {
+		return Pending{}, false
+	}
+	b, err := os.ReadFile(pendingFile(s.Dir, peer, tool))
+	if err != nil {
+		return Pending{}, false
+	}
+	var p Pending
+	if json.Unmarshal(b, &p) != nil {
+		return Pending{}, false
+	}
+	if s.TTL > 0 {
+		if t, err := time.Parse(time.RFC3339, p.Requested); err == nil && time.Since(t) > s.TTL {
+			return Pending{}, false // expired
+		}
+	}
+	return p, true
 }
 
 // Has reports whether a (non-expired) pending request exists for (peer, tool).

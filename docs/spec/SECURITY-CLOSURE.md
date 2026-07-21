@@ -568,17 +568,15 @@ co-sign path is unchanged. A gateway opts in by attaching a `FileApprovalStore`.
 
 ### Residual risk / follow-up
 
-- The **approver HTTP service** still grants the legacy ambient approval;
-  connecting it to `FileApprovalStore.Grant` (and showing the human the exact
-  canonical operation in the UI) is the remaining integration step. The
-  enforcement primitive and gateway decision path are complete and tested.
+- The approver-service grant wiring (the last mile) lands in **F-P3.2** below.
+  Now closed.
 - Spec: `docs/spec/APPROVAL-TOKEN.md`.
 
 ### Definition-of-Done item satisfied
 
 - *"Approvals are signed, short-lived, request-bound and single-use"* (the
-  enforcement primitive and gateway path; approver-UI grant wiring is the
-  documented follow-up).
+  enforcement primitive and gateway path here; end-to-end approver wiring in
+  **F-P3.2**).
 
 ### Commit
 
@@ -987,13 +985,102 @@ Review follow-ups on the request-bound approval work:
   `TestApprovalsEndpointsProtected`.
 
 Remaining (tracked): the approver service does not yet *grant* a request-bound
-token (Pending would need to carry the argument hash), and `serve.go` does not
-yet attach a `FileApprovalStore` — production still uses the legacy ambient
-grant. That end-to-end grant wiring is the next narrow commit.
+token, and `serve.go` does not yet attach a `FileApprovalStore` — closed in
+**F-P3.2** below.
 
 ### Commit
 
 `approvals: session + policy-version binding; protect pending/status endpoints`
+
+---
+
+## F-P3.2 · Request-bound approvals not wired to the approver or the gateway — FIXED (wired)
+
+**Severity:** High (the request-bound primitive and the gateway decision path
+existed, but nothing minted request-bound tokens and `serve.go` never attached a
+store — so in production a `require_cosign` call was still released by an
+**ambient** `(peer, tool)` grant, not one bound to the exact arguments. The
+hardened path was unreachable end-to-end).
+
+**Component:** `policy/pending.go`, `policy/filter.go`, `approvals.go`,
+`serve.go`, `config.go`.
+
+**Reproduced:** Yes. `Engine.SetRequestApprovals` + `DecideToolCallBound`
+consumed argument-bound approvals, but (a) `Pending` carried no argument/policy
+binding, (b) the approver's `/v1/approve` only wrote an ambient `policy.Grant`,
+and (c) no runtime path called `SetRequestApprovals`. So a gateway that opted in
+could never have a held call released (the approver's ambient grant is ignored in
+request-bound mode); a gateway that did not opt in bound approvals only to
+`(peer, tool)`.
+
+### Fix (runtime wiring, opt-in, fail-closed)
+
+- **Held call carries its binding.** `Pending` gains `ArgsHash` + `PolicyHash`;
+  the filter records `canonicalArgsHash(args)` and `Engine.PolicyHash()` on every
+  held `require_cosign` call. `Pending.ApprovalRequest()` rebuilds the exact
+  request-bound operation, so the approver never needs the raw arguments or a copy
+  of the policy.
+- **Approver mints the token.** With a shared signing key
+  (`meshmcp approvals --approval-key`), `/v1/approve` reads the held record and
+  calls `FileApprovalStore.Grant`, minting a signed, single-use approval bound to
+  the exact arguments + policy version. A grant with no held request-bound call
+  fails closed (`409`), never a silent ambient-only fallback. The ambient grant
+  is still written for backward compatibility / the `/v1/status` view.
+- **Gateway enforces it.** A new backend config `approval_signing_key` (the
+  Ed25519 key SHARED with the approver) makes `serve.go` load the key
+  **fail-closed** and call `eng.SetRequestApprovals(NewFileApprovalStore(...))`.
+  Once set, ambient co-sign no longer releases held calls — only a request-bound
+  token does. `config.go` rejects `approval_signing_key` without `cosign_store`
+  (a security-config error must fail startup).
+
+### Key model (explicit, not silent)
+
+Gateway and approver share one Ed25519 key file: the approver signs minted
+approvals; the gateway pins that public key to trust them. It is **opt-in** — with
+no `approval_signing_key` / `--approval-key`, the ambient co-sign path is
+unchanged, so no existing deployment changes behavior.
+
+### Tests
+
+- `approvals_test.go`
+  - `TestApproverMintsRequestBoundApproval` — a held call recorded as the filter
+    writes it, approved via `/v1/approve` with a request-bound store, yields a
+    token the gateway consumes for the **exact** arguments, refuses a
+    different-argument call, is single-use, and clears the pending record.
+  - `TestApproverRequestBoundNoHeldCall` — approving with no held request-bound
+    call fails closed (`409`), never an unbound grant.
+- `config_test.go`
+  - `TestConfigApprovalKeyRequiresCosignStore` — `approval_signing_key` without
+    `cosign_store` fails startup; paired, it validates.
+- Existing `policy.TestFilterRequestBoundCosignEndToEnd`,
+  `TestApprovalPolicyHashBinding`, and the approver-endpoint/ACL tests are
+  unchanged and still pass (argument, policy, single-use, and endpoint-protection
+  guarantees).
+
+### Compatibility impact
+
+None by default. The new `Pending` fields are `omitempty`; the approver option
+and the gateway config are opt-in; the ambient path is preserved when the key is
+absent.
+
+### Residual risk / follow-up
+
+- The pending file is keyed by `(peer, tool)`, so two concurrently-held calls to
+  the same tool with different arguments collapse to the latest record; the other
+  stays blocked (fail-closed) until re-requested. Keying pending by the full
+  binding is a future refinement. Logged, not silent.
+- Distributing the shared approval key across hosts is an operator concern (same
+  as any signing key); single-operator setups share one file over the mesh.
+
+### Definition-of-Done item satisfied
+
+- *"Approvals are signed, short-lived, request-bound and single-use"* — now
+  reachable end-to-end: the human approver mints the argument-bound token and the
+  gateway enforces it in place of ambient co-sign.
+
+### Commit
+
+`approvals: wire request-bound grant end-to-end (approver mints, gateway enforces)`
 
 ---
 
