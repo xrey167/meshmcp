@@ -653,6 +653,117 @@ func TestDurableGroupResumesAfterTotalOutage(t *testing.T) {
 	}
 }
 
+// TestDurableGroupStateReclaimed verifies durable-group offset state does not
+// leak: after churning many distinct groups (each subscribed then closed), no
+// per-group maps retain entries.
+func TestDurableGroupStateReclaimed(t *testing.T) {
+	store := newMemGroupStore()
+	b := New(Options{Authorizer: AllowAll{}, GroupStore: store})
+	defer b.Close()
+
+	for i := 0; i < 50; i++ {
+		g := fmt.Sprintf("g%d", i)
+		s, err := b.Subscribe(id("w"), SubOptions{Topics: []string{"jobs"}, Group: g, Ack: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.Publish(id("p"), "jobs", json.RawMessage(`1`), nil)
+		s.Close()
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if n := len(b.groupCmt); n != 0 {
+		t.Fatalf("groupCmt retained %d entries after all groups closed (leak)", n)
+	}
+	if n := len(b.groupMax) + len(b.groupN) + len(b.groupRR) + len(b.groupAck); n != 0 {
+		t.Fatalf("group maps retained %d entries after all groups closed", n)
+	}
+}
+
+// TestPlainGroupNotDurable verifies a plain (non-ack) group is NOT treated as
+// durable even when a GroupStore is configured: rejoining after an outage must
+// not replay already-delivered events (durability is only for ack groups).
+func TestPlainGroupNotDurable(t *testing.T) {
+	store := newMemGroupStore()
+	b := New(Options{Authorizer: AllowAll{}, GroupStore: store, Limits: Limits{Retain: 100}})
+	defer b.Close()
+
+	// Plain group processes 5 events, then its member leaves.
+	s1, _ := b.Subscribe(id("w1"), SubOptions{Topics: []string{"jobs"}, Group: "g"})
+	for i := 0; i < 5; i++ {
+		b.Publish(id("p"), "jobs", json.RawMessage(`1`), nil)
+		recv(t, s1)
+	}
+	s1.Close()
+
+	// A new member rejoining must NOT receive a replay of the 5 prior events.
+	s2, _ := b.Subscribe(id("w2"), SubOptions{Topics: []string{"jobs"}, Group: "g"})
+	defer s2.Close()
+	if r := recvWithin(s2, 200*time.Millisecond); r != nil {
+		t.Fatalf("plain group replayed a delivered event (seq %d); durability must be ack-only", r.Seq)
+	}
+}
+
+// TestGroupAckUniformity verifies a group is uniformly ack or non-ack: a member
+// whose ack mode disagrees with the group is refused.
+func TestGroupAckUniformity(t *testing.T) {
+	b := New(Options{Authorizer: AllowAll{}})
+	defer b.Close()
+
+	ackSub, err := b.Subscribe(id("a"), SubOptions{Topics: []string{"jobs"}, Group: "g", Ack: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ackSub.Close()
+	// A non-ack member joining the ack group is refused.
+	if _, err := b.Subscribe(id("b"), SubOptions{Topics: []string{"jobs"}, Group: "g"}); !errors.Is(err, ErrBadTopic) {
+		t.Fatalf("mixed ack/non-ack join: got %v, want ErrBadTopic", err)
+	}
+	// Another ack member is fine.
+	ok, err := b.Subscribe(id("c"), SubOptions{Topics: []string{"jobs"}, Group: "g", Ack: true})
+	if err != nil {
+		t.Fatalf("matching ack member should join: %v", err)
+	}
+	ok.Close()
+}
+
+// TestAckGroupBacklogCapOnRequeue verifies a departing member's requeued
+// in-flight cannot push the group backlog past MaxGroupPending (the overflow is
+// dropped and counted, not silently retained).
+func TestAckGroupBacklogCapOnRequeue(t *testing.T) {
+	b := New(Options{Authorizer: AllowAll{}, Limits: Limits{SubQueue: 4, MaxGroupPending: 3}})
+	defer b.Close()
+
+	// One member takes and holds (never acks) 4 events (its in-flight cap).
+	w, _ := b.Subscribe(id("w"), SubOptions{Topics: []string{"jobs"}, Group: "g", Ack: true})
+	// A second member so the group survives w leaving (remaining > 0), but keep
+	// it saturated so the requeue lands in the backlog, not on it.
+	keep, _ := b.Subscribe(id("keep"), SubOptions{Topics: []string{"jobs"}, Group: "g", Ack: true})
+	defer keep.Close()
+	// Fill keep's in-flight so it can't absorb the requeue.
+	b.mu.Lock()
+	for i := 0; i < cap(keep.ch); i++ {
+		keep.ch <- &Event{}
+	}
+	b.mu.Unlock()
+
+	for i := 0; i < 4; i++ {
+		b.Publish(id("p"), "jobs", json.RawMessage(`1`), nil)
+	}
+	// Drain what w received so they're in its inflight.
+	for i := 0; i < 4; i++ {
+		recvWithin(w, 100*time.Millisecond)
+	}
+	w.Close() // requeues up to 4 to a backlog capped at 3
+
+	b.mu.Lock()
+	n := len(b.groupPend["g"])
+	b.mu.Unlock()
+	if n > 3 {
+		t.Fatalf("group backlog = %d, exceeds MaxGroupPending=3 after requeue", n)
+	}
+}
+
 // TestConsumerGroupRejectsSince verifies --since replay is refused with a group
 // (a group is live-only; replaying a window to every competing consumer would
 // duplicate it).

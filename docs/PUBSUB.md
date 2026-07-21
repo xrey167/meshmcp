@@ -102,7 +102,9 @@ one disconnects first — so a crashed or rolling worker loses no work. The
 handler's job is retried on a sibling). When every member is at its in-flight cap,
 further events are held in a **bounded per-group backlog** (`max_group_pending`;
 oldest dropped and counted if it overflows) and drain as members ack. Duplicates
-are possible if a member dies mid-processing — at-least-once, by design.
+are possible if a member dies mid-processing — at-least-once, by design. All
+members of a group must agree on `--ack` (a group is uniformly at-least-once or
+not); a mismatched join is refused.
 
 Set `group_cursors:` on the broker to make at-least-once groups **durable across
 a restart or a total outage**: the broker persists each group's committed offset
@@ -157,7 +159,9 @@ Run several with `--group` and they become a **pool of competing RPC workers**
 of me". Add `--ack` for a **reliable job queue**: a request is acked only after
 the handler succeeds, so a crash redelivers it to a sibling worker (at-least-once)
 instead of losing it. Without `--ack`, a failed handler still returns a reply
-(its error text), so an RPC caller gets a reply or a timeout, never silence. (A
+(its error text), so an RPC caller gets a reply or a timeout, never silence.
+`--handler-timeout` kills a handler that runs too long (so one slow/malformed
+request can't stall the worker), and `--max-bytes` bounds handler output. (A
 responder is just a subscribe + publish, so the shell `while read` equivalent
 works too, using `publish --corr`.)
 

@@ -179,6 +179,7 @@ type Broker struct {
 	groupPend  map[string][]*Event  // per-group backlog of events no member could take yet (at-least-once)
 	groupCmt   map[string]uint64    // durable groups: committed offset (all group events ≤ this are acked)
 	groupMax   map[string]uint64    // durable groups: highest seq delivered to the group
+	groupAck   map[string]bool      // whether a group is at-least-once (all members must agree)
 	groupStore GroupStore           // optional: persists groupCmt across restarts
 	nextSubID  uint64
 	ring       *ring
@@ -237,6 +238,7 @@ func New(opts Options) *Broker {
 		groupPend:  map[string][]*Event{},
 		groupCmt:   map[string]uint64{},
 		groupMax:   map[string]uint64{},
+		groupAck:   map[string]bool{},
 		groupStore: opts.GroupStore,
 		ring:       newRing(lm.Retain),
 	}
@@ -521,7 +523,9 @@ func (b *Broker) tryPlaceOnGroupLocked(name string, members []*Subscription, ev 
 // group (delivered or backlogged), so the committed offset can advance to it once
 // nothing is outstanding. Must hold b.mu.
 func (b *Broker) noteGroupDeliveredLocked(name string, seq uint64) {
-	if b.groupStore == nil {
+	// Only durable (store-backed) at-least-once groups track a committed offset;
+	// a plain group must not, or a resume would replay already-delivered events.
+	if b.groupStore == nil || !b.groupAck[name] {
 		return
 	}
 	if seq > b.groupMax[name] {
@@ -548,6 +552,14 @@ func (b *Broker) deliverToGroupLocked(name string, members []*Subscription, ev *
 	b.deliverLocked(members[0], ev)
 }
 
+// ackWord describes a group's delivery mode for an error message.
+func ackWord(ack bool) string {
+	if ack {
+		return "at-least-once (ack)"
+	}
+	return "at-most-once (no ack)"
+}
+
 // groupIsAck reports whether any member of the group runs at-least-once (so an
 // undeliverable event should be held rather than dropped).
 func groupIsAck(members []*Subscription) bool {
@@ -570,6 +582,17 @@ func (b *Broker) enqueueGroupPendingLocked(name string, ev *Event) {
 	}
 	b.groupPend[name] = append(q, ev)
 	b.noteGroupDeliveredLocked(name, ev.Seq)
+}
+
+// trimGroupPendingLocked enforces MaxGroupPending after a bulk prepend (a
+// departing member's requeued in-flight), dropping the oldest overflow and
+// counting it — so redelivery cannot push a group's backlog past its cap.
+func (b *Broker) trimGroupPendingLocked(name string) {
+	q := b.groupPend[name]
+	if over := len(q) - b.lm.MaxGroupPending; over > 0 {
+		b.dropped += uint64(over)
+		b.groupPend[name] = q[over:]
+	}
 }
 
 // recomputeGroupCommittedLocked recomputes and persists a durable group's
@@ -994,12 +1017,24 @@ func (b *Broker) Subscribe(id Identity, opts SubOptions) (*Subscription, error) 
 		b.mu.Unlock()
 		return nil, fmt.Errorf("%w: %d subscriptions for peer at max", ErrTooMany, b.lm.MaxSubsPerPeer)
 	}
-	b.nextSubID++
-	s.ID = b.nextSubID
-	b.perPeer[id.Key]++
 	groupWasEmpty := false
 	if s.group != "" {
 		groupWasEmpty = b.groupN[s.group] == 0
+		// A consumer group is uniformly at-least-once or not — a mixed group could
+		// let an ack member's commit advance past a non-ack member's unread event
+		// (silent loss across a restart). Enforce agreement at join.
+		if !groupWasEmpty && b.groupAck[s.group] != s.ackMode {
+			b.mu.Unlock()
+			return nil, fmt.Errorf("%w: group %q is %s; joining member must match", ErrBadTopic, s.group, ackWord(b.groupAck[s.group]))
+		}
+	}
+	b.nextSubID++
+	s.ID = b.nextSubID
+	b.perPeer[id.Key]++
+	if s.group != "" {
+		if groupWasEmpty {
+			b.groupAck[s.group] = s.ackMode
+		}
 		b.groupN[s.group]++
 	}
 	// Register before replay so backpressure (Disconnect) during replay is
@@ -1055,7 +1090,7 @@ func (b *Broker) Subscribe(id Identity, opts SubOptions) (*Subscription, error) 
 	// A durable group resuming (its first member joining after a broker restart
 	// or a total outage) replays the events after its committed offset, so no
 	// un-acked work is lost across the gap.
-	if groupWasEmpty && s.group != "" {
+	if groupWasEmpty && s.group != "" && s.ackMode {
 		b.resumeDurableGroupLocked(s.group, s)
 	}
 	// A newly-joined at-least-once member drains any backlog its group accrued
@@ -1147,7 +1182,7 @@ func (b *Broker) closeSubLocked(s *Subscription) {
 	}
 	if s.group != "" {
 		remaining := b.groupN[s.group] - 1
-		durable := b.groupStore != nil
+		durable := b.groupStore != nil && s.ackMode
 		// At-least-once: a departing member's un-acked events are requeued to the
 		// front of the group backlog so another member reprocesses them (a rolling
 		// or crashed worker loses no work). A duplicate is possible if the member
@@ -1160,6 +1195,7 @@ func (b *Broker) closeSubLocked(s *Subscription) {
 				}
 				sort.Slice(repend, func(i, j int) bool { return repend[i].Seq < repend[j].Seq })
 				b.groupPend[s.group] = append(repend, b.groupPend[s.group]...)
+				b.trimGroupPendingLocked(s.group) // keep the backlog within its cap
 			} else if !durable {
 				// Last member of a NON-durable group left holding un-acked work — it
 				// cannot be redelivered. Count it (surfaced, not silent).
@@ -1171,10 +1207,13 @@ func (b *Broker) closeSubLocked(s *Subscription) {
 		s.inflight = nil
 		if remaining <= 0 {
 			if durable {
-				// Keep the committed offset (persisted) so the group resumes across
-				// this outage; the un-acked/backlogged events are below it and will
-				// replay when a member rejoins or the broker restarts.
+				// Persist the committed offset so the group resumes across this
+				// outage (the un-acked/backlogged events are below it and replay on
+				// rejoin/restart), then drop the in-memory group state — resume
+				// reloads the offset from the store. Keeping groupCmt in memory would
+				// leak one entry per distinct group name over the broker's lifetime.
 				_ = b.groupStore.Save(s.group, b.groupCmt[s.group])
+				delete(b.groupCmt, s.group)
 				delete(b.groupMax, s.group)
 			} else if q := b.groupPend[s.group]; len(q) > 0 {
 				b.dropped += uint64(len(q))
@@ -1182,6 +1221,7 @@ func (b *Broker) closeSubLocked(s *Subscription) {
 			delete(b.groupN, s.group)
 			delete(b.groupRR, s.group)
 			delete(b.groupPend, s.group)
+			delete(b.groupAck, s.group)
 		} else {
 			b.groupN[s.group] = remaining
 			b.drainGroupPendingLocked(s.group) // hand the requeued work to a survivor
@@ -1209,6 +1249,7 @@ func (b *Broker) Close() {
 	b.groupPend = map[string][]*Event{}
 	b.groupCmt = map[string]uint64{}
 	b.groupMax = map[string]uint64{}
+	b.groupAck = map[string]bool{}
 	b.retained = map[string]*Event{}
 	b.retainExp = map[string]time.Time{}
 }

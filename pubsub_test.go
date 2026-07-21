@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,24 @@ import (
 	"meshmcp/pubsub"
 	"meshmcp/session"
 )
+
+// TestClientStreamNoOutR guards against a typed-nil regression: cmdRespond in
+// its default (non-ack) mode must leave clientStream.outR unset (a genuine nil
+// interface), so Read blocks-then-EOFs on finish() instead of dereferencing a
+// nil *io.PipeReader and panicking.
+func TestClientStreamNoOutR(t *testing.T) {
+	s := &clientStream{out: []byte("hello\n"), done: make(chan struct{})}
+	buf := make([]byte, 16)
+	n, err := s.Read(buf) // drains the preamble
+	if err != nil || string(buf[:n]) != "hello\n" {
+		t.Fatalf("preamble read: n=%d err=%v", n, err)
+	}
+	go func() { time.Sleep(20 * time.Millisecond); s.finish() }()
+	n, err = s.Read(buf) // must block until finish() then EOF, never panic
+	if err != io.EOF || n != 0 {
+		t.Fatalf("post-preamble read: n=%d err=%v, want 0/EOF", n, err)
+	}
+}
 
 // TestPubsubVerifyCheckpointsCommand checks the CLI verifies signed checkpoints
 // end-to-end and rejects a wrong pinned key.

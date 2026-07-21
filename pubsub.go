@@ -997,8 +997,11 @@ func cmdRequest(args []string) error {
 		if json.Unmarshal(line, &ev) != nil || ev.Corr != corr {
 			return // not our reply
 		}
-		if *from != "" && ev.Publisher != *from {
-			return // reply from an unexpected responder — skip (anti-spoof / gather filter)
+		if *from != "" && (ev.Publisher != *from || ev.Origin != "") {
+			// Pin to the responder's locally-proven key. A federated reply
+			// (Origin set) carries a peer-ASSERTED publisher the local broker did
+			// not prove, so it cannot satisfy --from — reject it.
+			return
 		}
 		mu.Lock()
 		os.Stdout.Write(append(append([]byte(nil), ev.Payload...), '\n')) // stream each reply
@@ -1081,6 +1084,25 @@ func cmdRequest(args []string) error {
 	}
 }
 
+// capWriter buffers at most max bytes and silently discards the rest, so a
+// child process's output is bounded in memory without blocking the process
+// (writes past the cap report success). Not safe for concurrent use — each
+// handler invocation uses its own.
+type capWriter struct {
+	buf []byte
+	max int
+}
+
+func (w *capWriter) Write(p []byte) (int, error) {
+	if room := w.max - len(w.buf); room > 0 {
+		if len(p) < room {
+			room = len(p)
+		}
+		w.buf = append(w.buf, p[:room]...)
+	}
+	return len(p), nil // pretend fully consumed so the handler isn't blocked
+}
+
 // cmdRespond is the responder side of request/reply: it subscribes to a request
 // topic and, for each request, runs a handler command (the request payload on
 // its stdin) and publishes the handler's output to the event's reply_to with the
@@ -1094,7 +1116,8 @@ func cmdRespond(args []string) error {
 	group := fs.String("group", "", "share the request load across a consumer group of responders")
 	ackMode := fs.Bool("ack", false, "at-least-once: ack a request only after the handler succeeds; a crash redelivers it to another worker (requires --group)")
 	rawJSON := fs.Bool("json", false, "treat handler stdout as raw JSON (default: wrap it as a JSON string)")
-	maxBytes := fs.Int64("max-bytes", 1<<20, "maximum handler output size in bytes")
+	maxBytes := fs.Int64("max-bytes", 1<<20, "maximum handler output size in bytes (bounds memory)")
+	handlerTO := fs.Duration("handler-timeout", 0, "kill a handler that runs longer than this (0 = no limit); bounds head-of-line blocking from one slow request")
 	var labels stringList
 	fs.Var(&labels, "label", "data-flow label to attach to replies (repeatable)")
 	if err := fs.Parse(args); err != nil {
@@ -1163,13 +1186,25 @@ func cmdRespond(args []string) error {
 	// another worker; otherwise it replies with the error text so an RPC caller
 	// is never left hanging.
 	handle := func(ev *pubsub.Event) {
-		cmd := exec.CommandContext(ctx, handler[0], handler[1:]...)
+		// Per-request deadline: a hung or slow handler is killed instead of
+		// blocking the responder's single dispatch goroutine forever (a malformed
+		// request must not be a head-of-line DoS). 0 disables the limit.
+		hctx := ctx
+		if *handlerTO > 0 {
+			var hcancel context.CancelFunc
+			hctx, hcancel = context.WithTimeout(ctx, *handlerTO)
+			defer hcancel()
+		}
+		cmd := exec.CommandContext(hctx, handler[0], handler[1:]...)
 		cmd.Stdin = bytes.NewReader(ev.Payload)
 		cmd.Stderr = os.Stderr
-		out, herr := cmd.Output()
-		if int64(len(out)) > *maxBytes {
-			out = out[:*maxBytes]
-		}
+		// Bound handler stdout to max-bytes as it is produced, so an amplifying
+		// handler can't drive memory arbitrarily high (cmd.Output buffers all of
+		// stdout before any cap could apply).
+		cw := &capWriter{max: int(*maxBytes)}
+		cmd.Stdout = cw
+		herr := cmd.Run()
+		out := cw.buf
 		if herr != nil {
 			log.Printf("handler failed for corr %s: %v", ev.Corr, herr)
 			if *ackMode {
@@ -1198,7 +1233,14 @@ func cmdRespond(args []string) error {
 
 	// Subscribe to the request topic and dispatch each request to handle().
 	subHello, _ := json.Marshal(helloFrame{Role: "sub", Topics: []string{reqTopic}, Capability: capToken, Group: *group, Ack: *ackMode})
-	subStream := &clientStream{out: append(subHello, '\n'), outR: apr, done: make(chan struct{})}
+	subStream := &clientStream{out: append(subHello, '\n'), done: make(chan struct{})}
+	if apr != nil {
+		// Only stream ack frames when in ack mode. Assigning a nil *io.PipeReader
+		// to the io.Reader field would make a non-nil interface holding a nil
+		// pointer, so clientStream.Read would call (*io.PipeReader)(nil).Read and
+		// panic — set it only when there is a real pipe.
+		subStream.outR = apr
+	}
 	first := true
 	var mu sync.Mutex
 	var subErr error

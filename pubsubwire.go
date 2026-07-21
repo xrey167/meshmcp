@@ -31,6 +31,11 @@ import (
 // authoritative payload limit.
 const frameEnvelope = 1 << 16 // 64 KiB
 
+// maxRetainTTLSec bounds a wire-supplied retained-message TTL (~10 years), so
+// the int→Duration conversion cannot overflow int64. A value outside [0, this]
+// is treated as "no TTL".
+const maxRetainTTLSec = 315360000 // 10 * 365 * 24 * 3600
+
 type helloFrame struct {
 	Role         string   `json:"role"` // "pub" | "sub"
 	Topics       []string `json:"topics,omitempty"`
@@ -223,11 +228,18 @@ func (bb *brokerBackend) servePub(sc *bufio.Scanner, capToken string) {
 			}
 			continue
 		}
+		// Clamp the wire-supplied retain TTL before the int→Duration multiply, so a
+		// hostile/garbage `retain_ttl_sec` (negative or absurdly large) cannot
+		// overflow int64 and wrap into a nonsensical expiry. 0 disables the TTL.
+		ttlSec := pf.RetainTTLSec
+		if ttlSec < 0 || ttlSec > maxRetainTTLSec {
+			ttlSec = 0
+		}
 		ev, err := bb.broker.PublishOpts(bb.ident, pf.Topic, pf.Payload, pubsub.PublishOptions{
 			Labels:       pf.Labels,
 			Capability:   capToken,
 			Retain:       pf.Retain,
-			RetainTTL:    time.Duration(pf.RetainTTLSec) * time.Second,
+			RetainTTL:    time.Duration(ttlSec) * time.Second,
 			RetainDelete: pf.RetainDelete,
 			Encoding:     pf.Enc,
 			ReplyTo:      pf.ReplyTo,
