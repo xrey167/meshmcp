@@ -28,6 +28,9 @@ name: alerts-bus                       # audience name for signed capability gra
 audit_log: ./pubsub-audit.jsonl        # one hash-chained record per allow/deny decision
 event_log: ./pubsub-events.jsonl       # durable event stream: survives restart, --since replay,
                                        # verify with `meshmcp pubsub verify ./pubsub-events.jsonl`
+group_cursors: ./pubsub-groups        # per-group committed offsets: makes at-least-once (--ack)
+                                       # consumer groups durable across a broker restart / total outage
+                                       # (pair with event_log so the replay window survives)
 
 # Signed Merkle checkpoints over the event stream — non-repudiation, so an
 # insider who controls the file can't rewrite history without the signature

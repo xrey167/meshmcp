@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -65,6 +66,11 @@ type PubsubConfig struct {
 	// Federate mirrors remote brokers' topics into this one, so a subscriber
 	// here also sees events published there (removing the single-broker SPOF).
 	Federate []FederatePeer `yaml:"federate"`
+
+	// GroupCursors is a directory of per-consumer-group committed offsets. Set it
+	// to make at-least-once (--ack) groups durable across a broker restart: on
+	// resume, events after a group's committed offset are replayed to the group.
+	GroupCursors string `yaml:"group_cursors"`
 
 	Policy pubsub.RuleAuthorizer `yaml:"policy"` // per-topic authorization
 	Limits pubsub.Limits         `yaml:"limits"` // resource caps
@@ -311,6 +317,18 @@ func cmdPubsub(args []string) error {
 		log.Printf("capability grants accepted from %d authority key(s) for audience %q", len(cfg.TrustedKeys), cfg.Name)
 	}
 
+	// Optional durable consumer groups: persist per-group committed offsets so
+	// at-least-once groups survive a broker restart.
+	var groupStore pubsub.GroupStore
+	if cfg.GroupCursors != "" {
+		gs, err := newFileGroupStore(cfg.GroupCursors)
+		if err != nil {
+			return fmt.Errorf("group cursors: %w", err)
+		}
+		groupStore = gs
+		log.Printf("durable consumer groups: offsets in %s", cfg.GroupCursors)
+	}
+
 	policyCopy := cfg.Policy // take a stable address for the Authorizer
 	broker := pubsub.New(pubsub.Options{
 		Authorizer:   &policyCopy,
@@ -319,6 +337,7 @@ func cmdPubsub(args []string) error {
 		Seed:         seed,
 		Name:         cfg.Name,
 		Capabilities: capVerifier,
+		GroupStore:   groupStore,
 		Limits:       cfg.Limits,
 	})
 	defer broker.Close()
@@ -677,6 +696,65 @@ func readCursor(path string) (seq uint64, ok bool) {
 		return 0, false
 	}
 	return n, true
+}
+
+// fileGroupStore persists consumer-group committed offsets as one small file per
+// group under a directory, so durable at-least-once groups resume across a broker
+// restart. Group names are hex-encoded into filenames (a group name may contain
+// characters unsafe for a path). It implements pubsub.GroupStore.
+type fileGroupStore struct {
+	dir string
+	mu  sync.Mutex
+	m   map[string]uint64
+}
+
+func newFileGroupStore(dir string) (*fileGroupStore, error) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	s := &fileGroupStore{dir: dir, m: map[string]uint64{}}
+	// Preload existing offsets so Load is in-memory and a restart resumes.
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		name := e.Name()
+		enc, ok := strings.CutSuffix(name, ".cursor")
+		if !ok {
+			continue
+		}
+		raw, err := hex.DecodeString(enc)
+		if err != nil {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			continue
+		}
+		n, err := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
+		if err != nil {
+			continue
+		}
+		s.m[string(raw)] = n
+	}
+	return s, nil
+}
+
+func (s *fileGroupStore) Load(group string) (uint64, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n, ok := s.m[group]
+	return n, ok
+}
+
+func (s *fileGroupStore) Save(group string, committed uint64) error {
+	s.mu.Lock()
+	s.m[group] = committed
+	s.mu.Unlock()
+	path := filepath.Join(s.dir, hex.EncodeToString([]byte(group))+".cursor")
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(strconv.FormatUint(committed, 10)), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // writeCursor persists the last-seen sequence atomically (temp file + rename),

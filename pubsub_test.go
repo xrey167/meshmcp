@@ -73,6 +73,37 @@ func TestDurableCursor(t *testing.T) {
 	}
 }
 
+// TestFileGroupStore verifies the durable consumer-group offset store round-trips
+// through the filesystem and reloads on "restart" (a fresh store over the same
+// directory), including group names with path-unsafe characters.
+func TestFileGroupStore(t *testing.T) {
+	dir := t.TempDir()
+	s, err := newFileGroupStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.Load("alerts/prod.*"); ok {
+		t.Fatal("unknown group should not be ok")
+	}
+	if err := s.Save("alerts/prod.*", 128); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Save("plain", 7); err != nil {
+		t.Fatal(err)
+	}
+	// A fresh store over the same dir preloads persisted offsets (simulated restart).
+	s2, err := newFileGroupStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, ok := s2.Load("alerts/prod.*"); !ok || n != 128 {
+		t.Fatalf("reloaded offset = %d ok=%v, want 128", n, ok)
+	}
+	if n, ok := s2.Load("plain"); !ok || n != 7 {
+		t.Fatalf("reloaded plain offset = %d ok=%v, want 7", n, ok)
+	}
+}
+
 // TestStreamPubSinkCounts checks the streaming publisher tallies per-event acks
 // (including across a split write).
 func TestStreamPubSinkCounts(t *testing.T) {

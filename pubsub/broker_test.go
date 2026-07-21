@@ -535,6 +535,124 @@ func TestAckRequiresGroup(t *testing.T) {
 	}
 }
 
+// memGroupStore is an in-memory GroupStore for tests (stands in for the file
+// store) — it also survives a simulated "restart" (a new broker built with the
+// same store instance).
+type memGroupStore struct {
+	mu sync.Mutex
+	m  map[string]uint64
+}
+
+func newMemGroupStore() *memGroupStore { return &memGroupStore{m: map[string]uint64{}} }
+func (s *memGroupStore) Load(g string) (uint64, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n, ok := s.m[g]
+	return n, ok
+}
+func (s *memGroupStore) Save(g string, c uint64) error {
+	s.mu.Lock()
+	s.m[g] = c
+	s.mu.Unlock()
+	return nil
+}
+
+// TestDurableGroupSurvivesRestart is the cross-restart guarantee: an
+// at-least-once group with a committed-offset store replays its un-acked events
+// to a member that joins after a broker restart, so no work is lost across the
+// gap.
+func TestDurableGroupSurvivesRestart(t *testing.T) {
+	store := newMemGroupStore()
+	var buf bytes.Buffer
+
+	// Run 1: a durable group processes one job and acks it, then a second job is
+	// published and delivered but NOT acked before the broker "crashes".
+	b1 := New(Options{Authorizer: AllowAll{}, Events: NewEventLog(&buf), GroupStore: store, Limits: Limits{Retain: 100}})
+	w1, err := b1.Subscribe(id("w1"), SubOptions{Topics: []string{"jobs"}, Group: "g", Ack: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	j1, _ := b1.Publish(id("p"), "jobs", json.RawMessage(`"j1"`), nil)
+	if e := recv(t, w1); e.Seq != j1.Seq {
+		t.Fatalf("w1 got %d, want %d", e.Seq, j1.Seq)
+	}
+	b1.Ack(w1, j1.Seq) // j1 done → committed advances past it
+	j2, _ := b1.Publish(id("p"), "jobs", json.RawMessage(`"j2"`), nil)
+	recv(t, w1) // j2 delivered but NOT acked
+	b1.Close()  // "crash" with j2 un-acked
+
+	// Run 2: a fresh broker seeded from the same log + same store. A worker joins
+	// the group and must be redelivered j2 (un-acked) but NOT j1 (acked).
+	seed, err := LoadEvents(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b2 := New(Options{Authorizer: AllowAll{}, Events: NewEventLog(&buf), Seed: seed, GroupStore: store, Limits: Limits{Retain: 100}})
+	defer b2.Close()
+
+	w2, err := b2.Subscribe(id("w2"), SubOptions{Topics: []string{"jobs"}, Group: "g", Ack: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w2.Close()
+
+	ev := recv(t, w2)
+	if ev.Seq != j2.Seq {
+		t.Fatalf("after restart, replayed seq %d, want the un-acked j2 (%d)", ev.Seq, j2.Seq)
+	}
+	// No further replay (j1 was acked before the crash).
+	if r := recvWithin(w2, 200*time.Millisecond); r != nil {
+		t.Fatalf("acked j1 should not be replayed, got seq %d", r.Seq)
+	}
+}
+
+// TestDurableGroupBrandNewStartsFromNow verifies a brand-new durable group does
+// NOT replay history — it starts from the current sequence, like a fresh
+// subscriber.
+func TestDurableGroupBrandNewStartsFromNow(t *testing.T) {
+	store := newMemGroupStore()
+	b := New(Options{Authorizer: AllowAll{}, GroupStore: store, Limits: Limits{Retain: 100}})
+	defer b.Close()
+
+	// Pre-existing history before the group ever existed.
+	for i := 0; i < 5; i++ {
+		b.Publish(id("p"), "jobs", json.RawMessage(`1`), nil)
+	}
+	w, _ := b.Subscribe(id("w"), SubOptions{Topics: []string{"jobs"}, Group: "g", Ack: true})
+	defer w.Close()
+
+	// The brand-new group must not receive the 5 historical events.
+	if r := recvWithin(w, 200*time.Millisecond); r != nil {
+		t.Fatalf("brand-new durable group replayed history (seq %d); it should start from now", r.Seq)
+	}
+	// A new publish is delivered normally.
+	nv, _ := b.Publish(id("p"), "jobs", json.RawMessage(`1`), nil)
+	if e := recv(t, w); e.Seq != nv.Seq {
+		t.Fatalf("new event seq %d, want %d", e.Seq, nv.Seq)
+	}
+}
+
+// TestDurableGroupResumesAfterTotalOutage verifies same-process recovery: after
+// the group's last member leaves with un-acked work, a new member joining
+// replays it (via the committed offset), no restart required.
+func TestDurableGroupResumesAfterTotalOutage(t *testing.T) {
+	store := newMemGroupStore()
+	b := New(Options{Authorizer: AllowAll{}, GroupStore: store, Limits: Limits{Retain: 100}})
+	defer b.Close()
+
+	w1, _ := b.Subscribe(id("w1"), SubOptions{Topics: []string{"jobs"}, Group: "g", Ack: true})
+	job, _ := b.Publish(id("p"), "jobs", json.RawMessage(`"x"`), nil)
+	recv(t, w1) // delivered, not acked
+	w1.Close()  // total outage: last member leaves with the job un-acked
+
+	// A replacement worker joins → the un-acked job replays.
+	w2, _ := b.Subscribe(id("w2"), SubOptions{Topics: []string{"jobs"}, Group: "g", Ack: true})
+	defer w2.Close()
+	if r := recvWithin(w2, time.Second); r == nil || r.Seq != job.Seq {
+		t.Fatal("un-acked job was not replayed to the replacement worker after a total outage")
+	}
+}
+
 // TestConsumerGroupRejectsSince verifies --since replay is refused with a group
 // (a group is live-only; replaying a window to every competing consumer would
 // duplicate it).

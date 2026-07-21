@@ -104,14 +104,21 @@ further events are held in a **bounded per-group backlog** (`max_group_pending`;
 oldest dropped and counted if it overflows) and drain as members ack. Duplicates
 are possible if a member dies mid-processing — at-least-once, by design.
 
-A group is live-only and scoped to **one broker**: `--since` replay is not
-combined with `--group` (replaying a window to every competing consumer would
-duplicate it), and a group spanning two *federated* brokers gets one delivery
-**per broker** (federation mirrors independently — it does not coordinate a global
-group). At-least-once holds across worker churn while the group keeps ≥1 member;
-if the **last** member leaves holding un-acked work, that work can't be
-redelivered live (it is counted, not silently lost) — recover it with the durable
-`event_log:` plus a `--durable` non-group consumer.
+Set `group_cursors:` on the broker to make at-least-once groups **durable across
+a restart or a total outage**: the broker persists each group's committed offset
+(the point up to which it has fully processed), and on resume replays the events
+after it to the group — so even if every worker dies (or the broker restarts)
+with work in flight, a worker that joins later picks it up. Pair it with
+`event_log:` so the replay window survives the restart. A brand-new group starts
+from "now" (it does not replay history).
+
+A group is scoped to **one broker**: `--since` replay is not combined with
+`--group` (replaying a window to every competing consumer would duplicate it),
+and a group spanning two *federated* brokers gets one delivery **per broker**
+(federation mirrors independently — it does not coordinate a global group).
+Without `group_cursors:`, at-least-once holds across worker churn while the group
+keeps ≥1 member, but a total outage's un-acked work is counted (not silently
+lost) rather than recovered.
 
 `--durable <file>` makes a subscriber **at-least-once**: it persists the
 last-seen sequence to the file and resumes from it, so with a broker `event_log:`
