@@ -36,7 +36,7 @@ meshmcp is an **identity-native control plane for agent-to-tool (MCP) traffic**.
 | `air.go` · `airserve.go` · `airworkflow.go` | **Air · Steer** CLI: `air sessions/steer/launch/agent-steer/workflow/serve` — drive live work over the mesh (see `docs/AIR.md`, `docs/AIR-STEER.md`). |
 | `aircontrol.go` | The gateway Air control endpoint (`/v1/sessions`, `/v1/steer`) served by `serve` when a `control:` block is set. |
 | `steerenvelope.go` · `steerinbox.go` | The agent steer inbox: envelope wire type + the drop-receiver-style factory that feeds `runAgentLoop`. |
-| `pushwake.go` | Push-wake seam: device registry + `Notifier` (vendor APNs/FCM pluggable), wired into `approvals`. |
+| `pushwake.go` · `webhooknotify.go` | Push-wake seam: device registry + `Notifier`, wired into `approvals`; `logNotifier` stub + a `webhookNotifier` (`--notify-webhook`) that delivers over the network (vendor APNs/FCM still pluggable). |
 | `drop.go` · `push.go` · `cas.go` · `peers.go` | AirDrop payload layer: `drop` / `push` / `fetch` / `peers`, resumable + audited. |
 | `probe.go` · `replay.go` | `probe` (handshake diagnostic) and `replay` (re-issue a traced session and diff). |
 | `pubsub.go` · `pubsubwire.go` | `pubsub` (identity-gated event-bus daemon), `publish`, `subscribe`; the wire protocol + `session.Backend` adapter over the `pubsub/` core. |

@@ -10,7 +10,7 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // cmdMarket implements "meshmcp market <keygen|publish|list|verify|install>" —
