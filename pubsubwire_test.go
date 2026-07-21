@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"meshmcp/pubsub"
-	"meshmcp/session"
+	"github.com/xrey167/meshmcp/pubsub"
+	"github.com/xrey167/meshmcp/session"
 )
 
 // TestWirePublishCarriesOptions verifies the publish wire path (servePub) maps

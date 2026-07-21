@@ -12,7 +12,7 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"meshmcp/registry"
+	"github.com/xrey167/meshmcp/registry"
 )
 
 // F19 · Mesh Spotlight — federated semantic search.

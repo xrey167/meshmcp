@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"meshmcp/mcp"
+	"github.com/xrey167/meshmcp/mcp"
 )
 
 // searchToolReturning registers a vectors-style `search` tool that answers with

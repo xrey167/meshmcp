@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 func TestManifestStorePublishAndList(t *testing.T) {
