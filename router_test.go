@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/xrey167/meshmcp/mcp"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 func TestRouterAggregatesAndRoutes(t *testing.T) {
@@ -29,7 +31,7 @@ func TestRouterAggregatesAndRoutes(t *testing.T) {
 	defer stopB()
 
 	agg, cleanup := buildAggregate(context.Background(), loopbackDial,
-		map[string][]string{"svca": {addrA}, "svcb": {addrB}}, nil)
+		map[string][]string{"svca": {addrA}, "svcb": {addrB}}, nil, nil)
 	defer cleanup()
 
 	mc := clientTo(agg)
@@ -97,7 +99,7 @@ func TestRouterFailsOverToHealthyReplica(t *testing.T) {
 	dl.Close()
 
 	agg, cleanup := buildAggregate(context.Background(), loopbackDial,
-		map[string][]string{"svc": {deadAddr, addrGood}}, nil)
+		map[string][]string{"svc": {deadAddr, addrGood}}, nil, nil)
 	defer cleanup()
 
 	mc := clientTo(agg)
@@ -314,10 +316,85 @@ func TestRouterRequiresAllowList(t *testing.T) {
 	}
 }
 
+// TestRouterEnforcesToolPolicy: with a router policy configured, an admitted
+// caller may drive only the tools the policy allows. A forbidden tool is denied
+// at the router and NEVER reaches the upstream — the confused-deputy blast radius
+// is reduced from "any upstream tool" to exactly what the policy permits.
+func TestRouterEnforcesToolPolicy(t *testing.T) {
+	var mu sync.Mutex
+	secretCalls := 0
+	addr, stop := startLoopbackServer(t, func(s *mcp.Server) {
+		s.AddTool(mcp.Tool{Name: "ok", Handler: func(_ context.Context, _ json.RawMessage) (mcp.ToolResult, error) {
+			return mcp.ToolResult{Content: []mcp.Content{mcp.Text("ok-result")}}, nil
+		}})
+		s.AddTool(mcp.Tool{Name: "secret", Handler: func(_ context.Context, _ json.RawMessage) (mcp.ToolResult, error) {
+			mu.Lock()
+			secretCalls++
+			mu.Unlock()
+			return mcp.ToolResult{Content: []mcp.Content{mcp.Text("leaked")}}, nil
+		}})
+	})
+	defer stop()
+
+	// Router policy: default-deny, allow only the namespaced tool "svc.ok".
+	pol := &policy.Policy{DefaultAllow: false, Rules: []policy.Rule{
+		{Peers: []string{"*"}, Tools: []string{"svc.ok"}, Allow: true},
+	}}
+	eng := policy.NewEngine(pol, func() time.Time { return time.Now() }, nil)
+	// enforce mirrors handleRouterConn: authorize by the caller's transport
+	// identity + namespaced tool name before forwarding.
+	enforce := func(namespaced string, _ json.RawMessage) error {
+		if dec := eng.DecideToolCall("caller.mesh", "CALLERKEY", namespaced, nil); dec.Outcome != policy.OutcomeAllow {
+			return fmt.Errorf("router policy denies %q", namespaced)
+		}
+		return nil
+	}
+
+	agg, cleanup := buildAggregate(context.Background(), loopbackDial,
+		map[string][]string{"svc": {addr}}, nil, enforce)
+	defer cleanup()
+
+	mc := clientTo(agg)
+	defer mc.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := mc.Initialize(ctx, "test"); err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+
+	// Allowed tool is forwarded and returns the upstream result.
+	res, err := mc.CallTool(ctx, "svc.ok", map[string]any{}, false)
+	if err != nil {
+		t.Fatalf("svc.ok should be allowed: %v", err)
+	}
+	if got := firstText(res); got != "ok-result" {
+		t.Fatalf("svc.ok = %q, want ok-result", got)
+	}
+
+	// Forbidden tool: denied at the router (isError result) and never dispatched.
+	res, err = mc.CallTool(ctx, "svc.secret", map[string]any{}, false)
+	if err != nil {
+		t.Fatalf("unexpected transport error: %v", err)
+	}
+	var tr struct {
+		IsError bool `json:"isError"`
+	}
+	_ = json.Unmarshal(res, &tr)
+	if !tr.IsError || !strings.Contains(firstText(res), "router policy") {
+		t.Fatalf("svc.secret should be denied by router policy, got %s", res)
+	}
+	mu.Lock()
+	n := secretCalls
+	mu.Unlock()
+	if n != 0 {
+		t.Fatalf("a router-denied tool reached the upstream %d time(s)", n)
+	}
+}
+
 // TestRouterExampleConfigsLoad: the shipped router example configs include an
 // allow list and load.
 func TestRouterExampleConfigsLoad(t *testing.T) {
-	for _, f := range []string{"examples/router.yaml", "examples/router-failover.yaml"} {
+	for _, f := range []string{"examples/router.yaml", "examples/router-failover.yaml", "examples/router-policy.yaml"} {
 		if _, err := loadRouterConfig(f); err != nil {
 			t.Errorf("%s should load: %v", f, err)
 		}

@@ -1,0 +1,41 @@
+# Aggregating router WITH router-side tool policy.
+#
+# Beyond the default-deny caller allow list (who may reach the router at all),
+# a `policy:` block authorizes every forwarded tools/call against the ORIGINAL
+# caller's mesh identity and the namespaced tool name (e.g. "billing.transfer").
+# An admitted caller can then drive only the tools the policy permits — not the
+# whole upstream surface. This is enforcement the router owns locally; the
+# signed-delegation upstream verification (docs/spec/ROUTER-DELEGATION.md) is a
+# separate, Labs feature.
+mesh:
+  device_name: meshmcp-router
+  setup_key_env: NB_SETUP_KEY
+  config_path: ./router-nb.json
+  log_level: error
+
+listen_port: 9100
+upstreams:
+  billing: "100.81.215.9:9101"
+  search:
+    - "100.81.215.9:9102"
+    - "100.81.215.9:9103"
+
+allow:
+  - "agent-host.netbird.cloud"
+
+# Router tool policy: default-deny, then allow specific (caller, tool) pairs by
+# the NAMESPACED tool name. Use allow/deny/rate rules; a require_cosign rule
+# denies at the router (the router is not a co-sign enforcement point — the
+# upstream gateway is).
+policy:
+  default_allow: false
+  rules:
+    # The agent may run read-only search tools freely.
+    - peers: ["agent-host.netbird.cloud"]
+      tools: ["search.*"]
+      allow: true
+    # ...but billing.transfer is rate-limited even through the router.
+    - peers: ["agent-host.netbird.cloud"]
+      tools: ["billing.transfer"]
+      allow: true
+      rate: { max: 5, per: "1m" }

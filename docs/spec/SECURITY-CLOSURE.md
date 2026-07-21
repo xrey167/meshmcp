@@ -1270,3 +1270,68 @@ lease tests are unchanged.
 ### Commit
 
 `session: wire CAS ownership lease + fencing into the running server`
+
+---
+
+## F-P4.3 · Router forwards any tool for an admitted caller — FIXED (router-side policy)
+
+**Severity:** High (the default-deny caller ACL controls *who* may reach the
+router, but an admitted caller could still drive *any* upstream tool the router
+could reach — the router applied no per-call authorization before forwarding).
+
+**Component:** `router.go`.
+
+**Reproduced:** Yes. `handleRouterConn` admitted a caller by ACL and then proxied
+every upstream tool unconditionally; there was no per-`tools/call` policy check.
+
+### Fix (the mission's "at minimum": full tool policy at the router)
+
+- `RouterConfig.Policy` (optional) — a standard `policy.Policy` enforced at the
+  router. When set, `cmdRouter` builds one `policy.Engine`.
+- Every proxied `tools/call` is authorized in the proxy tool handler **before**
+  dispatch, keyed by the ORIGINAL caller's transport identity (`fqdn`, `pubKey`
+  from `peerIdentity`, never `_meta`) and the **namespaced** tool name
+  (`svca.transfer`). A non-allow decision returns an `isError` denial and the
+  call is **never dispatched upstream** (`enforce` runs before `pool.call`).
+- Router policy uses allow/deny/rate rules; a `require_cosign` rule denies at the
+  router (it is not a co-sign enforcement point). Optional — with no policy the
+  router keeps prior mesh + caller-ACL admission.
+
+This cannot widen a caller's authority (it only denies), reducing the
+confused-deputy blast radius from "any upstream tool" to exactly what the router
+policy permits — enforcement the router owns locally, with no wire-protocol
+change and no upstream changes.
+
+### Tests (`router_test.go`)
+
+- `TestRouterEnforcesToolPolicy` — an admitted caller may call `svc.ok` (allowed
+  by policy) but is denied `svc.secret`; the denied call returns an `isError`
+  result AND the upstream tool handler is never invoked (`secretCalls == 0`).
+- `TestRouterExampleConfigsLoad` — now also loads `examples/router-policy.yaml`
+  (a router with a tool policy + rate limit).
+
+### Compatibility impact
+
+None. `Policy` is optional and additive; the three internal `buildAggregate`
+call sites gain a `nil` enforcer (no enforcement) and behave exactly as before.
+
+### Residual risk / follow-up
+
+- Router-side policy covers `tools/call` (the confused-deputy tool-driving risk).
+  Resource/prompt read policy at the router is a follow-up.
+- The router has no audit sink of its own yet; denials are logged with the caller
+  identity. A hash-chained router audit (recording caller + router + tool) is a
+  follow-up.
+- The full **signed-delegation** upstream verification (per-hop `DelegationToken`
+  minted by the router, `VerifyDelegation` + `AuthorizeDelegated` at the upstream)
+  remains Labs — it needs the audience-discovery, authority-key-distribution, and
+  token-transport decisions called out in `docs/spec/ROUTER-DELEGATION.md`.
+
+### Definition-of-Done item satisfied
+
+- The router's stated minimum — *default-deny caller ACL (F-P4.2) **and** full
+  tool policy at the router before forwarding* — is now enforced end to end.
+
+### Commit
+
+`router: enforce tool policy per caller before forwarding`

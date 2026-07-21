@@ -34,7 +34,7 @@ func TestRouterRelaysServerRequest(t *testing.T) {
 	defer stop()
 
 	agg, cleanup := buildAggregate(context.Background(), loopbackDial,
-		map[string][]string{"up": {addr}}, nil)
+		map[string][]string{"up": {addr}}, nil, nil)
 	defer cleanup()
 
 	mc := clientTo(agg)
