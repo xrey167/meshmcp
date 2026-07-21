@@ -900,13 +900,17 @@ func cmdRequest(args []string) error {
 	capFlag := fs.String("capability", "", "present a signed capability grant; @file reads the token from a file")
 	replyTopic := fs.String("reply-topic", "", "topic to receive the reply on (default: _rpc.reply.<id>)")
 	from := fs.String("from", "", "only accept a reply whose publisher WireGuard key matches this (pin the responder)")
-	timeout := fs.Duration("timeout", 30*time.Second, "how long to wait for a reply")
+	replies := fs.Int("replies", 1, "replies to collect before returning; 0 = collect all until --timeout (scatter-gather across many responders)")
+	timeout := fs.Duration("timeout", 30*time.Second, "how long to wait for replies")
 	maxBytes := fs.Int64("max-bytes", 1<<20, "maximum request payload size in bytes")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 2 {
 		return errors.New("usage: meshmcp request [flags] <peer-ip:port> <topic>")
+	}
+	if *replies < 0 {
+		return errors.New("--replies must be >= 0")
 	}
 	target, topic := fs.Arg(0), fs.Arg(1)
 	capToken, err := readCapabilityToken(*capFlag)
@@ -963,14 +967,15 @@ func cmdRequest(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
-	// Subscribe to the reply topic FIRST, so the reply cannot race ahead of our
-	// subscription. onLine handles the ack, then captures the correlated reply.
+	// Subscribe to the reply topic FIRST, so a reply cannot race ahead of our
+	// subscription. onLine handles the ack, then collects correlated replies —
+	// one for a normal request, up to N (or all until timeout) for scatter-gather.
 	var mu sync.Mutex
-	var replyPayload []byte
 	var subErr error
+	var count int
 	subscribed := make(chan struct{})
-	replyCh := make(chan struct{})
-	var subOnce, replyOnce sync.Once
+	allDone := make(chan struct{})
+	var subOnce, doneOnce sync.Once
 	subHello, _ := json.Marshal(helloFrame{Role: "sub", Topics: []string{reply}, Capability: capToken})
 	subStream := &clientStream{out: append(subHello, '\n'), done: make(chan struct{})}
 	firstLine := true
@@ -993,13 +998,17 @@ func cmdRequest(args []string) error {
 			return // not our reply
 		}
 		if *from != "" && ev.Publisher != *from {
-			return // reply from an unexpected responder — keep waiting (anti-spoof)
+			return // reply from an unexpected responder — skip (anti-spoof / gather filter)
 		}
 		mu.Lock()
-		replyPayload = append([]byte(nil), ev.Payload...)
+		os.Stdout.Write(append(append([]byte(nil), ev.Payload...), '\n')) // stream each reply
+		count++
+		reached := *replies > 0 && count >= *replies
 		mu.Unlock()
-		replyOnce.Do(func() { close(replyCh) })
-		subStream.finish()
+		if reached {
+			doneOnce.Do(func() { close(allDone) })
+			subStream.finish()
+		}
 	}
 	go func() {
 		scl := session.NewClient(dial, log.Printf)
@@ -1051,17 +1060,24 @@ func cmdRequest(args []string) error {
 		return fmt.Errorf("broker rejected request: %s", presult.Error)
 	}
 
-	// Await the correlated reply (or time out).
+	// Collect replies until the requested count is reached or the timeout fires.
+	// Each reply is already streamed to stdout as it arrives.
 	select {
-	case <-replyCh:
-		mu.Lock()
-		rp := replyPayload
-		mu.Unlock()
-		os.Stdout.Write(append(rp, '\n'))
-		return nil
+	case <-allDone:
+		return nil // collected the requested number of replies
 	case <-ctx.Done():
 		subStream.finish()
-		return fmt.Errorf("request to %s: no reply within %s", target, *timeout)
+		mu.Lock()
+		c := count
+		mu.Unlock()
+		switch {
+		case c == 0:
+			return fmt.Errorf("request to %s: no reply within %s", target, *timeout)
+		case *replies == 0:
+			return nil // gather-all: the timeout is the expected end, and we got replies
+		default:
+			return fmt.Errorf("request to %s: collected %d of %d replies within %s", target, c, *replies, *timeout)
+		}
 	}
 }
 

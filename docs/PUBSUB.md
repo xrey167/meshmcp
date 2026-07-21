@@ -168,8 +168,17 @@ cross-talk; `--reply-topic` overrides it, `--timeout` bounds the wait, and
 reply from anyone else). RPC is still deny-by-default: **both parties must be
 granted the reply namespace** — the requester to *subscribe* `_rpc.reply.*`, the
 responder to *publish* it — so an RPC channel is an explicit policy grant, not
-ambient. `request` returns the **first** matching reply (single-reply RPC;
-scatter-gather across many responders is not built in).
+ambient.
+
+For **scatter-gather** — one request, many responders — use `--replies`: fan a
+request out to a fleet and collect every answer (each printed as it arrives).
+`--replies N` returns after N replies or the timeout; `--replies 0` collects all
+that answer within the timeout (unknown fleet size):
+
+```sh
+# health-check every node subscribed to fleet.ping; collect all answers in 5s
+echo ping | meshmcp request --replies 0 --timeout 5s 100.x.y.z:9120 fleet.ping
+```
 
 ## Durability
 
