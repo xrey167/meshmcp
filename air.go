@@ -55,6 +55,8 @@ func cmdAir(args []string) error {
 		return cmdAirListen(args[1:])
 	case "cast":
 		return cmdAirCast(args[1:])
+	case "screen":
+		return cmdAirScreen(args[1:])
 	case "catalog", "discover":
 		return cmdAirCatalog(args[1:])
 	case "change":
@@ -80,7 +82,7 @@ func cmdAir(args []string) error {
 	case "-h", "--help", "help":
 		return airUsage()
 	default:
-		return fmt.Errorf("meshmcp air: unknown subcommand %q (want whoami | map | browse | stream | vision | bind | film | play | ring | listen | cast | catalog | change | dns | sessions | steer | launch | agent-steer | tasks | task-steer | workflow | serve)", args[0])
+		return fmt.Errorf("meshmcp air: unknown subcommand %q (want whoami | map | browse | stream | vision | bind | film | play | ring | listen | cast | screen | catalog | change | dns | sessions | steer | launch | agent-steer | tasks | task-steer | workflow | serve)", args[0])
 	}
 }
 
@@ -97,6 +99,7 @@ func airUsage() error {
 	fmt.Fprintln(os.Stderr, "  "+b("air stream")+"      <audit.jsonl>                     "+dim("watch governed Air activity live (tail the ledger)"))
 	fmt.Fprintln(os.Stderr, "  "+b("air vision")+"      <inbox-dir>                       "+dim("images the mesh dropped here (view on a phone via serve --gallery)"))
 	fmt.Fprintln(os.Stderr, "  "+b("air cast")+"        <peer-ip:port> <image>            "+dim("present an image on a peer's page (their serve --cast \"Now Showing\")"))
+	fmt.Fprintln(os.Stderr, "  "+b("air screen")+"      <peer-ip:port> --watch <f> | --recv "+dim("stream a live frame feed to a peer (governed, per-frame audited)"))
 	fmt.Fprintln(os.Stderr, "  "+b("air film")+"        record|play|verify               "+dim("record & replay governed activity (tamper-evident forensic capture)"))
 	fmt.Fprintln(os.Stderr, "  "+b("air play")+"        <film> [--speed N]                "+dim("replay a film (shortcut for air film play)"))
 	fmt.Fprintln(os.Stderr, "  "+b("air dns")+"         <domain> --control <mesh-ip:port>  "+dim("print DNS records for domain-name discovery"))
