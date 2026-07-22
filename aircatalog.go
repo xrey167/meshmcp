@@ -2,11 +2,9 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -82,22 +80,13 @@ func cmdAirCatalog(args []string) error {
 	}
 	defer cleanup()
 
-	resp, err := hc.Get(catalogURL)
+	cat, body, err := air.FetchCatalog(hc, catalogURL)
 	if err != nil {
 		return fmt.Errorf("air catalog: %w", err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("air catalog: %s: %s", resp.Status, body)
 	}
 	if *asJSON {
 		fmt.Println(string(bytes.TrimSpace(body)))
 		return nil
-	}
-	var cat AirCatalog
-	if err := json.Unmarshal(body, &cat); err != nil {
-		return fmt.Errorf("air catalog: bad response: %w", err)
 	}
 	if cat.Gateway != "" {
 		fmt.Fprintln(os.Stderr, dim("gateway ")+bold(cat.Gateway)+dim(" · "+cat.Service+" "+cat.Version))

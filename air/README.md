@@ -13,7 +13,7 @@ proven here.
 | File | Provides |
 |------|----------|
 | `catalog.go` | `Catalog` / `CatalogEntry` discovery model — builder (`NewCatalog`/`Add`/`Sorted`/`Names`), lookup (`Entry`), filters (`Steerable`/`Resumable`), and `Valid()` + `Transport*` constants |
-| `discovery.go` | ARD (Agentic Resource Discovery) legs 2–3: `DNSRecords` generation (with zone-injection-safe validation), `ParseCatalogTXT`, and `ResolveCatalog` (TXT then SRV) over injectable lookups |
+| `discovery.go` | ARD (Agentic Resource Discovery) legs 2–3: `DNSRecords` generation (with zone-injection-safe validation), `ParseCatalogTXT`, `ResolveCatalog` (TXT then SRV) over injectable lookups, and `FetchCatalog` (transport-agnostic fetch+parse over an injected `http.Client`, bounded body) |
 | `steer.go` | `SteerEnvelope` (+ `Validate`), the `Task`/`Nudge`/`Cancel`/`TaskArgs` constructors, `String()`, and the newline-JSON framing (`ParseEnvelopes`/`WriteEnvelope`) |
 | `target.go` | The `Target` addressing grammar — `agent` / `session` / `task` / `group` — with `ParseTarget` and a round-tripping `String()` |
 | `workflow.go` | The declarative `Workflow` schema, `ParseWorkflow`, full `Validate()` (including `${var.field}` reference checking against prior `as:` captures), `Plan()`, and `${var}` expansion |
