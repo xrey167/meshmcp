@@ -17,6 +17,8 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/netbirdio/netbird/client/embed"
+
 	"github.com/xrey167/meshmcp/session"
 )
 
@@ -39,6 +41,10 @@ func cmdAir(args []string) error {
 		return cmdAirLaunch(args[1:])
 	case "agent-steer":
 		return cmdAirAgentSteer(args[1:])
+	case "tasks":
+		return cmdAirTasks(args[1:])
+	case "task-steer":
+		return cmdAirTaskSteer(args[1:])
 	case "workflow":
 		return cmdAirWorkflow(args[1:])
 	case "serve":
@@ -46,7 +52,7 @@ func cmdAir(args []string) error {
 	case "-h", "--help", "help":
 		return airUsage()
 	default:
-		return fmt.Errorf("meshmcp air: unknown subcommand %q (want sessions | steer | launch | agent-steer | workflow | serve)", args[0])
+		return fmt.Errorf("meshmcp air: unknown subcommand %q (want sessions | steer | launch | agent-steer | tasks | task-steer | workflow | serve)", args[0])
 	}
 }
 
@@ -60,8 +66,12 @@ func airUsage() error {
                                                           spawn a new agent identity
   air agent-steer <agent-ip:port> --type task|nudge|cancel [--tool t --arg k=v | --text s]
                                                           send an instruction to an agent's steer inbox
+  air tasks    <backend-ip:port>                         list a backend's async tasks
+  air task-steer <backend-ip:port> --task id [--text s | --payload json | --cancel]
+                                                          steer (or cancel) one running task
   air workflow [--dry-run] <file.yaml>                   run a declarative launch/steer/call workflow
-  air serve    [--port N] [--control ip:port]            serve the live Air web page over the mesh
+  air serve    [--port N] [--control ip:port] [--approvals ip:port] [--audit file] [--allow id]
+                                                          serve the live Air web page over the mesh
 
 Shared mesh flags apply (see "meshmcp air <sub> -h").
 `)
@@ -235,6 +245,102 @@ func spawnAgent(role, nbConfig, gateway string, extra ...string) (pid int, ident
 	return cmd.Process.Pid, identity, nil
 }
 
+// cmdAirTasks lists a backend's async MCP tasks (tasks/list) over the mesh —
+// the CLI counterpart to the assistant's air_tasks tool.
+func cmdAirTasks(args []string) error {
+	fs := flag.NewFlagSet("air tasks", flag.ExitOnError)
+	o := meshFlags(fs)
+	asJSON := fs.Bool("json", false, "print the raw task list as JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: meshmcp air tasks [flags] <backend-ip:port>")
+	}
+	mc, cleanup, err := dialMCP(o, fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	tasks, err := mc.ListTasks(context.Background())
+	if err != nil {
+		return fmt.Errorf("air tasks: %w", err)
+	}
+	if *asJSON {
+		b, err := json.MarshalIndent(map[string]any{"tasks": tasks}, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(b))
+		return nil
+	}
+	if len(tasks) == 0 {
+		fmt.Fprintln(os.Stderr, "no tasks")
+		return nil
+	}
+	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "TASK\tSTATUS\tERROR")
+	for _, t := range tasks {
+		fmt.Fprintf(tw, "%s\t%s\t%s\n", t.TaskID, t.Status, t.Error)
+	}
+	return tw.Flush()
+}
+
+// cmdAirTaskSteer steers (tasks/steer) or cancels (tasks/cancel) one running
+// task on a backend — the CLI counterpart to air_task_steer. Both are governed
+// MCP methods: a policy methods: rule can deny either.
+func cmdAirTaskSteer(args []string) error {
+	fs := flag.NewFlagSet("air task-steer", flag.ExitOnError)
+	o := meshFlags(fs)
+	taskID := fs.String("task", "", "task id (from air tasks)")
+	text := fs.String("text", "", "free-form guidance, sent as {\"text\": ...}")
+	payload := fs.String("payload", "", "raw JSON payload (overrides --text)")
+	cancel := fs.Bool("cancel", false, "cancel the task instead of steering it")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: meshmcp air task-steer [flags] <backend-ip:port> --task <id>")
+	}
+	if *taskID == "" {
+		return errors.New("air task-steer: --task is required")
+	}
+	var body json.RawMessage
+	switch {
+	case *cancel:
+	case *payload != "":
+		if !json.Valid([]byte(*payload)) {
+			return fmt.Errorf("air task-steer: --payload is not valid JSON")
+		}
+		body = json.RawMessage(*payload)
+	case *text != "":
+		body, _ = json.Marshal(map[string]string{"text": *text})
+	default:
+		return errors.New("air task-steer: one of --text, --payload, or --cancel is required")
+	}
+	mc, cleanup, err := dialMCP(o, fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	if *cancel {
+		t, err := mc.CancelTask(context.Background(), *taskID)
+		if err != nil {
+			return fmt.Errorf("air task-steer: cancel: %w", err)
+		}
+		fmt.Printf("cancelled task %s (status %s)\n", t.TaskID, t.Status)
+		return nil
+	}
+	t, err := mc.SteerTask(context.Background(), *taskID, body)
+	if err != nil {
+		return fmt.Errorf("air task-steer: %w", err)
+	}
+	fmt.Printf("steered task %s (status %s)\n", t.TaskID, t.Status)
+	return nil
+}
+
 // cmdAirAgentSteer sends one steer envelope to an agent's steer inbox (P1),
 // over the same resumable mesh channel as a drop but framed as newline JSON.
 func cmdAirAgentSteer(args []string) error {
@@ -269,8 +375,6 @@ func cmdAirAgentSteer(args []string) error {
 		b, _ := json.Marshal(map[string]any(steerArgs))
 		env.Args = b
 	}
-	line, _ := json.Marshal(env)
-	line = append(line, '\n')
 
 	o.BlockInbound = true
 	client, err := startMesh(o, os.Stderr)
@@ -279,12 +383,21 @@ func cmdAirAgentSteer(args []string) error {
 	}
 	defer stopMesh(client)
 
-	pr, pw := io.Pipe()
-	go func() { _, werr := pw.Write(line); pw.CloseWithError(werr) }()
-	dial := func(ctx context.Context) (net.Conn, error) { return client.Dial(ctx, "tcp", agentAddr) }
-	if err := session.NewClient(dial, log.Printf).Run(context.Background(), sendStream{r: pr}); err != nil {
+	if err := sendSteerEnvelope(context.Background(), client, agentAddr, env); err != nil {
 		return fmt.Errorf("air agent-steer: %w", err)
 	}
 	fmt.Printf("steered %s -> %s\n", *typ, agentAddr)
 	return nil
+}
+
+// sendSteerEnvelope delivers one steer envelope to an agent's steer inbox over
+// an existing mesh membership — the same resumable, line-framed channel as a
+// push. Shared by `air agent-steer` and the workflow runner's agent_steer step.
+func sendSteerEnvelope(ctx context.Context, client *embed.Client, addr string, env steerEnvelope) error {
+	line, _ := json.Marshal(env)
+	line = append(line, '\n')
+	pr, pw := io.Pipe()
+	go func() { _, werr := pw.Write(line); pw.CloseWithError(werr) }()
+	dial := func(ctx context.Context) (net.Conn, error) { return client.Dial(ctx, "tcp", addr) }
+	return session.NewClient(dial, log.Printf).Run(ctx, sendStream{r: pr})
 }
