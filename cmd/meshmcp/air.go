@@ -40,6 +40,10 @@ func cmdAir(args []string) error {
 		return cmdAirUp(args[1:])
 	case "home":
 		return cmdAirHome(args[1:])
+	case "join":
+		return cmdAirJoin(args[1:])
+	case "pair":
+		return cmdAirPair(args[1:])
 	case "nearby":
 		return cmdAirNearby(args[1:])
 	case "announce":
@@ -109,7 +113,7 @@ func cmdAir(args []string) error {
 	case "-h", "--help", "help":
 		return airUsage()
 	default:
-		return fmt.Errorf("meshmcp air: unknown subcommand %q (want init | up | home | nearby | announce | node | handoff | whoami | map | browse | stream | vision | bind | film | play | ring | listen | cast | drive | screen | catalog | change | osint | dns | kg | database | sessions | steer | launch | agent-steer | tasks | task-steer | workflow | graph | rag | serve)", args[0])
+		return fmt.Errorf("meshmcp air: unknown subcommand %q (want init | up | join | pair | home | nearby | announce | node | handoff | whoami | map | browse | stream | vision | bind | film | play | ring | listen | cast | drive | screen | catalog | change | osint | dns | kg | database | sessions | steer | launch | agent-steer | tasks | task-steer | workflow | graph | rag | serve)", args[0])
 	}
 }
 
@@ -121,6 +125,9 @@ func airUsage() error {
 	fmt.Fprintln(os.Stderr, "  "+b("air init")+"        [--out meshmcp.yaml] [--force] [--name <device>] [--backend name=cmd|name=http] [--json]")
 	fmt.Fprintln(os.Stderr, "                  "+dim("scaffold a safe-by-default gateway config — deny-by-default, audit on, zero hand-authoring"))
 	fmt.Fprintln(os.Stderr, "  "+b("air up")+"          [config]                          "+dim("bring the gateway online (scaffolds if missing, then serves)"))
+	fmt.Fprintln(os.Stderr, "  "+b("air join")+"        <pair-addr> [--label name]        "+dim("ask a gateway for access — request, then wait for the operator's tap"))
+	fmt.Fprintln(os.Stderr, "  "+b("air pair")+"        list|approve|deny|revoke <control-ip:port> [peer-key]")
+	fmt.Fprintln(os.Stderr, "                  "+dim("operator side: approve peers onto the mesh — no YAML editing (identity only, not tool access)"))
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, dim("HOME"))
 	fmt.Fprintln(os.Stderr, "  "+b("air home")+"        <control-ip:port> [--audit f] [--approvals ip:port] [--watch] [--json]")

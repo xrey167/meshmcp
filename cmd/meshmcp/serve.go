@@ -273,6 +273,33 @@ func cmdServe(args []string) error {
 		// no peer may attest (attribution stays the verified connecting peer).
 		onBehalfAllow := newACL(cfg.Control.OnBehalfAllow)
 		h := airControlHandler(ctl, identify, allow, onBehalfAllow, airAuditFunc(sharedAudit))
+		// Optional pairing surface, mounted on the SAME control listener. Peers
+		// request access with `air join` and an operator approves with `air pair`,
+		// so recognizing a new peer never means hand-editing this file's allow
+		// list. It shares the control endpoint's identity resolution and audit
+		// chain. The approve/deny/revoke surface is gated on the SAME operator
+		// Allow as list/steer (deny-by-default); the request surface is
+		// deliberately open so an un-allowed peer can ask — but a request grants
+		// nothing, and approval confers recognition only, never a tool/control ACL.
+		if cfg.Control.PairStore != "" {
+			pairStore, perr := air.OpenPairedStore(cfg.Control.PairStore)
+			if perr != nil {
+				close(shutdown)
+				for _, l := range listeners {
+					l.Close()
+				}
+				wg.Wait()
+				return fmt.Errorf("control: open paired store %s: %w", cfg.Control.PairStore, perr)
+			}
+			ph := pairControlHandler(pairStore, identify, allow, newRingLimiter(pairRatePerMin), pairAuditFunc(sharedAudit))
+			// Longest-prefix routing: pairing paths go to ph, everything else to
+			// the existing control handler.
+			parent := http.NewServeMux()
+			parent.Handle("/v1/pair/", ph)
+			parent.Handle("/", h)
+			h = parent
+			log.Printf("Air pairing enabled (store %s): POST /v1/pair/request · GET /v1/pair/status · GET /v1/pair/pending · POST /v1/pair/approve|deny|revoke", cfg.Control.PairStore)
+		}
 		obNote := ""
 		if len(cfg.Control.OnBehalfAllow) > 0 {
 			obNote = fmt.Sprintf(" · on-behalf proxies: %v", cfg.Control.OnBehalfAllow)
