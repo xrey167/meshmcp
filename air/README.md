@@ -17,6 +17,7 @@ proven here.
 | `steer.go` | `SteerEnvelope` (+ `Validate`), the `Task`/`Nudge`/`Cancel`/`TaskArgs` constructors, `String()`, and the newline-JSON framing (`ParseEnvelopes`/`WriteEnvelope`) |
 | `target.go` | The `Target` addressing grammar — `agent` / `session` / `task` / `group` — with `ParseTarget` and a round-tripping `String()` |
 | `workflow.go` | The declarative `Workflow` schema, `ParseWorkflow`, full `Validate()` (including `${var.field}` reference checking against prior `as:` captures), `Plan()`, and `${var}` expansion |
+| `view.go` | The live-view rows — `Session` (a gateway's control view) and `PeerRow` (the page's Nearby view) |
 
 ## Design invariants
 

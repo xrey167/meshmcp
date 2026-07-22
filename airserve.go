@@ -25,14 +25,6 @@ import (
 //go:embed site/air-live.html
 var airLiveHTML []byte
 
-// airPeerRow is one reachable mesh identity in the served Air page.
-type airPeerRow struct {
-	Status string `json:"status"`
-	IP     string `json:"ip"`
-	FQDN   string `json:"fqdn"`
-	PubKey string `json:"pubkey"`
-}
-
 // maxAirUpload bounds a browser Drop/Push payload accepted by the served page.
 const maxAirUpload = 8 << 20
 
