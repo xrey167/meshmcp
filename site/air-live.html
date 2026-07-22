@@ -60,6 +60,14 @@
   @keyframes spin{to{transform:rotate(360deg)}}
   .subtitle{max-width:720px;margin:2px auto 0;font-size:12.5px;color:var(--label2)}
 
+  /* Hero — the one-glance counts that answer "what is my mesh doing now?" */
+  .hero{max-width:720px;margin:9px auto 0;display:flex;gap:8px;flex-wrap:wrap}
+  .hero .stat{display:flex;align-items:baseline;gap:5px;background:var(--fill);
+    border-radius:12px;padding:6px 11px;font-size:12.5px;color:var(--label2);white-space:nowrap}
+  .hero .stat b{font-size:15px;font-weight:700;color:var(--label);font-variant-numeric:tabular-nums}
+  .hero .stat.warn{background:color-mix(in srgb,var(--orange) 16%,transparent);color:var(--orange)}
+  .hero .stat.warn b{color:var(--orange)}
+
   main{max-width:720px;margin:0 auto;padding:8px 16px 80px}
   section{margin-top:26px}
   .sec-head{font-size:13px;font-weight:600;letter-spacing:.02em;text-transform:uppercase;color:var(--label2);
@@ -199,6 +207,12 @@
     </button>
   </div>
   <div class="subtitle">meshmcp · served over the mesh · identity-gated · audited</div>
+  <div class="hero" id="hero" hidden>
+    <span class="stat"><b id="hPeers">–</b><span>online / <span id="hPeersTot">–</span> peers</span></span>
+    <span class="stat"><b id="hSessions">–</b><span>sessions</span></span>
+    <span class="stat"><b id="hReach">–</b><span>reachable</span></span>
+    <span class="stat" id="hPendWrap"><b id="hPend">–</b><span>waiting</span></span>
+  </div>
 </header>
 
 <main>
@@ -307,53 +321,75 @@
   // grid tears down and re-decodes every <img> on a timer. Reset via changed(el,"").
   function changed(el,sig){if(el.dataset.sig===sig)return false;el.dataset.sig=sig;return true}
 
-  async function loadPeers(){
-    var el=$("peers");if(!el.dataset.loaded)el.innerHTML=skeleton(3);
-    try{
-      var d=await getJSON("api/peers");var ps=d.peers||[];el.dataset.loaded="1";
-      if(!ps.length){el.dataset.sig="";el.innerHTML=emptyState("📡","No peers reachable");return}
-      if(!changed(el,JSON.stringify(ps)))return;
-      el.innerHTML=ps.map(function(p){
-        var up=p.status==="connected";
-        return '<div class="cell fade-in"><div class="avatar" style="background:'+grad(p.pubkey)+'">'+esc(ini(p.fqdn||p.ip))+'</div>'+
-          '<div class="body"><div class="title">'+esc(p.fqdn||p.ip)+'</div><div class="sub">'+esc(p.ip)+(p.pubkey?' · '+esc(p.pubkey):'')+'</div></div>'+
-          '<span class="badge '+(up?"up":"off")+'">'+esc(p.status)+'</span></div>';
-      }).join("");
-    }catch(e){el.innerHTML='<div class="err">'+esc(e.message)+'</div>'}
+  // The sections below are render-only: loadHome() fetches the aggregated
+  // /api/home once and drives each with its slice, so one poll refreshes the
+  // whole board. The per-section /api/* routes stay for deep views and direct
+  // access; every render keeps its changed(el, sig) flicker-free diff.
+  function renderPeers(ps){
+    var el=$("peers");el.dataset.loaded="1";
+    if(!ps.length){el.dataset.sig="";el.innerHTML=emptyState("📡","No peers reachable");return}
+    if(!changed(el,JSON.stringify(ps)))return;
+    el.innerHTML=ps.map(function(p){
+      var up=p.status==="connected";
+      return '<div class="cell fade-in"><div class="avatar" style="background:'+grad(p.pubkey)+'">'+esc(ini(p.fqdn||p.ip))+'</div>'+
+        '<div class="body"><div class="title">'+esc(p.fqdn||p.ip)+'</div><div class="sub">'+esc(p.ip)+(p.pubkey?' · '+esc(p.pubkey):'')+'</div></div>'+
+        '<span class="badge '+(up?"up":"off")+'">'+esc(p.status)+'</span></div>';
+    }).join("");
   }
 
-  async function loadCatalog(){
-    if(!cfg.catalog)return;var el=$("catalog");if(!el.dataset.loaded)el.innerHTML=skeleton(2);
-    try{
-      var d=await getJSON("api/catalog");var eps=d.endpoints||[];el.dataset.loaded="1";
-      if(!eps.length){el.dataset.sig="";el.innerHTML=emptyState("🧭","No backends you may reach");return}
-      if(!changed(el,JSON.stringify(eps)))return;
-      el.innerHTML=eps.map(function(e){
-        var tags='<span class="tag">'+esc(e.transport||"?")+'</span>';
-        if(e.resumable)tags+='<span class="badge up">resumable</span>';
-        if(e.steerable)tags+='<span class="badge info">steerable</span>';
-        return '<div class="cell fade-in"><div class="avatar" style="background:'+grad(e.name)+'">'+esc(ini(e.name))+'</div>'+
-          '<div class="body"><div class="title">'+esc(e.name)+'</div><div class="sub">'+esc(e.address||"")+'</div></div>'+
-          '<div class="tags">'+tags+'</div></div>';
-      }).join("");
-    }catch(e){el.innerHTML='<div class="err">'+esc(e.message)+'</div>'}
+  function renderCatalog(eps){
+    var el=$("catalog");el.dataset.loaded="1";
+    if(!eps.length){el.dataset.sig="";el.innerHTML=emptyState("🧭","No backends you may reach");return}
+    if(!changed(el,JSON.stringify(eps)))return;
+    el.innerHTML=eps.map(function(e){
+      var tags='<span class="tag">'+esc(e.transport||"?")+'</span>';
+      if(e.resumable)tags+='<span class="badge up">resumable</span>';
+      if(e.steerable)tags+='<span class="badge info">steerable</span>';
+      return '<div class="cell fade-in"><div class="avatar" style="background:'+grad(e.name)+'">'+esc(ini(e.name))+'</div>'+
+        '<div class="body"><div class="title">'+esc(e.name)+'</div><div class="sub">'+esc(e.address||"")+'</div></div>'+
+        '<div class="tags">'+tags+'</div></div>';
+    }).join("");
   }
 
   var sessions=[];
-  async function loadSessions(){
-    var el=$("sessions");if(!el.dataset.loaded)el.innerHTML=skeleton(2);
+  function renderSessions(ss){
+    var el=$("sessions");el.dataset.loaded="1";sessions=ss;
+    if(!ss.length){el.dataset.sig="";el.innerHTML=emptyState("🌙","No live sessions");return}
+    if(!changed(el,JSON.stringify(ss)))return;
+    el.innerHTML=ss.map(function(s,i){
+      return '<div class="cell fade-in"><div class="avatar" style="background:'+grad(s.id)+'">'+esc((s.backend||"?").slice(0,2).toUpperCase())+'</div>'+
+        '<div class="body"><div class="title">'+esc(s.backend)+'</div><div class="sub">'+esc(s.id)+' · '+esc(s.peer||"?")+' · '+esc(s.age_sec||0)+'s</div></div>'+
+        '<button class="pill-btn" data-i="'+i+'">Steer</button></div>';
+    }).join("");
+    [].forEach.call(el.querySelectorAll(".pill-btn"),function(b){b.onclick=function(){openSteer(sessions[+b.dataset.i])}});
+  }
+
+  // updateHero paints the one-glance counts. An unknown pending (-1, this viewer
+  // is not an approver) reads as a dash — never a misleading zero.
+  function updateHero(s){
+    s=s||{};
+    $("hPeers").textContent=(s.peers_online!=null?s.peers_online:"–");
+    $("hPeersTot").textContent=(s.peers_total!=null?s.peers_total:"–");
+    $("hSessions").textContent=(s.sessions!=null?s.sessions:"–");
+    $("hReach").textContent=(s.reachable!=null?s.reachable:"–");
+    var p=$("hPend"),wrap=$("hPendWrap");
+    if(s.pending==null||s.pending<0){p.textContent="—";wrap.classList.remove("warn")}
+    else{p.textContent=s.pending;wrap.classList.toggle("warn",s.pending>0)}
+    $("hero").hidden=false;
+  }
+
+  // loadHome is the primary poll: one aggregated fetch drives every section.
+  async function loadHome(){
     try{
-      var d=await getJSON("api/sessions");sessions=d.sessions||[];el.dataset.loaded="1";
-      if(d.you)$("you").textContent="acting as "+d.you;
-      if(!sessions.length){el.dataset.sig="";el.innerHTML=emptyState("🌙","No live sessions");return}
-      if(!changed(el,JSON.stringify(sessions)))return;
-      el.innerHTML=sessions.map(function(s,i){
-        return '<div class="cell fade-in"><div class="avatar" style="background:'+grad(s.id)+'">'+esc((s.backend||"?").slice(0,2).toUpperCase())+'</div>'+
-          '<div class="body"><div class="title">'+esc(s.backend)+'</div><div class="sub">'+esc(s.id)+' · '+esc(s.peer||"?")+' · '+esc(s.age_sec||0)+'s</div></div>'+
-          '<button class="pill-btn" data-i="'+i+'">Steer</button></div>';
-      }).join("");
-      [].forEach.call(el.querySelectorAll(".pill-btn"),function(b){b.onclick=function(){openSteer(sessions[+b.dataset.i])}});
-    }catch(e){el.innerHTML='<div class="err">'+esc(e.message)+' — is --control set?</div>'}
+      var d=await getJSON("api/home");
+      if(d.you&&d.you.fqdn)$("you").textContent="acting as "+d.you.fqdn;
+      updateHero(d.summary);
+      renderPeers(d.peers||[]);
+      renderSessions(d.sessions||[]);
+      if(cfg.catalog)renderCatalog(d.reachable||[]);
+      if(cfg.receipts)renderReceipts(d.activity||[]);
+      if(cfg.cast)renderCast(d.showing);
+    }catch(e){$("sessions").innerHTML='<div class="err">'+esc(e.message)+'</div>'}
   }
 
   /* ---- Steer sheet ---- */
@@ -429,21 +465,18 @@
     }catch(e){setStatus(pushOut,e.message,"bad")}finally{btn.disabled=false}
   };
 
-  /* ---- Receipts ---- */
-  async function loadReceipts(){
-    if(!cfg.receipts)return;var el=$("receipts");if(!el.dataset.loaded)el.innerHTML=skeleton(3);
-    try{
-      var d=await getJSON("api/receipts?limit=50");var rs=d.receipts||[];el.dataset.loaded="1";
-      if(!rs.length){el.dataset.sig="";el.innerHTML=emptyState("🧾","No receipts yet");return}
-      if(!changed(el,JSON.stringify(rs)))return;
-      el.innerHTML=rs.slice().reverse().map(function(x){
-        var dec=(x.decision||"?").toLowerCase();
-        return '<div class="receipt"><span class="dec '+esc(dec)+'">'+esc(dec)+'</span>'+
-          '<span class="who2">'+esc(x.peer||"?")+'</span>'+
-          '<span class="what">'+esc((x.method||"")+(x.tool?" · "+x.tool:""))+'</span>'+
-          '<span class="when">'+esc((x.time||"").replace("T"," ").replace("Z","").slice(5,16))+'</span></div>';
-      }).join("");
-    }catch(e){el.innerHTML='<div class="err">'+esc(e.message)+'</div>'}
+  /* ---- Receipts ---- (home's activity is already newest-first) */
+  function renderReceipts(rs){
+    var el=$("receipts");el.dataset.loaded="1";
+    if(!rs.length){el.dataset.sig="";el.innerHTML=emptyState("🧾","No receipts yet");return}
+    if(!changed(el,JSON.stringify(rs)))return;
+    el.innerHTML=rs.map(function(x){
+      var dec=(x.decision||"?").toLowerCase();
+      return '<div class="receipt"><span class="dec '+esc(dec)+'">'+esc(dec)+'</span>'+
+        '<span class="who2">'+esc(x.peer||"?")+'</span>'+
+        '<span class="what">'+esc((x.method||"")+(x.tool?" · "+x.tool:""))+'</span>'+
+        '<span class="when">'+esc((x.time||"").replace("T"," ").replace("Z","").slice(5,16))+'</span></div>';
+    }).join("");
   }
 
   /* ---- Vision gallery ---- */
@@ -466,23 +499,21 @@
     }catch(e){el.innerHTML='<div class="err">'+esc(e.message)+'</div>'}
   }
 
-  async function loadCast(){
-    if(!cfg.cast)return;var el=$("cast");if(!el.dataset.loaded)el.innerHTML=skeleton(1);
-    try{
-      var d=await getJSON("api/cast?limit=1");var gs=d.images||[];el.dataset.loaded="1";
-      if(!gs.length){el.dataset.sig="";el.innerHTML=emptyState("🎞️","Nothing being cast");return}
-      var g=gs[0];if(!changed(el,g.name+":"+g.mod))return;
-      var u="api/castimage?name="+encodeURIComponent(g.name);
-      el.innerHTML='<img class="fade-in" src="'+esc(u)+'" alt="'+esc(g.name)+'"><span class="cap">'+esc(g.name)+' · '+esc(fmtAge(g.mod))+'</span>';
-    }catch(e){el.innerHTML='<div class="err">'+esc(e.message)+'</div>'}
+  // renderCast takes home's single "showing" slot (a {name, mod} or null).
+  function renderCast(g){
+    var el=$("cast");el.dataset.loaded="1";
+    if(!g){el.dataset.sig="";el.innerHTML=emptyState("🎞️","Nothing being cast");return}
+    if(!changed(el,g.name+":"+g.mod))return;
+    var u="api/castimage?name="+encodeURIComponent(g.name);
+    el.innerHTML='<img class="fade-in" src="'+esc(u)+'" alt="'+esc(g.name)+'"><span class="cap">'+esc(g.name)+' · '+esc(fmtAge(g.mod))+'</span>';
   }
 
   var refreshBtn=$("refresh");
   function refresh(){refreshBtn.classList.remove("spin");void refreshBtn.offsetWidth;refreshBtn.classList.add("spin");
-    loadPeers();loadCatalog();loadSessions();loadReceipts();loadCast();loadVision()}
+    loadHome();loadVision()}
   refreshBtn.onclick=refresh;
-  loadConfig().then(refresh);
-  setInterval(function(){loadPeers();loadCatalog();loadSessions();loadReceipts();loadCast();loadVision()},10000);
+  loadConfig().then(function(){$("peers").innerHTML=skeleton(3);$("sessions").innerHTML=skeleton(2);refresh()});
+  setInterval(function(){loadHome();loadVision()},10000);
 })();
 </script>
 </body>
