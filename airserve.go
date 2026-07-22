@@ -44,10 +44,11 @@ type airServeDeps struct {
 	controlHC   *http.Client                              // client that reaches the gateway control endpoint
 	controlBase string                                    // base URL for the control endpoint (empty = sessions/steer disabled)
 
-	push      func(ctx context.Context, target, name string, data []byte) error // deliver a payload to a peer's drop inbox (nil = push/drop disabled)
-	receipts  func(limit int) ([]json.RawMessage, error)                        // tail of the local audit ledger (nil = receipts disabled)
-	approvals string                                                            // approvals server (mesh-ip:port) the page links out to ("" = hidden)
-	allow     acl                                                               // page-wide viewer ACL; empty = any mesh peer
+	push         func(ctx context.Context, target, name string, data []byte) error // deliver a payload to a peer's drop inbox (nil = push/drop disabled)
+	receipts     func(limit int) ([]json.RawMessage, error)                        // tail of the local audit ledger (nil = receipts disabled)
+	approvals    string                                                            // approvals server (mesh-ip:port) the page links out to ("" = hidden)
+	allow        acl                                                               // page-wide viewer ACL; empty = any mesh peer
+	allowedHosts []string                                                          // Host values the page may be served at (mesh ip/fqdn:port); empty = no Host check (dev)
 }
 
 // airServeHandler builds the live Air page + its /api surface: proxied
@@ -233,14 +234,14 @@ func airServeHandler(d airServeDeps) http.Handler {
 			mux.ServeHTTP(w, r)
 		})
 	}
-	return withWebSecurity(gated)
+	return withWebSecurity(gated, d.allowedHosts)
 }
 
 // withWebSecurity wraps the served Air page with defence-in-depth for a browser
-// surface: hardening response headers on every response, and a same-origin
-// guard on state-changing POSTs so a page on another origin can't drive the
-// relay through a viewer's browser (CSRF / DNS-rebinding).
-func withWebSecurity(h http.Handler) http.Handler {
+// surface: hardening response headers on every response, a Host allow-list that
+// defeats DNS rebinding, and a same-origin guard on state-changing POSTs so a
+// page on another origin can't drive the relay through a viewer's browser.
+func withWebSecurity(h http.Handler, allowedHosts []string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hdr := w.Header()
 		// Self-contained page: no external hosts for scripts, styles, images,
@@ -255,6 +256,15 @@ func withWebSecurity(h http.Handler) http.Handler {
 		hdr.Set("X-Content-Type-Options", "nosniff")
 		hdr.Set("X-Frame-Options", "DENY")
 		hdr.Set("Referrer-Policy", "no-referrer")
+		// DNS-rebinding defence: the page is only ever reached at the gateway's
+		// own mesh address, so a request whose Host is anything else (an
+		// attacker domain rebound to the mesh IP) is refused — this is what a
+		// same-origin check alone misses, because under rebinding Origin==Host.
+		// Applied to ALL methods, since a rebound page can read as well as write.
+		if len(allowedHosts) > 0 && !airHostAllowed(r.Host, allowedHosts) {
+			http.Error(w, "host not permitted", http.StatusForbidden)
+			return
+		}
 		if r.Method == http.MethodPost && !sameOrigin(r) {
 			http.Error(w, "cross-origin request refused", http.StatusForbidden)
 			return
@@ -263,11 +273,23 @@ func withWebSecurity(h http.Handler) http.Handler {
 	})
 }
 
+// hostAllowed reports whether the request Host matches one of the expected
+// mesh addresses the page is served on.
+func airHostAllowed(host string, allowed []string) bool {
+	for _, a := range allowed {
+		if strings.EqualFold(host, a) {
+			return true
+		}
+	}
+	return false
+}
+
 // sameOrigin reports whether a state-changing request is same-origin: a present
 // Origin header must match the request's Host. A browser always sends Origin on
-// a cross-origin fetch, so a mismatch is a CSRF/rebinding attempt; an absent
+// a cross-origin fetch, so a mismatch is a classic CSRF attempt; an absent
 // Origin (a non-browser client such as the CLI) is allowed — the mesh + viewer
-// ACL already gate those.
+// ACL already gate those. (Host-pinning above handles the rebinding case where
+// Origin==Host.)
 func sameOrigin(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
@@ -348,7 +370,10 @@ func cmdAirServe(args []string) error {
 
 	// Local/dev mode: serve the page without joining the mesh.
 	if *addr != "" {
-		d := airServeDeps{peers: func() ([]airPeerRow, error) { return nil, nil }}
+		d := airServeDeps{
+			peers:        func() ([]airPeerRow, error) { return nil, nil },
+			allowedHosts: []string{*addr},
+		}
 		fmt.Fprintf(os.Stderr, "Air (live) on http://%s (LOCAL — no mesh; peers/sessions unavailable)\n", *addr)
 		return newLocalHTTPServer(*addr, airServeHandler(d)).ListenAndServe()
 	}
@@ -371,9 +396,24 @@ func cmdAirServe(args []string) error {
 	}
 	defer stopMesh(client)
 
+	// The page is reached only at this gateway's own mesh address, so pin the
+	// Host to the mesh IP (and FQDN) with the serve port — a DNS-rebinding page
+	// carries the attacker's Host and is refused (withWebSecurity).
+	var allowedHosts []string
+	if st, err := client.Status(); err == nil {
+		ip := strings.SplitN(st.LocalPeerState.IP, "/", 2)[0]
+		if ip != "" {
+			allowedHosts = append(allowedHosts, fmt.Sprintf("%s:%d", ip, *port))
+		}
+		if st.LocalPeerState.FQDN != "" {
+			allowedHosts = append(allowedHosts, fmt.Sprintf("%s:%d", st.LocalPeerState.FQDN, *port))
+		}
+	}
+
 	d := airServeDeps{
-		approvals: *approvals,
-		allow:     newACL(allow),
+		approvals:    *approvals,
+		allow:        newACL(allow),
+		allowedHosts: allowedHosts,
 		// The browser is itself a mesh peer; resolve its WireGuard identity so
 		// steers it drives are attributed to the human, not this relay.
 		identify: func(r *http.Request) (string, string) { return peerIdentityStr(client, r.RemoteAddr) },
@@ -405,6 +445,10 @@ func cmdAirServe(args []string) error {
 	if privileged {
 		d.push = func(ctx context.Context, target, name string, data []byte) error {
 			pr, pw := io.Pipe()
+			// Close the read end when Run returns: if it exits early (send
+			// error or ctx cancel) the writer goroutine is otherwise left
+			// blocked forever on pw.Write into an unread pipe.
+			defer pr.Close()
 			go func() { pw.CloseWithError(sendData(pw, name, data)) }()
 			dial := func(ctx context.Context) (net.Conn, error) { return client.Dial(ctx, "tcp", target) }
 			return session.NewClient(dial, log.Printf).Run(ctx, sendStream{r: pr})

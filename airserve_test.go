@@ -329,3 +329,39 @@ func TestAirServeCatalogProxy(t *testing.T) {
 		t.Fatalf("catalog without control = %d, want 503", rr.Code)
 	}
 }
+
+// TestAirServeHostPinning proves the Host allow-list defeats DNS rebinding: a
+// request whose Host is not the served mesh address is refused even when the
+// Origin matches the Host (the case a same-origin check alone misses).
+func TestAirServeHostPinning(t *testing.T) {
+	h := airServeHandler(airServeDeps{allowedHosts: []string{"100.64.0.2:9800"}})
+
+	// Rebinding: Host == Origin == attacker domain → refused.
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Host = "evil.example"
+	req.Header.Set("Origin", "http://evil.example")
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("rebound Host = %d, want 403", rr.Code)
+	}
+
+	// Legitimate: Host is the mesh address → served.
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Host = "100.64.0.2:9800"
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("mesh Host = %d, want 200", rr.Code)
+	}
+
+	// No allow-list (dev / tests) → Host check skipped.
+	open := airServeHandler(airServeDeps{})
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Host = "anything"
+	open.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("no allow-list should skip Host check, got %d", rr.Code)
+	}
+}

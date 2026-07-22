@@ -71,3 +71,25 @@ func stripANSI(s string) string {
 	}
 	return b.String()
 }
+
+// TestSanitizeCellStripsEscapes proves untrusted cell text can't inject ANSI /
+// control sequences and can't break table alignment, while colour styling
+// (added after sanitization) is preserved.
+func TestSanitizeCellStripsEscapes(t *testing.T) {
+	old := colorOn
+	colorOn = true
+	defer func() { colorOn = old }()
+
+	evil := "fs\x1b[31mRED\x1b[0m\tnext\nline\x07"
+	c := styled(evil, cyan)
+	if strings.ContainsAny(c.text, "\x1b\t\n\x07") {
+		t.Fatalf("cell text still holds control bytes: %q", c.text)
+	}
+	if c.text != "fs[31mRED[0mnextline" {
+		t.Fatalf("unexpected sanitized text: %q", c.text)
+	}
+	// The styler still wraps the (clean) text in colour.
+	if !strings.Contains(c.style(c.text), "\x1b[36m") {
+		t.Fatalf("styling should still apply: %q", c.style(c.text))
+	}
+}

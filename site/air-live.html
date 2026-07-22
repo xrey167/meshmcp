@@ -274,7 +274,7 @@
       if(!ps.length){el.innerHTML=emptyState("📡","No peers reachable");return}
       el.innerHTML=ps.map(function(p){
         var up=p.status==="connected";
-        return '<div class="cell fade-in"><div class="avatar" style="background:'+grad(p.pubkey)+'">'+ini(p.fqdn||p.ip)+'</div>'+
+        return '<div class="cell fade-in"><div class="avatar" style="background:'+grad(p.pubkey)+'">'+esc(ini(p.fqdn||p.ip))+'</div>'+
           '<div class="body"><div class="title">'+esc(p.fqdn||p.ip)+'</div><div class="sub">'+esc(p.ip)+(p.pubkey?' · '+esc(p.pubkey):'')+'</div></div>'+
           '<span class="badge '+(up?"up":"off")+'">'+esc(p.status)+'</span></div>';
       }).join("");
@@ -290,7 +290,7 @@
         var tags='<span class="tag">'+esc(e.transport||"?")+'</span>';
         if(e.resumable)tags+='<span class="badge up">resumable</span>';
         if(e.steerable)tags+='<span class="badge info">steerable</span>';
-        return '<div class="cell fade-in"><div class="avatar" style="background:'+grad(e.name)+'">'+ini(e.name)+'</div>'+
+        return '<div class="cell fade-in"><div class="avatar" style="background:'+grad(e.name)+'">'+esc(ini(e.name))+'</div>'+
           '<div class="body"><div class="title">'+esc(e.name)+'</div><div class="sub">'+esc(e.address||"")+'</div></div>'+
           '<div class="tags">'+tags+'</div></div>';
       }).join("");

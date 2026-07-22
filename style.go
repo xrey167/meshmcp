@@ -78,8 +78,23 @@ type cell struct {
 	style func(string) string
 }
 
-func plain(s string) cell                         { return cell{text: s} }
-func styled(s string, f func(string) string) cell { return cell{text: s, style: f} }
+func plain(s string) cell                         { return cell{text: sanitizeCell(s)} }
+func styled(s string, f func(string) string) cell { return cell{text: sanitizeCell(s), style: f} }
+
+// sanitizeCell strips control characters (including ESC/0x1b, tab, newline, and
+// DEL) from a value before it becomes a table cell, so a hostile or compromised
+// remote source — a gateway's catalog entry, a peer's FQDN, a task id — cannot
+// inject terminal escape sequences or break the layout. Colour is added by the
+// cell's styler AFTER this, so legitimate styling is unaffected; the cell's
+// plain text (measured for alignment) is guaranteed escape-free.
+func sanitizeCell(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
+}
 
 func runeLen(s string) int { return len([]rune(s)) }
 

@@ -14,6 +14,9 @@ import (
 // console, a redirected handle) leaves the mode untouched — detectColor has
 // already confirmed a character device, and the SGR codes degrade to plain.
 func enableVT() {
+	// LazyProc.Call panics if the DLL or proc can't be resolved; recover so an
+	// unexpected environment degrades to plain output rather than crashing.
+	defer func() { _ = recover() }()
 	const enableVirtualTerminalProcessing = 0x0004
 	kernel32 := syscall.NewLazyDLL("kernel32.dll")
 	getConsoleMode := kernel32.NewProc("GetConsoleMode")
