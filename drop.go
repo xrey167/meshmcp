@@ -312,7 +312,9 @@ func sanitizeDest(dir, name string) (string, error) {
 	if name == "" {
 		return "", errors.New("refusing empty file name")
 	}
-	if filepath.IsAbs(name) || strings.ContainsRune(name, ':') {
+	// os.IsPathSeparator catches rooted names ("/abs", "\abs") that
+	// filepath.IsAbs does not consider absolute on Windows.
+	if filepath.IsAbs(name) || strings.ContainsRune(name, ':') || os.IsPathSeparator(name[0]) {
 		return "", fmt.Errorf("refusing absolute path %q", name)
 	}
 	clean := filepath.Clean(name)

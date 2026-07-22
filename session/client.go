@@ -52,6 +52,12 @@ func (c *Client) Run(ctx context.Context, local io.ReadWriteCloser) error {
 			}
 			if err != nil {
 				// Local client closed: end the logical session gracefully.
+				// Wait (bounded) for the peer to acknowledge everything we
+				// sent first — closing the transport with peer ACKs still
+				// unread in our receive buffer turns the close into a TCP
+				// RST, which can discard our in-flight DATA/CLOSE frames in
+				// the peer's receive buffer (a drop then never finalizes).
+				c.awaitDrain()
 				c.ep.sendClose()
 				return
 			}
@@ -165,6 +171,23 @@ func (c *Client) handshake(ctx context.Context) (net.Conn, uint64, *bufio.Reader
 	}
 	_ = conn.SetDeadline(time.Time{})
 	return conn, f.seq, r, nil
+}
+
+// drainTimeout bounds how long a closing client waits for the peer to
+// acknowledge all sent data before closing the transport anyway.
+const drainTimeout = 10 * time.Second
+
+// awaitDrain blocks until every sent DATA frame is acknowledged, the session
+// ends, or drainTimeout passes — whichever comes first.
+func (c *Client) awaitDrain() {
+	deadline := time.Now().Add(drainTimeout)
+	for !c.ep.drained() && time.Now().Before(deadline) {
+		select {
+		case <-c.ep.Done():
+			return
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 }
 
 func (c *Client) keepalive() {

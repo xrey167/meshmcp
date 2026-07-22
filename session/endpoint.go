@@ -294,6 +294,13 @@ func (e *endpoint) recvCursor() uint64 {
 	return e.recvSeq
 }
 
+// drained reports whether the peer has acknowledged every DATA frame sent.
+func (e *endpoint) drained() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.acked >= e.sendSeq
+}
+
 func (e *endpoint) isClosed() bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
