@@ -69,7 +69,23 @@ func airServeHandler(d airServeDeps) http.Handler {
 			"approvals": d.approvals,
 			"push":      d.push != nil,
 			"receipts":  d.receipts != nil,
+			"catalog":   d.controlBase != "",
 		})
+	})
+
+	mux.HandleFunc("/api/catalog", func(w http.ResponseWriter, r *http.Request) {
+		if d.controlBase == "" {
+			http.Error(w, "no --control endpoint configured", http.StatusServiceUnavailable)
+			return
+		}
+		req, _ := http.NewRequest(http.MethodGet, d.controlBase+airCatalogPath, nil)
+		d.attest(req, r)
+		resp, err := d.controlHC.Do(req)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		relay(w, resp)
 	})
 
 	mux.HandleFunc("/api/peers", func(w http.ResponseWriter, r *http.Request) {

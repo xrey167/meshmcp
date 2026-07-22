@@ -77,6 +77,9 @@
   .badge{font-size:11px;font-weight:600;padding:3px 9px;border-radius:20px;white-space:nowrap;letter-spacing:.01em}
   .badge.up{color:var(--green);background:color-mix(in srgb,var(--green) 15%,transparent)}
   .badge.off{color:var(--orange);background:color-mix(in srgb,var(--orange) 15%,transparent)}
+  .badge.info{color:var(--accent);background:color-mix(in srgb,var(--accent) 15%,transparent)}
+  .tags{display:flex;gap:5px;flex-wrap:wrap;justify-content:flex-end;max-width:52%}
+  .tag{font-size:10.5px;font-weight:600;padding:3px 8px;border-radius:20px;background:var(--fill);color:var(--label2);white-space:nowrap}
   .pill-btn{appearance:none;border:none;cursor:pointer;font-family:inherit;font-size:14px;font-weight:600;
     color:var(--accent);background:var(--fill);border-radius:20px;padding:7px 15px;transition:transform .15s,background .15s}
   .pill-btn:active{transform:scale(.94);background:var(--fill2)}
@@ -182,6 +185,11 @@
     <div class="group" id="peers"></div>
   </section>
 
+  <section id="catWrap" hidden>
+    <h2 class="sec-head">Catalog</h2>
+    <div class="group" id="catalog"></div>
+  </section>
+
   <section>
     <h2 class="sec-head">Live Sessions</h2>
     <div class="group" id="sessions"></div>
@@ -273,6 +281,22 @@
     }catch(e){el.innerHTML='<div class="err">'+esc(e.message)+'</div>'}
   }
 
+  async function loadCatalog(){
+    if(!cfg.catalog)return;var el=$("catalog");if(!el.dataset.loaded)el.innerHTML=skeleton(2);
+    try{
+      var d=await getJSON("api/catalog");var eps=d.endpoints||[];el.dataset.loaded="1";
+      if(!eps.length){el.innerHTML=emptyState("🧭","No backends you may reach");return}
+      el.innerHTML=eps.map(function(e){
+        var tags='<span class="tag">'+esc(e.transport||"?")+'</span>';
+        if(e.resumable)tags+='<span class="badge up">resumable</span>';
+        if(e.steerable)tags+='<span class="badge info">steerable</span>';
+        return '<div class="cell fade-in"><div class="avatar" style="background:'+grad(e.name)+'">'+ini(e.name)+'</div>'+
+          '<div class="body"><div class="title">'+esc(e.name)+'</div><div class="sub">'+esc(e.address||"")+'</div></div>'+
+          '<div class="tags">'+tags+'</div></div>';
+      }).join("");
+    }catch(e){el.innerHTML='<div class="err">'+esc(e.message)+'</div>'}
+  }
+
   var sessions=[];
   async function loadSessions(){
     var el=$("sessions");if(!el.dataset.loaded)el.innerHTML=skeleton(2);
@@ -320,10 +344,11 @@
   };
 
   /* ---- Config-gated sections ---- */
-  var cfg={push:false,receipts:false,approvals:""};
+  var cfg={push:false,receipts:false,approvals:"",catalog:false};
   async function loadConfig(){
     try{
       cfg=await getJSON("api/config");
+      $("catWrap").hidden=!cfg.catalog;
       $("pushWrap").hidden=!cfg.push;$("recWrap").hidden=!cfg.receipts;
       $("apprWrap").hidden=!cfg.approvals;
       if(cfg.approvals)$("apprLink").href="http://"+cfg.approvals+"/";
@@ -377,10 +402,10 @@
 
   var refreshBtn=$("refresh");
   function refresh(){refreshBtn.classList.remove("spin");void refreshBtn.offsetWidth;refreshBtn.classList.add("spin");
-    loadPeers();loadSessions();loadReceipts()}
+    loadPeers();loadCatalog();loadSessions();loadReceipts()}
   refreshBtn.onclick=refresh;
   loadConfig().then(refresh);
-  setInterval(function(){loadPeers();loadSessions();loadReceipts()},10000);
+  setInterval(function(){loadPeers();loadCatalog();loadSessions();loadReceipts()},10000);
 })();
 </script>
 </body>

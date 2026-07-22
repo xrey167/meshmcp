@@ -285,3 +285,47 @@ func TestAirServeCrossOriginRefused(t *testing.T) {
 		t.Fatalf("push should have run twice (same-origin + origin-less), got %d", pushed)
 	}
 }
+
+// TestAirServeCatalogProxy proves the page proxies /api/catalog to the gateway's
+// well-known catalog with browser attestation, and advertises it via /api/config.
+func TestAirServeCatalogProxy(t *testing.T) {
+	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == airCatalogPath {
+			if r.Header.Get("X-Air-On-Behalf") != "phone.mesh" {
+				t.Errorf("catalog request missing on-behalf attestation")
+			}
+			_, _ = io.WriteString(w, `{"service":"meshmcp","version":"t","endpoints":[{"name":"fs","address":"100.64.0.2:9101","transport":"stdio","steerable":true}]}`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer control.Close()
+
+	h := airServeHandler(airServeDeps{
+		controlHC:   control.Client(),
+		controlBase: control.URL,
+		identify:    func(*http.Request) (string, string) { return "browserkey", "phone.mesh" },
+	})
+
+	// config advertises catalog availability.
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+	if !strings.Contains(rr.Body.String(), `"catalog":true`) {
+		t.Fatalf("config should advertise catalog: %s", rr.Body)
+	}
+
+	// catalog proxied through.
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/catalog", nil))
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"fs"`) {
+		t.Fatalf("catalog proxy failed: %d %s", rr.Code, rr.Body)
+	}
+
+	// disabled without control.
+	off := airServeHandler(airServeDeps{})
+	rr = httptest.NewRecorder()
+	off.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/catalog", nil))
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("catalog without control = %d, want 503", rr.Code)
+	}
+}
