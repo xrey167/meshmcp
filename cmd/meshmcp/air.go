@@ -34,6 +34,10 @@ func cmdAir(args []string) error {
 		return airUsage()
 	}
 	switch args[0] {
+	case "init":
+		return cmdAirInit(args[1:])
+	case "up":
+		return cmdAirUp(args[1:])
 	case "home":
 		return cmdAirHome(args[1:])
 	case "nearby":
@@ -105,13 +109,18 @@ func cmdAir(args []string) error {
 	case "-h", "--help", "help":
 		return airUsage()
 	default:
-		return fmt.Errorf("meshmcp air: unknown subcommand %q (want home | nearby | announce | node | handoff | whoami | map | browse | stream | vision | bind | film | play | ring | listen | cast | drive | screen | catalog | change | osint | dns | kg | database | sessions | steer | launch | agent-steer | tasks | task-steer | workflow | graph | rag | serve)", args[0])
+		return fmt.Errorf("meshmcp air: unknown subcommand %q (want init | up | home | nearby | announce | node | handoff | whoami | map | browse | stream | vision | bind | film | play | ring | listen | cast | drive | screen | catalog | change | osint | dns | kg | database | sessions | steer | launch | agent-steer | tasks | task-steer | workflow | graph | rag | serve)", args[0])
 	}
 }
 
 func airUsage() error {
 	b := func(s string) string { return bold(s) }
 	fmt.Fprintln(os.Stderr, bold("meshmcp air")+dim(" — drive live work over the mesh"))
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, dim("GET STARTED"))
+	fmt.Fprintln(os.Stderr, "  "+b("air init")+"        [--out meshmcp.yaml] [--force] [--name <device>] [--backend name=cmd|name=http] [--json]")
+	fmt.Fprintln(os.Stderr, "                  "+dim("scaffold a safe-by-default gateway config — deny-by-default, audit on, zero hand-authoring"))
+	fmt.Fprintln(os.Stderr, "  "+b("air up")+"          [config]                          "+dim("bring the gateway online (scaffolds if missing, then serves)"))
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, dim("HOME"))
 	fmt.Fprintln(os.Stderr, "  "+b("air home")+"        <control-ip:port> [--audit f] [--approvals ip:port] [--watch] [--json]")
