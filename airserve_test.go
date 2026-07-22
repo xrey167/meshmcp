@@ -201,6 +201,17 @@ func TestAirServeVision(t *testing.T) {
 	if ct := rr.Header().Get("Content-Type"); ct != "image/png" {
 		t.Fatalf("image content-type = %q, want image/png", ct)
 	}
+	// Served inline (not downloaded) — the whole point of the gallery.
+	if cd := rr.Header().Get("Content-Disposition"); cd != "inline" {
+		t.Fatalf("image content-disposition = %q, want inline", cd)
+	}
+
+	// Missing name is a 400.
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/image", nil))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("missing name = %d, want 400", rr.Code)
+	}
 
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/image?name=../secret.png", nil))

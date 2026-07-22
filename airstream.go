@@ -22,8 +22,16 @@ import (
 func cmdAirStream(args []string) error {
 	fs := flag.NewFlagSet("air stream", flag.ExitOnError)
 	fromStart := fs.Bool("from-start", false, "render existing records first, then follow (default: only new)")
-	backend := fs.String("backend", "", "show only records for this backend")
 	interval := fs.Duration("interval", 500*time.Millisecond, "poll interval for new records")
+	asJSON := fs.Bool("json", false, "print each matched record as its raw JSONL line instead of a rendered row")
+	// Field filters — the same glob matcher `air bind` triggers on, so a terminal
+	// tail can narrow to "only denials", "only this peer", "only this tool".
+	var m bindMatch
+	fs.StringVar(&m.Decision, "decision", "", "show only records with this decision (allow|deny|cosign; glob)")
+	fs.StringVar(&m.Backend, "backend", "", "show only records for this backend (glob)")
+	fs.StringVar(&m.Method, "method", "", "show only records for this method (glob)")
+	fs.StringVar(&m.Tool, "tool", "", "show only records for this tool (glob)")
+	fs.StringVar(&m.Peer, "peer", "", "show only records for this peer (glob)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -36,16 +44,26 @@ func cmdAirStream(args []string) error {
 	defer stop()
 
 	fmt.Fprintln(os.Stderr, dim("streaming ")+bold(path)+dim(" · Ctrl-C to stop"))
-	return streamAudit(ctx, path, *fromStart, *backend, *interval, os.Stdout)
+	if err := streamAudit(ctx, path, *fromStart, m, *asJSON, *interval, os.Stdout); err != nil {
+		return fmt.Errorf("air stream: %w", err)
+	}
+	return nil
 }
 
 // streamAudit follows an append-only audit file, rendering each new audit record
-// through formatAuditLine. It is rotation-aware and stops when ctx is cancelled.
-func streamAudit(ctx context.Context, path string, fromStart bool, backend string, interval time.Duration, w io.Writer) error {
+// that matches filter — as a coloured row, or (asJSON) its raw JSONL line for a
+// scripting consumer. It is rotation-aware and stops when ctx is cancelled.
+func streamAudit(ctx context.Context, path string, fromStart bool, filter bindMatch, asJSON bool, interval time.Duration, w io.Writer) error {
 	return followAudit(ctx, path, fromStart, interval, func(line []byte) {
-		if s, ok := formatAuditLine(bytes.TrimSpace(line), backend); ok {
-			fmt.Fprintln(w, s)
+		r, ok := parseStreamRecord(line)
+		if !ok || !matchRecord(filter, r) {
+			return
 		}
+		if asJSON {
+			fmt.Fprintln(w, string(bytes.TrimSpace(line)))
+			return
+		}
+		fmt.Fprintln(w, formatStreamRow(r))
 	})
 }
 
@@ -57,9 +75,12 @@ func streamAudit(ctx context.Context, path string, fromStart bool, backend strin
 func followAudit(ctx context.Context, path string, fromStart bool, interval time.Duration, handle func(line []byte)) error {
 	f, err := os.Open(path)
 	if err != nil {
-		return fmt.Errorf("follow audit: %w", err)
+		return fmt.Errorf("open %s: %w", path, err)
 	}
-	defer f.Close()
+	// Close via a closure, not `defer f.Close()`: a rotation reopen reassigns f,
+	// and a bound method value would keep closing the ORIGINAL handle, leaking the
+	// reopened one (an fd leak on every rotation).
+	defer func() { f.Close() }()
 
 	var offset int64
 	if !fromStart {
@@ -133,7 +154,7 @@ func parseStreamRecord(line []byte) (streamRecord, bool) {
 }
 
 // formatAuditLine renders one audit JSONL line as a coloured stream row, or
-// (‑, false) if the line is not a renderable audit record or is filtered out by
+// ("", false) if the line is not a renderable audit record or is filtered out by
 // backend. The decision drives the colour: allow green, deny red, cosign amber.
 func formatAuditLine(line []byte, backend string) (string, bool) {
 	r, ok := parseStreamRecord(line)
@@ -143,6 +164,13 @@ func formatAuditLine(line []byte, backend string) (string, bool) {
 	if backend != "" && r.Backend != backend {
 		return "", false
 	}
+	return formatStreamRow(r), true
+}
+
+// formatStreamRow renders a parsed audit record as a coloured, escape-safe row.
+// Every dynamic field goes through sanitizeCell so a hostile peer/tool/reason
+// cannot inject terminal escapes; the decision drives the colour.
+func formatStreamRow(r streamRecord) string {
 	var dec string
 	switch r.Decision {
 	case "allow":
@@ -166,7 +194,7 @@ func formatAuditLine(line []byte, backend string) (string, bool) {
 	if r.Reason != "" {
 		row += "  " + dim(sanitizeCell(r.Reason))
 	}
-	return row, true
+	return row
 }
 
 // streamTime shortens an RFC3339 timestamp to HH:MM:SS for a compact row,
