@@ -18,7 +18,7 @@ chain tooling.
 **Who is affected.**
 
 - **End users building from source:** no action. `go build ./...`,
-  `go build -o meshmcp .`, and `go test ./...` work unchanged inside the repo.
+  `go build -o meshmcp ./cmd/meshmcp`, and `go test ./...` work unchanged inside the repo.
 - **Anyone importing these packages** (e.g. `meshmcp/policy`,
   `meshmcp/mcpclient`) from another module: update your imports to the
   `github.com/xrey167/meshmcp/...` prefix. Once a version is tagged you can

@@ -1,6 +1,7 @@
 # Compiled binaries
 *.exe
 /meshmcp
+/cmd/meshmcp/meshmcp
 cmd/*/mcpserver
 cmd/*/mcpecho
 cmd/*/mcphttp

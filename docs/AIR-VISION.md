@@ -56,7 +56,7 @@ screenshot, an image, a live frame — with the same identity, ACL, and receipt 
   by cryptographic identity, each audited by content hash. `air serve --gallery <inbox>` grows
   a **Vision** section on the phone-first page that renders those images inline — a phone *sees*
   what a laptop dropped, served path-safely and gated by the viewer ACL. `air vision <inbox>` is
-  the terminal inventory of the same (`airvision.go`, `airserve.go`, `site/air-live.html`).
+  the terminal inventory of the same (`airvision.go`, `airserve.go`, `cmd/meshmcp/site/air-live.html`).
 - **Deeper:** a governed **screen-share** primitive — frames pushed over the resumable session
   channel, viewed on a peer's page, ACL'd and audited frame-by-frame; a roam mid-share
   resumes. The transport (`session/`) already carries ordered, resumable byte regions.

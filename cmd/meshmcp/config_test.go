@@ -266,7 +266,7 @@ func writeAndLoad(t *testing.T, body string) error {
 // TestExampleGatewayConfigsLoadStrictly guards that enabling strict decoding did
 // not break any real gateway config (every example with a top-level backends:).
 func TestExampleGatewayConfigsLoadStrictly(t *testing.T) {
-	files, _ := filepath.Glob("examples/*.yaml")
+	files, _ := filepath.Glob("../../examples/*.yaml")
 	for _, f := range files {
 		data, err := os.ReadFile(f)
 		if err != nil || !bytes.Contains(data, []byte("\nbackends:")) && !bytes.HasPrefix(data, []byte("backends:")) {

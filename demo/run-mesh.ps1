@@ -12,7 +12,7 @@ if (-not $env:NB_SETUP_KEY) {
 }
 
 Write-Host "==> building binaries" -ForegroundColor Cyan
-go build -o meshmcp.exe .
+go build -o meshmcp.exe ./cmd/meshmcp
 go build -o cmd/mcpserver/mcpserver.exe ./cmd/mcpserver/prompt_mcp
 
 New-Item -ItemType Directory -Force -Path demo | Out-Null

@@ -136,7 +136,7 @@ one tamper-evident ledger, one credential broker. See the
 ## Quick start — 60 seconds
 
 ```bash
-go build -o meshmcp .
+go build -o meshmcp ./cmd/meshmcp
 go build -o cmd/mcpserver/mcpserver.exe ./cmd/mcpserver/prompt_mcp   # the demo MCP server the config runs
 
 export NB_SETUP_KEY=<key from app.netbird.io → Setup Keys>
