@@ -60,6 +60,9 @@ func airServeHandler(d airServeDeps) http.Handler {
 	})
 
 	mux.HandleFunc("/api/config", func(w http.ResponseWriter, r *http.Request) {
+		if !getOnly(w, r) {
+			return
+		}
 		writeJSONResp(w, http.StatusOK, map[string]any{
 			"approvals": d.approvals,
 			"push":      d.push != nil,
@@ -70,6 +73,9 @@ func airServeHandler(d airServeDeps) http.Handler {
 	})
 
 	mux.HandleFunc("/api/catalog", func(w http.ResponseWriter, r *http.Request) {
+		if !getOnly(w, r) {
+			return
+		}
 		if d.controlBase == "" {
 			http.Error(w, "no --control endpoint configured", http.StatusServiceUnavailable)
 			return
@@ -85,6 +91,9 @@ func airServeHandler(d airServeDeps) http.Handler {
 	})
 
 	mux.HandleFunc("/api/peers", func(w http.ResponseWriter, r *http.Request) {
+		if !getOnly(w, r) {
+			return
+		}
 		rows := []airPeerRow{}
 		if d.peers != nil {
 			got, err := d.peers()
@@ -111,8 +120,14 @@ func airServeHandler(d airServeDeps) http.Handler {
 			http.Error(w, "target and text are required", http.StatusBadRequest)
 			return
 		}
-		name := body.Name
-		if name == "" {
+		if !validMeshTarget(body.Target) {
+			http.Error(w, "target must be a mesh host:port", http.StatusBadRequest)
+			return
+		}
+		// Base-sanitize the sender-supplied name (the receiver re-checks, but the
+		// relay should never forward a path-y name), matching /api/drop.
+		name := filepath.Base(body.Name)
+		if name == "" || name == "." || name == string(filepath.Separator) {
 			name = "clip.txt"
 		}
 		if err := d.push(r.Context(), body.Target, name, []byte(body.Text)); err != nil {
@@ -142,6 +157,10 @@ func airServeHandler(d airServeDeps) http.Handler {
 			http.Error(w, "target and file are required", http.StatusBadRequest)
 			return
 		}
+		if !validMeshTarget(target) {
+			http.Error(w, "target must be a mesh host:port", http.StatusBadRequest)
+			return
+		}
 		defer file.Close()
 		data, err := io.ReadAll(io.LimitReader(file, maxAirUpload))
 		if err != nil {
@@ -160,6 +179,9 @@ func airServeHandler(d airServeDeps) http.Handler {
 	})
 
 	mux.HandleFunc("/api/receipts", func(w http.ResponseWriter, r *http.Request) {
+		if !getOnly(w, r) {
+			return
+		}
 		if d.receipts == nil {
 			http.Error(w, "receipts are not enabled on this page", http.StatusServiceUnavailable)
 			return
@@ -184,6 +206,9 @@ func airServeHandler(d airServeDeps) http.Handler {
 	// name against the inbox root); the page-wide viewer ACL, if set, gates them
 	// like every other endpoint.
 	mux.HandleFunc("/api/gallery", func(w http.ResponseWriter, r *http.Request) {
+		if !getOnly(w, r) {
+			return
+		}
 		if d.gallery == nil {
 			http.Error(w, "the Vision gallery is not enabled on this page", http.StatusServiceUnavailable)
 			return
@@ -204,6 +229,9 @@ func airServeHandler(d airServeDeps) http.Handler {
 	})
 
 	mux.HandleFunc("/api/image", func(w http.ResponseWriter, r *http.Request) {
+		if !getOnly(w, r) {
+			return
+		}
 		if d.image == nil {
 			http.Error(w, "the Vision gallery is not enabled on this page", http.StatusServiceUnavailable)
 			return
@@ -229,6 +257,9 @@ func airServeHandler(d airServeDeps) http.Handler {
 	})
 
 	mux.HandleFunc("/api/sessions", func(w http.ResponseWriter, r *http.Request) {
+		if !getOnly(w, r) {
+			return
+		}
 		if d.controlBase == "" {
 			http.Error(w, "no --control endpoint configured", http.StatusServiceUnavailable)
 			return
@@ -300,6 +331,11 @@ func withWebSecurity(h http.Handler, allowedHosts []string) http.Handler {
 		hdr.Set("X-Content-Type-Options", "nosniff")
 		hdr.Set("X-Frame-Options", "DENY")
 		hdr.Set("Referrer-Policy", "no-referrer")
+		// The page and its API expose identity-attributed, per-caller-filtered
+		// data (peers, catalog, receipts, sessions) — never let a shared or proxy
+		// cache retain it. Handlers that serve cacheable bytes (e.g. /api/image)
+		// override this with their own Cache-Control after us.
+		hdr.Set("Cache-Control", "no-store")
 		// DNS-rebinding defence: the page is only ever reached at the gateway's
 		// own mesh address, so a request whose Host is anything else (an
 		// attacker domain rebound to the mesh IP) is refused — this is what a
@@ -315,6 +351,32 @@ func withWebSecurity(h http.Handler, allowedHosts []string) http.Handler {
 		}
 		h.ServeHTTP(w, r)
 	})
+}
+
+// getOnly rejects any method other than GET/HEAD on a read-only endpoint,
+// returning false (after writing a 405) so the handler stops. Read-only API
+// routes must not silently accept POST/PUT/DELETE.
+func getOnly(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET")
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return false
+	}
+	return true
+}
+
+// validMeshTarget reports whether target is a well-formed mesh host:port — a
+// syntactic guard so the relay's push/drop cannot be pointed at garbage (and,
+// with a bad port, at an unintended local service).
+func validMeshTarget(target string) bool {
+	host, port, err := net.SplitHostPort(target)
+	if err != nil || host == "" || port == "" {
+		return false
+	}
+	if _, err := strconv.Atoi(port); err != nil {
+		return false
+	}
+	return true
 }
 
 // hostAllowed reports whether the request Host matches one of the expected
@@ -538,7 +600,11 @@ func cmdAirServe(args []string) error {
 		return fmt.Errorf("listen on mesh port %d: %w", *port, err)
 	}
 	defer ln.Close()
-	fmt.Fprintf(os.Stderr, "Air (live) on mesh port %d (open it from any device on the mesh)\n", *port)
+	if len(allowedHosts) > 0 {
+		fmt.Fprintf(os.Stderr, "Air (live) on http://%s (open it from any device on the mesh)\n", allowedHosts[0])
+	} else {
+		fmt.Fprintf(os.Stderr, "Air (live) on mesh port %d (open it from any device on the mesh)\n", *port)
+	}
 	// Read/header timeouts even on the mesh: any admitted peer could otherwise
 	// dribble headers forever and exhaust the listener (Slowloris).
 	return newLocalHTTPServer("", airServeHandler(d)).Serve(ln)

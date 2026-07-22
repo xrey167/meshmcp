@@ -73,6 +73,11 @@ func streamAudit(ctx context.Context, path string, fromStart bool, filter bindMa
 // cancelled. This is the shared engine under `air stream` (which renders each
 // line) and `air bind` (which matches each line against reaction rules).
 func followAudit(ctx context.Context, path string, fromStart bool, interval time.Duration, handle func(line []byte)) error {
+	// time.NewTicker panics on a non-positive interval; a bad --interval (0 or
+	// negative) must degrade to a sane default, never crash the follower.
+	if interval <= 0 {
+		interval = 500 * time.Millisecond
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", path, err)
