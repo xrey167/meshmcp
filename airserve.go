@@ -525,6 +525,12 @@ func cmdAirServe(args []string) error {
 		galleryDir := *gallery
 		d.gallery = func(limit int) ([]galleryImage, error) { return listGalleryImages(galleryDir, limit) }
 		d.image = func(name string) ([]byte, string, error) { return readGalleryImage(galleryDir, name) }
+		// A Receipt is audit metadata; a gallery streams the raw pixels of whatever
+		// landed in the inbox (a screenshot, a scanned document) — materially more
+		// sensitive. Without --allow any mesh peer can view them, so say so loudly.
+		if len(allow) == 0 {
+			fmt.Fprintln(os.Stderr, amber("warning:")+" --gallery exposes received images to ANY mesh peer; add --allow <id> to restrict who can view them")
+		}
 	}
 
 	ln, err := client.ListenTCP(fmt.Sprintf(":%d", *port))

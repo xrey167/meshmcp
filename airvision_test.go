@@ -120,6 +120,32 @@ func TestReadGalleryImageRejectsTraversal(t *testing.T) {
 	}
 }
 
+func TestReadGalleryImageRejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	// A secret outside the inbox; a symlink inside points at it with an image name.
+	secret := filepath.Join(filepath.Dir(dir), "secret.txt")
+	if err := os.WriteFile(secret, []byte("PRIVATE KEY"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(secret)
+	link := filepath.Join(dir, "innocent.png")
+	if err := os.Symlink(secret, link); err != nil {
+		t.Skipf("symlinks unavailable on this platform: %v", err) // Windows without privilege
+	}
+	// The listing already skips it (lstat semantics)...
+	imgs, err := listGalleryImages(dir, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(imgs) != 0 {
+		t.Errorf("symlink should not be listed, got %+v", imgs)
+	}
+	// ...and the read path must refuse to follow it out of the inbox.
+	if _, _, err := readGalleryImage(dir, "innocent.png"); err == nil {
+		t.Fatal("readGalleryImage followed a symlink out of the inbox")
+	}
+}
+
 func TestReadGalleryImageRejectsNonImage(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "key.pem"), []byte("private"), 0o644); err != nil {

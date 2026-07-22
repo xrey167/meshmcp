@@ -12,6 +12,7 @@ func rec(decision, backend, method, tool, peer string) streamRecord {
 
 func TestMatchRecord(t *testing.T) {
 	r := rec("deny", "drop", "drop/recv", "abc123", "phone.mesh")
+	r.Reason = "not in allow list"
 	cases := []struct {
 		name string
 		m    bindMatch
@@ -25,12 +26,71 @@ func TestMatchRecord(t *testing.T) {
 		{"peer miss", bindMatch{Peer: "*.other"}, false},
 		{"all fields match", bindMatch{Decision: "deny", Backend: "drop", Peer: "phone.mesh"}, true},
 		{"one field misses -> no match", bindMatch{Decision: "deny", Peer: "laptop.mesh"}, false},
-		{"invalid glob fails closed", bindMatch{Peer: "[bad"}, false},
+		{"literal non-glob mismatch", bindMatch{Peer: "[bad"}, false},
+		// The '/' bug: a wildcard must span the separator in slash-bearing fields.
+		{"method star spans slash", bindMatch{Method: "*"}, true},
+		{"method prefix spans slash", bindMatch{Method: "drop/*"}, true},
+		{"method contains spans slash", bindMatch{Method: "*rec*"}, true},
+		// The reason trigger — the "why" is now matchable.
+		{"reason glob", bindMatch{Reason: "*allow list*"}, true},
+		{"reason miss", bindMatch{Reason: "*cost*"}, false},
 	}
 	for _, c := range cases {
 		if got := matchRecord(c.m, r); got != c.want {
 			t.Errorf("%s: matchRecord=%v, want %v", c.name, got, c.want)
 		}
+	}
+}
+
+// TestGlobMatch pins the wildcard semantics that distinguish this matcher from
+// path.Match: `*` spans '/', `?` is one char, and anchoring is full-string.
+func TestGlobMatch(t *testing.T) {
+	cases := []struct {
+		pattern, s string
+		want       bool
+	}{
+		{"*", "tools/call", true}, // path.Match returns false here
+		{"notifications/*", "notifications/air/steer", true},
+		{"*steer*", "notifications/air/steer", true},
+		{"tools/*", "tools/call", true},
+		{"tools/?all", "tools/call", true},
+		{"tools/?all", "tools/xxall", false},
+		{"exact", "exact", true},
+		{"exact", "exacts", false},
+		{"", "", true},
+		{"*", "", true},
+		{"a*b*c", "axxbyyc", true},
+		{"a*b*c", "axxbyy", false},
+	}
+	for _, c := range cases {
+		if got := globMatch(c.pattern, c.s); got != c.want {
+			t.Errorf("globMatch(%q,%q)=%v, want %v", c.pattern, c.s, got, c.want)
+		}
+	}
+}
+
+// TestFireBindingHelpers covers the pure reaction builders: print rows sanitize
+// attacker-influenced fields, and run args are template-expanded.
+func TestFireBindingHelpers(t *testing.T) {
+	old := colorOn
+	colorOn = false
+	defer func() { colorOn = old }()
+
+	r := rec("deny", "drop", "drop/recv", "sha", "phone.mesh")
+	// A hostile field carrying an ANSI escape must be stripped from the print row.
+	r.Reason = "evil\x1b[31mred\x1b]0;title\x07"
+	line := formatPrintLine(bindingRule{Name: "notify", Do: bindAction{Print: "{peer} — {reason}"}}, r)
+	if !strings.Contains(line, "phone.mesh") || !strings.Contains(line, "notify") {
+		t.Fatalf("print row missing expected content: %q", line)
+	}
+	if strings.ContainsRune(line, '\x1b') {
+		t.Fatalf("escape sequence not sanitized from print row: %q", line)
+	}
+
+	args := buildRunArgs(bindingRule{Do: bindAction{Run: []string{"air", "agent-steer", "--text", "drop from {peer}"}}}, r)
+	want := []string{"air", "agent-steer", "--text", "drop from phone.mesh"}
+	if strings.Join(args, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("buildRunArgs = %v, want %v", args, want)
 	}
 }
 

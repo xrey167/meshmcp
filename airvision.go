@@ -132,12 +132,14 @@ func readGalleryImage(dir, name string) (data []byte, contentType string, err er
 	if err != nil {
 		return nil, "", err
 	}
-	f, err := os.Open(dest)
-	if err != nil {
-		return nil, "", err
-	}
-	defer f.Close()
-	fi, err := f.Stat()
+	// Lstat, not Stat: sanitizeDest is purely lexical (it never resolves
+	// symlinks), so a symlink named e.g. "x.png" inside the inbox pointing at a
+	// secret outside it would pass the lexical check and, if we followed it, be
+	// served as an image. Lstat sees the link itself; requiring a regular file
+	// rejects it — matching the listing path (WalkDir's lstat-based
+	// DirEntry.Type), which already skips symlinks. So /api/image can never serve
+	// what /api/gallery would not list.
+	fi, err := os.Lstat(dest)
 	if err != nil {
 		return nil, "", err
 	}
@@ -145,8 +147,13 @@ func readGalleryImage(dir, name string) (data []byte, contentType string, err er
 		return nil, "", fmt.Errorf("not a regular file: %q", name)
 	}
 	if fi.Size() > maxAirImage {
-		return nil, "", fmt.Errorf("image %q is %d bytes, over the %d-byte limit", name, fi.Size(), maxAirImage)
+		return nil, "", fmt.Errorf("image %q is %s, over the %s limit", name, humanBytes(fi.Size()), humanBytes(maxAirImage))
 	}
+	f, err := os.Open(dest)
+	if err != nil {
+		return nil, "", err
+	}
+	defer f.Close()
 	data, err = io.ReadAll(io.LimitReader(f, maxAirImage))
 	if err != nil {
 		return nil, "", err

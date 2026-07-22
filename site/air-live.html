@@ -287,11 +287,18 @@
 
   async function getJSON(u){var r=await fetch(u,{headers:{"Accept":"application/json"}});if(!r.ok)throw new Error(r.status+" "+(await r.text()).trim());return r.json()}
 
+  // changed reports whether el's payload differs from the last render, recording
+  // the new signature. The 10s poll uses it to skip re-assigning innerHTML when
+  // nothing changed — otherwise every card re-fires its fade-in and the Vision
+  // grid tears down and re-decodes every <img> on a timer. Reset via changed(el,"").
+  function changed(el,sig){if(el.dataset.sig===sig)return false;el.dataset.sig=sig;return true}
+
   async function loadPeers(){
     var el=$("peers");if(!el.dataset.loaded)el.innerHTML=skeleton(3);
     try{
       var d=await getJSON("api/peers");var ps=d.peers||[];el.dataset.loaded="1";
-      if(!ps.length){el.innerHTML=emptyState("📡","No peers reachable");return}
+      if(!ps.length){el.dataset.sig="";el.innerHTML=emptyState("📡","No peers reachable");return}
+      if(!changed(el,JSON.stringify(ps)))return;
       el.innerHTML=ps.map(function(p){
         var up=p.status==="connected";
         return '<div class="cell fade-in"><div class="avatar" style="background:'+grad(p.pubkey)+'">'+esc(ini(p.fqdn||p.ip))+'</div>'+
@@ -305,7 +312,8 @@
     if(!cfg.catalog)return;var el=$("catalog");if(!el.dataset.loaded)el.innerHTML=skeleton(2);
     try{
       var d=await getJSON("api/catalog");var eps=d.endpoints||[];el.dataset.loaded="1";
-      if(!eps.length){el.innerHTML=emptyState("🧭","No backends you may reach");return}
+      if(!eps.length){el.dataset.sig="";el.innerHTML=emptyState("🧭","No backends you may reach");return}
+      if(!changed(el,JSON.stringify(eps)))return;
       el.innerHTML=eps.map(function(e){
         var tags='<span class="tag">'+esc(e.transport||"?")+'</span>';
         if(e.resumable)tags+='<span class="badge up">resumable</span>';
@@ -323,7 +331,8 @@
     try{
       var d=await getJSON("api/sessions");sessions=d.sessions||[];el.dataset.loaded="1";
       if(d.you)$("you").textContent="acting as "+d.you;
-      if(!sessions.length){el.innerHTML=emptyState("🌙","No live sessions");return}
+      if(!sessions.length){el.dataset.sig="";el.innerHTML=emptyState("🌙","No live sessions");return}
+      if(!changed(el,JSON.stringify(sessions)))return;
       el.innerHTML=sessions.map(function(s,i){
         return '<div class="cell fade-in"><div class="avatar" style="background:'+grad(s.id)+'">'+esc((s.backend||"?").slice(0,2).toUpperCase())+'</div>'+
           '<div class="body"><div class="title">'+esc(s.backend)+'</div><div class="sub">'+esc(s.id)+' · '+esc(s.peer||"?")+' · '+esc(s.age_sec||0)+'s</div></div>'+
@@ -410,7 +419,8 @@
     if(!cfg.receipts)return;var el=$("receipts");if(!el.dataset.loaded)el.innerHTML=skeleton(3);
     try{
       var d=await getJSON("api/receipts?limit=50");var rs=d.receipts||[];el.dataset.loaded="1";
-      if(!rs.length){el.innerHTML=emptyState("🧾","No receipts yet");return}
+      if(!rs.length){el.dataset.sig="";el.innerHTML=emptyState("🧾","No receipts yet");return}
+      if(!changed(el,JSON.stringify(rs)))return;
       el.innerHTML=rs.slice().reverse().map(function(x){
         var dec=(x.decision||"?").toLowerCase();
         return '<div class="receipt"><span class="dec '+esc(dec)+'">'+esc(dec)+'</span>'+
@@ -429,7 +439,8 @@
     if(!cfg.vision)return;var el=$("gallery");if(!el.dataset.loaded)el.innerHTML=skeleton(2);
     try{
       var d=await getJSON("api/gallery?limit=60");var gs=d.images||[];el.dataset.loaded="1";
-      if(!gs.length){el.innerHTML=emptyState("🖼️","Nothing dropped here yet");return}
+      if(!gs.length){el.dataset.sig="";el.innerHTML=emptyState("🖼️","Nothing dropped here yet");return}
+      if(!changed(el,JSON.stringify(gs)))return;
       el.innerHTML=gs.map(function(g){
         var u="api/image?name="+encodeURIComponent(g.name);
         return '<a class="shot fade-in" href="'+esc(u)+'" target="_blank" rel="noopener" title="'+esc(g.name)+'">'+
