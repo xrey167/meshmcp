@@ -18,6 +18,7 @@ import (
 
 	"github.com/netbirdio/netbird/client/embed"
 
+	"github.com/xrey167/meshmcp/air"
 	"github.com/xrey167/meshmcp/mcp"
 	"github.com/xrey167/meshmcp/mcpclient"
 	"github.com/xrey167/meshmcp/policy"
@@ -234,6 +235,12 @@ func (a *meshApp) register(s *mcp.Server) {
 			"path":   appStr("local file path to send"),
 		}, "target", "path"),
 		Handler: a.toolDropFile,
+	})
+	s.AddTool(mcp.Tool{
+		Name:        "air_catalog",
+		Description: "Discover the backends you may reach on a gateway (Air · ARD well-known catalog). Requires --control. Returns each backend's name, mesh address, transport, and whether it is resumable/steerable — filtered to your identity.",
+		InputSchema: appObj(nil),
+		Handler:     a.toolAirCatalog,
 	})
 	s.AddTool(mcp.Tool{
 		Name:        "air_sessions",
@@ -458,6 +465,20 @@ func (a *meshApp) toolDropFile(ctx context.Context, args json.RawMessage) (mcp.T
 		return errTxt("drop to %s failed: %v", p.Target, err), nil
 	}
 	return txt(fmt.Sprintf("dropped %s to %s", p.Path, p.Target)), nil
+}
+
+// toolAirCatalog discovers the backends the caller may reach on the gateway,
+// via the ARD well-known catalog on the control endpoint.
+func (a *meshApp) toolAirCatalog(ctx context.Context, _ json.RawMessage) (mcp.ToolResult, error) {
+	hc, err := a.controlClient()
+	if err != nil {
+		return errTxt("%v", err), nil
+	}
+	_, body, err := air.FetchCatalog(hc, "http://air-control"+air.CatalogPath)
+	if err != nil {
+		return errTxt("air_catalog: %v", err), nil
+	}
+	return txt(string(body)), nil
 }
 
 // toolAirSessions lists live sessions via the gateway control endpoint.
