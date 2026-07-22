@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/xrey167/meshmcp/air"
 )
@@ -26,13 +27,6 @@ import (
 // The catalog model (AirCatalog/AirCatalogEntry) and the ARD DNS logic live in
 // the `air` package (aliased in airalias.go); this file is the mesh-wired CLI
 // and the gateway's per-caller filtering that binds them to a live mesh.
-
-// catalogBackend is a gateway's static per-backend catalog data, captured at
-// startup; steerability is resolved live from the session-server map.
-type catalogBackend struct {
-	name, address, transport string
-	resumable                bool
-}
 
 // cmdAirCatalog fetches and renders a gateway's Air catalog — the discovery
 // view. It dials the gateway's control endpoint over the mesh (the URL host is
@@ -118,13 +112,17 @@ func cmdAirCatalog(args []string) error {
 	for _, e := range cat.Endpoints {
 		rows = append(rows, []cell{
 			styled(e.Name, bold),
+			styled(catalogID(e), dim),
+			plain(catalogType(e)),
+			plain(catalogOwner(e)),
 			styled(e.Address, cyan),
 			plain(e.Transport),
+			plain(catalogState(e)),
 			plain(catalogCaps(e)),
 		})
 	}
-	renderTable(os.Stdout, []string{"backend", "address", "transport", "supports"}, rows)
-	fmt.Fprintln(os.Stderr, dim(fmt.Sprintf("%d reachable endpoint(s)", len(rows))))
+	renderTable(os.Stdout, []string{"component", "id", "type", "owner", "address", "transport", "state", "features"}, rows)
+	fmt.Fprintln(os.Stderr, dim(fmt.Sprintf("%d reachable component(s)", len(rows))))
 	return nil
 }
 
@@ -134,12 +132,27 @@ func cmdAirCatalog(args []string) error {
 // pre-coloured text here would both miscount the column width and defeat the
 // cell sanitizer.
 func catalogCaps(e AirCatalogEntry) string {
-	caps := []string{}
+	features, err := air.NormalizeFeatures(e.Features)
+	if err != nil {
+		features = e.Features
+	}
+	caps, seen := []string{}, map[string]bool{}
+	add := func(label string) {
+		if label != "" && !seen[label] {
+			seen[label] = true
+			caps = append(caps, label)
+		}
+	}
+	for _, feature := range features {
+		add(catalogFeatureLabel(feature))
+	}
+	// Legacy catalogs have only these booleans. Keep their familiar labels
+	// while component cards converge on the versioned feature vocabulary.
 	if e.Resumable {
-		caps = append(caps, "resumable")
+		add("resumable")
 	}
 	if e.Steerable {
-		caps = append(caps, "steerable")
+		add("steerable")
 	}
 	if len(caps) == 0 {
 		return "—"
@@ -147,20 +160,137 @@ func catalogCaps(e AirCatalogEntry) string {
 	return strings.Join(caps, " · ")
 }
 
-// buildCatalogBackends captures the static catalog data for a gateway's
-// configured backends: address (meshIP:port) and transport kind. Steerability
-// is resolved live from the running session-server map, not here.
-func buildCatalogBackends(backends []*Backend, meshIP string) []catalogBackend {
-	out := make([]catalogBackend, 0, len(backends))
-	for _, b := range backends {
-		transport := "stdio"
-		if b.HTTP != "" {
-			transport = "http"
-		}
-		addr := fmt.Sprintf("%s:%d", meshIP, b.Port)
-		out = append(out, catalogBackend{name: b.Name, address: addr, transport: transport, resumable: b.Resumable})
+func catalogFeatureLabel(feature air.Feature) string {
+	label := feature.Name
+	switch feature.Name {
+	case air.FeatureMCP20250618:
+		label = "mcp 2025-06-18"
+	case air.FeatureAirBrowseV1:
+		label = "browse"
+	case air.FeatureAirResumeV1:
+		label = "resumable"
+	case air.FeatureAirSteerV1:
+		label = "steerable"
+	case air.FeatureCapabilityV1:
+		label = "capability auth"
 	}
-	return out
+	if feature.Version != "" {
+		label += "@" + feature.Version
+	}
+	return label
+}
+
+func catalogKind(e AirCatalogEntry) string {
+	if e.Kind == "" {
+		return "backend"
+	}
+	return string(e.Kind)
+}
+
+func catalogVersion(e AirCatalogEntry) string {
+	if e.Version == "" {
+		return "—"
+	}
+	return e.Version
+}
+
+func catalogID(e AirCatalogEntry) string {
+	if e.ID == "" {
+		return "—"
+	}
+	return e.ID
+}
+
+func catalogType(e AirCatalogEntry) string {
+	t := catalogKind(e)
+	if e.Version != "" {
+		t += "@" + e.Version
+	}
+	return t
+}
+
+func catalogOwner(e AirCatalogEntry) string {
+	switch {
+	case e.Owner.FQDN != "":
+		return e.Owner.FQDN
+	case e.Owner.PubKey != "":
+		return shortKey(e.Owner.PubKey)
+	case e.Owner.SPIFFE != "":
+		return e.Owner.SPIFFE
+	default:
+		return "—"
+	}
+}
+
+func catalogState(e AirCatalogEntry) string {
+	if e.Lifecycle.State == "" {
+		return "unknown"
+	}
+	return string(e.Lifecycle.State)
+}
+
+// buildCatalogBackends creates the gateway's canonical component cards. The
+// same cards feed HTTP discovery, Air Home/Map/Change, and the MCP app. Live
+// steerability is added by gatewayAirControl.catalog; every other advertised
+// feature comes from real configured behavior. Cards are descriptive only:
+// the transport identity, backend ACL, policy, and capability verifier still
+// decide whether an operation is authorized.
+func buildCatalogBackends(backends []*Backend, meshIP string, owner air.IdentityRef) ([]AirCatalogEntry, error) {
+	if owner.PubKey == "" {
+		return nil, errors.New("component cards require the gateway mesh public key")
+	}
+	out := make([]AirCatalogEntry, 0, len(backends))
+	seenIDs := make(map[string]string, len(backends))
+	since := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, b := range backends {
+		transport := air.TransportStdio
+		switch {
+		case b.Remote != nil:
+			transport = air.TransportRemote
+		case b.HTTP != "":
+			transport = air.TransportHTTP
+		}
+
+		id := b.ID
+		if id == "" {
+			var err error
+			id, err = air.StableComponentID(owner.PubKey, air.ComponentBackend, b.Name)
+			if err != nil {
+				return nil, fmt.Errorf("backend %q: derive component id: %w", b.Name, err)
+			}
+		}
+		features := []air.Feature{
+			{Name: air.FeatureMCP20250618},
+			{Name: air.FeatureAirBrowseV1},
+		}
+		if b.Resumable {
+			features = append(features, air.Feature{Name: air.FeatureAirResumeV1})
+		}
+		if b.Capabilities != nil {
+			features = append(features, air.Feature{Name: air.FeatureCapabilityV1})
+		}
+		entry, err := (AirCatalogEntry{
+			ID:        id,
+			Kind:      air.ComponentBackend,
+			Name:      b.Name,
+			Version:   b.Version,
+			Owner:     owner,
+			Address:   net.JoinHostPort(meshIP, fmt.Sprintf("%d", b.Port)),
+			Transport: transport,
+			Features:  features,
+			Lifecycle: air.Lifecycle{State: air.LifecycleServing, Since: since},
+			Resumable: b.Resumable,
+		}).Normalized()
+		if err != nil {
+			return nil, fmt.Errorf("backend %q: component card: %w", b.Name, err)
+		}
+		if other, duplicate := seenIDs[entry.ID]; duplicate {
+			return nil, fmt.Errorf("backend %q: component id %q collides with backend %q", b.Name, entry.ID, other)
+		}
+		seenIDs[entry.ID] = b.Name
+		out = append(out, entry)
+	}
+	return out, nil
 }
 
 // writeCatalog is a tiny convenience the handler uses; kept here so the

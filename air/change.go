@@ -21,9 +21,10 @@ import (
 // true" rather than an opaque "changed".
 type EntryChange struct {
 	Name   string       `json:"name"`
+	ID     string       `json:"id,omitempty"`
 	From   CatalogEntry `json:"from"`
 	To     CatalogEntry `json:"to"`
-	Fields []string     `json:"fields"` // address | transport | steerable | resumable
+	Fields []string     `json:"fields"` // stable ordered names from changedFields
 }
 
 // CatalogDelta is the difference between an older and a current catalog:
@@ -40,57 +41,112 @@ func (d CatalogDelta) Empty() bool {
 	return len(d.Added) == 0 && len(d.Removed) == 0 && len(d.Changed) == 0
 }
 
-// DiffCatalogs computes what changed from old to cur, keyed by endpoint name.
-// A name present only in cur is Added; only in old is Removed; in both with any
-// differing field is Changed (with the differing field names). Endpoints are
-// matched by Name — a rename reads as one removed + one added, which is the
-// honest interpretation without a stable id.
+// DiffCatalogs computes what changed from old to cur. Component cards are
+// matched by stable ID first, so a rename or address move remains one component
+// change. Unmatched entries fall back to Name only when at least one side has
+// no ID, preserving comparisons against legacy snapshots without allowing two
+// different non-empty IDs with the same display name to collapse together.
 func DiffCatalogs(old, cur Catalog) CatalogDelta {
-	oldByName := index(old)
-	curByName := index(cur)
-
 	var d CatalogDelta
-	for name, oe := range oldByName {
-		ce, ok := curByName[name]
-		if !ok {
+	matchedCur := make([]bool, len(cur.Endpoints))
+	for _, oe := range old.Endpoints {
+		j := matchingEntry(oe, cur.Endpoints, matchedCur)
+		if j < 0 {
 			d.Removed = append(d.Removed, oe)
 			continue
 		}
+		matchedCur[j] = true
+		ce := cur.Endpoints[j]
 		if fields := changedFields(oe, ce); len(fields) > 0 {
-			d.Changed = append(d.Changed, EntryChange{Name: name, From: oe, To: ce, Fields: fields})
+			id := ce.ID
+			if id == "" {
+				id = oe.ID
+			}
+			name := ce.Name
+			if name == "" {
+				name = oe.Name
+			}
+			d.Changed = append(d.Changed, EntryChange{ID: id, Name: name, From: oe, To: ce, Fields: fields})
 		}
 	}
-	for name, ce := range curByName {
-		if _, ok := oldByName[name]; !ok {
+	for i, ce := range cur.Endpoints {
+		if !matchedCur[i] {
 			d.Added = append(d.Added, ce)
 		}
 	}
 
-	sort.Slice(d.Added, func(i, j int) bool { return d.Added[i].Name < d.Added[j].Name })
-	sort.Slice(d.Removed, func(i, j int) bool { return d.Removed[i].Name < d.Removed[j].Name })
-	sort.Slice(d.Changed, func(i, j int) bool { return d.Changed[i].Name < d.Changed[j].Name })
+	sort.Slice(d.Added, func(i, j int) bool { return entryLess(d.Added[i], d.Added[j]) })
+	sort.Slice(d.Removed, func(i, j int) bool { return entryLess(d.Removed[i], d.Removed[j]) })
+	sort.Slice(d.Changed, func(i, j int) bool {
+		if d.Changed[i].Name != d.Changed[j].Name {
+			return d.Changed[i].Name < d.Changed[j].Name
+		}
+		return d.Changed[i].ID < d.Changed[j].ID
+	})
 	return d
 }
 
-// index maps endpoint name to entry. On a duplicate name (a malformed catalog)
-// the last wins, matching how a client resolving by name would see it.
-func index(c Catalog) map[string]CatalogEntry {
-	m := make(map[string]CatalogEntry, len(c.Endpoints))
-	for _, e := range c.Endpoints {
-		m[e.Name] = e
+// matchingEntry returns the first unmatched current entry representing old.
+// Stable IDs are authoritative. Name fallback is only a legacy bridge.
+func matchingEntry(old CatalogEntry, current []CatalogEntry, used []bool) int {
+	if old.ID != "" {
+		for i, e := range current {
+			if !used[i] && e.ID == old.ID {
+				return i
+			}
+		}
 	}
-	return m
+	for i, e := range current {
+		if used[i] || e.Name != old.Name {
+			continue
+		}
+		if old.ID == "" || e.ID == "" {
+			return i
+		}
+	}
+	return -1
+}
+
+func entryLess(a, b CatalogEntry) bool {
+	if a.Name != b.Name {
+		return a.Name < b.Name
+	}
+	if a.ID != b.ID {
+		return a.ID < b.ID
+	}
+	return a.Address < b.Address
 }
 
 // changedFields returns the names of the capability fields that differ between
 // two same-named entries, in a stable order.
 func changedFields(a, b CatalogEntry) []string {
 	var f []string
+	if a.ID != b.ID {
+		f = append(f, "id")
+	}
+	if a.Name != b.Name {
+		f = append(f, "name")
+	}
+	if a.Kind != b.Kind {
+		f = append(f, "kind")
+	}
+	if a.Version != b.Version {
+		f = append(f, "version")
+	}
+	if a.Owner.normalized() != b.Owner.normalized() {
+		f = append(f, "owner")
+	}
 	if a.Address != b.Address {
 		f = append(f, "address")
 	}
 	if a.Transport != b.Transport {
 		f = append(f, "transport")
+	}
+	if featureKey(a.Features) != featureKey(b.Features) {
+		f = append(f, "features")
+	}
+	if a.Lifecycle.normalized() != b.Lifecycle.normalized() {
+		f = append(f, "lifecycle")
 	}
 	if a.Steerable != b.Steerable {
 		f = append(f, "steerable")

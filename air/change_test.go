@@ -78,8 +78,15 @@ func TestChangedFieldsEachField(t *testing.T) {
 		mut   func(CatalogEntry) CatalogEntry
 		field string
 	}{
+		{func(e CatalogEntry) CatalogEntry { e.ID = "backend:x"; return e }, "id"},
+		{func(e CatalogEntry) CatalogEntry { e.Name = "renamed"; return e }, "name"},
+		{func(e CatalogEntry) CatalogEntry { e.Kind = ComponentBackend; return e }, "kind"},
+		{func(e CatalogEntry) CatalogEntry { e.Version = "2"; return e }, "version"},
+		{func(e CatalogEntry) CatalogEntry { e.Owner.PubKey = "key"; return e }, "owner"},
 		{func(e CatalogEntry) CatalogEntry { e.Address = "a:2"; return e }, "address"},
 		{func(e CatalogEntry) CatalogEntry { e.Transport = TransportHTTP; return e }, "transport"},
+		{func(e CatalogEntry) CatalogEntry { e.Features = []Feature{{Name: FeatureAirBrowseV1}}; return e }, "features"},
+		{func(e CatalogEntry) CatalogEntry { e.Lifecycle.State = LifecycleServing; return e }, "lifecycle"},
 		{func(e CatalogEntry) CatalogEntry { e.Steerable = true; return e }, "steerable"},
 		{func(e CatalogEntry) CatalogEntry { e.Resumable = true; return e }, "resumable"},
 	}
@@ -91,5 +98,57 @@ func TestChangedFieldsEachField(t *testing.T) {
 	}
 	if f := changedFields(base, base); len(f) != 0 {
 		t.Errorf("identical entries should have no changed fields, got %v", f)
+	}
+}
+
+func TestDiffCatalogsMatchesStableIDAcrossRename(t *testing.T) {
+	old := cat(CatalogEntry{
+		ID: "backend:files", Kind: ComponentBackend, Name: "files", Version: "1",
+		Address: "a:1", Transport: TransportStdio,
+	})
+	cur := cat(CatalogEntry{
+		ID: "backend:files", Kind: ComponentBackend, Name: "documents", Version: "2",
+		Address: "a:2", Transport: TransportStdio,
+	})
+	d := DiffCatalogs(old, cur)
+	if len(d.Added) != 0 || len(d.Removed) != 0 || len(d.Changed) != 1 {
+		t.Fatalf("stable-id rename should be one change: %+v", d)
+	}
+	c := d.Changed[0]
+	if c.ID != "backend:files" || c.Name != "documents" {
+		t.Fatalf("change did not retain stable/current identity: %+v", c)
+	}
+	if strings.Join(c.Fields, ",") != "name,version,address" {
+		t.Fatalf("rename fields = %v, want name,version,address", c.Fields)
+	}
+}
+
+func TestDiffCatalogsDoesNotMergeDifferentStableIDsByName(t *testing.T) {
+	old := cat(CatalogEntry{ID: "backend:old", Kind: ComponentBackend, Name: "search", Address: "a:1", Transport: TransportStdio})
+	cur := cat(CatalogEntry{ID: "backend:new", Kind: ComponentBackend, Name: "search", Address: "a:1", Transport: TransportStdio})
+	d := DiffCatalogs(old, cur)
+	if len(d.Added) != 1 || len(d.Removed) != 1 || len(d.Changed) != 0 {
+		t.Fatalf("identity replacement collapsed into a change: %+v", d)
+	}
+}
+
+func TestDiffCatalogsLegacyToCardFallsBackToName(t *testing.T) {
+	old := cat(CatalogEntry{Name: "files", Address: "a:1", Transport: TransportStdio})
+	cur := cat(CatalogEntry{ID: "backend:files", Kind: ComponentBackend, Name: "files", Address: "a:1", Transport: TransportStdio})
+	d := DiffCatalogs(old, cur)
+	if len(d.Changed) != 1 || len(d.Added) != 0 || len(d.Removed) != 0 || strings.Join(d.Changed[0].Fields, ",") != "id,kind" {
+		t.Fatalf("legacy-to-card transition should enrich one entry: %+v", d)
+	}
+}
+
+func TestChangedFieldsIgnoresFeatureOrderAndDuplicates(t *testing.T) {
+	a := CatalogEntry{Features: []Feature{{Name: FeatureAirSteerV1}, {Name: FeatureAirBrowseV1}}}
+	b := CatalogEntry{Features: []Feature{{Name: FeatureAirBrowseV1}, {Name: FeatureAirSteerV1}, {Name: FeatureAirSteerV1}}}
+	if fields := changedFields(a, b); len(fields) != 0 {
+		t.Fatalf("equivalent feature sets changed: %v", fields)
+	}
+	b.Features[0].Version = "2"
+	if fields := changedFields(a, b); len(fields) != 1 || fields[0] != "features" {
+		t.Fatalf("feature-version change not detected: %v", fields)
 	}
 }

@@ -414,12 +414,15 @@ func renderHome(w io.Writer, h air.Home, limit int) {
 		for _, e := range firstN(h.Reachable, limit) {
 			rows = append(rows, []cell{
 				styled(e.Name, bold),
+				styled(catalogID(e), dim),
+				plain(catalogType(e)),
+				plain(catalogOwner(e)),
 				styled(e.Address, cyan),
-				plain(e.Transport),
+				plain(catalogState(e)),
 				plain(catalogCaps(e)),
 			})
 		}
-		renderTable(w, []string{"backend", "address", "transport", "supports"}, rows)
+		renderTable(w, []string{"component", "id", "type", "owner", "address", "state", "features"}, rows)
 	}
 
 	if h.Showing != nil {

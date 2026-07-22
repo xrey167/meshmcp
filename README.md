@@ -93,6 +93,27 @@ key-holding insider).
 
 ---
 
+## One coherent agent ecosystem
+
+meshmcp now gives every discoverable backend a **Component Card**: a stable ID,
+kind, version, advertised owner, versioned features, and lifecycle. The same
+card drives the catalog, map, home, change, terminal, and assistant views, so an
+agent can **discover → understand → use → continue** without each surface
+inventing a different identity for the same component.
+
+Cards describe; they never authorize. The live WireGuard transport still proves
+the caller, and backend ACL, policy, co-sign, and capability verification still
+decide every action. See [the ecosystem design](docs/ECOSYSTEM.md) for the v1
+card contract and the Trust Library, Universal Resolver, Continuity Capsule,
+automation, and native-companion roadmap.
+
+The design goal is integrated-product coherence—one identity, a small shared
+vocabulary, predictable continuity, and privacy by default—not imitation of a
+third-party product or protocol. meshmcp is independent and is not affiliated
+with or endorsed by Apple Inc.
+
+---
+
 ## One plane, many MCP servers
 
 meshmcp isn't a server — it's the layer **in front of** your servers. A filesystem,
@@ -330,7 +351,8 @@ examples/    ready-to-adapt configs        docs/  design docs + open specs
 - **[docs/MARKETPLACE.md](docs/MARKETPLACE.md)** — the **governed plugin marketplace** (F14): Ed25519-signed bundle manifests, pinned-key + content-hash verification, and metered, audited installs — no dynamic loading.
 - **[protocol/README.md](protocol/README.md)** — granular Go models for the full MCP wire protocol: the 2025-06-18 base schema, the draft revision (server/discover, MRTR, subscriptions, error catalog, sampling tool-use, form/url elicitation, streamable-HTTP + stdio transports, OAuth 2.1 authorization), and the Server Card / Tasks / Apps extensions — plus a client-side response cache. One package per domain, each with round-trip tests.
 - **[docs/spec/](docs/spec/)** — open specs: the [audit-record format](docs/spec/AUDIT-RECORD.md) and the [policy DSL](docs/spec/POLICY-DSL.md), each with a JSON Schema.
-- **[docs/AIR.md](docs/AIR.md)** — **Air**: the AirDrop-native face of meshmcp — discover · drop · push · fetch · steer · launch · approve, across a phone-first web app, the assistant, and native mobile (see the [visual mockup](https://xrey167.github.io/meshmcp/air.html)).
+- **[docs/AIR.md](docs/AIR.md)** — **Air**: meshmcp's coherent human-and-agent surface — discover · drop · push · fetch · steer · launch · approve, across a phone-first web app, the assistant, and native mobile (see the [visual mockup](https://xrey167.github.io/meshmcp/air.html)).
+- **[docs/ECOSYSTEM.md](docs/ECOSYSTEM.md)** — the shared Component Card contract and the **discover → understand → use → continue** roadmap for a coherent agent ecosystem.
 - **[docs/AIR-STEER.md](docs/AIR-STEER.md)** — Air · **Steer**: send to / cancel / nudge an agent, session, or task, and launch new agents/workflows. All four primitives ship — the agent steer inbox, session enumeration + a line-safe session steer, `tasks/steer`, and launch/workflow — plus the gateway control endpoint, the `air_*` assistant tools, and the `meshmcp air` CLI.
 - **[docs/PUBSUB.md](docs/PUBSUB.md)** — the identity-native **event bus**: an on-mesh pub/sub broker (durable event log, resumable subscribers, signed checkpoints, capability grants, cross-broker federation) and gateway hooks that publish policy decisions.
 - **[docs/MOBILE.md](docs/MOBILE.md)** — how the whole stack could reach phones (a phone is a human identity on the mesh — the natural co-sign approver).

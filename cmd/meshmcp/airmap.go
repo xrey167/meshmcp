@@ -107,22 +107,31 @@ func renderAirMap(w io.Writer, me air.PeerRow, controlAddr string, cat air.Catal
 		if i == len(eps)-1 {
 			branch = "└──"
 		}
-		fmt.Fprintf(w, "%s %s  %s  %s\n", dim(branch), bold(padRight(e.Name, width)), dim(padRight(e.Transport, 6)), mapCaps(e))
+		meta := catalogType(e) + " · " + e.Transport + " · " + catalogState(e)
+		if e.ID != "" {
+			meta += " · " + e.ID
+		}
+		fmt.Fprintf(w, "%s %s  %s  %s\n", dim(branch), bold(padRight(e.Name, width)), dim(meta), mapCaps(e))
 	}
 }
 
 // mapCaps renders an entry's capabilities as small coloured labels (a leaf
 // display, not a table cell, so colour here is fine).
 func mapCaps(e air.CatalogEntry) string {
-	var caps []string
-	if e.Resumable {
-		caps = append(caps, green("resumable"))
-	}
-	if e.Steerable {
-		caps = append(caps, blue("steerable"))
-	}
-	if len(caps) == 0 {
+	plainCaps := catalogCaps(e)
+	if plainCaps == "—" {
 		return dim("—")
 	}
-	return strings.Join(caps, dim(" · "))
+	labels := strings.Split(plainCaps, " · ")
+	for i, label := range labels {
+		switch label {
+		case "resumable":
+			labels[i] = green(label)
+		case "steerable":
+			labels[i] = blue(label)
+		default:
+			labels[i] = cyan(label)
+		}
+	}
+	return strings.Join(labels, dim(" · "))
 }

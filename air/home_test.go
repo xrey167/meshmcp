@@ -90,11 +90,46 @@ func TestSignatureChangesOnDelta(t *testing.T) {
 			h.Showing = &Media{Name: "next.png", ModUnix: 1700000999}
 			return h
 		},
+		"component id": func(h Home) Home {
+			h.Reachable = append([]CatalogEntry(nil), h.Reachable...)
+			h.Reachable[0].ID = "backend:fs"
+			return h
+		},
+		"component version": func(h Home) Home {
+			h.Reachable = append([]CatalogEntry(nil), h.Reachable...)
+			h.Reachable[0].Version = "2"
+			return h
+		},
+		"component owner": func(h Home) Home {
+			h.Reachable = append([]CatalogEntry(nil), h.Reachable...)
+			h.Reachable[0].Owner = IdentityRef{PubKey: "owner-key", FQDN: "gw.mesh"}
+			return h
+		},
+		"component feature": func(h Home) Home {
+			h.Reachable = append([]CatalogEntry(nil), h.Reachable...)
+			h.Reachable[0].Features = []Feature{{Name: FeatureAirBrowseV1}}
+			return h
+		},
+		"component lifecycle": func(h Home) Home {
+			h.Reachable = append([]CatalogEntry(nil), h.Reachable...)
+			h.Reachable[0].Lifecycle = Lifecycle{State: LifecycleServing, Generation: 2}
+			return h
+		},
 	}
 	for name, mutate := range cases {
 		if got := mutate(sampleHome("2026-07-22T12:00:00Z")).Signature(); got == sig {
 			t.Errorf("%s: signature did not change (still %s)", name, got)
 		}
+	}
+}
+
+func TestSignatureCanonicalizesFeatureOrder(t *testing.T) {
+	a := sampleHome("2026-07-22T12:00:00Z")
+	a.Reachable[0].Features = []Feature{{Name: FeatureAirSteerV1}, {Name: FeatureAirBrowseV1}}
+	b := sampleHome("2026-07-22T12:00:00Z")
+	b.Reachable[0].Features = []Feature{{Name: FeatureAirBrowseV1}, {Name: FeatureAirSteerV1}, {Name: FeatureAirSteerV1}}
+	if a.Signature() != b.Signature() {
+		t.Fatalf("equivalent feature sets produced different signatures: %s != %s", a.Signature(), b.Signature())
 	}
 }
 

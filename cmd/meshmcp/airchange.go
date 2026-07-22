@@ -115,16 +115,27 @@ func loadCatalogSnapshot(path string) (cat air.Catalog, existed bool, err error)
 	if err := json.Unmarshal(data, &cat); err != nil {
 		return air.Catalog{}, false, fmt.Errorf("snapshot %s is not a catalog: %w", path, err)
 	}
-	return cat, true, nil
+	normalized, err := cat.Normalized()
+	if err != nil {
+		return air.Catalog{}, false, fmt.Errorf("snapshot %s is not a valid catalog: %w", path, err)
+	}
+	return normalized, true, nil
 }
 
-// saveCatalogSnapshot writes the catalog as indented JSON.
+// saveCatalogSnapshot writes the catalog as indented JSON. Catalogs can expose
+// owner identities and private mesh addresses, so a new snapshot is private to
+// its owner by default.
 func saveCatalogSnapshot(path string, cat air.Catalog) error {
 	data, err := json.MarshalIndent(cat.Sorted(), "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(data, '\n'), 0o644)
+	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+		return err
+	}
+	// WriteFile keeps an existing file's mode, so tighten older snapshots that
+	// may have been created with the previous world-readable default.
+	return os.Chmod(path, 0o600)
 }
 
 // renderCatalogDelta prints the delta as coloured lines: additions green,
@@ -165,10 +176,34 @@ func catalogCapsSuffix(e air.CatalogEntry) string {
 // changeVal formats one capability field's value for a change line.
 func changeVal(field string, e air.CatalogEntry) string {
 	switch field {
+	case "id":
+		return e.ID
+	case "name":
+		return e.Name
+	case "kind":
+		return catalogKind(e)
+	case "version":
+		return catalogVersion(e)
+	case "owner":
+		switch {
+		case e.Owner.FQDN != "":
+			return e.Owner.FQDN
+		case e.Owner.PubKey != "":
+			return shortKey(e.Owner.PubKey)
+		default:
+			return e.Owner.SPIFFE
+		}
 	case "address":
 		return e.Address
 	case "transport":
 		return e.Transport
+	case "features":
+		return catalogCaps(e)
+	case "lifecycle":
+		if e.Lifecycle.Generation > 0 {
+			return fmt.Sprintf("%s#%d", catalogState(e), e.Lifecycle.Generation)
+		}
+		return catalogState(e)
 	case "steerable":
 		return fmt.Sprintf("%t", e.Steerable)
 	case "resumable":

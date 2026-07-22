@@ -18,6 +18,63 @@ func writeConfig(t *testing.T, body string) string {
 	return p
 }
 
+func TestConfigComponentCardIdentity(t *testing.T) {
+	valid, err := loadConfig(writeConfig(t, `
+backends:
+  - name: knowledge
+    id: com.example.meshmcp.knowledge
+    version: 2.3.1
+    port: 9101
+    stdio: ["echo"]
+`))
+	if err != nil {
+		t.Fatalf("component card config should load: %v", err)
+	}
+	if valid.Backends[0].ID != "com.example.meshmcp.knowledge" || valid.Backends[0].Version != "2.3.1" {
+		t.Fatalf("component identity was not retained: %+v", valid.Backends[0])
+	}
+
+	cases := []struct {
+		name, body, want string
+	}{
+		{"invalid id", `
+backends:
+  - name: fs
+    id: com.example/fs
+    port: 9101
+    stdio: ["echo"]
+`, "component id"},
+		{"duplicate id", `
+backends:
+  - name: fs
+    id: com.example.shared
+    port: 9101
+    stdio: ["echo"]
+  - name: kg
+    id: com.example.shared
+    port: 9102
+    stdio: ["echo"]
+`, "already used"},
+		{"duplicate name", `
+backends:
+  - name: " fs "
+    port: 9101
+    stdio: ["echo"]
+  - name: fs
+    port: 9102
+    stdio: ["echo"]
+`, "name is already used"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := loadConfig(writeConfig(t, tc.body))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected error containing %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
 func TestConfigCapabilitiesValidation(t *testing.T) {
 	cases := []struct {
 		name    string
