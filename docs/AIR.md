@@ -51,6 +51,7 @@ feel like one thing.
 ```bash
 meshmcp peers            # connected identities — the "who can I drop to" view
 meshmcp peers --all      # include offline peers
+meshmcp air whoami       # the mesh identity a gateway's allow-list + audit see me as
 meshmcp air catalog 100.x.y.z:9600   # what backends can I reach on this gateway?
 ```
 Peer rows come straight from the mesh (`client.Status()` in `peers.go`): status, mesh IP,
