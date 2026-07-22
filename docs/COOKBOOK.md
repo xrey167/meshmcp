@@ -66,6 +66,8 @@ language, one tamper-evident ledger, one credential broker.
 8. [Survive a gateway crash mid-session](#8-survive-a-gateway-crash-mid-session)
 9. [Aggregate many servers into one endpoint](#9-aggregate-many-servers-into-one-endpoint)
 10. [Bridge two organizations](#10-bridge-two-organizations)
+11. [Share a screenshot to a phone](#11-share-a-screenshot-to-a-phone)
+12. [Notify on every deny — and escalate a co-sign hold](#12-notify-on-every-deny--and-escalate-a-co-sign-hold)
 
 ---
 
@@ -386,6 +388,84 @@ flowchart LR
 
 An unrecognized caller maps to no org and sees nothing; each org may call only
 its granted tools; every crossing is identity-stamped and recorded.
+
+---
+
+## 11. Share a screenshot to a phone
+
+**Goal:** the mesh dropped some images into a drop inbox; take inventory in the
+terminal, then look at the actual pixels on a phone — without opening a port.
+
+```bash
+air vision ./drop-inbox                       # inventory: name/size/age/type
+air vision ./drop-inbox --json --limit 20     # same, machine-readable
+# now serve the pixels, phone-first, over the mesh — gated to one identity:
+air serve --gallery ./drop-inbox --allow pubkey:<phone-key>
+```
+
+`air vision` never renders pixels in the terminal — it lists what landed. To
+*see* an image, `air serve --gallery` renders the drops inline on the Air web
+page (path-safe, gated by the viewer `--allow` ACL), reachable only from the
+mesh.
+
+```mermaid
+flowchart LR
+  D["drop inbox<br/>./drop-inbox"] --> V["air vision<br/>terminal inventory"]
+  D --> S["air serve --gallery<br/>Vision gallery, --allow gated"]
+  S -- WireGuard mesh --> P["phone browser<br/>sees the pixels"]
+  I(("internet")) -. "no open port" .- S
+```
+
+The gallery is a hardened browser surface (strict CSP, nosniff/frame-deny,
+same-origin POST guard, Host-pin vs DNS rebinding) — and it renders only what the
+`--allow` identity is cleared to view.
+
+---
+
+## 12. Notify on every deny — and escalate a co-sign hold
+
+**Goal:** turn the audit ledger into a governed reaction layer — print a line on
+every denial, and *act* on a co-sign hold — the Air way (`air bind`).
+
+```yaml
+# bindings.yaml — each binding matches audit fields by glob and fires one action
+bindings:
+  - name: notify-on-deny                 # always safe: print only
+    on: { decision: deny }
+    do: { print: "⛔ DENIED {peer} · {method} {tool} — {reason}" }
+
+  - name: escalate-cosign                # ACTS — spawns a governed child
+    on: { decision: cosign }
+    do:
+      run: ["air", "agent-steer", "100.64.0.5:9120",
+            "--type", "nudge",
+            "--text", "co-sign hold: {peer} wants {method} {tool}"]
+```
+
+```bash
+air bind bindings.yaml --audit ./audit.jsonl                  # print reactions fire
+air bind bindings.yaml --audit ./audit.jsonl --allow-exec     # run reactions also fire
+air bind bindings.yaml --audit ./audit.jsonl --from-start     # replay, then follow
+```
+
+A `run` reaction is **deny-by-default**: `air bind` refuses to spawn it unless you
+pass `--allow-exec`, because the child (`meshmcp …`) re-enters the firewall as its
+own governed mesh action. Without the flag, the `notify-on-deny` print still
+fires; `escalate-cosign` is held.
+
+```mermaid
+flowchart LR
+  L[("audit ledger<br/>hash-chained")] --> B["air bind<br/>glob match on decision/backend/method/tool/peer"]
+  B -->|decision: deny| N["print '⛔ DENIED …'"]
+  B -->|decision: cosign| G{"--allow-exec?"}
+  G -->|yes| R["run: air agent-steer --type nudge"]
+  G -->|no| H["held (deny-by-default)"]
+  style H fill:#5a1a1a,stroke:#ff5c5c,color:#fff
+```
+
+Templates expand `{peer}` `{tool}` `{method}` `{backend}` `{decision}` `{reason}`
+`{time}`. The trigger is an already-governed, already-audited action; the reaction
+is governed too. See [examples/air-bindings.yaml](../examples/air-bindings.yaml).
 
 ---
 

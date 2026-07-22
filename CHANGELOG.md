@@ -59,6 +59,14 @@ first, fixed with the smallest robust change, and documented in
 
 ### Added
 
+- **Air vision arc** — new identity-gated, firewalled, audited CLI verbs:
+  `air browse` (a backend's tools/resources/prompts, filtered to your identity),
+  `air stream` (watch governed Air activity live by tailing the audit ledger,
+  decision-coloured and rotation-aware), `air vision` (terminal inventory of
+  images the mesh dropped into a drop inbox) with `air serve --gallery` to view
+  the pixels inline over the mesh, and `air bind` ("rebind, the Air way": watch
+  the ledger and fire a declared reaction — `print` or deny-by-default `run` —
+  when a record matches glob triggers). See `docs/AIR-VISION.md`.
 - CI workflow (build/test/race on Linux/macOS/Windows, gofmt, vet, mod verify,
   advisory staticcheck/govulncheck, fuzz smoke); release workflow (cross-platform
   archives, checksums, SBOM, cosign keyless signing); Dependabot.

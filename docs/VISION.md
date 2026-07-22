@@ -29,6 +29,7 @@ properties at once.
 | Accountability | Structured per-call audit + full both-directions trace | Live: JSONL deny record; trace with payloads |
 | Aggregation | One endpoint = namespaced union; LB, failover, discovery, bidirectional MCP | `-race` tests + live router routing/failover |
 | Payload + Steer (Air) | AirDrop files, push, fetch; **steer** a live agent/session/task; launch/workflow | `-race` tests: `tasks/steer`, line-safe session steer, agent inbox; see [AIR.md](AIR.md) |
+| Discover + See (Air) | **browse** a backend's tools/resources/prompts; **stream** the ledger live; **bind** a governed reaction to it; **vision** — inventory & serve image drops | Shipped: `air browse / stream / bind / vision` (+ `serve --gallery`); the browse→stream→bind→vision arc, with computer-use/phone-use ahead, is in [AIR-VISION.md](AIR-VISION.md) |
 
 ## Where it goes — grounded
 
