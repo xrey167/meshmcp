@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/netbirdio/netbird/client/embed"
@@ -67,8 +68,9 @@ type meshApp struct {
 	mesh        *embed.Client
 	auditPath   string
 	cosignDir   string
-	control     string // gateway Air control endpoint (mesh-ip:port), for air_sessions/air_steer
-	allowLaunch bool   // opt-in: enable the air_launch tool to spawn agent processes
+	control     string       // gateway Air control endpoint (mesh-ip:port), for air_sessions/air_steer
+	allowLaunch bool         // opt-in: enable the air_launch tool to spawn agent processes
+	launches    atomic.Int32 // agents spawned via air_launch, capped at maxAppLaunches
 
 	mu     sync.Mutex
 	pool   map[string]*mcpclient.Client
@@ -630,6 +632,11 @@ func (a *meshApp) toolAirFetch(ctx context.Context, args json.RawMessage) (mcp.T
 	return txt(fmt.Sprintf("fetched %s (%d bytes) -> %s", hash, got, dest)), nil
 }
 
+// maxAppLaunches caps the agents one `meshmcp mcp` process may spawn via
+// air_launch — a backstop against a runaway assistant loop fanning out
+// processes. Launched agents outlive the app, so this is a lifetime cap.
+const maxAppLaunches = 16
+
 // toolAirLaunch spawns a new agent — opt-in, since it starts a process.
 func (a *meshApp) toolAirLaunch(_ context.Context, args json.RawMessage) (mcp.ToolResult, error) {
 	if !a.allowLaunch {
@@ -639,8 +646,13 @@ func (a *meshApp) toolAirLaunch(_ context.Context, args json.RawMessage) (mcp.To
 	if json.Unmarshal(args, &p) != nil || p.Role == "" || p.Gateway == "" {
 		return errTxt("role and gateway are required"), nil
 	}
+	if n := a.launches.Add(1); n > maxAppLaunches {
+		a.launches.Add(-1)
+		return errTxt("air_launch: launch cap reached (%d agents this session) — restart the app to launch more", maxAppLaunches), nil
+	}
 	pid, identity, err := spawnAgent(p.Role, "", p.Gateway)
 	if err != nil {
+		a.launches.Add(-1)
 		return errTxt("air_launch: %v", err), nil
 	}
 	return txt(fmt.Sprintf("launched agent role=%s pid=%d identity=%s -> %s", p.Role, pid, identity, p.Gateway)), nil

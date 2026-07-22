@@ -24,32 +24,50 @@ import (
 )
 
 // airWorkflow is a declarative sequence of Air steps (P4): launch an agent,
-// steer a session, or call a tool — run in order over one mesh membership.
-// OnError controls whether a failed step stops the run ("stop", the default) or
-// lets the remaining steps run ("continue").
+// steer a session, steer an agent's inbox, or call a tool — run in order over
+// one mesh membership. OnError controls whether a failed step stops the run
+// ("stop", the default) or lets the remaining steps run ("continue"). Cleanup
+// decides what happens to launched agents when the run ends: "leave" (default —
+// they keep running as their own mesh identities) or "stop" (kill them).
 type airWorkflow struct {
 	Name    string            `yaml:"name"`
 	OnError string            `yaml:"on_error"` // "stop" (default) | "continue"
+	Cleanup string            `yaml:"cleanup"`  // "leave" (default) | "stop"
 	Steps   []airWorkflowStep `yaml:"steps"`
 }
 
-// airWorkflowStep is one step: exactly one of launch/steer/call/parallel must be
-// set. As names a variable that captures the step's output (a launch's identity,
-// a call's result) for later ${as.field} references. Timeout bounds a network
-// step (steer/call); Parallel runs its children concurrently.
+// airWorkflowStep is one step: exactly one of launch/steer/agent_steer/call/
+// parallel must be set. As names a variable that captures the step's output (a
+// launch's identity, a call's result) for later ${as.field} references. Timeout
+// bounds a network step (steer/agent_steer/call); Parallel runs its children
+// concurrently.
 type airWorkflowStep struct {
-	Launch   *launchStep       `yaml:"launch"`
-	Steer    *steerStep        `yaml:"steer"`
-	Call     *callStep         `yaml:"call"`
-	Parallel []airWorkflowStep `yaml:"parallel"`
-	As       string            `yaml:"as"`
-	Timeout  string            `yaml:"timeout"` // e.g. "30s"; default stepDefaultTimeout
+	Launch     *launchStep       `yaml:"launch"`
+	Steer      *steerStep        `yaml:"steer"`
+	AgentSteer *agentSteerStep   `yaml:"agent_steer"`
+	Call       *callStep         `yaml:"call"`
+	Parallel   []airWorkflowStep `yaml:"parallel"`
+	As         string            `yaml:"as"`
+	Timeout    string            `yaml:"timeout"` // e.g. "30s"; default stepDefaultTimeout
 }
 
 type launchStep struct {
-	Role     string `yaml:"role"`
-	Gateway  string `yaml:"gateway"`
-	NBConfig string `yaml:"nb_config"`
+	Role      string `yaml:"role"`
+	Gateway   string `yaml:"gateway"`
+	NBConfig  string `yaml:"nb_config"`
+	SteerPort int    `yaml:"steer_port"` // if >0, launch with a P1 steer inbox on this mesh port
+	Interval  string `yaml:"interval"`   // agent's delay between calls (passed through)
+}
+
+// agentSteerStep sends one steer envelope to a launched agent's P1 inbox —
+// the workflow counterpart to `meshmcp air agent-steer`.
+type agentSteerStep struct {
+	Target string         `yaml:"target"` // agent steer inbox (mesh-ip:port)
+	Type   string         `yaml:"type"`   // task | nudge | cancel
+	Tool   string         `yaml:"tool"`   // type=task: tool to call
+	Args   map[string]any `yaml:"args"`   // type=task: tool args
+	Text   string         `yaml:"text"`   // type=nudge: guidance
+	ID     string         `yaml:"id"`     // caller correlation id (audited)
 }
 
 type steerStep struct {
@@ -80,6 +98,8 @@ func (s airWorkflowStep) kind() string {
 		return "launch " + s.Launch.Role
 	case s.Steer != nil:
 		return "steer " + s.Steer.Backend + "/" + s.Steer.Session
+	case s.AgentSteer != nil:
+		return "agent-steer " + s.AgentSteer.Type + "@" + s.AgentSteer.Target
 	case s.Call != nil:
 		return "call " + s.Call.Tool + "@" + s.Call.Target
 	case s.Parallel != nil:
@@ -96,11 +116,31 @@ func (s airWorkflowStep) validate(i int) error {
 		if s.Launch.Role == "" || s.Launch.Gateway == "" {
 			return fmt.Errorf("step %d launch: role and gateway are required", i+1)
 		}
+		if s.Launch.Interval != "" {
+			if _, err := time.ParseDuration(s.Launch.Interval); err != nil {
+				return fmt.Errorf("step %d launch: bad interval %q: %w", i+1, s.Launch.Interval, err)
+			}
+		}
 	}
 	if s.Steer != nil {
 		n++
 		if s.Steer.Control == "" || s.Steer.Backend == "" || s.Steer.Session == "" {
 			return fmt.Errorf("step %d steer: control, backend and session are required", i+1)
+		}
+	}
+	if s.AgentSteer != nil {
+		n++
+		if s.AgentSteer.Target == "" {
+			return fmt.Errorf("step %d agent_steer: target is required", i+1)
+		}
+		switch s.AgentSteer.Type {
+		case "task":
+			if s.AgentSteer.Tool == "" {
+				return fmt.Errorf("step %d agent_steer: type task needs tool", i+1)
+			}
+		case "nudge", "cancel":
+		default:
+			return fmt.Errorf("step %d agent_steer: type must be task, nudge, or cancel (got %q)", i+1, s.AgentSteer.Type)
 		}
 	}
 	if s.Call != nil {
@@ -124,7 +164,7 @@ func (s airWorkflowStep) validate(i int) error {
 		}
 	}
 	if n != 1 {
-		return fmt.Errorf("step %d: exactly one of launch, steer, call, parallel must be set (got %d)", i+1, n)
+		return fmt.Errorf("step %d: exactly one of launch, steer, agent_steer, call, parallel must be set (got %d)", i+1, n)
 	}
 	if s.Timeout != "" {
 		if _, err := time.ParseDuration(s.Timeout); err != nil {
@@ -149,6 +189,9 @@ func loadAirWorkflow(path string) (*airWorkflow, error) {
 	if wf.OnError != "" && wf.OnError != "stop" && wf.OnError != "continue" {
 		return nil, fmt.Errorf("workflow %s: on_error must be stop or continue (got %q)", path, wf.OnError)
 	}
+	if wf.Cleanup != "" && wf.Cleanup != "leave" && wf.Cleanup != "stop" {
+		return nil, fmt.Errorf("workflow %s: cleanup must be leave or stop (got %q)", path, wf.Cleanup)
+	}
 	for i, s := range wf.Steps {
 		if err := s.validate(i); err != nil {
 			return nil, err
@@ -166,12 +209,46 @@ type stepResult struct {
 	Output     string `json:"output,omitempty"`
 }
 
+// maxWorkflowLaunches caps the agents one workflow run may spawn — a backstop
+// against a mis-generated or malicious YAML fanning out unbounded processes.
+const maxWorkflowLaunches = 32
+
 // wfRun carries the mesh membership and the variable store shared across a
-// workflow's steps.
+// workflow's steps, plus the pids of agents it launched (for cleanup: stop).
 type wfRun struct {
 	client *embed.Client
 	mu     sync.Mutex
 	vars   map[string]any
+	pids   []int
+}
+
+func (r *wfRun) recordLaunch(pid int) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.pids) >= maxWorkflowLaunches {
+		return fmt.Errorf("workflow launch cap reached (%d agents)", maxWorkflowLaunches)
+	}
+	r.pids = append(r.pids, pid)
+	return nil
+}
+
+// stopLaunched kills every agent this run spawned (cleanup: stop). Best-effort:
+// an already-exited child is not an error.
+func (r *wfRun) stopLaunched() {
+	r.mu.Lock()
+	pids := append([]int(nil), r.pids...)
+	r.mu.Unlock()
+	for _, pid := range pids {
+		p, err := os.FindProcess(pid)
+		if err != nil {
+			continue
+		}
+		if err := p.Kill(); err != nil {
+			log.Printf("  cleanup: stop agent pid=%d: %v", pid, err)
+		} else {
+			log.Printf("  cleanup: stopped agent pid=%d", pid)
+		}
+	}
 }
 
 func (r *wfRun) setVar(name string, v map[string]any) {
@@ -238,6 +315,9 @@ func cmdAirWorkflow(args []string) error {
 
 	run := &wfRun{client: client, vars: map[string]any{}}
 	results, runErr := run.runSteps(context.Background(), wf.Name, wf.Steps, wf.OnError)
+	if wf.Cleanup == "stop" {
+		run.stopLaunched()
+	}
 	if *jsonOut {
 		if err := printWorkflowJSON(wf.Name, results); err != nil {
 			return err
@@ -325,12 +405,38 @@ func (r *wfRun) execStep(ctx context.Context, s airWorkflowStep) (output string,
 	defer cancel()
 	switch {
 	case s.Launch != nil:
-		pid, identity, err := spawnAgent(s.Launch.Role, s.Launch.NBConfig, s.Launch.Gateway)
+		var extra []string
+		if s.Launch.SteerPort > 0 {
+			extra = append(extra, "--steer-port", fmt.Sprint(s.Launch.SteerPort))
+		}
+		if s.Launch.Interval != "" {
+			extra = append(extra, "--interval", s.Launch.Interval)
+		}
+		pid, identity, err := spawnAgent(s.Launch.Role, s.Launch.NBConfig, s.Launch.Gateway, extra...)
 		if err != nil {
+			return "", nil, err
+		}
+		if err := r.recordLaunch(pid); err != nil {
 			return "", nil, err
 		}
 		log.Printf("  launched agent role=%s pid=%d identity=%s", s.Launch.Role, pid, identity)
 		return identity, map[string]any{"identity": identity, "pid": pid}, nil
+	case s.AgentSteer != nil:
+		st := expandAgentSteer(*s.AgentSteer, vars)
+		env := steerEnvelope{Type: st.Type, Tool: st.Tool, Text: st.Text, ID: st.ID}
+		if len(st.Args) > 0 {
+			b, _ := json.Marshal(st.Args)
+			env.Args = b
+		}
+		// Retried like steer/call: a just-launched agent's inbox may not be
+		// listening yet.
+		err := retryConn(stepCtx, connRetryCap, func() error {
+			return sendSteerEnvelope(stepCtx, r.client, st.Target, env)
+		})
+		if err != nil {
+			return "", nil, err
+		}
+		return "steered", map[string]any{"status": "steered", "target": st.Target}, nil
 	case s.Steer != nil:
 		st := expandSteer(*s.Steer, vars)
 		if err := workflowSteer(stepCtx, r.client, &st); err != nil {
@@ -402,6 +508,14 @@ func expandSteer(s steerStep, vars map[string]any) steerStep {
 	s.Session = expand(s.Session, vars)
 	s.Method = expand(s.Method, vars)
 	s.Params = expandMap(s.Params, vars)
+	return s
+}
+
+func expandAgentSteer(s agentSteerStep, vars map[string]any) agentSteerStep {
+	s.Target = expand(s.Target, vars)
+	s.Tool = expand(s.Tool, vars)
+	s.Text = expand(s.Text, vars)
+	s.Args = expandMap(s.Args, vars)
 	return s
 }
 

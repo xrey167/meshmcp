@@ -188,3 +188,58 @@ func TestRetryConnRetriesThenSucceeds(t *testing.T) {
 		t.Fatalf("calls = %d, want 3", calls)
 	}
 }
+
+// TestLoadAirWorkflowAgentSteer covers the agent_steer step type: valid forms
+// load, missing/invalid fields are rejected, and launch options parse.
+func TestLoadAirWorkflowAgentSteer(t *testing.T) {
+	wf, err := loadAirWorkflow(writeWF(t, `
+name: demo
+cleanup: stop
+steps:
+  - launch: { role: reader, gateway: 1.2.3.4:9101, steer_port: 9120, interval: 1s }
+    as: reader
+  - agent_steer: { target: 1.2.3.4:9120, type: task, tool: read_file, args: { path: README.md } }
+  - agent_steer: { target: 1.2.3.4:9120, type: nudge, text: "focus" }
+  - agent_steer: { target: 1.2.3.4:9120, type: cancel }
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if wf.Cleanup != "stop" {
+		t.Fatalf("cleanup = %q, want stop", wf.Cleanup)
+	}
+	if got := wf.Steps[1].kind(); got != "agent-steer task@1.2.3.4:9120" {
+		t.Fatalf("kind = %q", got)
+	}
+	if wf.Steps[0].Launch.SteerPort != 9120 || wf.Steps[0].Launch.Interval != "1s" {
+		t.Fatalf("launch options not parsed: %+v", wf.Steps[0].Launch)
+	}
+
+	bad := []string{
+		"name: x\nsteps:\n  - agent_steer: { type: task, tool: t }\n",                                                            // no target
+		"name: x\nsteps:\n  - agent_steer: { target: a:1, type: task }\n",                                                        // task without tool
+		"name: x\nsteps:\n  - agent_steer: { target: a:1, type: pause }\n",                                                       // unknown type
+		"name: x\ncleanup: nuke\nsteps:\n  - agent_steer: { target: a:1, type: cancel }\n",                                       // bad cleanup
+		"name: x\nsteps:\n  - launch: { role: r, gateway: g:1, interval: soon }\n",                                               // bad interval
+		"name: x\nsteps:\n  - agent_steer: { target: a:1, type: cancel }\n    steer: { control: c:1, backend: b, session: s }\n", // two kinds
+	}
+	for i, body := range bad {
+		if _, err := loadAirWorkflow(writeWF(t, body)); err == nil {
+			t.Fatalf("bad workflow %d loaded without error:\n%s", i, body)
+		}
+	}
+}
+
+// TestWorkflowLaunchCap proves the per-run launch cap refuses the launch that
+// would exceed it.
+func TestWorkflowLaunchCap(t *testing.T) {
+	r := &wfRun{vars: map[string]any{}}
+	for i := 0; i < maxWorkflowLaunches; i++ {
+		if err := r.recordLaunch(1000 + i); err != nil {
+			t.Fatalf("launch %d unexpectedly refused: %v", i, err)
+		}
+	}
+	if err := r.recordLaunch(9999); err == nil {
+		t.Fatalf("launch beyond the cap must be refused")
+	}
+}
