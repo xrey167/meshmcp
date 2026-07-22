@@ -49,3 +49,7 @@ audit-signing-key.json
 /bus
 /scheduler
 /vault
+
+# Stray agent-memory dir accidentally materialized inside the repo — real
+# memory lives outside the working tree; never commit this.
+/XR_THINKCENTRE/
