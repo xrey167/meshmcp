@@ -53,7 +53,13 @@ meshmcp peers            # connected identities — the "who can I drop to" view
 meshmcp peers --all      # include offline peers
 meshmcp air whoami       # the mesh identity a gateway's allow-list + audit see me as
 meshmcp air catalog 100.x.y.z:9600   # what backends can I reach on this gateway?
+meshmcp air map 100.x.y.z:9600       # your reachable mesh as a tree (you → gateway → backends)
 ```
+
+`air map` composes `whoami` and the catalog into a topology view — a tree of *you → the
+gateway → the backends you may reach*, each tagged with its transport and whether it is
+resumable/steerable — so you can see the shape of your reachable mesh at a glance, not just
+flat lists (`airmap.go`).
 Peer rows come straight from the mesh (`client.Status()` in `peers.go`): status, mesh IP,
 FQDN, short public key. The identity is the transport's, so it can't be spoofed.
 
