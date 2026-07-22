@@ -6,7 +6,6 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"text/tabwriter"
 )
 
 // cmdPeers lists the mesh peers currently reachable from this node — the
@@ -35,30 +34,34 @@ func cmdPeers(args []string) error {
 	peers := st.Peers
 	sort.Slice(peers, func(i, j int) bool { return peers[i].FQDN < peers[j].FQDN })
 
-	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "STATUS\tMESH IP\tFQDN\tPUBKEY")
-	shown := 0
+	var rows [][]cell
 	for _, p := range peers {
 		connected := strings.EqualFold(fmt.Sprint(p.ConnStatus), "Connected")
 		if !connected && !*all {
 			continue
 		}
-		status := "connected"
+		label := "connected"
 		if !connected {
-			status = strings.ToLower(fmt.Sprint(p.ConnStatus))
+			label = strings.ToLower(fmt.Sprint(p.ConnStatus))
 		}
 		ip := strings.SplitN(p.IP, "/", 2)[0]
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", status, ip, p.FQDN, shortKey(p.PubKey))
-		shown++
+		rows = append(rows, []cell{
+			statusDot(connected, label),
+			plain(ip),
+			styled(p.FQDN, bold),
+			styled(shortKey(p.PubKey), dim),
+		})
 	}
-	tw.Flush()
 
-	if shown == 0 {
+	if len(rows) == 0 {
 		if len(peers) == 0 {
-			fmt.Fprintln(os.Stderr, "no peers on the mesh yet")
+			fmt.Fprintln(os.Stderr, dim("no peers on the mesh yet"))
 		} else {
-			fmt.Fprintln(os.Stderr, "no connected peers (use --all to include offline peers)")
+			fmt.Fprintln(os.Stderr, dim("no connected peers (use --all to include offline peers)"))
 		}
+		return nil
 	}
+	renderTable(os.Stdout, []string{"", "mesh ip", "fqdn", "pubkey"}, rows)
+	fmt.Fprintln(os.Stderr, dim(fmt.Sprintf("%d peer(s)", len(rows))))
 	return nil
 }

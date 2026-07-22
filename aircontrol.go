@@ -35,6 +35,7 @@ type AirSession struct {
 type airController interface {
 	sessions(pubKey, fqdn string) []AirSession
 	steer(pubKey, fqdn, backend, id, method string, params any) error
+	catalog(pubKey, fqdn string) AirCatalog
 }
 
 // airSteerMethods is the allowlist of server->client notification methods a
@@ -53,6 +54,23 @@ var airSteerMethods = map[string]bool{
 // closed when empty (no peer may attest). audit records accepted actions.
 func airControlHandler(c airController, identify func(*http.Request) (pubkey, fqdn string), allow, onBehalfAllow acl, audit func(rec airSteerAudit)) http.Handler {
 	mux := http.NewServeMux()
+
+	// Discovery: the ARD-style well-known catalog. Unlike list/steer it is NOT
+	// gated on the control Allow — any identified mesh peer may discover — but
+	// the result is filtered per-caller by each backend's own ACL, and an
+	// unidentifiable peer (no key and no FQDN) discovers nothing.
+	mux.HandleFunc(airCatalogPath, func(w http.ResponseWriter, r *http.Request) {
+		pubKey, fqdn := identify(r)
+		if pubKey == "" && fqdn == "" {
+			http.Error(w, "unidentified mesh peer", http.StatusForbidden)
+			return
+		}
+		cat := c.catalog(pubKey, fqdn)
+		if audit != nil {
+			audit(airSteerAudit{Peer: fqdnOr(fqdn), PeerKey: pubKey, Method: "air/catalog", OK: true})
+		}
+		writeCatalog(w, cat)
+	})
 
 	mux.HandleFunc("/v1/sessions", func(w http.ResponseWriter, r *http.Request) {
 		pubKey, fqdn := identify(r)
@@ -185,9 +203,11 @@ func (*backendForbiddenError) Error() string { return "not permitted for this ba
 // the target backend, not just the global control-endpoint Allow. A backend with
 // no entry falls back to a permissive ACL (mirrors an empty Allow = any peer).
 type gatewayAirControl struct {
-	servers map[string]*session.Server
-	acls    map[string]acl
-	mu      *sync.Mutex
+	servers  map[string]*session.Server
+	acls     map[string]acl
+	mu       *sync.Mutex
+	backends []catalogBackend // static per-backend discovery data (Air catalog)
+	gateway  string           // this gateway's mesh FQDN, for the catalog
 }
 
 func (g *gatewayAirControl) backendAllows(backend, pubKey, fqdn string) bool {
@@ -211,6 +231,26 @@ func (g *gatewayAirControl) sessions(pubKey, fqdn string) []AirSession {
 		}
 	}
 	return out
+}
+
+// catalog returns the backends the caller's identity is permitted to reach —
+// discovery that respects the per-backend ACL, so a peer never learns of a
+// backend it could not already call.
+func (g *gatewayAirControl) catalog(pubKey, fqdn string) AirCatalog {
+	cat := AirCatalog{Service: "meshmcp", Version: version, Gateway: g.gateway}
+	for _, b := range g.backends {
+		if !g.backendAllows(b.name, pubKey, fqdn) {
+			continue
+		}
+		g.mu.Lock()
+		_, steerable := g.servers[b.name]
+		g.mu.Unlock()
+		cat.Endpoints = append(cat.Endpoints, AirCatalogEntry{
+			Name: b.name, Address: b.address, Transport: b.transport,
+			Resumable: b.resumable, Steerable: steerable,
+		})
+	}
+	return cat
 }
 
 func (g *gatewayAirControl) steer(pubKey, fqdn, backend, id, method string, params any) error {
@@ -252,9 +292,11 @@ func airAuditFunc(audit *policy.AuditLog) func(airSteerAudit) {
 		// never the relay-asserted, unverified browser key, which would put an
 		// unproven value where the ledger's verified keys live. The attested
 		// browser key is recorded in Reason, clearly labelled as a relay claim.
-		base := "air/steer"
-		if rec.Method == "air/sessions" {
-			base = "air/sessions"
+		// The method already names the action (air/steer, air/sessions,
+		// air/catalog); use it as the reason base directly.
+		base := rec.Method
+		if base == "" {
+			base = "air/steer"
 		}
 		peer, reason := rec.Peer, base
 		if rec.OnBehalf != "" {

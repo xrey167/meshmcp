@@ -51,9 +51,18 @@ feel like one thing.
 ```bash
 meshmcp peers            # connected identities — the "who can I drop to" view
 meshmcp peers --all      # include offline peers
+meshmcp air catalog 100.x.y.z:9600   # what backends can I reach on this gateway?
 ```
-Rows come straight from the mesh (`client.Status()` in `peers.go`): status, mesh IP,
+Peer rows come straight from the mesh (`client.Status()` in `peers.go`): status, mesh IP,
 FQDN, short public key. The identity is the transport's, so it can't be spoofed.
+
+**Air catalog** adds an ARD-style (Agentic Resource Discovery) well-known document —
+`GET /.well-known/ai-catalog.json`, served on the gateway's control port — so a peer can
+ask a gateway "what can I reach here?" and get back the backends *its own identity is
+permitted to use* (address, transport, whether resumable/steerable). Discovery respects
+the firewall: the list is filtered per-caller by each backend's ACL, an unidentifiable
+peer discovers nothing, and every read is audited (`air/catalog`). It is the discovery
+counterpart to Air's drive verbs (`aircatalog.go`).
 
 ### Drop
 ```bash

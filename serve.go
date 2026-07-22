@@ -227,7 +227,15 @@ func cmdServe(args []string) error {
 		for _, b := range cfg.Backends {
 			backendACLs[b.Name] = newACL(b.Allow)
 		}
-		ctl := &gatewayAirControl{servers: servers, acls: backendACLs, mu: &serversMu}
+		gwFQDN := ""
+		if st, err := client.Status(); err == nil {
+			gwFQDN = st.LocalPeerState.FQDN
+		}
+		ctl := &gatewayAirControl{
+			servers: servers, acls: backendACLs, mu: &serversMu,
+			backends: buildCatalogBackends(cfg.Backends, meshIP),
+			gateway:  gwFQDN,
+		}
 		identify := func(r *http.Request) (string, string) { return peerIdentityStr(client, r.RemoteAddr) }
 		allow := newACL(cfg.Control.Allow)
 		// Dedicated proxy allow list for X-Air-On-Behalf attestation; empty ⇒
@@ -238,7 +246,7 @@ func cmdServe(args []string) error {
 		if len(cfg.Control.OnBehalfAllow) > 0 {
 			obNote = fmt.Sprintf(" · on-behalf proxies: %v", cfg.Control.OnBehalfAllow)
 		}
-		log.Printf("Air control endpoint on mesh port %d (GET /v1/sessions · POST /v1/steer)%s", cfg.Control.Port, obNote)
+		log.Printf("Air control endpoint on mesh port %d (GET /v1/sessions · POST /v1/steer · GET %s)%s", cfg.Control.Port, airCatalogPath, obNote)
 		wg.Add(1)
 		// Read/header timeouts: a mesh peer must not be able to hold the control
 		// listener open with a slow/half-open request (Slowloris).

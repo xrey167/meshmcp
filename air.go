@@ -14,7 +14,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"text/tabwriter"
 	"time"
 
 	"github.com/netbirdio/netbird/client/embed"
@@ -33,6 +32,8 @@ func cmdAir(args []string) error {
 		return airUsage()
 	}
 	switch args[0] {
+	case "catalog", "discover":
+		return cmdAirCatalog(args[1:])
 	case "sessions":
 		return cmdAirSessions(args[1:])
 	case "steer":
@@ -52,29 +53,32 @@ func cmdAir(args []string) error {
 	case "-h", "--help", "help":
 		return airUsage()
 	default:
-		return fmt.Errorf("meshmcp air: unknown subcommand %q (want sessions | steer | launch | agent-steer | tasks | task-steer | workflow | serve)", args[0])
+		return fmt.Errorf("meshmcp air: unknown subcommand %q (want catalog | sessions | steer | launch | agent-steer | tasks | task-steer | workflow | serve)", args[0])
 	}
 }
 
 func airUsage() error {
-	fmt.Fprint(os.Stderr, `meshmcp air — drive live work over the mesh
-
-  air sessions <control-ip:port>                         list live sessions on a gateway
-  air steer    <control-ip:port> --backend b --session id [--method m] [--param k=v]
-                                                          steer a live session
-  air launch   --role <role> [--nb-config dir] <gateway-ip:port>
-                                                          spawn a new agent identity
-  air agent-steer <agent-ip:port> --type task|nudge|cancel [--tool t --arg k=v | --text s]
-                                                          send an instruction to an agent's steer inbox
-  air tasks    <backend-ip:port>                         list a backend's async tasks
-  air task-steer <backend-ip:port> --task id [--text s | --payload json | --cancel]
-                                                          steer (or cancel) one running task
-  air workflow [--dry-run] <file.yaml>                   run a declarative launch/steer/call workflow
-  air serve    [--port N] [--control ip:port] [--approvals ip:port] [--audit file] [--allow id]
-                                                          serve the live Air web page over the mesh
-
-Shared mesh flags apply (see "meshmcp air <sub> -h").
-`)
+	b := func(s string) string { return bold(s) }
+	fmt.Fprintln(os.Stderr, bold("meshmcp air")+dim(" — drive live work over the mesh"))
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, dim("DISCOVER & DRIVE"))
+	fmt.Fprintln(os.Stderr, "  "+b("air catalog")+"     <control-ip:port>                 "+dim("discover the backends you may reach (ARD well-known)"))
+	fmt.Fprintln(os.Stderr, "  "+b("air sessions")+"    <control-ip:port>                 "+dim("list live sessions on a gateway"))
+	fmt.Fprintln(os.Stderr, "  "+b("air steer")+"       <control-ip:port> --backend b --session id [--param k=v]")
+	fmt.Fprintln(os.Stderr, "  "+b("air tasks")+"       <backend-ip:port>                 "+dim("list a backend's async tasks"))
+	fmt.Fprintln(os.Stderr, "  "+b("air task-steer")+"  <backend-ip:port> --task id [--text s | --payload j | --cancel]")
+	fmt.Fprintln(os.Stderr, "  "+b("air agent-steer")+" <agent-ip:port>   --type task|nudge|cancel [--tool t --arg k=v | --text s]")
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, dim("LAUNCH & AUTOMATE"))
+	fmt.Fprintln(os.Stderr, "  "+b("air launch")+"      --role <role> [--nb-config dir] <gateway-ip:port>")
+	fmt.Fprintln(os.Stderr, "  "+b("air workflow")+"    [--dry-run] <file.yaml>           "+dim("run a declarative launch/steer/call flow"))
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, dim("SERVE"))
+	fmt.Fprintln(os.Stderr, "  "+b("air serve")+"       [--port N] [--control ip:port] [--approvals ip:port] [--audit f] [--allow id]")
+	fmt.Fprintln(os.Stderr, "                  "+dim("serve the live, phone-first Air web page over the mesh"))
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, dim(`Every action is identity-gated, firewalled, and audited. Add -h to any`))
+	fmt.Fprintln(os.Stderr, dim(`subcommand for its flags; shared mesh flags apply throughout.`))
 	return nil
 }
 
@@ -135,15 +139,21 @@ func cmdAirSessions(args []string) error {
 		return fmt.Errorf("air sessions: bad response: %w", err)
 	}
 	if len(out.Sessions) == 0 {
-		fmt.Fprintln(os.Stderr, "no live sessions")
+		fmt.Fprintln(os.Stderr, dim("no live sessions"))
 		return nil
 	}
-	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "BACKEND\tSESSION\tPEER\tAGE")
+	var rows [][]cell
 	for _, s := range out.Sessions {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%ds\n", s.Backend, s.ID, s.Peer, s.AgeSec)
+		rows = append(rows, []cell{
+			styled(s.Backend, bold),
+			styled(s.ID, cyan),
+			plain(s.Peer),
+			styled(humanAge(s.AgeSec), dim),
+		})
 	}
-	return tw.Flush()
+	renderTable(os.Stdout, []string{"backend", "session", "peer", "age"}, rows)
+	fmt.Fprintln(os.Stderr, dim(fmt.Sprintf("%d live session(s)", len(rows))))
+	return nil
 }
 
 // cmdAirSteer steers one live session via the gateway control endpoint.
@@ -182,7 +192,16 @@ func cmdAirSteer(args []string) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("air steer: %s: %s", resp.Status, body)
 	}
-	fmt.Println(string(bytes.TrimSpace(body)))
+	var st struct{ Status, Backend, ID, By string }
+	if json.Unmarshal(body, &st) == nil && st.Backend != "" {
+		line := okLine("steered %s/%s", st.Backend, st.ID)
+		if st.By != "" {
+			line += dim(" by " + st.By)
+		}
+		fmt.Println(line)
+	} else {
+		fmt.Println(string(bytes.TrimSpace(body)))
+	}
 	return nil
 }
 
@@ -207,7 +226,7 @@ func cmdAirLaunch(args []string) error {
 	if err != nil {
 		return fmt.Errorf("air launch: %w", err)
 	}
-	fmt.Printf("launched agent role=%s pid=%d identity=%s -> %s\n", *role, pid, identity, fs.Arg(0))
+	fmt.Println(okLine("launched %s agent", *role) + dim(fmt.Sprintf(" · pid %d · %s → %s", pid, identity, fs.Arg(0))))
 	return nil
 }
 
@@ -280,15 +299,36 @@ func cmdAirTasks(args []string) error {
 		return nil
 	}
 	if len(tasks) == 0 {
-		fmt.Fprintln(os.Stderr, "no tasks")
+		fmt.Fprintln(os.Stderr, dim("no tasks"))
 		return nil
 	}
-	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "TASK\tSTATUS\tERROR")
+	var rows [][]cell
 	for _, t := range tasks {
-		fmt.Fprintf(tw, "%s\t%s\t%s\n", t.TaskID, t.Status, t.Error)
+		rows = append(rows, []cell{
+			styled(t.TaskID, cyan),
+			taskStatusCell(t.Status),
+			styled(t.Error, dim),
+		})
 	}
-	return tw.Flush()
+	renderTable(os.Stdout, []string{"task", "status", "error"}, rows)
+	fmt.Fprintln(os.Stderr, dim(fmt.Sprintf("%d task(s)", len(rows))))
+	return nil
+}
+
+// taskStatusCell colours a task status the way the page colours a decision.
+func taskStatusCell(status string) cell {
+	switch status {
+	case "completed":
+		return styled(status, green)
+	case "failed":
+		return styled(status, red)
+	case "cancelled":
+		return styled(status, amber)
+	case "working":
+		return styled(status, blue)
+	default:
+		return plain(status)
+	}
 }
 
 // cmdAirTaskSteer steers (tasks/steer) or cancels (tasks/cancel) one running
@@ -334,14 +374,14 @@ func cmdAirTaskSteer(args []string) error {
 		if err != nil {
 			return fmt.Errorf("air task-steer: cancel: %w", err)
 		}
-		fmt.Printf("cancelled task %s (status %s)\n", t.TaskID, t.Status)
+		fmt.Println(okLine("cancelled task %s", t.TaskID) + dim(" ("+t.Status+")"))
 		return nil
 	}
 	t, err := mc.SteerTask(context.Background(), *taskID, body)
 	if err != nil {
 		return fmt.Errorf("air task-steer: %w", err)
 	}
-	fmt.Printf("steered task %s (status %s)\n", t.TaskID, t.Status)
+	fmt.Println(okLine("steered task %s", t.TaskID) + dim(" ("+t.Status+")"))
 	return nil
 }
 
@@ -409,7 +449,7 @@ func cmdAirAgentSteer(args []string) error {
 	if err := sendSteerEnvelope(context.Background(), client, agentAddr, env); err != nil {
 		return fmt.Errorf("air agent-steer: %w", err)
 	}
-	fmt.Printf("steered %s -> %s\n", *typ, agentAddr)
+	fmt.Println(okLine("%s → %s", *typ, agentAddr))
 	return nil
 }
 
