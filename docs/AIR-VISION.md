@@ -37,6 +37,8 @@ The other views are snapshots; a stream is the mesh in motion. `air stream` tail
 activity — steers, drops, catalog reads, policy decisions — and renders it live, colour-coded,
 as it lands. It is the terminal-native counterpart to the served Receipts page.
 
+- **Shipped as the second step of this doc:** `air stream <audit.jsonl>` follows the ledger
+  live, colour-coded by decision, rotation-aware (`airstream.go`).
 - **Primitives:** the hash-chained audit ledger (already tailed by `tailAuditRecords` and the
   Receipts view), the governed pub/sub event bus (`cmd/bus`, F28), the style layer.
 - **Deeper:** subscribe to a *governed* event stream by identity — an agent receives only the
