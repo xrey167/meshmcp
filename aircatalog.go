@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -41,6 +42,8 @@ func cmdAirCatalog(args []string) error {
 	o := meshFlags(fs)
 	asJSON := fs.Bool("json", false, "print the raw catalog JSON instead of a table")
 	resolve := fs.String("resolve", "", "discover the control endpoint from a domain's ARD DNS record instead of a positional address")
+	steerable := fs.Bool("steerable", false, "show only backends you can steer (Air · Steer)")
+	resumable := fs.Bool("resumable", false, "show only backends whose sessions survive a reconnect")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -84,7 +87,23 @@ func cmdAirCatalog(args []string) error {
 	if err != nil {
 		return fmt.Errorf("air catalog: %w", err)
 	}
+	// Optional filters, using the module's discovery helpers. --json prints the
+	// full raw response (a filtered view is a human aid, not a wire format).
+	switch {
+	case *steerable:
+		cat.Endpoints = cat.Steerable()
+	case *resumable:
+		cat.Endpoints = cat.Resumable()
+	}
 	if *asJSON {
+		if *steerable || *resumable {
+			b, err := json.MarshalIndent(cat, "", "  ")
+			if err != nil {
+				return err
+			}
+			fmt.Println(string(b))
+			return nil
+		}
 		fmt.Println(string(bytes.TrimSpace(body)))
 		return nil
 	}
