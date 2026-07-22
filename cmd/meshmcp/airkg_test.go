@@ -37,7 +37,8 @@ func newKGRig(t *testing.T, pubKey, fqdn string, allow []string, grants kgGrants
 	audit := policy.NewAuditLog(&buf, func() string { return "t" })
 	f := knowstore.New(st, audit)
 	identify := func(*http.Request) (string, string) { return pubKey, fqdn }
-	return kgTestRig{h: kgControlHandler(f, identify, newACL(allow), grants, audit), audit: &buf}
+	bridge := &kgGrantBridge{static: grants, audit: audit}
+	return kgTestRig{h: kgControlHandler(f, identify, newACL(allow), bridge, audit), audit: &buf}
 }
 
 // do runs one request against the rig and returns the recorder.
