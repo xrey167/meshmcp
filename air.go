@@ -34,6 +34,8 @@ func cmdAir(args []string) error {
 	switch args[0] {
 	case "catalog", "discover":
 		return cmdAirCatalog(args[1:])
+	case "dns":
+		return cmdAirDNS(args[1:])
 	case "sessions":
 		return cmdAirSessions(args[1:])
 	case "steer":
@@ -53,7 +55,7 @@ func cmdAir(args []string) error {
 	case "-h", "--help", "help":
 		return airUsage()
 	default:
-		return fmt.Errorf("meshmcp air: unknown subcommand %q (want catalog | sessions | steer | launch | agent-steer | tasks | task-steer | workflow | serve)", args[0])
+		return fmt.Errorf("meshmcp air: unknown subcommand %q (want catalog | dns | sessions | steer | launch | agent-steer | tasks | task-steer | workflow | serve)", args[0])
 	}
 }
 
@@ -62,7 +64,8 @@ func airUsage() error {
 	fmt.Fprintln(os.Stderr, bold("meshmcp air")+dim(" — drive live work over the mesh"))
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, dim("DISCOVER & DRIVE"))
-	fmt.Fprintln(os.Stderr, "  "+b("air catalog")+"     <control-ip:port>                 "+dim("discover the backends you may reach (ARD well-known)"))
+	fmt.Fprintln(os.Stderr, "  "+b("air catalog")+"     <control-ip:port> | --resolve <domain>  "+dim("what backends can I reach? (ARD)"))
+	fmt.Fprintln(os.Stderr, "  "+b("air dns")+"         <domain> --control <mesh-ip:port>  "+dim("print DNS records for domain-name discovery"))
 	fmt.Fprintln(os.Stderr, "  "+b("air sessions")+"    <control-ip:port>                 "+dim("list live sessions on a gateway"))
 	fmt.Fprintln(os.Stderr, "  "+b("air steer")+"       <control-ip:port> --backend b --session id [--param k=v]")
 	fmt.Fprintln(os.Stderr, "  "+b("air tasks")+"       <backend-ip:port>                 "+dim("list a backend's async tasks"))
