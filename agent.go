@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xrey167/meshmcp/air"
 	"github.com/xrey167/meshmcp/mcpclient"
 	"github.com/xrey167/meshmcp/policy"
 	"github.com/xrey167/meshmcp/session"
@@ -295,11 +296,16 @@ func applySteer(ctx context.Context, mc toolCaller, env steerEnvelope, guidance 
 // method on the agent's existing backend connection (tasks/cancel or
 // tasks/steer), so the gateway firewall still applies.
 func steerTarget(ctx context.Context, mc toolCaller, env steerEnvelope, logf func(string, ...any)) {
-	id, ok := strings.CutPrefix(env.Target, "task:")
-	if !ok || id == "" {
-		logf("steer: unsupported target %q — ignored (want task:<id>)", env.Target)
+	tgt, err := env.ParsedTarget()
+	if err != nil {
+		logf("steer: %v — ignored", err)
 		return
 	}
+	if tgt.Kind != air.TargetTask {
+		logf("steer: target %q not supported here — only task:<id> (ignored)", env.Target)
+		return
+	}
+	id := tgt.Value
 	ts, ok := mc.(taskSteerer)
 	if !ok {
 		logf("steer: target %q needs a task-capable client — ignored", env.Target)

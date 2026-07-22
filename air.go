@@ -18,6 +18,7 @@ import (
 
 	"github.com/netbirdio/netbird/client/embed"
 
+	"github.com/xrey167/meshmcp/air"
 	"github.com/xrey167/meshmcp/session"
 )
 
@@ -454,10 +455,8 @@ func cmdAirAgentSteer(args []string) error {
 // an existing mesh membership — the same resumable, line-framed channel as a
 // push. Shared by `air agent-steer` and the workflow runner's agent_steer step.
 func sendSteerEnvelope(ctx context.Context, client *embed.Client, addr string, env steerEnvelope) error {
-	line, _ := json.Marshal(env)
-	line = append(line, '\n')
 	pr, pw := io.Pipe()
-	go func() { _, werr := pw.Write(line); pw.CloseWithError(werr) }()
+	go func() { pw.CloseWithError(air.WriteEnvelope(pw, env)) }()
 	dial := func(ctx context.Context) (net.Conn, error) { return client.Dial(ctx, "tcp", addr) }
 	return session.NewClient(dial, log.Printf).Run(ctx, sendStream{r: pr})
 }

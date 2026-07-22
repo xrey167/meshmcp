@@ -55,6 +55,28 @@ func (e SteerEnvelope) Validate() error {
 	return nil
 }
 
+// Task builds a task steer: run tool with args on the target work.
+func Task(tool string, args json.RawMessage) SteerEnvelope {
+	return SteerEnvelope{Type: SteerTask, Tool: tool, Args: args}
+}
+
+// Nudge builds a nudge steer: augment in-flight guidance.
+func Nudge(text string) SteerEnvelope { return SteerEnvelope{Type: SteerNudge, Text: text} }
+
+// Cancel builds a cancel steer: interrupt the target work.
+func Cancel() SteerEnvelope { return SteerEnvelope{Type: SteerCancel} }
+
+// WriteEnvelope frames one envelope as a newline-delimited JSON record — the
+// wire form the steer inbox reads (see ParseEnvelopes).
+func WriteEnvelope(w io.Writer, e SteerEnvelope) error {
+	line, err := json.Marshal(e)
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(append(line, '\n'))
+	return err
+}
+
 // maxEnvelopeLine bounds one newline-delimited envelope, so a peer on an
 // agent's steer inbox cannot force an unbounded line buffer.
 const maxEnvelopeLine = 1 << 20
