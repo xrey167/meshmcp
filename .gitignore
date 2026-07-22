@@ -45,7 +45,9 @@ audit-signing-key.json
 !.omc/skills/
 
 # Prebuilt cmd/ backends — build from source, never commit
+# (the /kg binary is ignored, but the kg/ importable store library — S1 — is tracked)
 /kg
+!/kg/
 /memory
 /bus
 /scheduler
