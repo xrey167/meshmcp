@@ -35,3 +35,24 @@ func (c Catalog) Entry(name string) (CatalogEntry, bool) {
 	}
 	return CatalogEntry{}, false
 }
+
+// Steerable returns the discovered backends that expose a live session server,
+// i.e. the ones `air steer` can drive.
+func (c Catalog) Steerable() []CatalogEntry {
+	return c.filter(func(e CatalogEntry) bool { return e.Steerable })
+}
+
+// Resumable returns the discovered backends whose sessions survive a reconnect.
+func (c Catalog) Resumable() []CatalogEntry {
+	return c.filter(func(e CatalogEntry) bool { return e.Resumable })
+}
+
+func (c Catalog) filter(keep func(CatalogEntry) bool) []CatalogEntry {
+	var out []CatalogEntry
+	for _, e := range c.Endpoints {
+		if keep(e) {
+			out = append(out, e)
+		}
+	}
+	return out
+}

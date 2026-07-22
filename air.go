@@ -425,21 +425,15 @@ func cmdAirAgentSteer(args []string) error {
 	if fs.NArg() != 1 {
 		return errors.New("usage: meshmcp air agent-steer [flags] <agent-ip:port>")
 	}
-	switch *typ {
-	case "task":
-		if *tool == "" {
-			return errors.New("air agent-steer --type task needs --tool")
-		}
-	case "nudge", "cancel":
-	default:
-		return fmt.Errorf("air agent-steer: unknown --type %q (want task | nudge | cancel)", *typ)
-	}
 	agentAddr := fs.Arg(0)
 
 	env := steerEnvelope{Type: *typ, Tool: *tool, Text: *text, Target: *target, ID: *id}
 	if len(steerArgs) > 0 {
 		b, _ := json.Marshal(map[string]any(steerArgs))
 		env.Args = b
+	}
+	if err := env.Validate(); err != nil {
+		return fmt.Errorf("air agent-steer: %w", err)
 	}
 
 	o.BlockInbound = true
