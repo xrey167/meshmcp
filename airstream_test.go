@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -149,6 +150,30 @@ func TestStreamAuditFollowsAppendsAndPartialLines(t *testing.T) {
 	}
 	if c := strings.Count(out, "split.mesh"); c != 1 {
 		t.Fatalf("split record delivered %d times, want exactly 1: %q", c, out)
+	}
+}
+
+// TestFollowAuditZeroIntervalNoPanic proves a non-positive interval degrades to
+// a default instead of panicking in time.NewTicker (a crash on bad CLI input).
+func TestFollowAuditZeroIntervalNoPanic(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	if err := os.WriteFile(path, []byte(`{"peer":"a.mesh","decision":"allow"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	// interval 0 must not panic; cancel promptly ends the follow.
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				done <- fmt.Errorf("panic: %v", r)
+			}
+		}()
+		done <- followAudit(ctx, path, true, 0, func([]byte) {})
+	}()
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("followAudit with interval 0: %v", err)
 	}
 }
 

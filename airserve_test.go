@@ -228,6 +228,51 @@ func TestAirServeVision(t *testing.T) {
 	}
 }
 
+// TestAirServeHardening covers the defence-in-depth added to the served API:
+// read-only routes reject non-GET, sensitive responses are no-store, and the
+// relay's push refuses a malformed target.
+func TestAirServeHardening(t *testing.T) {
+	h := airServeHandler(airServeDeps{
+		peers: func() ([]airPeerRow, error) { return nil, nil },
+		push:  func(ctx context.Context, target, name string, data []byte) error { return nil },
+	})
+
+	// A read-only route rejects POST with 405.
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/peers", nil))
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST /api/peers = %d, want 405", rr.Code)
+	}
+
+	// Sensitive JSON responses are not cacheable.
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/peers", nil))
+	if cc := rr.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", cc)
+	}
+
+	// A malformed push target is refused before any dial.
+	rr = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/push", strings.NewReader(`{"target":"not-a-target","text":"hi"}`))
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("push bad target = %d, want 400", rr.Code)
+	}
+}
+
+func TestValidMeshTarget(t *testing.T) {
+	for _, ok := range []string{"100.64.0.9:9110", "peer.mesh:22", "[::1]:80"} {
+		if !validMeshTarget(ok) {
+			t.Errorf("validMeshTarget(%q) = false, want true", ok)
+		}
+	}
+	for _, bad := range []string{"", "no-port", "host:", ":9110", "host:abc", "a:b:c"} {
+		if validMeshTarget(bad) {
+			t.Errorf("validMeshTarget(%q) = true, want false", bad)
+		}
+	}
+}
+
 // TestAirServeViewerACL proves a non-empty --allow list gates every route by
 // the browser's mesh identity.
 func TestAirServeViewerACL(t *testing.T) {
