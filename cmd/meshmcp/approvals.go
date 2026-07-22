@@ -176,6 +176,7 @@ func approvalsHandler(ps *policy.FilePending, approver func(*http.Request) strin
 		o(&opt)
 	}
 	mux := http.NewServeMux()
+	registerAgentOSAssets(mux)
 
 	mux.HandleFunc("/v1/pending", func(w http.ResponseWriter, r *http.Request) {
 		// Enumerating every held request is approver-only state.
@@ -198,6 +199,10 @@ func approvalsHandler(ps *policy.FilePending, approver func(*http.Request) strin
 		return func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
 				http.Error(w, "POST only", http.StatusMethodNotAllowed)
+				return
+			}
+			if !sameOrigin(r) {
+				http.Error(w, "cross-origin request refused", http.StatusForbidden)
 				return
 			}
 			if authorized != nil && !authorized(r) {
@@ -284,6 +289,10 @@ func approvalsHandler(ps *policy.FilePending, approver func(*http.Request) strin
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
 			return
 		}
+		if !sameOrigin(r) {
+			http.Error(w, "cross-origin request refused", http.StatusForbidden)
+			return
+		}
 		// Requester allowlist: only permitted identities may register a pending
 		// request (and thereby buzz the approver's device). When unset, any
 		// caller may — the open, framework-facing default.
@@ -323,6 +332,10 @@ func approvalsHandler(ps *policy.FilePending, approver func(*http.Request) strin
 		mux.HandleFunc("/v1/devices", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
 				http.Error(w, "POST only", http.StatusMethodNotAllowed)
+				return
+			}
+			if !sameOrigin(r) {
+				http.Error(w, "cross-origin request refused", http.StatusForbidden)
 				return
 			}
 			var body struct{ Token, Platform string }
@@ -406,11 +419,11 @@ button:active{filter:brightness(.85)}
 .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--panel);border:1px solid var(--line);
 border-radius:10px;padding:10px 16px;font-size:13px;opacity:0;transition:opacity .2s;pointer-events:none}
 .toast.show{opacity:1}
-</style></head><body>
+</style><link rel="stylesheet" href="/assets/agent-os.css"></head><body>
 <header><span class="dot"></span><h1>Pending approvals</h1></header>
 <p class="you" id="you">…</p>
-<div id="list"><div class="empty">loading…</div></div>
-<div class="toast" id="toast"></div>
+<div id="list" aria-live="polite" aria-busy="true"><div class="empty">loading…</div></div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
 <script>
 // All dynamic values (peer, tool, backend) are agent-controlled, so they are
 // only ever written via textContent / DOM APIs — never string-concatenated into
@@ -425,10 +438,14 @@ function act(peer,tool,grant,p){
    .then(function(r){return r.json()}).then(function(){toast((grant?'✓ approved ':'✗ denied ')+tool);load()})
    .catch(function(e){toast('error: '+e)});
 }
+var lastPendingSignature='';
 function load(){
   fetch('/v1/pending').then(function(r){return r.json()}).then(function(j){
     document.getElementById('you').textContent='signing as: '+(j.you||'');
     var list=j.pending||[], c=document.getElementById('list');
+	var signature=JSON.stringify(list);
+	if(signature===lastPendingSignature){c.setAttribute('aria-busy','false');return}
+	lastPendingSignature=signature;c.setAttribute('aria-busy','false');
     c.textContent='';
     if(!list.length){c.appendChild(el('div','empty','✓ nothing waiting'));return}
     list.forEach(function(p){
@@ -439,12 +456,12 @@ function load(){
       meta.appendChild(document.createTextNode(' · '+(p.backend||'')+' · '+ago(p.requested)));
       card.appendChild(meta);
       var row=el('div','row');
-      var ok=el('button','ok','Approve'); ok.addEventListener('click',function(){act(p.peer,p.tool,true,p)});
-      var no=el('button','no','Deny');    no.addEventListener('click',function(){act(p.peer,p.tool,false,p)});
+      var ok=el('button','ok','Approve');ok.setAttribute('aria-label','Approve '+p.tool+' for '+p.peer);ok.addEventListener('click',function(){act(p.peer,p.tool,true,p)});
+      var no=el('button','no','Deny');no.setAttribute('aria-label','Deny '+p.tool+' for '+p.peer);no.addEventListener('click',function(){act(p.peer,p.tool,false,p)});
       row.appendChild(ok); row.appendChild(no); card.appendChild(row);
       c.appendChild(card);
     });
-  }).catch(function(e){var c=document.getElementById('list');c.textContent='';c.appendChild(el('div','empty','fetch error: '+e))});
+  }).catch(function(e){lastPendingSignature='';var c=document.getElementById('list');c.setAttribute('aria-busy','false');c.textContent='';c.appendChild(el('div','empty','fetch error: '+e))});
 }
 load();setInterval(load,2000);
 </script></body></html>`

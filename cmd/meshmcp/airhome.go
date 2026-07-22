@@ -174,6 +174,9 @@ func gatherHome(client *embed.Client, control, catalogURL, approvals, auditPath 
 	h.Peers = rows
 
 	hc := meshDialHTTP(client, control)
+	if nearby, err := fetchPresence(context.Background(), hc); err == nil {
+		h.Nearby = nearby.Presence
+	}
 	if sessions, err := fetchHomeSessions(hc); err == nil {
 		h.Sessions = sessions
 	}
@@ -302,8 +305,8 @@ func auditView(views *policy.AuditLog, h air.Home) {
 		Method:   "air.home",
 		Decision: "allow",
 		Rule:     -1,
-		Reason: fmt.Sprintf("view peers=%d sessions=%d pending=%d",
-			h.Summary.PeersOnline, h.Summary.Sessions, h.Summary.Pending),
+		Reason: fmt.Sprintf("view nearby=%d working=%d peers=%d sessions=%d pending=%d",
+			h.Summary.Nearby, h.Summary.Working, h.Summary.PeersOnline, h.Summary.Sessions, h.Summary.Pending),
 	})
 }
 
@@ -368,7 +371,34 @@ func renderHome(w io.Writer, h air.Home, limit int) {
 	fmt.Fprintln(w, homeHero(h.Summary))
 
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, dim("PEERS"))
+	fmt.Fprintln(w, dim("NEARBY"))
+	if len(h.Nearby) == 0 {
+		fmt.Fprintln(w, dim("  no Air nodes nearby"))
+	} else {
+		var rows [][]cell
+		for _, p := range firstN(h.Nearby, limit) {
+			identity := p.FQDN
+			if identity == "" {
+				identity = shortKey(p.PublicKey)
+			}
+			services := make([]string, 0, len(p.Services))
+			for _, svc := range p.Services {
+				services = append(services, string(svc.Kind))
+			}
+			activity := "available"
+			if p.Activity != nil {
+				activity = string(p.Activity.State) + " · " + p.Activity.Title
+			}
+			rows = append(rows, []cell{
+				styled(p.Name, bold), plain(string(p.Kind)), styled(identity, dim),
+				plain(strings.Join(services, " · ")), plain(activity),
+			})
+		}
+		renderTable(w, []string{"node", "kind", "identity", "services", "activity"}, rows)
+	}
+
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, dim("MESH PEERS"))
 	if len(h.Peers) == 0 {
 		fmt.Fprintln(w, dim("  no peers reachable"))
 	} else {
@@ -448,7 +478,9 @@ func renderHome(w io.Writer, h air.Home, limit int) {
 // never a misleading zero.
 func homeHero(s air.HomeSummary) string {
 	parts := []string{
-		green(fmt.Sprintf("● %d online", s.PeersOnline)) + dim(fmt.Sprintf(" / %d peers", s.PeersTotal)),
+		green(fmt.Sprintf("● %d nearby", s.Nearby)),
+		fmt.Sprintf("%d working", s.Working),
+		dim(fmt.Sprintf("%d/%d mesh peers", s.PeersOnline, s.PeersTotal)),
 		fmt.Sprintf("%d sessions", s.Sessions),
 		fmt.Sprintf("%d reachable", s.Reachable),
 	}

@@ -21,6 +21,12 @@ func homeFixture() air.Home {
 			{Status: "connected", IP: "100.64.0.2", FQDN: "gw.mesh", PubKey: "PUBKEYgw"},
 			{Status: "idle", IP: "100.64.0.3", FQDN: "laptop.mesh", PubKey: "PUBKEYlp"},
 		},
+		Nearby: []air.Presence{{
+			Version: air.PresenceSchema, Name: "Research Agent", Kind: air.NodeAgent, Status: air.StatusAvailable,
+			PublicKey: "PUBKEYagent", FQDN: "research.mesh", IP: "100.64.0.4",
+			Services: []air.Service{{Kind: air.ServiceSteer, Port: 9120, Protocol: "tcp", Address: "100.64.0.4:9120"}},
+			Activity: &air.Activity{Schema: air.ActivitySchema, ID: "research", Kind: air.ActivityTask, Title: "Customer research", State: air.ActivityRunning},
+		}},
 		Sessions:  []air.Session{{Backend: "fs", ID: "9f2a", Peer: "gw.mesh", AgeSec: 4}},
 		Reachable: []air.CatalogEntry{{Name: "fs", Address: "100.64.0.2:9101", Transport: "stdio", Steerable: true}},
 		Activity:  []air.Receipt{{Decision: "allow", Time: "2026-07-22T11:59:00Z", Peer: "gw.mesh", Method: "tools/call", Tool: "read"}},
@@ -38,8 +44,9 @@ func TestRenderHomeGolden(t *testing.T) {
 	// The board paints, in order: YOU, hero counts, then each labelled section.
 	wantOrder := []string{
 		"me.mesh", "100.64.0.1", // YOU
-		"● 1 online", "2 peers", "1 sessions", "1 reachable", "⏸ 1 waiting", // hero
-		"PEERS", "gw.mesh", "laptop.mesh",
+		"● 1 nearby", "1 working", "1/2 mesh peers", "1 sessions", "1 reachable", "⏸ 1 waiting", // hero
+		"NEARBY", "Research Agent", "Customer research",
+		"MESH PEERS", "gw.mesh", "laptop.mesh",
 		"LIVE SESSIONS", "fs", "9f2a",
 		"REACHABLE", "100.64.0.2:9101", "steerable",
 		"RECENT ACTIVITY", "allow", "tools/call",
@@ -61,7 +68,7 @@ func TestRenderHomeEmptyMesh(t *testing.T) {
 	renderHome(&buf, h, 5)
 	out := buf.String()
 
-	for _, want := range []string{"no peers reachable", "no live sessions", "no backends you may reach", "nothing recent", "— pending"} {
+	for _, want := range []string{"no Air nodes nearby", "no peers reachable", "no live sessions", "no backends you may reach", "nothing recent", "— pending"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("empty-mesh board missing calm state %q:\n%s", want, out)
 		}

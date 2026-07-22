@@ -14,7 +14,12 @@ func TestSummarizeCounts(t *testing.T) {
 		},
 		Sessions:  make([]Session, 2),
 		Reachable: make([]CatalogEntry, 7),
-		Pending:   1,
+		Nearby: []Presence{
+			{Name: "Research", Activity: &Activity{State: ActivityRunning}},
+			{Name: "Idle"},
+			{Name: "Done", Activity: &Activity{State: ActivityCompleted}},
+		},
+		Pending: 1,
 		Activity: []Receipt{
 			{Decision: "deny", Time: "2026-07-22T11:30:00Z"},  // within 1h
 			{Decision: "deny", Time: "2026-07-22T10:00:00Z"},  // older than 1h
@@ -27,6 +32,9 @@ func TestSummarizeCounts(t *testing.T) {
 	}
 	if s.Sessions != 2 || s.Reachable != 7 {
 		t.Errorf("sessions/reachable = %d/%d, want 2/7", s.Sessions, s.Reachable)
+	}
+	if s.Nearby != 3 || s.Working != 1 {
+		t.Errorf("nearby/working = %d/%d, want 3/1", s.Nearby, s.Working)
 	}
 	if s.Pending != 1 {
 		t.Errorf("pending = %d, want 1", s.Pending)
@@ -50,6 +58,12 @@ func sampleHome(generated string) Home {
 		Generated: generated,
 		You:       PeerRow{Status: "connected", IP: "100.64.0.1", FQDN: "me.mesh", PubKey: "K0"},
 		Peers:     []PeerRow{{Status: "connected", IP: "100.64.0.2", FQDN: "a.mesh", PubKey: "K1"}},
+		Nearby: []Presence{{
+			Version: PresenceSchema, Name: "Research Agent", Kind: NodeAgent, Status: StatusAvailable,
+			PublicKey: "K1", FQDN: "a.mesh", IP: "100.64.0.2",
+			Services: []Service{{Kind: ServiceSteer, Port: 9120, Protocol: "tcp", Address: "100.64.0.2:9120"}},
+			Activity: &Activity{Schema: ActivitySchema, ID: "research", Kind: ActivityTask, Title: "Customer research", State: ActivityRunning},
+		}},
 		Sessions:  []Session{{Backend: "fs", ID: "9f2a", Peer: "a.mesh", AgeSec: 4}},
 		Reachable: []CatalogEntry{{Name: "fs", Address: "100.64.0.2:9101", Transport: "stdio"}},
 		Activity:  []Receipt{{Decision: "allow", Time: "2026-07-22T11:59:00Z", Peer: "a.mesh", Method: "tools/call"}},
@@ -80,6 +94,13 @@ func TestSignatureChangesOnDelta(t *testing.T) {
 		},
 		"new session": func(h Home) Home {
 			h.Sessions = append(append([]Session(nil), h.Sessions...), Session{Backend: "sql", ID: "abcd", Peer: "b.mesh"})
+			return h
+		},
+		"activity progress": func(h Home) Home {
+			progress := 68
+			h.Nearby = append([]Presence(nil), h.Nearby...)
+			h.Nearby[0] = clonePresence(h.Nearby[0])
+			h.Nearby[0].Activity.Progress = &progress
 			return h
 		},
 		"new receipt": func(h Home) Home {
@@ -155,7 +176,7 @@ func TestHomeDegradesSectionBySection(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(b)
-	for _, want := range []string{`"peers":[]`, `"sessions":[]`, `"reachable":[]`, `"activity":[]`} {
+	for _, want := range []string{`"peers":[]`, `"nearby":[]`, `"sessions":[]`, `"reachable":[]`, `"activity":[]`} {
 		if !strings.Contains(s, want) {
 			t.Errorf("nil section did not marshal to an empty array (%s missing): %s", want, s)
 		}

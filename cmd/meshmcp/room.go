@@ -117,6 +117,7 @@ func cmdRoom(args []string) error {
 	}
 
 	mux := http.NewServeMux()
+	registerAgentOSAssets(mux)
 	mux.HandleFunc("/api/room", rs.handleRoom)
 	mux.HandleFunc("/api/caps", rs.handleCaps)
 	// The actuator endpoints (drive a backend, list its tools, run a
@@ -396,7 +397,7 @@ main{display:grid;grid-template-columns:1.5fr 1fr;gap:14px;padding:16px 20px}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:14px 16px}
 .card h2{font-size:11px;text-transform:uppercase;letter-spacing:.13em;color:var(--dim);margin:0 0 12px;display:flex;justify-content:space-between}
 .tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
-.tile{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:11px 12px;cursor:pointer}
+.tile{width:100%;color:var(--fg);font:inherit;text-align:left;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:11px 12px;cursor:pointer}
 .tile:hover{border-color:var(--accent)}.tile .n{font-weight:600;font-size:13px}
 .tile .meta{color:var(--faint);font-size:11px;margin-top:2px}
 .tile .bar{height:5px;border-radius:3px;background:var(--line);overflow:hidden;margin-top:9px;display:flex}
@@ -427,10 +428,10 @@ main{display:grid;grid-template-columns:1.5fr 1fr;gap:14px;padding:16px 20px}
 .hint{color:var(--faint);font-size:11px;margin-top:8px}
 .hint code{color:var(--fg)}
 .warn{color:var(--warn)}
-</style></head><body>
+</style><link rel="stylesheet" href="/assets/agent-os.css"></head><body>
 <header>
   <h1><span class="dot"></span> meshmcp <span style="color:var(--dim)">· control room</span></h1>
-  <span id="chain" class="chain">…</span>
+  <span id="chain" class="chain" role="status" aria-live="polite">…</span>
   <span class="caps" id="caps"></span>
   <div class="spacer"></div>
   <div class="kpis">
@@ -453,8 +454,8 @@ main{display:grid;grid-template-columns:1.5fr 1fr;gap:14px;padding:16px 20px}
   <div class="card" style="padding:0;background:transparent;border:0">
     <h2 style="padding:0 4px">Console <span id="target-lbl" class="dim" style="text-transform:none;letter-spacing:0"></span></h2>
     <div class="term">
-      <div class="out" id="out"></div>
-      <div class="inbar"><span class="prompt">meshmcp&gt;</span><input id="in" autocomplete="off" spellcheck="false" placeholder="type a command — try: help"></div>
+      <div class="out" id="out" role="log" aria-live="polite"></div>
+      <div class="inbar"><span class="prompt" aria-hidden="true">meshmcp&gt;</span><input id="in" aria-label="Control Room command" autocomplete="off" spellcheck="false" placeholder="type a command — try: help"></div>
     </div>
     <div class="hint">
       <code>ls [peer:port]</code> · <code>call [peer:port] &lt;tool&gt; [json-args]</code> ·
@@ -484,7 +485,7 @@ function tick(){
     var recent=s.recent||[];
     var tiles=$('tiles');tiles.textContent='';
     (s.backend_stats||[]).forEach(function(b){
-      var t=el('div','tile');t.appendChild(el('div','n',b.backend));
+      var t=el('button','tile');t.type='button';t.setAttribute('aria-label','Open '+b.backend+' in the console');t.appendChild(el('div','n',b.backend));
       t.appendChild(el('div','meta',b.calls+' calls · '+b.peers+' caller(s) · '+ago(b.last_seen)));
       var tot=b.calls||1,bar=el('div','bar');
       var ia=el('i','ia');ia.style.width=(100*b.allowed/tot)+'%';var ic=el('i','ic');ic.style.width=(100*b.cosign/tot)+'%';var idn=el('i','id');idn.style.width=(100*b.denied/tot)+'%';

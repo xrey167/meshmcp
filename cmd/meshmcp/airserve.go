@@ -57,6 +57,7 @@ type airServeDeps struct {
 // sessions/steer, relay-sent push/drop, a receipts tail, and an approvals link.
 func airServeHandler(d airServeDeps) http.Handler {
 	mux := http.NewServeMux()
+	registerAgentOSAssets(mux)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
@@ -78,6 +79,7 @@ func airServeHandler(d airServeDeps) http.Handler {
 			"vision":    d.gallery != nil,
 			"cast":      d.cast != nil,
 			"catalog":   d.controlBase != "",
+			"nearby":    d.controlBase != "",
 			"home":      true,
 		})
 	})
@@ -102,8 +104,8 @@ func airServeHandler(d airServeDeps) http.Handler {
 			_ = d.viewAudit.Append(policy.AuditRecord{
 				Peer: fqdn, PeerKey: pubkey, Method: "air.home",
 				Decision: "allow", Rule: -1,
-				Reason: fmt.Sprintf("view peers=%d sessions=%d pending=%d",
-					home.Summary.PeersOnline, home.Summary.Sessions, home.Summary.Pending),
+				Reason: fmt.Sprintf("view nearby=%d working=%d peers=%d sessions=%d pending=%d",
+					home.Summary.Nearby, home.Summary.Working, home.Summary.PeersOnline, home.Summary.Sessions, home.Summary.Pending),
 			})
 		}
 		writeJSONResp(w, http.StatusOK, home)
@@ -125,6 +127,36 @@ func airServeHandler(d airServeDeps) http.Handler {
 			return
 		}
 		relay(w, resp)
+	})
+
+	mux.HandleFunc("/api/nearby", func(w http.ResponseWriter, r *http.Request) {
+		if !getOnly(w, r) {
+			return
+		}
+		if d.controlBase == "" {
+			http.Error(w, "no --control endpoint configured", http.StatusServiceUnavailable)
+			return
+		}
+		req, _ := http.NewRequestWithContext(r.Context(), http.MethodGet, d.controlBase+"/v1/presence", nil)
+		d.attest(req, r)
+		resp, err := d.controlHC.Do(req)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(io.LimitReader(resp.Body, maxPresenceListBytes+1))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		if len(body) > maxPresenceListBytes {
+			http.Error(w, "nearby response is too large", http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		_, _ = w.Write(body)
 	})
 
 	mux.HandleFunc("/api/peers", func(w http.ResponseWriter, r *http.Request) {
@@ -485,6 +517,9 @@ func (d airServeDeps) assembleHome(r *http.Request) air.Home {
 		}
 	}
 	if d.controlBase != "" {
+		if cards := d.relayPresence(r); cards != nil {
+			h.Nearby = cards
+		}
 		if sess := d.relaySessions(r); sess != nil {
 			h.Sessions = sess
 		}
@@ -514,6 +549,32 @@ func (d airServeDeps) assembleHome(r *http.Request) air.Home {
 	}
 	h.Summary = air.Summarize(h)
 	return h
+}
+
+// relayPresence fetches identity-stamped Air cards with browser attribution,
+// returning nil (an empty section) on any gateway or decoding failure.
+func (d airServeDeps) relayPresence(r *http.Request) []air.Presence {
+	req, _ := http.NewRequestWithContext(r.Context(), http.MethodGet, d.controlBase+"/v1/presence", nil)
+	d.attest(req, r)
+	resp, err := d.controlHC.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPresenceListBytes+1))
+	if err != nil || len(body) > maxPresenceListBytes {
+		return nil
+	}
+	var out struct {
+		Presence []air.Presence `json:"presence"`
+	}
+	if json.Unmarshal(body, &out) != nil {
+		return nil
+	}
+	return out.Presence
 }
 
 // relaySessions fetches the gateway's live sessions with browser attestation,

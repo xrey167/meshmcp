@@ -48,6 +48,9 @@ func TestAirToolsRequireMesh(t *testing.T) {
 // endpoint (no mesh / no control configured), rather than panicking.
 func TestAirCatalogRequiresControl(t *testing.T) {
 	app := &meshApp{}
+	if r, _ := app.toolAirNearby(context.Background(), nil); !r.IsError {
+		t.Fatal("air_nearby should error without a control endpoint")
+	}
 	if r, _ := app.toolAirCatalog(context.Background(), nil); !r.IsError {
 		t.Fatal("air_catalog should error without a control endpoint")
 	}

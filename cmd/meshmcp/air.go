@@ -35,6 +35,12 @@ func cmdAir(args []string) error {
 	switch args[0] {
 	case "home":
 		return cmdAirHome(args[1:])
+	case "nearby":
+		return cmdAirNearby(args[1:])
+	case "announce":
+		return cmdAirAnnounce(args[1:])
+	case "node":
+		return cmdAirNode(args[1:])
 	case "whoami", "self":
 		return cmdAirWhoami(args[1:])
 	case "map":
@@ -88,7 +94,7 @@ func cmdAir(args []string) error {
 	case "-h", "--help", "help":
 		return airUsage()
 	default:
-		return fmt.Errorf("meshmcp air: unknown subcommand %q (want home | whoami | map | browse | stream | vision | bind | film | play | ring | listen | cast | screen | catalog | change | dns | kg | sessions | steer | launch | agent-steer | tasks | task-steer | workflow | rag | serve)", args[0])
+		return fmt.Errorf("meshmcp air: unknown subcommand %q (want home | nearby | announce | node | whoami | map | browse | stream | vision | bind | film | play | ring | listen | cast | screen | catalog | change | dns | kg | sessions | steer | launch | agent-steer | tasks | task-steer | workflow | rag | serve)", args[0])
 	}
 }
 
@@ -99,6 +105,11 @@ func airUsage() error {
 	fmt.Fprintln(os.Stderr, dim("HOME"))
 	fmt.Fprintln(os.Stderr, "  "+b("air home")+"        <control-ip:port> [--audit f] [--approvals ip:port] [--watch] [--json]")
 	fmt.Fprintln(os.Stderr, "                  "+dim("your mesh at a glance — peers · sessions · reachable · waiting (one board; --serve for the web home)"))
+	fmt.Fprintln(os.Stderr, "  "+b("air nearby")+"      <control-ip:port> [--watch] [--json] "+dim("identity-stamped agent/device cards and their live services"))
+	fmt.Fprintln(os.Stderr, "  "+b("air announce")+"    <control-ip:port> --name n --kind agent --service steer=9120")
+	fmt.Fprintln(os.Stderr, "                  "+dim("publish one short-lived Presence + Activity card"))
+	fmt.Fprintln(os.Stderr, "  "+b("air node")+"        <control-ip:port> --name n [presence flags]")
+	fmt.Fprintln(os.Stderr, "                  "+dim("keep a Presence card alive; graceful leave, crash-safe TTL"))
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, dim("DISCOVER & DRIVE"))
 	fmt.Fprintln(os.Stderr, "  "+b("air whoami")+"      "+dim("                                  the mesh identity a gateway sees you as"))

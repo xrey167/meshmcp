@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/xrey167/meshmcp/air"
 	"github.com/xrey167/meshmcp/session"
@@ -19,6 +20,7 @@ type fakeAirControl struct {
 	callers    []string // "pubKey/fqdn" seen by steer
 	err        error    // returned by steer
 	denyOnFqdn string   // if set, steer/sessions deny this caller fqdn on backend "fs"
+	presence   *air.Registry
 }
 
 func (f *fakeAirControl) sessions(pubKey, fqdn string) []AirSession {
@@ -53,6 +55,21 @@ func (f *fakeAirControl) steer(pubKey, fqdn, backend, id, method string, _ any) 
 	f.callers = append(f.callers, pubKey+"/"+fqdn)
 	f.steers = append(f.steers, backend+"/"+id+"/"+method)
 	return nil
+}
+func (f *fakeAirControl) presenceRegistry() *air.Registry {
+	if f.presence == nil {
+		f.presence = air.NewRegistry(32)
+	}
+	return f.presence
+}
+func (f *fakeAirControl) nearby(now time.Time) []air.Presence {
+	return f.presenceRegistry().List(now)
+}
+func (f *fakeAirControl) announce(pubKey, fqdn, observedIP string, a air.Announcement, now time.Time) (air.Presence, bool, error) {
+	return f.presenceRegistry().Upsert(air.VerifiedIdentity{PublicKey: pubKey, FQDN: fqdn}, observedIP, a, now)
+}
+func (f *fakeAirControl) leave(pubKey string) bool {
+	return f.presenceRegistry().Remove(pubKey)
 }
 
 func newTestHandler(c airController, allowCaller bool) http.Handler {
@@ -123,16 +140,98 @@ func TestAirControlSteerUnknownBackend(t *testing.T) {
 
 func TestAirControlACLDeny(t *testing.T) {
 	c := &fakeAirControl{}
-	for _, path := range []string{"/v1/sessions", "/v1/steer"} {
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodGet, "/v1/sessions"},
+		{http.MethodPost, "/v1/steer"},
+		{http.MethodGet, "/v1/presence"},
+	} {
 		rr := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"backend":"fs","id":"9f2a","method":"m"}`))
+		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(`{"backend":"fs","id":"9f2a","method":"m"}`))
 		newTestHandler(c, false).ServeHTTP(rr, req)
 		if rr.Code != http.StatusForbidden {
-			t.Fatalf("%s: status = %d, want 403", path, rr.Code)
+			t.Fatalf("%s: status = %d, want 403", tc.path, rr.Code)
 		}
 	}
 	if len(c.steers) != 0 {
 		t.Fatalf("denied caller still steered: %v", c.steers)
+	}
+}
+
+func TestAirControlPresenceIdentityAddressAndLifecycle(t *testing.T) {
+	c := &fakeAirControl{}
+	var recs []airSteerAudit
+	h := handlerWithIdentity(c, "verified-key", "code-agent.mesh", func(r airSteerAudit) { recs = append(recs, r) })
+	body := `{"version":"air.presence/v1","name":"Code Agent","kind":"agent","ttl_seconds":90,"services":[{"kind":"steer","port":9120,"capabilities":["task","nudge"]}],"public_key":"forged","ip":"203.0.113.9"}`
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/presence", strings.NewReader(body))
+	req.RemoteAddr = "192.0.2.44:55321"
+	req.Header.Set("X-Air-On-Behalf", "victim.mesh")
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("announce status = %d, want 200: %s", rr.Code, rr.Body)
+	}
+	var announced struct {
+		Changed  bool         `json:"changed"`
+		Presence air.Presence `json:"presence"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &announced); err != nil {
+		t.Fatalf("bad announce json: %v", err)
+	}
+	if !announced.Changed || announced.Presence.PublicKey != "verified-key" || announced.Presence.FQDN != "code-agent.mesh" {
+		t.Fatalf("identity was not stamped from transport: %+v", announced)
+	}
+	if announced.Presence.IP != "192.0.2.44" || len(announced.Presence.Services) != 1 || announced.Presence.Services[0].Address != "192.0.2.44:9120" {
+		t.Fatalf("service address was not derived from observed IP: %+v", announced.Presence)
+	}
+	if len(recs) != 1 || recs[0].Method != "air/presence.announce" || recs[0].OnBehalf != "" || !recs[0].OK {
+		t.Fatalf("announce audit must use the direct peer: %+v", recs)
+	}
+
+	// The same material card is a heartbeat, not a second enforcement record.
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/presence", strings.NewReader(body))
+	req.RemoteAddr = "192.0.2.44:55322"
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"changed":false`) {
+		t.Fatalf("heartbeat = %d %s, want unchanged", rr.Code, rr.Body)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("unchanged heartbeat added audit noise: %+v", recs)
+	}
+
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/v1/presence", nil))
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "Code Agent") {
+		t.Fatalf("nearby list = %d %s", rr.Code, rr.Body)
+	}
+	if len(recs) != 2 || recs[1].Method != "air/presence.list" {
+		t.Fatalf("presence list not audited: %+v", recs)
+	}
+
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodDelete, "/v1/presence", nil))
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"removed":true`) {
+		t.Fatalf("leave = %d %s", rr.Code, rr.Body)
+	}
+	if len(c.nearby(time.Now())) != 0 {
+		t.Fatal("DELETE did not remove the caller's card")
+	}
+}
+
+func TestAirControlPresenceRequiresDirectKeyAndKnownMethod(t *testing.T) {
+	c := &fakeAirControl{}
+	withoutKey := handlerWithIdentity(c, "", "name-only.mesh", nil)
+	rr := httptest.NewRecorder()
+	withoutKey.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/presence", strings.NewReader(`{"name":"Agent","kind":"agent"}`)))
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("name-only announce = %d, want 403", rr.Code)
+	}
+
+	rr = httptest.NewRecorder()
+	newTestHandler(c, true).ServeHTTP(rr, httptest.NewRequest(http.MethodPut, "/v1/presence", nil))
+	if rr.Code != http.StatusMethodNotAllowed || rr.Header().Get("Allow") == "" {
+		t.Fatalf("PUT presence = %d Allow=%q, want 405", rr.Code, rr.Header().Get("Allow"))
 	}
 }
 

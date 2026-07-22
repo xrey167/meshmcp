@@ -18,6 +18,44 @@ import (
 var version = "0.1.0"
 
 func usage() {
+	fmt.Fprintf(os.Stderr, `meshmcp %s — private Agent OS and identity-native MCP control plane
+
+Start here:
+  meshmcp doctor --config <file>                 check readiness before joining
+  meshmcp serve --config <file>                  expose governed MCP backends
+  meshmcp air home <control-ip:port>             see your mesh, work, and attention
+  meshmcp air home --serve [flags]               open the responsive Agent OS
+
+Experiences:
+  air          Home · Nearby · Activities · Share · Security
+  approvals    review held agent actions from a trusted device
+  room         live operator view and explicit developer console
+  dash         audit and policy observation
+  mcp          let an assistant operate MeshMCP through governed tools
+
+Build the fabric:
+  serve · router · orchestrate · control · federate · agent
+
+Connect and call:
+  connect · forward · peers · probe · ls · call · read · prompt
+
+Share and automate:
+  drop · push · fetch · pubsub · publish · subscribe · request · respond
+
+Trust and operate:
+  audit · capability · approve · secrets · hook · insight · replay
+  config · status · budget · doctor
+
+Discover and extend:
+  graphrag · spotlight · market · plugins
+
+Run "meshmcp air help" for the Agent OS surface or "meshmcp help all" for
+the complete command reference. Shared mesh credentials come from flags,
+config, or $NB_SETUP_KEY / $NB_MANAGEMENT_URL.
+`, version)
+}
+
+func usageAll() {
 	fmt.Fprintf(os.Stderr, `meshmcp %s — MCP servers over a private WireGuard mesh
 
 Usage:
@@ -28,7 +66,7 @@ Usage:
   meshmcp control [flags]                        run the managed control plane (enroll, registry, policy)
   meshmcp federate --config <file>               run a cross-org federation boundary (granted tools only, audited)
   meshmcp agent --role <r> [flags] <peer:port>  run a demo agent app (reader/fetcher/billing/analyst) with its own identity
-  meshmcp air <sessions|steer|launch> [flags]   drive live work: list/steer a gateway's sessions, launch an agent
+  meshmcp air <home|nearby|steer|...> [flags]   discover agents/devices, share context, and drive live work
   meshmcp connect [flags] <peer-ip:port>        bridge stdio <-> remote stdio backend
   meshmcp forward [flags] <local> <peer:port>   forward a local TCP port to a mesh peer
   meshmcp drop [flags] <peer:port> <path...>    AirDrop files or directories to a mesh peer (resumable, audited); --config runs a receiver
@@ -183,7 +221,11 @@ func main() {
 	case "version":
 		fmt.Println(version)
 	case "-h", "--help", "help":
-		usage()
+		if len(os.Args) > 2 && os.Args[2] == "all" {
+			usageAll()
+		} else {
+			usage()
+		}
 	default:
 		// Fall through to the plugin subcommand registry before giving up, so a
 		// compiled-in extension can add a verb without editing this switch.

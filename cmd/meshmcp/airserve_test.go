@@ -94,6 +94,29 @@ func TestAirServeNoControl(t *testing.T) {
 	}
 }
 
+func TestAirServeNearbyProxy(t *testing.T) {
+	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/presence" {
+			http.NotFound(w, r)
+			return
+		}
+		if got := r.Header.Get("X-Air-On-Behalf"); got != "phone.mesh" {
+			t.Errorf("nearby request attested as %q, want phone.mesh", got)
+		}
+		_, _ = io.WriteString(w, `{"presence":[{"version":"air.presence/v1","name":"Code Agent","kind":"agent","status":"available","labels":[],"services":[],"public_key":"K","ip":"192.0.2.4","seen_at":"2026-07-22T12:00:00Z","expires_at":"2026-07-22T12:01:30Z"}]}`)
+	}))
+	defer control.Close()
+	h := airServeHandler(airServeDeps{
+		controlHC: control.Client(), controlBase: control.URL,
+		identify: func(*http.Request) (string, string) { return "browser-key", "phone.mesh" },
+	})
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/nearby", nil))
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "Code Agent") {
+		t.Fatalf("nearby proxy = %d %s", rr.Code, rr.Body)
+	}
+}
+
 // TestAirServePushDrop covers the relay push/drop endpoints: JSON text push,
 // multipart file drop, disabled state, and input validation.
 func TestAirServePushDrop(t *testing.T) {
@@ -481,6 +504,8 @@ func TestAirServeCatalogProxy(t *testing.T) {
 func TestAPIHomeAggregates(t *testing.T) {
 	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/v1/presence":
+			_, _ = io.WriteString(w, `{"presence":[{"version":"air.presence/v1","name":"Research Agent","kind":"agent","status":"available","labels":[],"services":[{"kind":"steer","port":9120,"protocol":"tcp","address":"100.64.0.4:9120"}],"activity":{"schema":"air.activity/v1","id":"research","kind":"task","title":"Customer research","state":"running","progress":68},"public_key":"K2","fqdn":"research.mesh","ip":"100.64.0.4","seen_at":"2026-07-22T12:00:00Z","expires_at":"2026-07-22T12:01:30Z"}]}`)
 		case "/v1/sessions":
 			_, _ = io.WriteString(w, `{"sessions":[{"backend":"fs","id":"9f2a","peer":"gw.mesh","age_sec":4}]}`)
 		case airCatalogPath:
@@ -492,14 +517,18 @@ func TestAPIHomeAggregates(t *testing.T) {
 	defer control.Close()
 
 	h := airServeHandler(airServeDeps{
-		self:        func() airPeerRow { return airPeerRow{Status: "connected", FQDN: "me.mesh", IP: "100.64.0.1"} },
-		peers:       func() ([]airPeerRow, error) { return []airPeerRow{{Status: "connected", FQDN: "gw.mesh", IP: "100.64.0.2"}}, nil },
+		self: func() airPeerRow { return airPeerRow{Status: "connected", FQDN: "me.mesh", IP: "100.64.0.1"} },
+		peers: func() ([]airPeerRow, error) {
+			return []airPeerRow{{Status: "connected", FQDN: "gw.mesh", IP: "100.64.0.2"}}, nil
+		},
 		controlHC:   control.Client(),
 		controlBase: control.URL,
 		receipts: func(limit int) ([]json.RawMessage, error) {
 			return []json.RawMessage{json.RawMessage(`{"decision":"allow","peer":"gw.mesh","method":"tools/call"}`)}, nil
 		},
-		cast:     func(limit int) ([]galleryImage, error) { return []galleryImage{{Name: "slide.png", ModUnix: 1700000000}}, nil },
+		cast: func(limit int) ([]galleryImage, error) {
+			return []galleryImage{{Name: "slide.png", ModUnix: 1700000000}}, nil
+		},
 		identify: func(*http.Request) (string, string) { return "K", "me.mesh" },
 	})
 
@@ -515,14 +544,14 @@ func TestAPIHomeAggregates(t *testing.T) {
 	if home.You.FQDN != "me.mesh" {
 		t.Errorf("you = %+v, want me.mesh", home.You)
 	}
-	if len(home.Peers) != 1 || len(home.Sessions) != 1 || len(home.Reachable) != 1 || len(home.Activity) != 1 {
-		t.Fatalf("sections not all aggregated: peers=%d sessions=%d reachable=%d activity=%d",
-			len(home.Peers), len(home.Sessions), len(home.Reachable), len(home.Activity))
+	if len(home.Peers) != 1 || len(home.Nearby) != 1 || len(home.Sessions) != 1 || len(home.Reachable) != 1 || len(home.Activity) != 1 {
+		t.Fatalf("sections not all aggregated: peers=%d nearby=%d sessions=%d reachable=%d activity=%d",
+			len(home.Peers), len(home.Nearby), len(home.Sessions), len(home.Reachable), len(home.Activity))
 	}
 	if home.Sessions[0].ID != "9f2a" || home.Showing == nil || home.Showing.Name != "slide.png" {
 		t.Errorf("session/cast wrong: %+v %+v", home.Sessions, home.Showing)
 	}
-	if home.Summary.PeersOnline != 1 || home.Summary.Sessions != 1 || home.Summary.Reachable != 1 {
+	if home.Summary.PeersOnline != 1 || home.Summary.Nearby != 1 || home.Summary.Working != 1 || home.Summary.Sessions != 1 || home.Summary.Reachable != 1 {
 		t.Errorf("summary counts wrong: %+v", home.Summary)
 	}
 	if home.Pending != -1 {
