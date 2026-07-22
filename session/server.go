@@ -44,8 +44,12 @@ func (s *Server) WithStore(store SessionStore, mode MigrationMode) *Server {
 	s.store = store
 	s.migMode = mode
 	// When the store supports compare-and-swap ownership leases, checkpoints go
-	// through SaveIfOwned so a superseded gateway is fenced and two gateways can
-	// never both write (and thus never both execute) the same session.
+	// through SaveIfOwned so a superseded gateway is fenced and two gateways
+	// never both write persisted state for the same session. A client that
+	// reconnects during a takeover may see one last inbound message dispatched
+	// to the backend on the fenced gateway before its next checkpoint detects
+	// the fence; MigrateBackend removes this residual (the backend is the
+	// authoritative state source and governs its own duplicate-dispatch window).
 	if ls, ok := store.(LeaseStore); ok {
 		s.lease = ls
 	}
@@ -330,7 +334,11 @@ func (s *Server) checkpoint(sess *serverSession) {
 
 	// Lease-gated store: write only while we still hold the lease. If SaveIfOwned
 	// reports we no longer own it, another gateway took the session over — we are
-	// fenced and must stop serving so the same session is never executed twice.
+	// fenced and must stop serving. The lease guarantees two gateways never both
+	// write persisted state for the same session; one last inbound message may
+	// have already been dispatched to the backend before this fence is detected
+	// (backend.Write precedes checkpoint — see pump). MigrateBackend avoids this
+	// residual by making the backend the authoritative state source.
 	if s.lease != nil && sess.leaseGen > 0 {
 		ok, err := s.lease.SaveIfOwned(ps, s.instance, sess.leaseGen)
 		if err != nil {
@@ -404,8 +412,10 @@ func (s *Server) pump(sess *serverSession) {
 			}
 		}
 	}()
-	// peer -> backend stdin (also captures the handshake and checkpoints
-	// state so another gateway can resume this session)
+	// peer -> backend stdin. backend.Write (side effect) runs before checkpoint
+	// (fence check), so a fenced gateway may dispatch one last inbound message
+	// to its backend process before discovering it lost the lease. This is the
+	// residual window noted in the checkpoint comment above.
 	go func() {
 		for {
 			select {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -228,7 +229,11 @@ func TestApproverMintsRequestBoundApproval(t *testing.T) {
 	ts := httptest.NewServer(h)
 	defer ts.Close()
 
-	post(t, ts.URL+"/v1/approve", `{"peer":"agent.mesh","tool":"transfer"}`)
+	// Include args_hash and policy_hash so the TOCTOU guard is satisfied.
+	post(t, ts.URL+"/v1/approve", fmt.Sprintf(
+		`{"peer":"agent.mesh","tool":"transfer","args_hash":%q,"policy_hash":"POLICYV1"}`,
+		argsHash,
+	))
 
 	// A DIFFERENT-argument call is not covered by the minted approval (test the
 	// negative first — it must not consume the real token).
@@ -277,6 +282,58 @@ func TestApproverRequestBoundNoHeldCall(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("approving with no held request-bound call should fail closed (409), got %d", resp.StatusCode)
+	}
+}
+
+// TestApproverRejectsStaleArgsHash is the M1 TOCTOU regression: when the agent
+// submits a new call (different args) between the approver reading /v1/pending
+// and clicking Approve, the pending record is overwritten. The handler must
+// reject with 409 rather than silently mint a token for the new, unreviewed call.
+func TestApproverRejectsStaleArgsHash(t *testing.T) {
+	dir := t.TempDir()
+	ps := &policy.FilePending{Dir: dir}
+	signer, _ := policy.GenerateSigner()
+	reqStore := policy.NewFileApprovalStore(dir, time.Minute, signer)
+
+	// The approver first reads the pending list and sees args A.
+	argsA := policy.NewApprovalRequest("KEY", "pay", "transfer", []byte(`{"amount":10}`), "").ArgsHash
+	_ = ps.Record(policy.Pending{
+		Peer: "agent.mesh", PeerKey: "KEY", Backend: "pay", Tool: "transfer",
+		ArgsHash: argsA, PolicyHash: "V1",
+	})
+
+	h := approvalsHandler(ps, func(*http.Request) string { return "approver.mesh" }, nil,
+		time.Now, withRequestBound(reqStore))
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	// Before the approver clicks, the agent re-requests with different args (B).
+	argsB := policy.NewApprovalRequest("KEY", "pay", "transfer", []byte(`{"amount":9999}`), "").ArgsHash
+	_ = ps.Record(policy.Pending{
+		Peer: "agent.mesh", PeerKey: "KEY", Backend: "pay", Tool: "transfer",
+		ArgsHash: argsB, PolicyHash: "V1",
+	})
+
+	// The approver submits the approve body with the stale args_hash (A).
+	resp, err := http.Post(ts.URL+"/v1/approve", "application/json",
+		strings.NewReader(fmt.Sprintf(
+			`{"peer":"agent.mesh","tool":"transfer","args_hash":%q,"policy_hash":"V1"}`,
+			argsA,
+		)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("stale args_hash should be rejected with 409 (Conflict), got %d", resp.StatusCode)
+	}
+	// No token should have been minted for either args set.
+	reqA := policy.ApprovalRequest{PeerKey: "KEY", Backend: "pay", Tool: "transfer", ArgsHash: argsA, PolicyHash: "V1"}
+	reqB := policy.ApprovalRequest{PeerKey: "KEY", Backend: "pay", Tool: "transfer", ArgsHash: argsB, PolicyHash: "V1"}
+	if ok, _ := reqStore.ConsumeApproval(reqA, time.Now()); ok {
+		t.Fatal("no token should exist for the stale args")
+	}
+	if ok, _ := reqStore.ConsumeApproval(reqB, time.Now()); ok {
+		t.Fatal("no token should exist for the new args either (the approve was rejected)")
 	}
 }
 

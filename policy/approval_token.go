@@ -181,8 +181,33 @@ func (s *FileApprovalStore) Grant(req ApprovalRequest, approver, policyHash stri
 	tok.PubKey = s.signer.PubKeyHex()
 	tok.Sig = hex.EncodeToString(ed25519.Sign(s.signer.priv, tok.signingBytes()))
 	b, _ := json.MarshalIndent(tok, "", "  ")
-	// 0600: an approval is a bearer-ish authorization; restrict it.
-	if err := os.WriteFile(s.file(req.bindingKey()), b, 0o600); err != nil {
+	// Atomic write: Grant and ConsumeApproval can race — ConsumeApproval does
+	// an os.Rename (atomic) which can steal a partially-written file and read
+	// garbled bytes, leaving the approval spent but unverifiable ("approval
+	// malformed"). Write to a sibling .tmp file, sync, then rename into place
+	// so there is no partial-write window for the consumer to hit.
+	dst := s.file(req.bindingKey())
+	tmp := dst + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return ApprovalToken{}, err
+	}
+	if _, werr := f.Write(b); werr != nil {
+		f.Close()
+		_ = os.Remove(tmp)
+		return ApprovalToken{}, werr
+	}
+	if serr := f.Sync(); serr != nil {
+		f.Close()
+		_ = os.Remove(tmp)
+		return ApprovalToken{}, serr
+	}
+	if cerr := f.Close(); cerr != nil {
+		_ = os.Remove(tmp)
+		return ApprovalToken{}, cerr
+	}
+	if err = os.Rename(tmp, dst); err != nil {
+		_ = os.Remove(tmp)
 		return ApprovalToken{}, err
 	}
 	return tok, nil

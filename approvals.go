@@ -179,7 +179,12 @@ func approvalsHandler(ps *policy.FilePending, approver func(*http.Request) strin
 				return
 			}
 			r.Body = http.MaxBytesReader(w, r.Body, 64<<10) // bound the request body
-			var body struct{ Peer, Tool string }
+			var body struct {
+				Peer       string `json:"peer"`
+				Tool       string `json:"tool"`
+				ArgsHash   string `json:"args_hash"`   // echo from /v1/pending (TOCTOU guard)
+				PolicyHash string `json:"policy_hash"` // same
+			}
 			if json.NewDecoder(r.Body).Decode(&body) != nil || body.Peer == "" || body.Tool == "" {
 				http.Error(w, "peer and tool are required", http.StatusBadRequest)
 				return
@@ -197,11 +202,31 @@ func approvalsHandler(ps *policy.FilePending, approver func(*http.Request) strin
 						http.Error(w, "no held request-bound call for this peer+tool", http.StatusConflict)
 						return
 					}
+					// TOCTOU guard: the approver must echo back the args_hash they
+					// saw in /v1/pending. If the agent submitted a new call (different
+					// args) between the approver reading /v1/pending and clicking
+					// Approve, the pending record is overwritten and the hashes diverge.
+					// Reject rather than silently mint a token for a call the human did
+					// not review. The UI passes these fields; a missing args_hash (empty)
+					// never matches a non-empty pending hash, so omission is caught too.
+					if body.ArgsHash != p.ArgsHash {
+						http.Error(w, "conflict: held call args changed since you read them — reload and re-approve", http.StatusConflict)
+						return
+					}
+					if body.PolicyHash != "" && body.PolicyHash != p.PolicyHash {
+						http.Error(w, "conflict: policy changed since you read the pending request — reload and re-approve", http.StatusConflict)
+						return
+					}
 					if _, err := opt.reqStore.Grant(p.ApprovalRequest(), who, p.PolicyHash, now()); err != nil {
 						http.Error(w, "request-bound grant failed: "+err.Error(), http.StatusInternalServerError)
 						return
 					}
 				}
+				// The ambient (peer, tool) grant is written in both the request-bound
+				// and non-request-bound paths. When reqStore is set, the engine tries
+				// DecideToolCallBound first (engine.go), so the request-bound token
+				// takes precedence; the ambient grant is only visible to /v1/status
+				// and does not widen access beyond the single-use bound token.
 				if err := policy.Grant(ps.Dir, body.Peer, body.Tool, who, now()); err != nil {
 					http.Error(w, err.Error(), http.StatusInternalServerError)
 					return
@@ -360,8 +385,10 @@ border-radius:10px;padding:10px 16px;font-size:13px;opacity:0;transition:opacity
 function toast(m){var t=document.getElementById('toast');t.textContent=m;t.classList.add('show');setTimeout(function(){t.classList.remove('show')},1800)}
 function ago(ts){var d=(Date.now()-Date.parse(ts))/1000;if(isNaN(d))return '';if(d<60)return Math.floor(d)+'s ago';if(d<3600)return Math.floor(d/60)+'m ago';return Math.floor(d/3600)+'h ago'}
 function el(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e}
-function act(peer,tool,grant){
-  fetch(grant?'/v1/approve':'/v1/deny',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({peer:peer,tool:tool})})
+function act(peer,tool,grant,p){
+  var payload={peer:peer,tool:tool};
+  if(p&&p.args_hash){payload.args_hash=p.args_hash;if(p.policy_hash)payload.policy_hash=p.policy_hash;}
+  fetch(grant?'/v1/approve':'/v1/deny',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})
    .then(function(r){return r.json()}).then(function(){toast((grant?'✓ approved ':'✗ denied ')+tool);load()})
    .catch(function(e){toast('error: '+e)});
 }
@@ -379,8 +406,8 @@ function load(){
       meta.appendChild(document.createTextNode(' · '+(p.backend||'')+' · '+ago(p.requested)));
       card.appendChild(meta);
       var row=el('div','row');
-      var ok=el('button','ok','Approve'); ok.addEventListener('click',function(){act(p.peer,p.tool,true)});
-      var no=el('button','no','Deny');    no.addEventListener('click',function(){act(p.peer,p.tool,false)});
+      var ok=el('button','ok','Approve'); ok.addEventListener('click',function(){act(p.peer,p.tool,true,p)});
+      var no=el('button','no','Deny');    no.addEventListener('click',function(){act(p.peer,p.tool,false,p)});
       row.appendChild(ok); row.appendChild(no); card.appendChild(row);
       c.appendChild(card);
     });
