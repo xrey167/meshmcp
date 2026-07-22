@@ -45,6 +45,10 @@ func cmdAir(args []string) error {
 		return cmdAirVision(args[1:])
 	case "bind":
 		return cmdAirBind(args[1:])
+	case "film":
+		return cmdAirFilm(args[1:])
+	case "play":
+		return cmdAirPlay(args[1:])
 	case "catalog", "discover":
 		return cmdAirCatalog(args[1:])
 	case "change":
@@ -70,7 +74,7 @@ func cmdAir(args []string) error {
 	case "-h", "--help", "help":
 		return airUsage()
 	default:
-		return fmt.Errorf("meshmcp air: unknown subcommand %q (want whoami | map | browse | stream | vision | bind | catalog | change | dns | sessions | steer | launch | agent-steer | tasks | task-steer | workflow | serve)", args[0])
+		return fmt.Errorf("meshmcp air: unknown subcommand %q (want whoami | map | browse | stream | vision | bind | film | play | catalog | change | dns | sessions | steer | launch | agent-steer | tasks | task-steer | workflow | serve)", args[0])
 	}
 }
 
@@ -86,6 +90,8 @@ func airUsage() error {
 	fmt.Fprintln(os.Stderr, "  "+b("air browse")+"      <backend-ip:port>                 "+dim("what tools/resources/prompts a backend exposes"))
 	fmt.Fprintln(os.Stderr, "  "+b("air stream")+"      <audit.jsonl>                     "+dim("watch governed Air activity live (tail the ledger)"))
 	fmt.Fprintln(os.Stderr, "  "+b("air vision")+"      <inbox-dir>                       "+dim("images the mesh dropped here (view on a phone via serve --gallery)"))
+	fmt.Fprintln(os.Stderr, "  "+b("air film")+"        record|play|verify               "+dim("record & replay governed activity (tamper-evident forensic capture)"))
+	fmt.Fprintln(os.Stderr, "  "+b("air play")+"        <film> [--speed N]                "+dim("replay a film (shortcut for air film play)"))
 	fmt.Fprintln(os.Stderr, "  "+b("air dns")+"         <domain> --control <mesh-ip:port>  "+dim("print DNS records for domain-name discovery"))
 	fmt.Fprintln(os.Stderr, "  "+b("air sessions")+"    <control-ip:port>                 "+dim("list live sessions on a gateway"))
 	fmt.Fprintln(os.Stderr, "  "+b("air steer")+"       <control-ip:port> --backend b --session id [--param k=v]")
