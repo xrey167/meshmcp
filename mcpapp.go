@@ -625,7 +625,7 @@ func (a *meshApp) toolAirFetch(ctx context.Context, args json.RawMessage) (mcp.T
 	if err := json.NewEncoder(conn).Encode(fetchReq{Hash: hash}); err != nil {
 		return errTxt("send request: %v", err), nil
 	}
-	got, err := fetchBlob(conn, hash, dest)
+	got, err := fetchBlob(conn, hash, dest, defaultFetchMaxBytes)
 	if err != nil {
 		return errTxt("fetch: %v", err), nil
 	}
