@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -234,12 +235,33 @@ steps:
 // would exceed it.
 func TestWorkflowLaunchCap(t *testing.T) {
 	r := &wfRun{vars: map[string]any{}}
+	// Reservations must be claimed BEFORE spawning, so the cap prevents the
+	// fork rather than relabelling an already-running process.
 	for i := 0; i < maxWorkflowLaunches; i++ {
-		if err := r.recordLaunch(1000 + i); err != nil {
-			t.Fatalf("launch %d unexpectedly refused: %v", i, err)
+		if err := r.reserveLaunch(); err != nil {
+			t.Fatalf("reservation %d unexpectedly refused: %v", i, err)
 		}
+		r.recordLaunch(1000 + i)
 	}
-	if err := r.recordLaunch(9999); err == nil {
-		t.Fatalf("launch beyond the cap must be refused")
+	if err := r.reserveLaunch(); err == nil {
+		t.Fatalf("reservation beyond the cap must be refused")
+	}
+	// A released reservation (spawn failed) frees a slot again.
+	r.releaseLaunch()
+	if err := r.reserveLaunch(); err != nil {
+		t.Fatalf("a slot freed by releaseLaunch must be reusable: %v", err)
+	}
+}
+
+// TestLoadAirWorkflowRejectsWideParallel proves a parallel block wider than the
+// cap is rejected at load, bounding concurrent fan-out.
+func TestLoadAirWorkflowRejectsWideParallel(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("name: wide\nsteps:\n  - parallel:\n")
+	for i := 0; i < maxParallelWidth+1; i++ {
+		b.WriteString("      - call: { target: 1.2.3.4:9101, tool: t }\n")
+	}
+	if _, err := loadAirWorkflow(writeWF(t, b.String())); err == nil {
+		t.Fatal("a parallel block wider than the cap must be rejected")
 	}
 }
