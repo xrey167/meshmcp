@@ -13,9 +13,10 @@ import (
 
 // A plugin marketplace manifest is a signed, tamper-evident description of a
 // plugin bundle (a policy pack, a tool backend, a decision hook, an audit
-// sink). It is the F14 admission primitive: publishing mints a signed manifest,
-// discovery lists manifests, and "install" verifies a manifest against a pinned
-// authority key and records an audited grant — the plugin CODE itself stays
+// sink, a prompt, an agent, a skill, an eval suite). It is the F14 admission
+// primitive: publishing mints a signed manifest, discovery lists manifests,
+// and "install" verifies a manifest against a pinned authority key and records
+// an audited grant — the plugin CODE itself stays
 // compiled in (meshmcp never loads code at runtime; a manifest governs
 // distribution and attribution, not execution). The signing/verification shape
 // deliberately mirrors CapabilityClaims so the same trust root and fail-closed
@@ -29,11 +30,16 @@ const (
 	ManifestToolBackend  = "tool-backend"
 	ManifestDecisionHook = "decision-hook"
 	ManifestAuditSink    = "audit-sink"
+	ManifestPrompt       = "prompt"
+	ManifestAgent        = "agent"
+	ManifestSkill        = "skill"
+	ManifestEvalSuite    = "eval-suite"
 )
 
 func validManifestKind(k string) bool {
 	switch k {
-	case ManifestPolicyPack, ManifestToolBackend, ManifestDecisionHook, ManifestAuditSink:
+	case ManifestPolicyPack, ManifestToolBackend, ManifestDecisionHook, ManifestAuditSink,
+		ManifestPrompt, ManifestAgent, ManifestSkill, ManifestEvalSuite:
 		return true
 	}
 	return false
@@ -91,7 +97,7 @@ func (s *Signer) IssueManifest(claims ManifestClaims, now time.Time) (string, er
 		return "", fmt.Errorf("manifest needs a bundle name")
 	}
 	if !validManifestKind(claims.Kind) {
-		return "", fmt.Errorf("manifest kind %q is not one of policy-pack, tool-backend, decision-hook, audit-sink", claims.Kind)
+		return "", fmt.Errorf("manifest kind %q is not one of policy-pack, tool-backend, decision-hook, audit-sink, prompt, agent, skill, eval-suite", claims.Kind)
 	}
 	if !isHex64(claims.ContentHash) {
 		return "", fmt.Errorf("manifest needs a hex sha256 content_hash (64 chars); got %q", claims.ContentHash)

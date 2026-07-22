@@ -32,37 +32,95 @@ type Mapping struct {
 	// Principal is the local identity a crossing from this org is stamped as,
 	// so local policy/audit see a stable principal rather than a raw remote key.
 	Principal string `yaml:"principal"`
+	// TrustDomain is this org's SPIFFE trust domain. When set (and the org is
+	// matched by a stable pubkey), every crossing this org makes is additively
+	// labeled spiffe://<TrustDomain>/peer/<key> on its audit record. It is a
+	// label only — enforcement still keys solely on the WireGuard key. Empty
+	// means no label is emitted for the org (Feature A, OAUTH-STANDARDS.md).
+	TrustDomain string `yaml:"trust_domain"`
 }
 
 // Boundary authorizes and audits cross-org tool calls.
 type Boundary struct {
-	grants    map[string][]string // org -> tool globs
-	corpora   map[string][]string // org -> corpus/subgraph globs
-	mappings  []Mapping
-	principal map[string]string // org -> local principal
-	audit     *policy.AuditLog
+	grants      map[string][]string // org -> tool globs
+	corpora     map[string][]string // org -> corpus/subgraph globs
+	mappings    []Mapping
+	principal   map[string]string // org -> local principal
+	trustDomain map[string]string // org -> SPIFFE trust domain (Feature A)
+	pubkey      map[string]string // org -> stable WireGuard key, if pubkey-mapped
+	collisions  []string          // trust domains claimed by more than one org
+	audit       *policy.AuditLog
 }
 
 // NewBoundary builds a boundary from grants and identity mappings. audit may be
-// nil (crossings are then not recorded — not recommended).
+// nil (crossings are then not recorded — not recommended). Trust-domain
+// collisions (the same non-empty domain claimed by two different orgs) are
+// detected here and surfaced via TrustDomainCollisions so the caller can warn
+// or reject rather than silently attribute two orgs to one SPIFFE identity.
 func NewBoundary(grants []Grant, mappings []Mapping, audit *policy.AuditLog) *Boundary {
 	b := &Boundary{
-		grants:    map[string][]string{},
-		corpora:   map[string][]string{},
-		mappings:  mappings,
-		principal: map[string]string{},
-		audit:     audit,
+		grants:      map[string][]string{},
+		corpora:     map[string][]string{},
+		mappings:    mappings,
+		principal:   map[string]string{},
+		trustDomain: map[string]string{},
+		pubkey:      map[string]string{},
+		audit:       audit,
 	}
 	for _, g := range grants {
 		b.grants[g.Org] = append(b.grants[g.Org], g.Tools...)
 		b.corpora[g.Org] = append(b.corpora[g.Org], g.Corpora...)
 	}
+	domainOwner := map[string]string{} // trust domain -> first org that claimed it
+	seenCollision := map[string]bool{}
 	for _, m := range mappings {
 		if m.Principal != "" {
 			b.principal[m.Org] = m.Principal
 		}
+		if k, ok := strings.CutPrefix(m.Match, "pubkey:"); ok && k != "" {
+			b.pubkey[m.Org] = k
+		}
+		if m.TrustDomain == "" {
+			continue
+		}
+		b.trustDomain[m.Org] = m.TrustDomain
+		if owner, ok := domainOwner[m.TrustDomain]; ok && owner != m.Org {
+			if !seenCollision[m.TrustDomain] {
+				b.collisions = append(b.collisions, m.TrustDomain)
+				seenCollision[m.TrustDomain] = true
+			}
+		} else {
+			domainOwner[m.TrustDomain] = m.Org
+		}
 	}
 	return b
+}
+
+// TrustDomainCollisions returns the trust domains that more than one org
+// claims. A non-empty result means the config maps distinct orgs to the same
+// SPIFFE identity namespace — the caller should warn or reject at startup
+// rather than let crossings from two orgs be labeled indistinguishably.
+func (b *Boundary) TrustDomainCollisions() []string { return b.collisions }
+
+// SpiffeID derives the additive spiffe://<trust-domain>/peer/<key> label for a
+// crossing attributed to org, using peerKey as the stable identity. Returns ""
+// when the org has no configured trust domain or peerKey is empty (e.g. an
+// FQDN-glob-mapped org with no individual key) — never a malformed URI, never
+// a panic. This is a label only; enforcement keys on peerKey, never on this.
+func (b *Boundary) SpiffeID(org, peerKey string) policy.SpiffeLabel {
+	td := b.trustDomain[org]
+	if td == "" || peerKey == "" {
+		return ""
+	}
+	return policy.SpiffeID(td, peerKey)
+}
+
+// spiffeForOrg derives the SPIFFE label to stamp on an org's crossing from what
+// the boundary already knows: the org's configured trust domain and, if the org
+// is matched by a stable pubkey, that key. FQDN-glob-mapped orgs have no stable
+// key, so they yield "" (no label) rather than a synthetic one.
+func (b *Boundary) spiffeForOrg(org string) policy.SpiffeLabel {
+	return b.SpiffeID(org, b.pubkey[org])
 }
 
 // OrgFor resolves a remote peer identity to an org id. Returns "" if the peer
@@ -79,6 +137,33 @@ func (b *Boundary) OrgFor(peerFQDN, peerKey string) string {
 			return m.Org
 		}
 		if ok, _ := path.Match(m.Match, peerFQDN); ok {
+			return m.Org
+		}
+	}
+	return ""
+}
+
+// tokenIssuerPrefix marks a Mapping.Match value as a token-exchange issuer
+// match (Feature C2, RFC 8693 exchange — see federation/exchange.go):
+// "issuer:<iss>". Resolved only by OrgForIssuer, never by OrgFor.
+const tokenIssuerPrefix = "issuer:"
+
+// OrgForIssuer resolves a federation org from a subject token's VALIDATED
+// issuer (never from the subject claim — the exchange path in
+// federation/exchange.go looks this up only after signature/audience/time
+// validation passes). This is deliberately a separate method from OrgFor,
+// not a case folded into it: an "issuer:<iss>" Mapping is an exact string
+// match only, with no glob and no "*" wildcard fallback, so an issuer this
+// config does not explicitly name resolves to no org, full stop — it never
+// falls through to a wildcard-mapped org the way OrgFor's FQDN matching
+// does. Closes the issuer-collision attack described in
+// docs/spec/OAUTH-STANDARDS.md Feature C2.
+func (b *Boundary) OrgForIssuer(issuer string) string {
+	if issuer == "" {
+		return ""
+	}
+	for _, m := range b.mappings {
+		if iss, ok := strings.CutPrefix(m.Match, tokenIssuerPrefix); ok && iss == issuer {
 			return m.Org
 		}
 	}
@@ -177,12 +262,13 @@ func (b *Boundary) recordCorpus(org, corpus string, allow bool, reason string) {
 		decision = "allow"
 	}
 	b.audit.Append(policy.AuditRecord{
-		Backend:  "federation-boundary",
-		Peer:     org,
-		Method:   "federation/corpus/query",
-		Tool:     corpus,
-		Decision: decision,
-		Reason:   reason,
+		Backend:      "federation-boundary",
+		Peer:         org,
+		PeerSpiffeID: b.spiffeForOrg(org),
+		Method:       "federation/corpus/query",
+		Tool:         corpus,
+		Decision:     decision,
+		Reason:       reason,
 	})
 }
 
@@ -195,11 +281,12 @@ func (b *Boundary) record(org, tool string, allow bool, reason string) {
 		decision = "allow"
 	}
 	b.audit.Append(policy.AuditRecord{
-		Backend:  "federation-boundary",
-		Peer:     org,
-		Method:   "federation/tools/call",
-		Tool:     tool,
-		Decision: decision,
-		Reason:   reason,
+		Backend:      "federation-boundary",
+		Peer:         org,
+		PeerSpiffeID: b.spiffeForOrg(org),
+		Method:       "federation/tools/call",
+		Tool:         tool,
+		Decision:     decision,
+		Reason:       reason,
 	})
 }

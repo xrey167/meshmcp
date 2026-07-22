@@ -47,6 +47,7 @@ continuously tested.
 | Mobile workflows | Experimental | Companion UX. |
 | Cost governance | Experimental | Budgeting/quota heuristics. |
 | Automatic policy generation (`insight`) | Experimental | Generates least-privilege drafts to review; not an enforcement control by itself. |
+| DPoP verification primitive (server-side, F35/Feature C0) | Experimental | `policy.DPoPVerifier` (RFC 9449 §4.3/§7.1/§8): alg pinning, htu/htm/jti/iat checks, jkt key-confirmation, ath, bounded jti replay tracking, single-use nonce lifecycle. Green under `policy/dpopverify_test.go`, including a direct signer↔verifier interop test — but a standalone, independently-callable module only; not wired into any live HTTP listener. The Feature C exposure-model question (`docs/spec/OAUTH-STANDARDS.md`) is unresolved, so no DCR/exchange facade (C1–C3) exists yet. |
 
 ## Planned (designed, not implemented)
 

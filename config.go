@@ -100,6 +100,10 @@ type Backend struct {
 	// HTTP reverse-proxies inbound requests to this local base URL
 	// (for MCP servers speaking Streamable HTTP).
 	HTTP string `yaml:"http"`
+	// Remote forwards inbound requests to a third-party MCP server over the
+	// public internet, authenticating outbound with OAuth 2.1 + DPoP-bound
+	// tokens (Feature B). Exactly one of stdio, http, or remote must be set.
+	Remote *RemoteBackendConfig `yaml:"remote,omitempty"`
 	// Allow lists peers permitted to use this backend: FQDN globs
 	// (e.g. "laptop-*.netbird.cloud") or "pubkey:<wireguard-key>".
 	// Empty means any mesh peer.
@@ -187,8 +191,35 @@ type Backend struct {
 	// unchanged (F24). A live canary for a policy change. Stdio + a policy.
 	ShadowPolicy *policy.Policy `yaml:"shadow_policy"`
 
-	httpURL *url.URL
-	groups  map[string][]string // resolved from Config.Groups at load
+	httpURL   *url.URL
+	remoteURL *url.URL            // parsed Remote.Endpoint, set at load
+	groups    map[string][]string // resolved from Config.Groups at load
+}
+
+// RemoteBackendConfig configures a "remote" backend: the gateway dials out to
+// a third-party MCP server (Streamable HTTP), discovering its authorization
+// server per the MCP authorization spec and presenting OAuth 2.1 access tokens
+// bound with DPoP proofs (RFC 9449). Secrets are referenced by NAME through the
+// existing secrets store — the config never holds a credential value, and the
+// dpop key secret's value is a PATH to the key file ("meshmcp dpop keygen").
+type RemoteBackendConfig struct {
+	// Endpoint is the remote MCP server URL (https://host/path).
+	Endpoint string `yaml:"endpoint"`
+	// ClientID is this gateway's OAuth client id at the authorization server.
+	ClientID string `yaml:"client_id"`
+	// Scope is the optional space-separated scope string to request.
+	Scope string `yaml:"scope"`
+	// Secrets is the store holding the named secrets below (file and/or env).
+	Secrets *SecretsConfig `yaml:"secrets"`
+	// DPoPKeyName is the secret whose VALUE is the path of the ECDSA P-256
+	// DPoP signing key file (default "dpop_private_key"). Missing key = fatal.
+	DPoPKeyName string `yaml:"dpop_key_name"`
+	// ClientSecretName is the secret holding the OAuth client secret
+	// (default "oauth_client_secret"); absent = public client.
+	ClientSecretName string `yaml:"client_secret_name"`
+	// RefreshTokenName is the secret holding the current refresh token
+	// (default "oauth_refresh_token"); rotated tokens are persisted back.
+	RefreshTokenName string `yaml:"refresh_token_name"`
 }
 
 // CapabilitiesConfig configures signed-capability admission for a backend.
@@ -205,6 +236,9 @@ type CapabilitiesConfig struct {
 }
 
 func (b *Backend) kind() string {
+	if b.Remote != nil {
+		return "remote -> " + b.Remote.Endpoint
+	}
 	if b.HTTP != "" {
 		return "http -> " + b.HTTP
 	}
@@ -255,9 +289,15 @@ func loadConfig(path string) (*Config, error) {
 			return nil, fmt.Errorf("backend %q: port %d already used by %q", b.Name, b.Port, other)
 		}
 		seen[b.Port] = b.Name
-		hasStdio, hasHTTP := len(b.Stdio) > 0, b.HTTP != ""
-		if hasStdio == hasHTTP {
-			return nil, fmt.Errorf("backend %q: exactly one of stdio or http must be set", b.Name)
+		hasStdio, hasHTTP, hasRemote := len(b.Stdio) > 0, b.HTTP != "", b.Remote != nil
+		kinds := 0
+		for _, set := range []bool{hasStdio, hasHTTP, hasRemote} {
+			if set {
+				kinds++
+			}
+		}
+		if kinds != 1 {
+			return nil, fmt.Errorf("backend %q: exactly one of stdio, http, or remote must be set", b.Name)
 		}
 		if b.Resumable && !hasStdio {
 			return nil, fmt.Errorf("backend %q: resumable is only valid for stdio backends", b.Name)
@@ -358,6 +398,31 @@ func loadConfig(path string) (*Config, error) {
 				return nil, fmt.Errorf("backend %q: invalid http url %q", b.Name, b.HTTP)
 			}
 			b.httpURL = u
+		}
+		if hasRemote {
+			if b.Remote.Endpoint == "" {
+				return nil, fmt.Errorf("backend %q: remote endpoint is required", b.Name)
+			}
+			u, err := url.Parse(b.Remote.Endpoint)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+				return nil, fmt.Errorf("backend %q: invalid remote endpoint url %q", b.Name, b.Remote.Endpoint)
+			}
+			b.remoteURL = u
+			if b.Remote.ClientID == "" {
+				return nil, fmt.Errorf("backend %q: remote client_id is required", b.Name)
+			}
+			if b.Remote.Secrets == nil || (b.Remote.Secrets.File == "" && b.Remote.Secrets.EnvPrefix == "") {
+				return nil, fmt.Errorf("backend %q: remote secrets (file or env_prefix) are required — they name the dpop key file and OAuth credentials", b.Name)
+			}
+			if b.Remote.DPoPKeyName == "" {
+				b.Remote.DPoPKeyName = "dpop_private_key"
+			}
+			if b.Remote.ClientSecretName == "" {
+				b.Remote.ClientSecretName = "oauth_client_secret"
+			}
+			if b.Remote.RefreshTokenName == "" {
+				b.Remote.RefreshTokenName = "oauth_refresh_token"
+			}
 		}
 	}
 	if cfg.Control != nil && cfg.Control.Port != 0 {

@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"runtime"
 )
 
 // Store resolves a secret name to its value. Implementations wrap env vars, a
@@ -47,8 +48,12 @@ type FileStore struct {
 
 // NewFileStore loads a JSON secrets file. It fails closed if the file is
 // readable or writable by group or others — a secrets file must be owner-only.
+// Windows does not emulate POSIX permission bits (Go's os package there can
+// only represent read-only vs read-write, reporting 0666 for any writable
+// file), so the mode check is skipped there — access control on Windows is
+// the ACL's job, not the mode bits'.
 func NewFileStore(path string) (*FileStore, error) {
-	if fi, err := os.Stat(path); err == nil {
+	if fi, err := os.Stat(path); err == nil && runtime.GOOS != "windows" {
 		if perm := fi.Mode().Perm(); perm&0o077 != 0 {
 			return nil, fmt.Errorf("secrets file %s has mode %#o: it must be owner-only (0600); run 'chmod 600 %s'", path, perm, path)
 		}

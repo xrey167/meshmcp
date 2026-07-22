@@ -178,21 +178,40 @@ func cmdServe(args []string) error {
 			}
 		}
 
-		// stdio backends run through the byte-stream Filter; HTTP backends with
-		// a policy run through the request-level httpEnforcer (F16).
+		// stdio backends run through the byte-stream Filter; HTTP and remote
+		// backends with a policy run through the request-level httpEnforcer (F16).
 		var factory session.BackendFactory
 		var httpEnf *httpEnforcer
-		if b.HTTP == "" {
+		if len(b.Stdio) > 0 {
 			factory = backendFactory(b, audit, tracer, hookSink)
 		} else if b.Policy != nil {
 			httpEnf = newHTTPEnforcer(b, audit)
 			log.Printf("backend %q: HTTP policy enforcement on (%d rules)", b.Name, len(b.Policy.Rules))
 		}
 
+		// A remote backend's OAuth/DPoP client is built once at startup; a
+		// missing or unloadable DPoP key file is fatal (S13 precedent), never
+		// silently regenerated.
+		var rc *remoteClient
+		if b.Remote != nil {
+			var rcErr error
+			rc, rcErr = buildRemoteClient(b)
+			if rcErr != nil {
+				close(shutdown)
+				for _, l := range listeners {
+					l.Close()
+				}
+				wg.Wait()
+				return rcErr
+			}
+		}
+
 		wg.Add(1)
-		go func(b *Backend, ln net.Listener, factory session.BackendFactory, httpEnf *httpEnforcer) {
+		go func(b *Backend, ln net.Listener, factory session.BackendFactory, httpEnf *httpEnforcer, rc *remoteClient) {
 			defer wg.Done()
 			switch {
+			case b.Remote != nil:
+				serveRemote(client, b, ln, httpEnf, rc)
 			case b.HTTP != "":
 				serveHTTP(client, b, ln, httpEnf)
 			case b.Resumable:
@@ -204,7 +223,7 @@ func cmdServe(args []string) error {
 			default:
 				serveStdio(client, b, ln, shutdown, factory)
 			}
-		}(b, ln, factory, httpEnf)
+		}(b, ln, factory, httpEnf, rc)
 	}
 
 	// Optionally serve the Air control endpoint: list and steer live sessions
