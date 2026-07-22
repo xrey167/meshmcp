@@ -53,12 +53,19 @@ func airControlHandler(c airController, identify func(*http.Request) (pubkey, fq
 	mux.HandleFunc("/v1/sessions", func(w http.ResponseWriter, r *http.Request) {
 		pubKey, fqdn := identify(r)
 		if !allow.allows(pubKey, fqdn) {
+			if audit != nil {
+				audit(airSteerAudit{Peer: fqdnOr(fqdn), PeerKey: pubKey, Method: "air/sessions", OK: false})
+			}
 			http.Error(w, "not permitted", http.StatusForbidden)
 			return
 		}
 		list := c.sessions(pubKey, fqdn)
 		if list == nil {
 			list = []AirSession{}
+		}
+		if audit != nil {
+			ob, obKey := onBehalfOf(r, allow, pubKey, fqdn)
+			audit(airSteerAudit{Peer: fqdnOr(fqdn), PeerKey: pubKey, OnBehalf: ob, OnBehalfKey: obKey, Method: "air/sessions", OK: true})
 		}
 		writeJSONResp(w, http.StatusOK, map[string]any{"sessions": list, "you": fqdnOr(fqdn)})
 	})
@@ -70,6 +77,9 @@ func airControlHandler(c airController, identify func(*http.Request) (pubkey, fq
 		}
 		pubKey, fqdn := identify(r)
 		if !allow.allows(pubKey, fqdn) {
+			if audit != nil {
+				audit(airSteerAudit{Peer: fqdnOr(fqdn), PeerKey: pubKey, Method: "air/steer", OK: false})
+			}
 			http.Error(w, "not permitted", http.StatusForbidden)
 			return
 		}
@@ -83,9 +93,13 @@ func airControlHandler(c airController, identify func(*http.Request) (pubkey, fq
 			http.Error(w, "backend, id and method are required", http.StatusBadRequest)
 			return
 		}
+		// A trusted (ACL-allowed) proxy — the served Air page — may attest the
+		// browser identity it resolved from the mesh, so receipts show the human
+		// who clicked, not the relay. Relay-attested, not cryptographically bound.
+		onBehalf, onBehalfKey := onBehalfOf(r, allow, pubKey, fqdn)
 		if !airSteerMethods[body.Method] {
 			if audit != nil {
-				audit(airSteerAudit{Backend: body.Backend, Peer: fqdnOr(fqdn), PeerKey: pubKey, OnBehalf: onBehalfOf(r, allow, pubKey, fqdn), Session: body.ID, Method: body.Method, OK: false})
+				audit(airSteerAudit{Backend: body.Backend, Peer: fqdnOr(fqdn), PeerKey: pubKey, OnBehalf: onBehalf, OnBehalfKey: onBehalfKey, Session: body.ID, Method: body.Method, OK: false})
 			}
 			http.Error(w, "method not permitted", http.StatusBadRequest)
 			return
@@ -94,13 +108,9 @@ func airControlHandler(c airController, identify func(*http.Request) (pubkey, fq
 		if len(body.Params) > 0 {
 			params = body.Params
 		}
-		// A trusted (ACL-allowed) proxy — the served Air page — may attest the
-		// browser identity it resolved from the mesh, so receipts show the human
-		// who clicked, not the relay. Relay-attested, not cryptographically bound.
-		onBehalf := onBehalfOf(r, allow, pubKey, fqdn)
 		err := c.steer(pubKey, fqdn, body.Backend, body.ID, body.Method, params)
 		if audit != nil {
-			audit(airSteerAudit{Backend: body.Backend, Peer: fqdnOr(fqdn), PeerKey: pubKey, OnBehalf: onBehalf, Session: body.ID, Method: body.Method, OK: err == nil})
+			audit(airSteerAudit{Backend: body.Backend, Peer: fqdnOr(fqdn), PeerKey: pubKey, OnBehalf: onBehalf, OnBehalfKey: onBehalfKey, Session: body.ID, Method: body.Method, OK: err == nil})
 		}
 		switch {
 		case err == nil:
@@ -117,16 +127,18 @@ func airControlHandler(c airController, identify func(*http.Request) (pubkey, fq
 	return mux
 }
 
-// onBehalfOf returns the browser identity a trusted proxy attests via the
-// X-Air-On-Behalf header. It is honoured only when the *connecting* peer (the
-// proxy) is itself ACL-allowed, so an ordinary caller can't spoof attribution by
-// setting the header. Empty when absent or unattested.
-func onBehalfOf(r *http.Request, allow acl, proxyKey, proxyFQDN string) string {
+// onBehalfOf returns the browser identity (FQDN and, when supplied, WireGuard
+// key) a trusted proxy attests via the X-Air-On-Behalf / X-Air-On-Behalf-Key
+// headers. It is honoured only when the *connecting* peer (the proxy) is itself
+// ACL-allowed, so an ordinary caller can't spoof attribution by setting the
+// headers. Empty when absent or unattested; the key is never honoured without
+// the FQDN.
+func onBehalfOf(r *http.Request, allow acl, proxyKey, proxyFQDN string) (fqdn, key string) {
 	ob := r.Header.Get("X-Air-On-Behalf")
 	if ob == "" || !allow.allows(proxyKey, proxyFQDN) {
-		return ""
+		return "", ""
 	}
-	return ob
+	return ob, r.Header.Get("X-Air-On-Behalf-Key")
 }
 
 // actingIdentity is who the audit/receipt attributes the steer to: the attested
@@ -208,12 +220,12 @@ func (g *gatewayAirControl) steer(pubKey, fqdn, backend, id, method string, para
 	return srv.Steer(id, method, params)
 }
 
-// airSteerAudit is one control-endpoint steer, recorded in the shared ledger.
-// OnBehalf is the browser identity a trusted proxy (the served Air page) attests;
-// empty for a direct caller.
+// airSteerAudit is one control-endpoint action (a steer or a sessions read),
+// recorded in the shared ledger. OnBehalf/OnBehalfKey are the browser identity
+// a trusted proxy (the served Air page) attests; empty for a direct caller.
 type airSteerAudit struct {
-	Backend, Peer, PeerKey, OnBehalf, Session, Method string
-	OK                                                bool
+	Backend, Peer, PeerKey, OnBehalf, OnBehalfKey, Session, Method string
+	OK                                                             bool
 }
 
 // airAuditFunc adapts the shared audit ledger to the control handler. It records
@@ -228,17 +240,25 @@ func airAuditFunc(audit *policy.AuditLog) func(airSteerAudit) {
 			decision = "deny"
 		}
 		// Attribute the human when a trusted proxy attested them: the receipt's
-		// Peer becomes the browser identity, and Reason records the relay it
-		// arrived through so the chain of custody stays visible.
-		peer, reason := rec.Peer, "air/steer"
+		// Peer (and, when attested, PeerKey) becomes the browser identity, and
+		// Reason records the relay it arrived through so the chain of custody
+		// stays visible.
+		base := "air/steer"
+		if rec.Method == "air/sessions" {
+			base = "air/sessions"
+		}
+		peer, peerKey, reason := rec.Peer, rec.PeerKey, base
 		if rec.OnBehalf != "" {
 			peer = rec.OnBehalf
-			reason = "air/steer via " + rec.Peer
+			if rec.OnBehalfKey != "" {
+				peerKey = rec.OnBehalfKey
+			}
+			reason = base + " via " + rec.Peer
 		}
 		audit.Append(policy.AuditRecord{
 			Backend:  rec.Backend,
 			Peer:     peer,
-			PeerKey:  rec.PeerKey,
+			PeerKey:  peerKey,
 			Method:   rec.Method,
 			Tool:     rec.Session,
 			Decision: decision,
