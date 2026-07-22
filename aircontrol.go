@@ -46,8 +46,12 @@ var airSteerMethods = map[string]bool{
 }
 
 // airControlHandler builds the control surface. identify resolves the caller's
-// (pubkey, fqdn); allow gates them; audit records accepted steers.
-func airControlHandler(c airController, identify func(*http.Request) (pubkey, fqdn string), allow acl, audit func(rec airSteerAudit)) http.Handler {
+// (pubkey, fqdn); allow gates who may reach the endpoint; onBehalfAllow is the
+// SEPARATE, dedicated list of proxy identities (the air-serve relay) permitted
+// to attest an X-Air-On-Behalf browser identity — it is NOT the general allow
+// list, so an ordinary allowed caller cannot forge attribution, and it fails
+// closed when empty (no peer may attest). audit records accepted actions.
+func airControlHandler(c airController, identify func(*http.Request) (pubkey, fqdn string), allow, onBehalfAllow acl, audit func(rec airSteerAudit)) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/v1/sessions", func(w http.ResponseWriter, r *http.Request) {
@@ -64,7 +68,7 @@ func airControlHandler(c airController, identify func(*http.Request) (pubkey, fq
 			list = []AirSession{}
 		}
 		if audit != nil {
-			ob, obKey := onBehalfOf(r, allow, pubKey, fqdn)
+			ob, obKey := onBehalfOf(r, onBehalfAllow, pubKey, fqdn)
 			audit(airSteerAudit{Peer: fqdnOr(fqdn), PeerKey: pubKey, OnBehalf: ob, OnBehalfKey: obKey, Method: "air/sessions", OK: true})
 		}
 		writeJSONResp(w, http.StatusOK, map[string]any{"sessions": list, "you": fqdnOr(fqdn)})
@@ -96,7 +100,7 @@ func airControlHandler(c airController, identify func(*http.Request) (pubkey, fq
 		// A trusted (ACL-allowed) proxy — the served Air page — may attest the
 		// browser identity it resolved from the mesh, so receipts show the human
 		// who clicked, not the relay. Relay-attested, not cryptographically bound.
-		onBehalf, onBehalfKey := onBehalfOf(r, allow, pubKey, fqdn)
+		onBehalf, onBehalfKey := onBehalfOf(r, onBehalfAllow, pubKey, fqdn)
 		if !airSteerMethods[body.Method] {
 			if audit != nil {
 				audit(airSteerAudit{Backend: body.Backend, Peer: fqdnOr(fqdn), PeerKey: pubKey, OnBehalf: onBehalf, OnBehalfKey: onBehalfKey, Session: body.ID, Method: body.Method, OK: false})
@@ -129,13 +133,15 @@ func airControlHandler(c airController, identify func(*http.Request) (pubkey, fq
 
 // onBehalfOf returns the browser identity (FQDN and, when supplied, WireGuard
 // key) a trusted proxy attests via the X-Air-On-Behalf / X-Air-On-Behalf-Key
-// headers. It is honoured only when the *connecting* peer (the proxy) is itself
-// ACL-allowed, so an ordinary caller can't spoof attribution by setting the
-// headers. Empty when absent or unattested; the key is never honoured without
-// the FQDN.
-func onBehalfOf(r *http.Request, allow acl, proxyKey, proxyFQDN string) (fqdn, key string) {
+// headers. It is honoured only when the *connecting* peer (the proxy) is on the
+// dedicated on-behalf proxy allow list — NOT the general control allow — so an
+// ordinary allowed caller can't forge attribution by setting the headers. It
+// FAILS CLOSED: an empty proxy allow list trusts no one, so no header is
+// honoured and attribution stays the verified connecting peer. The key is never
+// honoured without the FQDN.
+func onBehalfOf(r *http.Request, onBehalfAllow acl, proxyKey, proxyFQDN string) (fqdn, key string) {
 	ob := r.Header.Get("X-Air-On-Behalf")
-	if ob == "" || !allow.allows(proxyKey, proxyFQDN) {
+	if ob == "" || onBehalfAllow.empty() || !onBehalfAllow.allows(proxyKey, proxyFQDN) {
 		return "", ""
 	}
 	return ob, r.Header.Get("X-Air-On-Behalf-Key")

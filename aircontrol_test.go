@@ -51,7 +51,7 @@ func newTestHandler(c airController, allowCaller bool) http.Handler {
 	if allowCaller {
 		allow = newACL([]string{"pubkey:key1"})
 	}
-	return airControlHandler(c, id, allow, nil)
+	return airControlHandler(c, id, allow, newACL(nil), nil)
 }
 
 func TestAirControlSessions(t *testing.T) {
@@ -128,7 +128,9 @@ func TestAirControlACLDeny(t *testing.T) {
 // an audit collector, so per-backend ACL and on-behalf attribution are testable.
 func handlerWithIdentity(c airController, pubKey, fqdn string, audit func(airSteerAudit)) http.Handler {
 	id := func(*http.Request) (string, string) { return pubKey, fqdn }
-	return airControlHandler(c, id, newACL(nil), audit)
+	// Trust the connecting peer as an on-behalf proxy so the on-behalf tests
+	// that use this helper exercise attribution; the general allow is open.
+	return airControlHandler(c, id, newACL(nil), newACL([]string{"pubkey:" + pubKey}), audit)
 }
 
 func TestAirControlPerBackendACL(t *testing.T) {
@@ -260,5 +262,52 @@ func TestAirControlSessionsAudited(t *testing.T) {
 	}
 	if len(recs) != 1 || recs[0].Method != "air/sessions" || !recs[0].OK || recs[0].Peer != "caller.mesh" {
 		t.Fatalf("sessions read not audited: %+v", recs)
+	}
+}
+
+// TestAirControlOnBehalfRequiresProxyAllow proves the X-Air-On-Behalf header is
+// honoured ONLY when the connecting peer is on the dedicated on-behalf proxy
+// allow list — not merely on the general control allow — and that an empty
+// proxy list fails closed (no attestation, attribution stays the caller).
+func TestAirControlOnBehalfRequiresProxyAllow(t *testing.T) {
+	steerBody := `{"backend":"fs","id":"9f2a","method":"notifications/air/steer"}`
+
+	// Case 1: general allow open, but the connecting peer is NOT a listed proxy
+	// (empty on-behalf list) → the header is ignored, receipt attributes the peer.
+	c := &fakeAirControl{}
+	var recs []airSteerAudit
+	h := airControlHandler(c,
+		func(*http.Request) (string, string) { return "relaykey", "relay.mesh" },
+		newACL(nil), // general allow: open (any identified peer)
+		newACL(nil), // on-behalf proxies: none → fail closed
+		func(r airSteerAudit) { recs = append(recs, r) })
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/steer", strings.NewReader(steerBody))
+	req.Header.Set("X-Air-On-Behalf", "victim.mesh")
+	req.Header.Set("X-Air-On-Behalf-Key", "FORGED")
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body)
+	}
+	if len(recs) != 1 || recs[0].OnBehalf != "" || recs[0].OnBehalfKey != "" {
+		t.Fatalf("unlisted proxy must not attest on-behalf: %+v", recs)
+	}
+	if recs[0].Peer != "relay.mesh" {
+		t.Fatalf("attribution must stay the verified peer, got %q", recs[0].Peer)
+	}
+
+	// Case 2: the connecting peer IS a listed proxy → the header is honoured.
+	recs = nil
+	h = airControlHandler(c,
+		func(*http.Request) (string, string) { return "relaykey", "relay.mesh" },
+		newACL(nil),
+		newACL([]string{"pubkey:relaykey"}), // this relay may attest
+		func(r airSteerAudit) { recs = append(recs, r) })
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/steer", strings.NewReader(steerBody))
+	req.Header.Set("X-Air-On-Behalf", "phone.mesh")
+	h.ServeHTTP(rr, req)
+	if len(recs) != 1 || recs[0].OnBehalf != "phone.mesh" {
+		t.Fatalf("listed proxy attestation not honoured: %+v", recs)
 	}
 }

@@ -22,6 +22,10 @@ trace:
 # control:
 #   port: 9600
 #   allow: ["laptop-*.netbird.cloud"]   # REQUIRED when control is enabled (default-deny)
+#   on_behalf_allow: ["air-serve.netbird.cloud"]  # OPTIONAL: proxy identities (the
+#     # `meshmcp air serve` relay) permitted to attest X-Air-On-Behalf browser
+#     # identities for audit attribution. Separate from `allow` and fail-closed:
+#     # empty ⇒ no peer may attest, receipts attribute the connecting peer.
 
 mesh:
   device_name: meshmcp-gw          # peer name shown in the NetBird dashboard
