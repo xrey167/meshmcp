@@ -43,6 +43,19 @@
   dialog .acts button{flex:1;font-family:var(--mono);font-size:12px;border-radius:9px;padding:9px;cursor:pointer;border:1px solid var(--line);background:var(--panel2);color:var(--text)}
   dialog .acts .go{background:var(--cyan);color:#05070c;border:none;font-weight:700}
   #steerOut{font-size:11px;font-family:var(--mono);color:var(--green);margin-top:8px;min-height:14px}
+  .box{border:1px solid var(--line);border-radius:11px;background:var(--panel);padding:12px}
+  .box label{display:block;font-size:11px;color:var(--muted);margin:8px 0 4px}
+  .box input[type=text],.box input:not([type]),.box textarea{width:100%;background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:9px;padding:9px;font-family:var(--mono);font-size:12px}
+  .box textarea{font-family:var(--sans);font-size:13px}
+  .acts2{display:flex;gap:8px;margin-top:10px;align-items:center;flex-wrap:wrap}
+  .acts2 button{font-family:var(--mono);font-size:11px;color:#05070c;font-weight:700;background:var(--cyan);border:none;border-radius:8px;padding:8px 12px;cursor:pointer}
+  .acts2 input[type=file]{font-size:11px;color:var(--muted)}
+  .out{font-size:11px;font-family:var(--mono);color:var(--green);margin-top:8px;min-height:14px}
+  .note{font-size:10.5px;color:var(--muted);margin-top:6px}
+  .lnk{font-family:var(--mono);font-size:12px;color:var(--cyan);text-decoration:none}
+  .rec{display:flex;gap:10px;align-items:baseline;padding:6px 10px;border-bottom:1px solid var(--line);font-family:var(--mono);font-size:10.5px}
+  .rec .t{color:var(--muted);white-space:nowrap}
+  .rec .d-allow{color:var(--green)} .rec .d-deny{color:var(--crimson)} .rec .d-cosign{color:var(--amber)}
 </style>
 </head>
 <body>
@@ -58,6 +71,33 @@
   <div id="peers"><div class="empty">loading…</div></div>
   <h2>Live sessions</h2>
   <div id="sessions"><div class="empty">loading…</div></div>
+  <div id="pushWrap" hidden>
+    <h2>Push · Drop</h2>
+    <div class="box">
+      <label>to (peer mesh-ip:port of a drop inbox)</label>
+      <input id="pushTarget" placeholder="100.64.0.9:9110">
+      <label>text to push</label>
+      <textarea id="pushText" rows="2" placeholder="meet at 15:00"></textarea>
+      <div class="acts2">
+        <button id="pushSend">Push text</button>
+        <input type="file" id="dropFile">
+        <button id="dropSend">Drop file</button>
+      </div>
+      <div id="pushOut" class="out"></div>
+      <div class="note">sent over this relay's mesh identity — the receiver's ACL and receipt see the air-serve node</div>
+    </div>
+  </div>
+  <div id="apprWrap" hidden>
+    <h2>Approvals</h2>
+    <div class="box">
+      <a id="apprLink" class="lnk" target="_blank" rel="noopener">Open the approvals page →</a>
+      <div class="note">opens directly against the approvals server, so your own mesh identity signs the decision</div>
+    </div>
+  </div>
+  <div id="recWrap" hidden>
+    <h2>Receipts</h2>
+    <div id="receipts"><div class="empty">loading…</div></div>
+  </div>
 </main>
 
 <dialog id="steerDlg">
@@ -140,9 +180,65 @@
     }catch(e){out.style.color="var(--crimson)";out.textContent=e.message}
   };
 
-  function refresh(){loadPeers();loadSessions()}
+  var cfg={push:false,receipts:false,approvals:""};
+  async function loadConfig(){
+    try{
+      cfg=await getJSON("api/config");
+      document.getElementById("pushWrap").hidden=!cfg.push;
+      document.getElementById("recWrap").hidden=!cfg.receipts;
+      var a=document.getElementById("apprWrap");
+      a.hidden=!cfg.approvals;
+      if(cfg.approvals){document.getElementById("apprLink").href="http://"+cfg.approvals+"/"}
+    }catch(e){}
+  }
+
+  var pushOut=document.getElementById("pushOut");
+  function pushMsg(ok,msg){pushOut.style.color=ok?"var(--green)":"var(--crimson)";pushOut.textContent=msg}
+  document.getElementById("pushSend").onclick=async function(){
+    var target=document.getElementById("pushTarget").value.trim();
+    var text=document.getElementById("pushText").value;
+    if(!target||!text){pushMsg(false,"target and text are required");return}
+    pushMsg(true,"pushing…");
+    try{
+      var r=await fetch("api/push",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({target:target,text:text})});
+      var t=await r.text();
+      if(!r.ok)throw new Error(r.status+" "+t);
+      pushMsg(true,"✓ "+t);
+    }catch(e){pushMsg(false,e.message)}
+  };
+  document.getElementById("dropSend").onclick=async function(){
+    var target=document.getElementById("pushTarget").value.trim();
+    var f=document.getElementById("dropFile").files[0];
+    if(!target||!f){pushMsg(false,"target and a chosen file are required");return}
+    pushMsg(true,"dropping "+f.name+"…");
+    try{
+      var fd=new FormData();fd.append("target",target);fd.append("file",f);
+      var r=await fetch("api/drop",{method:"POST",body:fd});
+      var t=await r.text();
+      if(!r.ok)throw new Error(r.status+" "+t);
+      pushMsg(true,"✓ "+t);
+    }catch(e){pushMsg(false,e.message)}
+  };
+
+  async function loadReceipts(){
+    if(!cfg.receipts)return;
+    var el=document.getElementById("receipts");
+    try{
+      var d=await getJSON("api/receipts?limit=50");var rs=d.receipts||[];
+      if(!rs.length){el.innerHTML='<div class="empty">no receipts yet</div>';return}
+      el.innerHTML=rs.slice().reverse().map(function(x){
+        var dec=x.decision||"?";
+        return '<div class="rec"><span class="t">'+esc(x.time||"")+'</span>'+
+          '<span class="d-'+esc(dec)+'">'+esc(dec)+'</span>'+
+          '<span>'+esc(x.peer||"")+'</span><span>'+esc((x.method||"")+(x.tool?" · "+x.tool:""))+'</span>'+
+          '<span class="t">'+esc(x.reason||"")+'</span></div>';
+      }).join("");
+    }catch(e){el.innerHTML='<div class="err">'+esc(e.message)+'</div>'}
+  }
+
+  function refresh(){loadPeers();loadSessions();loadReceipts()}
   document.getElementById("refresh").onclick=refresh;
-  refresh();
+  loadConfig().then(refresh);
   setInterval(refresh,10000);
 })();
 </script>
