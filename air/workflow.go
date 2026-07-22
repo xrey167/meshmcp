@@ -162,7 +162,9 @@ func (s WorkflowStep) Validate(i int) error {
 }
 
 // Validate checks the whole workflow: at least one step, valid on_error/cleanup,
-// and every step valid.
+// every step valid, and every ${name.field} reference resolves to a variable a
+// PRIOR step captured with `as:` — so a typo or forward reference is caught at
+// load, not silently left unexpanded at run time.
 func (w *Workflow) Validate() error {
 	if len(w.Steps) == 0 {
 		return fmt.Errorf("workflow %q: no steps", w.Name)
@@ -173,12 +175,76 @@ func (w *Workflow) Validate() error {
 	if w.Cleanup != "" && w.Cleanup != "leave" && w.Cleanup != "stop" {
 		return fmt.Errorf("workflow %q: cleanup must be leave or stop (got %q)", w.Name, w.Cleanup)
 	}
+	defined := map[string]bool{}
 	for i, s := range w.Steps {
 		if err := s.Validate(i); err != nil {
 			return err
 		}
+		// A step may only reference variables captured by earlier steps
+		// (parallel children run concurrently, so they can't reference a
+		// sibling either — they are checked against `defined` as it stands
+		// before this step, and their own `as` is added after the block).
+		for _, ref := range s.varRefs() {
+			if !defined[ref] {
+				return fmt.Errorf("step %d references ${%s.…} but no earlier step captured it with `as: %s`", i+1, ref, ref)
+			}
+		}
+		if s.As != "" {
+			defined[s.As] = true
+		}
+		for _, child := range s.Parallel {
+			if child.As != "" {
+				defined[child.As] = true
+			}
+		}
 	}
 	return nil
+}
+
+// varRefs returns the distinct variable names a step references via
+// ${name.field}, across all its expandable string fields (including a parallel
+// block's children).
+func (s WorkflowStep) varRefs() []string {
+	seen := map[string]bool{}
+	var names []string
+	add := func(ss ...string) {
+		for _, str := range ss {
+			for _, m := range varRe.FindAllStringSubmatch(str, -1) {
+				if !seen[m[1]] {
+					seen[m[1]] = true
+					names = append(names, m[1])
+				}
+			}
+		}
+	}
+	addMap := func(m map[string]any) {
+		for _, v := range m {
+			if str, ok := v.(string); ok {
+				add(str)
+			}
+		}
+	}
+	if s.Steer != nil {
+		add(s.Steer.Control, s.Steer.Backend, s.Steer.Session, s.Steer.Method)
+		addMap(s.Steer.Params)
+	}
+	if s.Call != nil {
+		add(s.Call.Target, s.Call.Tool)
+		addMap(s.Call.Args)
+	}
+	if s.AgentSteer != nil {
+		add(s.AgentSteer.Target, s.AgentSteer.Tool, s.AgentSteer.Text)
+		addMap(s.AgentSteer.Args)
+	}
+	for _, child := range s.Parallel {
+		for _, r := range child.varRefs() { // already-extracted names, merge directly
+			if !seen[r] {
+				seen[r] = true
+				names = append(names, r)
+			}
+		}
+	}
+	return names
 }
 
 // Plan returns the one-line Kind of each step, for a --dry-run summary.

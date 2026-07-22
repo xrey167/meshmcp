@@ -66,3 +66,25 @@ func TestCatalogFilters(t *testing.T) {
 		t.Fatalf("Resumable() = %+v", r)
 	}
 }
+
+// TestSteerConveniences covers TaskArgs and String.
+func TestSteerConveniences(t *testing.T) {
+	e := TaskArgs("read_customer", map[string]any{"id": 42})
+	if e.Type != SteerTask || e.Tool != "read_customer" || len(e.Args) == 0 {
+		t.Fatalf("TaskArgs: %+v", e)
+	}
+	if got := TaskArgs("t", nil); len(got.Args) != 0 {
+		t.Fatalf("nil args should marshal to nothing: %+v", got)
+	}
+	cases := map[string]SteerEnvelope{
+		"task read_file":             {Type: SteerTask, Tool: "read_file"},
+		`nudge "focus"`:              {Type: SteerNudge, Text: "focus"},
+		"cancel → task:9f2a":         {Type: SteerCancel, Target: "task:9f2a"},
+		"task charge → session:1a2b": {Type: SteerTask, Tool: "charge", Target: "session:1a2b"},
+	}
+	for want, env := range cases {
+		if got := env.String(); got != want {
+			t.Errorf("String() = %q, want %q", got, want)
+		}
+	}
+}

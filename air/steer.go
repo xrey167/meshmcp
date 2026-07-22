@@ -60,6 +60,38 @@ func Task(tool string, args json.RawMessage) SteerEnvelope {
 	return SteerEnvelope{Type: SteerTask, Tool: tool, Args: args}
 }
 
+// TaskArgs builds a task steer, marshaling args to JSON (nil args → no args).
+func TaskArgs(tool string, args map[string]any) SteerEnvelope {
+	e := SteerEnvelope{Type: SteerTask, Tool: tool}
+	if len(args) > 0 {
+		if b, err := json.Marshal(args); err == nil {
+			e.Args = b
+		}
+	}
+	return e
+}
+
+// String renders a compact, log-friendly summary of the steer.
+func (e SteerEnvelope) String() string {
+	switch e.Type {
+	case SteerTask:
+		return fmt.Sprintf("task %s%s", e.Tool, targetSuffix(e.Target))
+	case SteerNudge:
+		return fmt.Sprintf("nudge %q%s", e.Text, targetSuffix(e.Target))
+	case SteerCancel:
+		return "cancel" + targetSuffix(e.Target)
+	default:
+		return fmt.Sprintf("steer(%s)%s", e.Type, targetSuffix(e.Target))
+	}
+}
+
+func targetSuffix(t string) string {
+	if t == "" {
+		return ""
+	}
+	return " → " + t
+}
+
 // Nudge builds a nudge steer: augment in-flight guidance.
 func Nudge(text string) SteerEnvelope { return SteerEnvelope{Type: SteerNudge, Text: text} }
 

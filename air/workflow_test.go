@@ -121,3 +121,48 @@ func TestExpandStepFields(t *testing.T) {
 		t.Fatalf("agent_steer not expanded: %+v", a)
 	}
 }
+
+// TestWorkflowVarRefValidation proves a ${name.field} reference to a variable no
+// earlier step captured with `as:` is rejected at load, while a valid backward
+// reference (including from after a parallel block) passes.
+func TestWorkflowVarRefValidation(t *testing.T) {
+	// Valid: step 2 references the `as: worker` captured by step 1.
+	if _, err := ParseWorkflow([]byte(`
+name: ok
+steps:
+  - launch: { role: reader, gateway: 1.2.3.4:9101 }
+    as: worker
+  - call: { target: 1.2.3.4:9101, tool: t, args: { note: "by ${worker.identity}" } }
+`)); err != nil {
+		t.Fatalf("valid backward reference rejected: %v", err)
+	}
+	// Valid: reference a var captured inside an earlier parallel block.
+	if _, err := ParseWorkflow([]byte(`
+name: okpar
+steps:
+  - parallel:
+      - launch: { role: reader, gateway: g:1 }
+        as: r
+  - call: { target: "${r.identity}", tool: t }
+`)); err != nil {
+		t.Fatalf("reference to parallel-captured var rejected: %v", err)
+	}
+	// Invalid: reference to an undefined var.
+	if _, err := ParseWorkflow([]byte(`
+name: bad
+steps:
+  - call: { target: 1.2.3.4:9101, tool: t, args: { note: "${ghost.identity}" } }
+`)); err == nil {
+		t.Fatal("reference to an undefined var must be rejected")
+	}
+	// Invalid: forward reference (var defined by a LATER step).
+	if _, err := ParseWorkflow([]byte(`
+name: fwd
+steps:
+  - call: { target: "${later.result}", tool: t }
+  - launch: { role: reader, gateway: g:1 }
+    as: later
+`)); err == nil {
+		t.Fatal("forward reference must be rejected")
+	}
+}
