@@ -42,6 +42,14 @@ type AuditRecord struct {
 	Seq      int    `json:"seq"`
 	PrevHash string `json:"prev_hash"`
 	Hash     string `json:"hash,omitempty"`
+
+	// PeerSpiffeID is a derived, additive SPIFFE identity label (Feature A);
+	// appended after Hash (never inserted) so the hash chain for existing
+	// deployments is unaffected by its addition. Not this slice's feature —
+	// added only to unblock the policy package's test compilation; see
+	// docs/spec/OAUTH-STANDARDS.md Feature A / docs/spec/AGENTS.md for the
+	// still-outstanding schema/doc pairing this field requires.
+	PeerSpiffeID SpiffeLabel `json:"peer_spiffe_id,omitempty"`
 }
 
 // AuditLog writes audit records as newline-delimited JSON to a sink, chaining

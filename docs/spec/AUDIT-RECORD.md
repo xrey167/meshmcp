@@ -23,6 +23,7 @@ record's hash, forming a hash chain.
 | `peer` | string | yes | Caller identity (mesh FQDN, org id, or principal). |
 | `peer_key` | string | no | Caller's cryptographic key (e.g. WireGuard public key). |
 | `peer_addr` | string | no | Caller transport address. |
+| `peer_spiffe_id` | string | no | Derived, additive SPIFFE identity label (`spiffe://<trust-domain>/peer/<key>`). A label only — enforcement keys on `peer_key`, never on this field. |
 | `method` | string | yes | JSON-RPC method (`tools/call`, `enroll`, …). |
 | `tool` | string | no | Tool name for `tools/call`. |
 | `rpc_id` | string | no | JSON-RPC request id. |

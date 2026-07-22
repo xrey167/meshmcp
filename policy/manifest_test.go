@@ -84,6 +84,31 @@ func TestManifestRejectsBadKindAndContentAtIssue(t *testing.T) {
 	}
 }
 
+func TestManifestContentKindsIssueAndVerify(t *testing.T) {
+	s, err := GenerateSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := NewManifestVerifier([]string{s.PubKeyHex()}, fixedClock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []string{ManifestPrompt, ManifestAgent, ManifestSkill, ManifestEvalSuite} {
+		tok := mkManifest(t, s, "bundle-"+kind, kind, HashBundle([]byte(kind)))
+		c, err := v.Verify(tok)
+		if err != nil {
+			t.Fatalf("verify of kind %q failed: %v", kind, err)
+		}
+		if c.Kind != kind || c.Name != "bundle-"+kind {
+			t.Fatalf("claims not round-tripped for kind %q: %+v", kind, c)
+		}
+	}
+	// An unknown kind is still refused at issue.
+	if _, err := s.IssueManifest(ManifestClaims{Name: "x", Kind: "workflow", ContentHash: HashBundle(nil)}, fixedClock()()); err == nil {
+		t.Fatalf("unknown kind must still be refused at issue")
+	}
+}
+
 func TestManifestExpiryAndRevocation(t *testing.T) {
 	s, _ := GenerateSigner()
 	now := fixedClock()

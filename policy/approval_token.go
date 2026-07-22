@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -129,6 +130,14 @@ type FileApprovalStore struct {
 	TTL       time.Duration
 	signer    *Signer
 	expectPub string // pinned signer public key (hex); required to trust a token
+
+	// claimMu serializes in-process ConsumeApproval claims. The claim itself
+	// is an os.Rename — atomic and exactly-one-winner on POSIX — but on
+	// Windows concurrent MoveFileEx calls against the same source can ALL
+	// fail with a sharing violation (zero winners) instead of one winning and
+	// the rest seeing ENOENT. Serializing in-process claimants restores
+	// exactly-one-winner; cross-process claims still ride on rename atomicity.
+	claimMu sync.Mutex
 }
 
 // NewFileApprovalStore builds a store. signer signs granted tokens (required to
@@ -241,7 +250,19 @@ func (s *FileApprovalStore) ConsumeApproval(req ApprovalRequest, now time.Time) 
 	}
 	src := s.file(req.bindingKey())
 	dst := src + ".used-" + newNonce()
-	if err := os.Rename(src, dst); err != nil {
+	s.claimMu.Lock()
+	err := os.Rename(src, dst)
+	if err != nil && !os.IsNotExist(err) {
+		// Transient interference (e.g. a Windows AV/indexer scan holding the
+		// file) is not "someone else claimed it" — retry briefly before giving
+		// up, still under the claim lock so no in-process racer sneaks in.
+		for i := 0; i < 5 && err != nil && !os.IsNotExist(err); i++ {
+			time.Sleep(2 * time.Millisecond)
+			err = os.Rename(src, dst)
+		}
+	}
+	s.claimMu.Unlock()
+	if err != nil {
 		// No file for this exact (peer, backend, tool, args): not approved. A
 		// changed argument/backend/peer lands here because the binding key differs.
 		return false, "no matching approval for this exact request"

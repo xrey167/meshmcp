@@ -12,6 +12,7 @@
     "peer": { "type": "string" },
     "peer_key": { "type": "string" },
     "peer_addr": { "type": "string" },
+    "peer_spiffe_id": { "type": "string", "pattern": "^spiffe://.+$", "description": "derived, additive SPIFFE identity label (spiffe://<trust-domain>/peer/<key>); never an enforcement input" },
     "method": { "type": "string" },
     "tool": { "type": "string" },
     "rpc_id": { "type": "string" },

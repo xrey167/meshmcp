@@ -215,6 +215,21 @@ public key alone.
 > **Why it's revolutionary:** *"prove to an auditor what the fleet did — with math, not trust"* becomes a
 > single command; compliance-grade, non-repudiable, reproducible.
 
+### F35 · DPoP verification primitive (Feature C0)
+A server-side RFC 9449 DPoP proof verifier (`policy/dpopsign.go`, `DPoPVerifier`/`DPoPReplayStore`),
+structurally distinct from the Feature B signer and from `policy/sign.go`'s Ed25519 checkpoint
+verification: algorithm pinning (ES256 only, never trusted from the proof header), `typ`/`htu`/`htm`/`jti`
+structural checks, a pinned `iat` freshness window, `jkt`/`cnf.jkt` key-confirmation binding, the `ath`
+check, and jti replay tracking bounded to that freshness window, plus a single-use, TTL-bound
+server-issued `DPoP-Nonce` lifecycle and spec-shaped `invalid_dpop_proof`/`use_dpop_nonce` error
+responses. See `docs/spec/OAUTH-STANDARDS-dod.md` Feature C0 for the full done-criteria block. This is a
+standalone, independently-tested module (`policy/dpopverify_test.go`) — not wired into any live HTTP
+listener; the exposure-model question in `docs/spec/OAUTH-STANDARDS.md` (Feature C, "The exposure-model
+question") remains unresolved and gates C1–C3, which this item does not include.
+> **Why it's revolutionary:** the one component two independent reviews found missing from the original
+> OAuth/DPoP plan — without it, "DPoP-bound" tokens at a future federation boundary would have nothing
+> actually checking proof-of-possession server-side.
+
 ---
 
 ## Supporting tier — S11–S60

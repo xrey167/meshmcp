@@ -48,6 +48,14 @@ func cmdFederate(args []string) error {
 	if cfg.Upstream == "" || cfg.Port == 0 {
 		return fmt.Errorf("federate config needs upstream and port")
 	}
+	// Validate any configured SPIFFE trust domains up front (Feature A): a
+	// malformed domain is a config error, not something to silently emit into
+	// audit labels later.
+	for _, m := range cfg.Mappings {
+		if m.TrustDomain != "" && !policy.ValidTrustDomain(m.TrustDomain) {
+			return fmt.Errorf("mapping for org %q: invalid trust_domain %q", m.Org, m.TrustDomain)
+		}
+	}
 
 	var audit *policy.AuditLog
 	if cfg.Audit != "" {
@@ -59,6 +67,12 @@ func cmdFederate(args []string) error {
 		audit = policy.NewAuditLog(f, func() string { return time.Now().UTC().Format(time.RFC3339) })
 	}
 	boundary := federation.NewBoundary(cfg.Grants, cfg.Mappings, audit)
+	if cols := boundary.TrustDomainCollisions(); len(cols) > 0 {
+		// Warn, don't reject: distinct orgs sharing one SPIFFE trust domain is a
+		// misconfiguration worth surfacing loudly, but crossings still enforce
+		// on the WireGuard key, so it is not itself an authorization hole.
+		log.Printf("federate: warning — trust domain(s) claimed by more than one org: %v", cols)
+	}
 
 	client, err := startMesh(cfg.Mesh.options(), os.Stderr)
 	if err != nil {
