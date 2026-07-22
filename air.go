@@ -43,6 +43,8 @@ func cmdAir(args []string) error {
 		return cmdAirStream(args[1:])
 	case "vision":
 		return cmdAirVision(args[1:])
+	case "bind":
+		return cmdAirBind(args[1:])
 	case "catalog", "discover":
 		return cmdAirCatalog(args[1:])
 	case "dns":
@@ -66,7 +68,7 @@ func cmdAir(args []string) error {
 	case "-h", "--help", "help":
 		return airUsage()
 	default:
-		return fmt.Errorf("meshmcp air: unknown subcommand %q (want whoami | map | browse | stream | vision | catalog | dns | sessions | steer | launch | agent-steer | tasks | task-steer | workflow | serve)", args[0])
+		return fmt.Errorf("meshmcp air: unknown subcommand %q (want whoami | map | browse | stream | vision | bind | catalog | dns | sessions | steer | launch | agent-steer | tasks | task-steer | workflow | serve)", args[0])
 	}
 }
 
@@ -91,6 +93,7 @@ func airUsage() error {
 	fmt.Fprintln(os.Stderr, dim("LAUNCH & AUTOMATE"))
 	fmt.Fprintln(os.Stderr, "  "+b("air launch")+"      --role <role> [--nb-config dir] <gateway-ip:port>")
 	fmt.Fprintln(os.Stderr, "  "+b("air workflow")+"    [--dry-run] <file.yaml>           "+dim("run a declarative launch/steer/call flow"))
+	fmt.Fprintln(os.Stderr, "  "+b("air bind")+"        <bindings.yaml> --audit <f>       "+dim("fire governed reactions when audit records match (a la rebind)"))
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, dim("SERVE"))
 	fmt.Fprintln(os.Stderr, "  "+b("air serve")+"       [--port N] [--control ip:port] [--approvals ip:port] [--audit f] [--gallery dir] [--allow id]")
