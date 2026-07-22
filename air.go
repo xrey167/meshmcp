@@ -49,6 +49,10 @@ func cmdAir(args []string) error {
 		return cmdAirFilm(args[1:])
 	case "play":
 		return cmdAirPlay(args[1:])
+	case "ring":
+		return cmdAirRing(args[1:])
+	case "listen":
+		return cmdAirListen(args[1:])
 	case "catalog", "discover":
 		return cmdAirCatalog(args[1:])
 	case "change":
@@ -74,7 +78,7 @@ func cmdAir(args []string) error {
 	case "-h", "--help", "help":
 		return airUsage()
 	default:
-		return fmt.Errorf("meshmcp air: unknown subcommand %q (want whoami | map | browse | stream | vision | bind | film | play | catalog | change | dns | sessions | steer | launch | agent-steer | tasks | task-steer | workflow | serve)", args[0])
+		return fmt.Errorf("meshmcp air: unknown subcommand %q (want whoami | map | browse | stream | vision | bind | film | play | ring | listen | catalog | change | dns | sessions | steer | launch | agent-steer | tasks | task-steer | workflow | serve)", args[0])
 	}
 }
 
@@ -98,6 +102,8 @@ func airUsage() error {
 	fmt.Fprintln(os.Stderr, "  "+b("air tasks")+"       <backend-ip:port>                 "+dim("list a backend's async tasks"))
 	fmt.Fprintln(os.Stderr, "  "+b("air task-steer")+"  <backend-ip:port> --task id [--text s | --payload j | --cancel]")
 	fmt.Fprintln(os.Stderr, "  "+b("air agent-steer")+" <agent-ip:port>   --type task|nudge|cancel [--tool t --arg k=v | --text s]")
+	fmt.Fprintln(os.Stderr, "  "+b("air ring")+"        <peer-ip:port> --message s        "+dim("ring a peer — a governed attention doorbell (paged on their air listen)"))
+	fmt.Fprintln(os.Stderr, "  "+b("air listen")+"      --port N --allow <id>              "+dim("receive rings over the mesh (deny-by-default, rate-limited, audited)"))
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, dim("LAUNCH & AUTOMATE"))
 	fmt.Fprintln(os.Stderr, "  "+b("air launch")+"      --role <role> [--nb-config dir] <gateway-ip:port>")
