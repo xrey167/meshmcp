@@ -236,7 +236,11 @@ func spawnAgent(role, nbConfig, gateway string, extra ...string) (pid int, ident
 	childArgs := append([]string{"agent", "--role", role, "--nb-config", identity}, extra...)
 	childArgs = append(childArgs, gateway)
 	cmd := exec.Command(exe, childArgs...)
-	cmd.Env = os.Environ() // inherits NB_SETUP_KEY / NB_MANAGEMENT_URL
+	// Pass only the variables the launched agent needs to join the mesh, not
+	// the whole parent environment: an assistant that starts `meshmcp mcp
+	// --allow-launch` may hold unrelated secrets in its env that a spawned
+	// agent has no business inheriting.
+	cmd.Env = agentChildEnv()
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
@@ -339,6 +343,25 @@ func cmdAirTaskSteer(args []string) error {
 	}
 	fmt.Printf("steered task %s (status %s)\n", t.TaskID, t.Status)
 	return nil
+}
+
+// agentChildEnv builds the environment for a launched agent: the mesh
+// credentials it needs plus a minimal base (PATH/HOME/temp), not the parent's
+// full os.Environ() which may carry unrelated secrets. NB_* covers the netbird
+// setup key / management URL the child reads to join.
+func agentChildEnv() []string {
+	pass := []string{
+		"NB_SETUP_KEY", "NB_MANAGEMENT_URL", "NB_CONFIG", "NB_LOG_LEVEL",
+		"PATH", "HOME", "USERPROFILE", "TMPDIR", "TEMP", "TMP",
+		"SystemRoot", "SystemDrive", "windir", "ComSpec", "PATHEXT",
+	}
+	var env []string
+	for _, k := range pass {
+		if v, ok := os.LookupEnv(k); ok {
+			env = append(env, k+"="+v)
+		}
+	}
+	return env
 }
 
 // cmdAirAgentSteer sends one steer envelope to an agent's steer inbox (P1),

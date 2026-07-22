@@ -154,6 +154,9 @@ func (s airWorkflowStep) validate(i int) error {
 		if len(s.Parallel) == 0 {
 			return fmt.Errorf("step %d parallel: no children", i+1)
 		}
+		if len(s.Parallel) > maxParallelWidth {
+			return fmt.Errorf("step %d parallel: %d children exceeds the cap of %d", i+1, len(s.Parallel), maxParallelWidth)
+		}
 		for j, child := range s.Parallel {
 			if child.Parallel != nil {
 				return fmt.Errorf("step %d parallel child %d: nested parallel is not allowed", i+1, j+1)
@@ -213,23 +216,49 @@ type stepResult struct {
 // against a mis-generated or malicious YAML fanning out unbounded processes.
 const maxWorkflowLaunches = 32
 
+// maxParallelWidth caps how many children a single parallel: block may hold, so
+// a workflow cannot request thousands of concurrent goroutines/steps at once.
+const maxParallelWidth = 64
+
 // wfRun carries the mesh membership and the variable store shared across a
 // workflow's steps, plus the pids of agents it launched (for cleanup: stop).
 type wfRun struct {
-	client *embed.Client
-	mu     sync.Mutex
-	vars   map[string]any
-	pids   []int
+	client   *embed.Client
+	mu       sync.Mutex
+	vars     map[string]any
+	pids     []int
+	reserved int // launch slots reserved (>= len(pids)); the spawn backstop
 }
 
-func (r *wfRun) recordLaunch(pid int) error {
+// reserveLaunch claims a launch slot BEFORE the process is spawned, so the cap
+// actually prevents a fan-out (a parallel block spawning N children) rather
+// than only relabelling the step after N processes already exist. The caller
+// must pair a successful reservation with either recordLaunch(pid) on a
+// successful spawn or releaseLaunch() on a spawn failure.
+func (r *wfRun) reserveLaunch() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if len(r.pids) >= maxWorkflowLaunches {
+	if r.reserved >= maxWorkflowLaunches {
 		return fmt.Errorf("workflow launch cap reached (%d agents)", maxWorkflowLaunches)
 	}
-	r.pids = append(r.pids, pid)
+	r.reserved++
 	return nil
+}
+
+func (r *wfRun) releaseLaunch() {
+	r.mu.Lock()
+	if r.reserved > 0 {
+		r.reserved--
+	}
+	r.mu.Unlock()
+}
+
+// recordLaunch records a successfully spawned child's pid so cleanup: stop can
+// reach it. The slot was already reserved by reserveLaunch.
+func (r *wfRun) recordLaunch(pid int) {
+	r.mu.Lock()
+	r.pids = append(r.pids, pid)
+	r.mu.Unlock()
 }
 
 // stopLaunched kills every agent this run spawned (cleanup: stop). Best-effort:
@@ -412,13 +441,17 @@ func (r *wfRun) execStep(ctx context.Context, s airWorkflowStep) (output string,
 		if s.Launch.Interval != "" {
 			extra = append(extra, "--interval", s.Launch.Interval)
 		}
+		// Reserve the launch slot BEFORE spawning, so the cap prevents the
+		// fork rather than relabelling a process that already exists.
+		if err := r.reserveLaunch(); err != nil {
+			return "", nil, err
+		}
 		pid, identity, err := spawnAgent(s.Launch.Role, s.Launch.NBConfig, s.Launch.Gateway, extra...)
 		if err != nil {
+			r.releaseLaunch()
 			return "", nil, err
 		}
-		if err := r.recordLaunch(pid); err != nil {
-			return "", nil, err
-		}
+		r.recordLaunch(pid)
 		log.Printf("  launched agent role=%s pid=%d identity=%s", s.Launch.Role, pid, identity)
 		return identity, map[string]any{"identity": identity, "pid": pid}, nil
 	case s.AgentSteer != nil:

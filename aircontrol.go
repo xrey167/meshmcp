@@ -240,25 +240,28 @@ func airAuditFunc(audit *policy.AuditLog) func(airSteerAudit) {
 			decision = "deny"
 		}
 		// Attribute the human when a trusted proxy attested them: the receipt's
-		// Peer (and, when attested, PeerKey) becomes the browser identity, and
-		// Reason records the relay it arrived through so the chain of custody
-		// stays visible.
+		// Peer becomes the browser identity and Reason records the relay it
+		// arrived through so the chain of custody stays visible. PeerKey ALWAYS
+		// holds the transport-VERIFIED key of the connecting peer (the relay) —
+		// never the relay-asserted, unverified browser key, which would put an
+		// unproven value where the ledger's verified keys live. The attested
+		// browser key is recorded in Reason, clearly labelled as a relay claim.
 		base := "air/steer"
 		if rec.Method == "air/sessions" {
 			base = "air/sessions"
 		}
-		peer, peerKey, reason := rec.Peer, rec.PeerKey, base
+		peer, reason := rec.Peer, base
 		if rec.OnBehalf != "" {
 			peer = rec.OnBehalf
+			reason = base + " via " + rec.Peer + " (relay-attested)"
 			if rec.OnBehalfKey != "" {
-				peerKey = rec.OnBehalfKey
+				reason += "; attested-key=" + rec.OnBehalfKey
 			}
-			reason = base + " via " + rec.Peer
 		}
 		audit.Append(policy.AuditRecord{
 			Backend:  rec.Backend,
 			Peer:     peer,
-			PeerKey:  peerKey,
+			PeerKey:  rec.PeerKey, // verified connecting-peer key, never the attested one
 			Method:   rec.Method,
 			Tool:     rec.Session,
 			Decision: decision,

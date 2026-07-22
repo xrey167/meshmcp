@@ -148,6 +148,7 @@ func cmdFetch(args []string) error {
 	fs := flag.NewFlagSet("fetch", flag.ExitOnError)
 	o := meshFlags(fs)
 	out := fs.String("out", "", "write the blob here (default: <hash> in the current directory)")
+	maxBytes := fs.Int64("max-bytes", defaultFetchMaxBytes, "reject a blob larger than this many bytes (0 = no limit)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -179,7 +180,7 @@ func cmdFetch(args []string) error {
 	if err := json.NewEncoder(conn).Encode(fetchReq{Hash: hash}); err != nil {
 		return fmt.Errorf("send request: %w", err)
 	}
-	got, err := fetchBlob(conn, hash, dest)
+	got, err := fetchBlob(conn, hash, dest, *maxBytes)
 	if err != nil {
 		return err
 	}
@@ -187,8 +188,16 @@ func cmdFetch(args []string) error {
 	return nil
 }
 
+// defaultFetchMaxBytes bounds a fetched blob by default: the size is declared
+// by the serving peer, so an unbounded copy lets a malicious holder stream
+// arbitrary bytes and fill the requester's disk before the hash is even
+// checked. Override with --max-bytes (0 disables the limit).
+const defaultFetchMaxBytes = 256 << 20 // 256 MiB
+
 // fetchBlob reads a fetch response from r and writes the verified blob to dest.
-func fetchBlob(r io.Reader, wantHash, dest string) (int64, error) {
+// maxBytes rejects a peer-declared size larger than the limit before any bytes
+// are streamed (0 = no limit).
+func fetchBlob(r io.Reader, wantHash, dest string, maxBytes int64) (int64, error) {
 	br := newLineReader(r)
 	line, err := br.readLine()
 	if err != nil {
@@ -204,6 +213,12 @@ func fetchBlob(r io.Reader, wantHash, dest string) (int64, error) {
 	if !resp.Found {
 		return 0, fmt.Errorf("peer does not have blob %s", wantHash)
 	}
+	if resp.Size < 0 {
+		return 0, fmt.Errorf("peer declared a negative blob size %d", resp.Size)
+	}
+	if maxBytes > 0 && resp.Size > maxBytes {
+		return 0, fmt.Errorf("peer-declared blob size %d exceeds the %d-byte limit (raise --max-bytes to allow)", resp.Size, maxBytes)
+	}
 
 	tmp, err := os.CreateTemp(filepath.Dir(mustAbsDir(dest)), ".fetch-*")
 	if err != nil {
@@ -213,7 +228,9 @@ func fetchBlob(r io.Reader, wantHash, dest string) (int64, error) {
 	defer os.Remove(tmpName)
 
 	h := sha256.New()
-	n, err := io.CopyN(io.MultiWriter(tmp, h), br, resp.Size)
+	// io.CopyN stops at resp.Size, which is now bounded by maxBytes above; the
+	// LimitReader is belt-and-suspenders against a peer streaming past it.
+	n, err := io.CopyN(io.MultiWriter(tmp, h), io.LimitReader(br, resp.Size), resp.Size)
 	if err != nil {
 		tmp.Close()
 		return 0, fmt.Errorf("receive blob: %w", err)

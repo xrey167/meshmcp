@@ -132,6 +132,24 @@ func (a *AuditLog) SeedFrom(seq int, prevHash string) {
 // can approach the verifier's 16 MiB line cap.
 const maxReasonBytes = 8192
 
+// maxFieldBytes bounds the other caller-influenced free-form fields (Tool,
+// Method, RPCID) taken verbatim from the JSON-RPC line. Without a cap, a peer
+// could send a tools/call with a multi-megabyte name; the (even denied)
+// record would then exceed the verifier's 16 MiB scanner buffer, making the
+// whole hash chain unverifiable and wedging the gateway on the next restart
+// (seedAuditFromExisting re-verifies the file). Kept well under the line cap.
+const maxFieldBytes = 4096
+
+// clipField truncates s to at most maxFieldBytes, marking the truncation so a
+// reader knows the value is not the original. Truncation must happen before the
+// record is hashed so the hash covers exactly what is written.
+func clipField(s string) string {
+	if len(s) > maxFieldBytes {
+		return s[:maxFieldBytes] + "…(truncated)"
+	}
+	return s
+}
+
 // chainHash computes the record's hash over its JSON with the Hash field
 // cleared. PrevHash is already a field of rec, so it is covered by the hash.
 func chainHash(rec AuditRecord) (string, []byte, error) {
@@ -168,6 +186,11 @@ func (a *AuditLog) write(rec AuditRecord) error {
 	if len(rec.Reason) > maxReasonBytes {
 		rec.Reason = rec.Reason[:maxReasonBytes] + "…(truncated)"
 	}
+	// The remaining caller-influenced fields come verbatim from the JSON-RPC
+	// line (Tool = params.name, Method, RPCID = id) and are otherwise unbounded.
+	rec.Tool = clipField(rec.Tool)
+	rec.Method = clipField(rec.Method)
+	rec.RPCID = clipField(rec.RPCID)
 
 	a.mu.Lock()
 	defer a.mu.Unlock()

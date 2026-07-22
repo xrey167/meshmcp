@@ -119,10 +119,13 @@ func cmdRoom(args []string) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/room", rs.handleRoom)
 	mux.HandleFunc("/api/caps", rs.handleCaps)
-	mux.HandleFunc("/api/ls", rs.handleLs)
-	// The actuator endpoints (drive a backend, run a command/shell) require the
-	// startup token, so even a local process that slips past the loopback and
-	// rebinding guards cannot act without the token the operator was handed.
+	// The actuator endpoints (drive a backend, list its tools, run a
+	// command/shell) require the startup token, so even a local process that
+	// slips past the loopback and rebinding guards cannot act without the token
+	// the operator was handed. /api/ls is included: it makes an outbound mesh
+	// dial under the room's identity, so an unauthenticated caller could
+	// enumerate any reachable backend through the room (a confused deputy).
+	mux.HandleFunc("/api/ls", rs.requireToken(rs.handleLs))
 	mux.HandleFunc("/api/call", rs.requireToken(rs.handleCall))
 	mux.HandleFunc("/api/shell", rs.requireToken(rs.handleShell))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {

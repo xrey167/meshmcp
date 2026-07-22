@@ -22,6 +22,13 @@ const (
 	// defaultMaxSendFrames bounds the unacked send buffer (per direction).
 	// Send blocks (backpressure) once this many frames are outstanding.
 	defaultMaxSendFrames = 1024
+	// maxReplayBytes bounds the migration replay-capture buffer. A resumable
+	// session captures inbound peer->backend bytes so another gateway can
+	// replay them after a failover; without a cap, a peer that streams input
+	// but never finishes the handshake grows this buffer (and, via the
+	// per-message checkpoint, its on-disk copy) without bound. Generous for a
+	// real MCP handshake + early traffic; a session exceeding it is closed.
+	maxReplayBytes = 8 << 20
 	// sendOverflowTimeout is how long Send waits on a full buffer before
 	// closing the session (the peer is gone or hopelessly behind).
 	sendOverflowTimeout = 60 * time.Second

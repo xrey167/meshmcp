@@ -425,7 +425,9 @@ func (s *Server) pump(sess *serverSession) {
 				}
 				if s.store != nil && s.migMode != MigrateBackend {
 					sess.cmu.Lock()
-					if s.migMode == MigrateFull || !sess.captureDone {
+					capturing := s.migMode == MigrateFull || !sess.captureDone
+					overflow := capturing && len(sess.replay)+len(p) > maxReplayBytes
+					if capturing && !overflow {
 						sess.replay = append(sess.replay, p...)
 						if s.migMode == MigrateHandshake &&
 							bytes.Contains(sess.replay, []byte("notifications/initialized")) {
@@ -433,6 +435,15 @@ func (s *Server) pump(sess *serverSession) {
 						}
 					}
 					sess.cmu.Unlock()
+					if overflow {
+						// A peer that streams input without finishing the
+						// handshake would grow the replay buffer (and its
+						// per-message on-disk checkpoint) without bound. Refuse
+						// to migrate an oversized session rather than degrade.
+						sess.ep.sendClose()
+						s.remove(sess.ep.id)
+						return
+					}
 				}
 				if _, err := sess.backend.Write(p); err != nil {
 					sess.ep.sendClose()

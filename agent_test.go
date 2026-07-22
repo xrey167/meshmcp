@@ -288,3 +288,13 @@ func TestApplySteerTaskTarget(t *testing.T) {
 	rec := &recordingCaller{onCall: func(string) { t.Fatal("no call expected") }}
 	applySteer(context.Background(), rec, steerEnvelope{Type: "cancel", Target: "task:9f2a"}, &guidance, logf)
 }
+
+// TestAgentSteerPortRequiresAllow proves the steer inbox is deny-by-default: a
+// --steer-port without any --steer-allow identity is a startup error, since a
+// steer runs tool calls under the agent's own identity (borrowed authority).
+func TestAgentSteerPortRequiresAllow(t *testing.T) {
+	err := cmdAgent([]string{"--role", "reader", "--steer-port", "9120", "1.2.3.4:9101"})
+	if err == nil || !strings.Contains(err.Error(), "--steer-allow") {
+		t.Fatalf("agent --steer-port without --steer-allow must fail closed, got: %v", err)
+	}
+}
