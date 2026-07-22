@@ -1,4 +1,4 @@
-package main
+package air
 
 import (
 	"errors"
@@ -7,12 +7,12 @@ import (
 	"testing"
 )
 
-// TestAirDNSRecords covers the generated ARD DNS records: a TXT pointer to the
+// TestDNSRecords covers the generated ARD DNS records: a TXT pointer to the
 // well-known catalog URL and an SRV for the control endpoint.
-func TestAirDNSRecords(t *testing.T) {
-	recs := airDNSRecords("mesh.example.com", "100.64.0.2", 9600, "gateway.netbird.cloud")
-	if len(recs) != 2 {
-		t.Fatalf("want 2 records, got %d: %v", len(recs), recs)
+func TestDNSRecords(t *testing.T) {
+	recs, err := DNSRecords("mesh.example.com", "100.64.0.2", 9600, "gateway.netbird.cloud")
+	if err != nil || len(recs) != 2 {
+		t.Fatalf("want 2 records, got %d (err=%v): %v", len(recs), err, recs)
 	}
 	txt, srv := recs[0], recs[1]
 	if !strings.HasPrefix(txt, "_catalog._agents.mesh.example.com. ") || !strings.Contains(txt, "IN TXT") {
@@ -26,19 +26,61 @@ func TestAirDNSRecords(t *testing.T) {
 	}
 }
 
-// TestAirDNSRecordsSRVFallback proves the SRV target falls back to the control
-// IP when no --srv-host is given.
-func TestAirDNSRecordsSRVFallback(t *testing.T) {
-	recs := airDNSRecords("x.io", "100.64.0.2", 9600, "")
-	if !strings.Contains(recs[1], "9600 100.64.0.2.") {
-		t.Fatalf("SRV should fall back to the control ip: %q", recs[1])
+// TestDNSRecordsSRVFallback proves the SRV target falls back to the control IP
+// when no srvHost is given.
+func TestDNSRecordsSRVFallback(t *testing.T) {
+	recs, err := DNSRecords("x.io", "100.64.0.2", 9600, "")
+	if err != nil || !strings.Contains(recs[1], "9600 100.64.0.2.") {
+		t.Fatalf("SRV should fall back to the control ip: %v (err=%v)", recs, err)
+	}
+}
+
+// TestDNSRecordsRejectsInjection proves a domain/host that could break the zone
+// record framing (quotes, whitespace, semicolons, control chars) or an
+// out-of-range port is refused rather than emitted.
+func TestDNSRecordsRejectsInjection(t *testing.T) {
+	bad := []struct {
+		domain, ip, srv string
+		port            int
+	}{
+		{`x.io" 300 IN TXT "evil`, "100.64.0.2", "", 9600},   // quote breaks TXT framing
+		{"x.io", "100.64.0.2", "h;evil", 9600},               // semicolon starts a comment/second record
+		{"x with space.io", "100.64.0.2", "", 9600},          // whitespace
+		{"x.io", "100.64.0.2\nB.io. IN A 6.6.6.6", "", 9600}, // newline injects a record
+		{"x.io", "100.64.0.2", "", 70000},                    // port out of range
+		{"", "100.64.0.2", "", 9600},                         // empty domain
+	}
+	for _, c := range bad {
+		if _, err := DNSRecords(c.domain, c.ip, c.port, c.srv); err == nil {
+			t.Fatalf("unsafe input accepted: %+v", c)
+		}
+	}
+}
+
+// TestParseCatalogTXTRejectsOversized proves an absurdly long TXT value is
+// rejected before it is parsed/followed.
+func TestParseCatalogTXTRejectsOversized(t *testing.T) {
+	huge := "v=ard1; catalog=http://x/" + strings.Repeat("a", maxCatalogURL+100)
+	if _, ok := ParseCatalogTXT(huge); ok {
+		t.Fatal("oversized catalog URL must be rejected")
+	}
+}
+
+// TestCatalogEntry covers the name lookup helper.
+func TestCatalogEntry(t *testing.T) {
+	c := Catalog{Endpoints: []CatalogEntry{{Name: "fs", Address: "a:1"}, {Name: "kg", Address: "b:2"}}}
+	if e, ok := c.Entry("kg"); !ok || e.Address != "b:2" {
+		t.Fatalf("Entry(kg) = %+v ok=%v", e, ok)
+	}
+	if _, ok := c.Entry("missing"); ok {
+		t.Fatal("Entry(missing) should not be found")
 	}
 }
 
 // TestParseCatalogTXT covers accepting a well-formed record and rejecting
 // version-less, empty, and non-http values.
 func TestParseCatalogTXT(t *testing.T) {
-	u, ok := parseCatalogTXT("v=ard1; catalog=http://100.64.0.2:9600/.well-known/ai-catalog.json")
+	u, ok := ParseCatalogTXT("v=ard1; catalog=http://100.64.0.2:9600/.well-known/ai-catalog.json")
 	if !ok || u != "http://100.64.0.2:9600/.well-known/ai-catalog.json" {
 		t.Fatalf("valid TXT not parsed: %q ok=%v", u, ok)
 	}
@@ -50,12 +92,11 @@ func TestParseCatalogTXT(t *testing.T) {
 		"v=ard1; catalog=not-a-url",  // no host/scheme
 		"random text",                // junk
 	} {
-		if _, ok := parseCatalogTXT(bad); ok {
+		if _, ok := ParseCatalogTXT(bad); ok {
 			t.Fatalf("malformed TXT accepted: %q", bad)
 		}
 	}
-	// Round-trips with the builder.
-	if _, ok := parseCatalogTXT(catalogTXTValue("https://host:1/.well-known/ai-catalog.json")); !ok {
+	if _, ok := ParseCatalogTXT(CatalogTXTValue("https://host:1/.well-known/ai-catalog.json")); !ok {
 		t.Fatal("builder output must parse")
 	}
 }
@@ -68,20 +109,17 @@ func TestResolveCatalogURL(t *testing.T) {
 		asked = name
 		return []string{"some other txt", "v=ard1; catalog=http://100.64.0.2:9600/.well-known/ai-catalog.json"}, nil
 	}
-	u, err := resolveCatalogURL(lookup, "mesh.example.com")
+	u, err := ResolveCatalogURL(lookup, "mesh.example.com")
 	if err != nil || u != "http://100.64.0.2:9600/.well-known/ai-catalog.json" {
 		t.Fatalf("resolve failed: %q err=%v", u, err)
 	}
 	if asked != "_catalog._agents.mesh.example.com" {
 		t.Fatalf("looked up the wrong name: %q", asked)
 	}
-
-	// A lookup error propagates.
-	if _, err := resolveCatalogURL(func(string) ([]string, error) { return nil, errors.New("nxdomain") }, "x"); err == nil {
+	if _, err := ResolveCatalogURL(func(string) ([]string, error) { return nil, errors.New("nxdomain") }, "x"); err == nil {
 		t.Fatal("lookup error should propagate")
 	}
-	// No ARD record among the results is an error, not a silent empty.
-	if _, err := resolveCatalogURL(func(string) ([]string, error) { return []string{"v=spf1 -all"}, nil }, "x"); err == nil {
+	if _, err := ResolveCatalogURL(func(string) ([]string, error) { return []string{"v=spf1 -all"}, nil }, "x"); err == nil {
 		t.Fatal("missing ARD record should error")
 	}
 }
@@ -97,31 +135,27 @@ func TestResolveCatalogSRV(t *testing.T) {
 			{Target: "backup.netbird.cloud.", Port: 9600, Priority: 10, Weight: 5},
 		}, nil
 	}
-	host, port, err := resolveCatalogSRV(lookup, "mesh.example.com")
+	host, port, err := ResolveCatalogSRV(lookup, "mesh.example.com")
 	if err != nil || host != "gateway.netbird.cloud" || port != 9600 {
 		t.Fatalf("srv resolve = %q:%d err=%v", host, port, err)
 	}
 	if askedSvc != "air" || askedProto != "tcp" || askedName != "mesh.example.com" {
 		t.Fatalf("looked up wrong SRV: %s/%s/%s", askedSvc, askedProto, askedName)
 	}
-
-	// No records is an error.
-	if _, _, err := resolveCatalogSRV(func(string, string, string) (string, []*net.SRV, error) {
+	if _, _, err := ResolveCatalogSRV(func(string, string, string) (string, []*net.SRV, error) {
 		return "", nil, nil
 	}, "x"); err == nil {
 		t.Fatal("empty SRV set should error")
 	}
-	// A "." target (RFC 2782 "not available") is rejected.
-	if _, _, err := resolveCatalogSRV(func(string, string, string) (string, []*net.SRV, error) {
+	if _, _, err := ResolveCatalogSRV(func(string, string, string) (string, []*net.SRV, error) {
 		return "", []*net.SRV{{Target: ".", Port: 0}}, nil
 	}, "x"); err == nil {
 		t.Fatal(`"." SRV target should be rejected`)
 	}
 }
 
-// TestResolveCatalogPrefersTXTThenSRV proves the combined resolver uses the TXT
-// pointer when present, falls back to SRV when TXT is absent, and errors when
-// neither answers.
+// TestResolveCatalogPrefersTXTThenSRV proves the combined resolver uses TXT when
+// present, falls back to SRV when TXT is absent, and errors when neither answers.
 func TestResolveCatalogPrefersTXTThenSRV(t *testing.T) {
 	txtOK := func(string) ([]string, error) {
 		return []string{"v=ard1; catalog=http://100.64.0.2:9600/.well-known/ai-catalog.json"}, nil
@@ -132,18 +166,15 @@ func TestResolveCatalogPrefersTXTThenSRV(t *testing.T) {
 	}
 	srvNone := func(string, string, string) (string, []*net.SRV, error) { return "", nil, nil }
 
-	// TXT present → via TXT, full URL from the record.
-	u, via, err := resolveCatalog(txtOK, srvNone, "d")
+	u, via, err := ResolveCatalog(txtOK, srvNone, "d")
 	if err != nil || via != "TXT" || u != "http://100.64.0.2:9600/.well-known/ai-catalog.json" {
 		t.Fatalf("TXT path: %q via=%q err=%v", u, via, err)
 	}
-	// TXT absent → fall back to SRV, URL built from host:port.
-	u, via, err = resolveCatalog(txtMissing, srvOK, "d")
+	u, via, err = ResolveCatalog(txtMissing, srvOK, "d")
 	if err != nil || via != "SRV" || u != "http://gateway.netbird.cloud:9600/.well-known/ai-catalog.json" {
 		t.Fatalf("SRV fallback: %q via=%q err=%v", u, via, err)
 	}
-	// Neither → error.
-	if _, _, err := resolveCatalog(txtMissing, srvNone, "d"); err == nil {
+	if _, _, err := ResolveCatalog(txtMissing, srvNone, "d"); err == nil {
 		t.Fatal("no TXT and no SRV should error")
 	}
 }

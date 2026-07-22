@@ -12,6 +12,8 @@ import (
 	"net/url"
 	"os"
 	"strings"
+
+	"github.com/xrey167/meshmcp/air"
 )
 
 // The Air catalog is an ARD-style (Agentic Resource Discovery) well-known
@@ -21,29 +23,10 @@ import (
 // filtered per-caller by each backend's ACL, so an unprivileged peer discovers
 // nothing it could not already call, and an unidentifiable peer discovers
 // nothing at all. It is the discovery counterpart to Air's drive verbs.
-
-// airCatalogPath is the standard well-known discovery URL, mirroring the ARD
-// spec's /.well-known/ai-catalog.json.
-const airCatalogPath = "/.well-known/ai-catalog.json"
-
-// AirCatalog is the discovery document: the service, its version, the gateway
-// identity, and the endpoints the calling identity may reach.
-type AirCatalog struct {
-	Service   string            `json:"service"`
-	Version   string            `json:"version"`
-	Gateway   string            `json:"gateway,omitempty"`
-	Endpoints []AirCatalogEntry `json:"endpoints"`
-}
-
-// AirCatalogEntry is one discoverable backend: how to address it and what it
-// supports, so a client knows whether it can list tools, resume, or be steered.
-type AirCatalogEntry struct {
-	Name      string `json:"name"`
-	Address   string `json:"address"`   // mesh-ip:port to dial
-	Transport string `json:"transport"` // stdio | http | remote
-	Resumable bool   `json:"resumable,omitempty"`
-	Steerable bool   `json:"steerable,omitempty"` // has a live session server (Air · Steer)
-}
+//
+// The catalog model (AirCatalog/AirCatalogEntry) and the ARD DNS logic live in
+// the `air` package (aliased in airalias.go); this file is the mesh-wired CLI
+// and the gateway's per-caller filtering that binds them to a live mesh.
 
 // catalogBackend is a gateway's static per-backend catalog data, captured at
 // startup; steerability is resolved live from the session-server map.
@@ -73,7 +56,7 @@ func cmdAirCatalog(args []string) error {
 		if fs.NArg() != 0 {
 			return errors.New("air catalog: give either --resolve <domain> or a <control-ip:port>, not both")
 		}
-		u, via, err := resolveCatalog(net.LookupTXT, net.LookupSRV, *resolve)
+		u, via, err := air.ResolveCatalog(net.LookupTXT, net.LookupSRV, *resolve)
 		if err != nil {
 			return fmt.Errorf("air catalog: %w", err)
 		}
