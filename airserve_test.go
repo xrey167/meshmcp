@@ -222,3 +222,66 @@ func TestAirServeControlRequiresAllow(t *testing.T) {
 		t.Fatalf("air serve --control without --allow must fail closed, got: %v", err)
 	}
 }
+
+// TestAirServeSecurityHeaders proves the hardening headers are set on every
+// response (CSP, nosniff, frame-deny, no-referrer).
+func TestAirServeSecurityHeaders(t *testing.T) {
+	h := airServeHandler(airServeDeps{})
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/", nil))
+	hd := rr.Header()
+	if csp := hd.Get("Content-Security-Policy"); !strings.Contains(csp, "default-src 'self'") || !strings.Contains(csp, "frame-ancestors 'none'") {
+		t.Fatalf("CSP missing/weak: %q", csp)
+	}
+	if hd.Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("missing nosniff: %q", hd.Get("X-Content-Type-Options"))
+	}
+	if hd.Get("X-Frame-Options") != "DENY" {
+		t.Fatalf("missing frame-deny: %q", hd.Get("X-Frame-Options"))
+	}
+	if hd.Get("Referrer-Policy") != "no-referrer" {
+		t.Fatalf("missing referrer-policy: %q", hd.Get("Referrer-Policy"))
+	}
+}
+
+// TestAirServeCrossOriginRefused proves a state-changing POST from a different
+// origin is refused (CSRF / DNS-rebinding), while a same-origin POST and an
+// Origin-less (non-browser) POST proceed.
+func TestAirServeCrossOriginRefused(t *testing.T) {
+	var pushed int
+	h := airServeHandler(airServeDeps{
+		push: func(_ context.Context, _, _ string, _ []byte) error { pushed++; return nil },
+	})
+	body := `{"target":"100.64.0.9:9110","text":"hi"}`
+
+	// Cross-origin → 403, push not invoked.
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/push", strings.NewReader(body))
+	req.Host = "100.64.0.2:9800"
+	req.Header.Set("Origin", "http://evil.example")
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin POST = %d, want 403", rr.Code)
+	}
+
+	// Same-origin → allowed.
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/push", strings.NewReader(body))
+	req.Host = "100.64.0.2:9800"
+	req.Header.Set("Origin", "http://100.64.0.2:9800")
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("same-origin POST = %d, want 200: %s", rr.Code, rr.Body)
+	}
+
+	// No Origin (non-browser client) → allowed.
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/push", strings.NewReader(body))
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("origin-less POST = %d, want 200", rr.Code)
+	}
+	if pushed != 2 {
+		t.Fatalf("push should have run twice (same-origin + origin-less), got %d", pushed)
+	}
+}

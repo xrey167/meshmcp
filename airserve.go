@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -205,17 +206,62 @@ func airServeHandler(d airServeDeps) http.Handler {
 	// Optional page-wide viewer gate: when an --allow list is set, only listed
 	// mesh identities may load the page or call its API (empty = any mesh peer,
 	// matching backend Allow semantics).
-	if d.allow.empty() || d.identify == nil {
-		return mux
+	var gated http.Handler = mux
+	if !d.allow.empty() && d.identify != nil {
+		gated = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			pubKey, fqdn := d.identify(r)
+			if !d.allow.allows(pubKey, fqdn) {
+				http.Error(w, "not permitted", http.StatusForbidden)
+				return
+			}
+			mux.ServeHTTP(w, r)
+		})
 	}
+	return withWebSecurity(gated)
+}
+
+// withWebSecurity wraps the served Air page with defence-in-depth for a browser
+// surface: hardening response headers on every response, and a same-origin
+// guard on state-changing POSTs so a page on another origin can't drive the
+// relay through a viewer's browser (CSRF / DNS-rebinding).
+func withWebSecurity(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		pubKey, fqdn := d.identify(r)
-		if !d.allow.allows(pubKey, fqdn) {
-			http.Error(w, "not permitted", http.StatusForbidden)
+		hdr := w.Header()
+		// Self-contained page: no external hosts for scripts, styles, images,
+		// or fetch/XHR; not framable; no MIME sniffing; no referrer leakage.
+		// ('unsafe-inline' is required for the inline <style>/<script>; the
+		// locked default-src/connect-src still prevent exfiltration to any
+		// other origin, and every dynamic value is HTML-escaped.)
+		hdr.Set("Content-Security-Policy",
+			"default-src 'self'; connect-src 'self'; img-src 'self' data:; "+
+				"style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "+
+				"object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+		hdr.Set("X-Content-Type-Options", "nosniff")
+		hdr.Set("X-Frame-Options", "DENY")
+		hdr.Set("Referrer-Policy", "no-referrer")
+		if r.Method == http.MethodPost && !sameOrigin(r) {
+			http.Error(w, "cross-origin request refused", http.StatusForbidden)
 			return
 		}
-		mux.ServeHTTP(w, r)
+		h.ServeHTTP(w, r)
 	})
+}
+
+// sameOrigin reports whether a state-changing request is same-origin: a present
+// Origin header must match the request's Host. A browser always sends Origin on
+// a cross-origin fetch, so a mismatch is a CSRF/rebinding attempt; an absent
+// Origin (a non-browser client such as the CLI) is allowed — the mesh + viewer
+// ACL already gate those.
+func sameOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	return strings.EqualFold(u.Host, r.Host)
 }
 
 // attest stamps the outbound control-endpoint request with the browser's own mesh
