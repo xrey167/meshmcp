@@ -159,6 +159,14 @@
     .grabber{display:none}
   }
 
+  /* Cast — a single "Now Showing" stage */
+  .stage{border-radius:18px;overflow:hidden;background:var(--nav);border:1px solid var(--hair);
+    box-shadow:0 2px 10px rgba(0,0,0,.10);position:relative}
+  .stage img{width:100%;max-height:60vh;object-fit:contain;display:block;background:#000}
+  .stage .cap{position:absolute;left:0;right:0;bottom:0;padding:18px 12px 8px;
+    font-size:12px;font-weight:600;color:#fff;letter-spacing:-.01em;
+    background:linear-gradient(transparent,rgba(0,0,0,.6));white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
   /* Vision gallery — a grid of received images */
   .gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:10px}
   .shot{position:relative;display:block;aspect-ratio:1;border-radius:14px;overflow:hidden;
@@ -238,6 +246,12 @@
       </a>
       <div class="hint">Opens directly against the approvals server, so your own mesh identity signs the decision.</div>
     </div>
+  </section>
+
+  <section id="castWrap" hidden>
+    <h2 class="sec-head">Now Showing</h2>
+    <div class="stage" id="cast"></div>
+    <div class="hint">The newest image a peer cast to this node — presented full-width, identity-gated.</div>
   </section>
 
   <section id="visionWrap" hidden>
@@ -380,6 +394,7 @@
       $("catWrap").hidden=!cfg.catalog;
       $("pushWrap").hidden=!cfg.push;$("recWrap").hidden=!cfg.receipts;
       $("visionWrap").hidden=!cfg.vision;
+      $("castWrap").hidden=!cfg.cast;
       $("apprWrap").hidden=!cfg.approvals;
       if(cfg.approvals)$("apprLink").href="http://"+cfg.approvals+"/";
     }catch(e){}
@@ -451,12 +466,23 @@
     }catch(e){el.innerHTML='<div class="err">'+esc(e.message)+'</div>'}
   }
 
+  async function loadCast(){
+    if(!cfg.cast)return;var el=$("cast");if(!el.dataset.loaded)el.innerHTML=skeleton(1);
+    try{
+      var d=await getJSON("api/cast?limit=1");var gs=d.images||[];el.dataset.loaded="1";
+      if(!gs.length){el.dataset.sig="";el.innerHTML=emptyState("🎞️","Nothing being cast");return}
+      var g=gs[0];if(!changed(el,g.name+":"+g.mod))return;
+      var u="api/castimage?name="+encodeURIComponent(g.name);
+      el.innerHTML='<img class="fade-in" src="'+esc(u)+'" alt="'+esc(g.name)+'"><span class="cap">'+esc(g.name)+' · '+esc(fmtAge(g.mod))+'</span>';
+    }catch(e){el.innerHTML='<div class="err">'+esc(e.message)+'</div>'}
+  }
+
   var refreshBtn=$("refresh");
   function refresh(){refreshBtn.classList.remove("spin");void refreshBtn.offsetWidth;refreshBtn.classList.add("spin");
-    loadPeers();loadCatalog();loadSessions();loadReceipts();loadVision()}
+    loadPeers();loadCatalog();loadSessions();loadReceipts();loadCast();loadVision()}
   refreshBtn.onclick=refresh;
   loadConfig().then(refresh);
-  setInterval(function(){loadPeers();loadCatalog();loadSessions();loadReceipts();loadVision()},10000);
+  setInterval(function(){loadPeers();loadCatalog();loadSessions();loadReceipts();loadCast();loadVision()},10000);
 })();
 </script>
 </body>
