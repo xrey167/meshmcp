@@ -47,6 +47,8 @@ func cmdAir(args []string) error {
 		return cmdAirBind(args[1:])
 	case "catalog", "discover":
 		return cmdAirCatalog(args[1:])
+	case "change":
+		return cmdAirChange(args[1:])
 	case "dns":
 		return cmdAirDNS(args[1:])
 	case "sessions":
@@ -68,7 +70,7 @@ func cmdAir(args []string) error {
 	case "-h", "--help", "help":
 		return airUsage()
 	default:
-		return fmt.Errorf("meshmcp air: unknown subcommand %q (want whoami | map | browse | stream | vision | bind | catalog | dns | sessions | steer | launch | agent-steer | tasks | task-steer | workflow | serve)", args[0])
+		return fmt.Errorf("meshmcp air: unknown subcommand %q (want whoami | map | browse | stream | vision | bind | catalog | change | dns | sessions | steer | launch | agent-steer | tasks | task-steer | workflow | serve)", args[0])
 	}
 }
 
@@ -80,6 +82,7 @@ func airUsage() error {
 	fmt.Fprintln(os.Stderr, "  "+b("air whoami")+"      "+dim("                                  the mesh identity a gateway sees you as"))
 	fmt.Fprintln(os.Stderr, "  "+b("air map")+"         <control-ip:port>                 "+dim("your reachable mesh as a tree (you → gateway → backends)"))
 	fmt.Fprintln(os.Stderr, "  "+b("air catalog")+"     <control-ip:port> | --resolve <domain>  "+dim("what backends can I reach? (ARD)"))
+	fmt.Fprintln(os.Stderr, "  "+b("air change")+"      <control-ip:port> --snapshot <f>  "+dim("what changed since last snapshot (added/removed/changed backends)"))
 	fmt.Fprintln(os.Stderr, "  "+b("air browse")+"      <backend-ip:port>                 "+dim("what tools/resources/prompts a backend exposes"))
 	fmt.Fprintln(os.Stderr, "  "+b("air stream")+"      <audit.jsonl>                     "+dim("watch governed Air activity live (tail the ledger)"))
 	fmt.Fprintln(os.Stderr, "  "+b("air vision")+"      <inbox-dir>                       "+dim("images the mesh dropped here (view on a phone via serve --gallery)"))
