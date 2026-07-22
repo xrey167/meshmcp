@@ -37,6 +37,8 @@ func cmdAir(args []string) error {
 		return cmdAirWhoami(args[1:])
 	case "map":
 		return cmdAirMap(args[1:])
+	case "browse":
+		return cmdAirBrowse(args[1:])
 	case "catalog", "discover":
 		return cmdAirCatalog(args[1:])
 	case "dns":
@@ -72,6 +74,7 @@ func airUsage() error {
 	fmt.Fprintln(os.Stderr, "  "+b("air whoami")+"      "+dim("                                  the mesh identity a gateway sees you as"))
 	fmt.Fprintln(os.Stderr, "  "+b("air map")+"         <control-ip:port>                 "+dim("your reachable mesh as a tree (you → gateway → backends)"))
 	fmt.Fprintln(os.Stderr, "  "+b("air catalog")+"     <control-ip:port> | --resolve <domain>  "+dim("what backends can I reach? (ARD)"))
+	fmt.Fprintln(os.Stderr, "  "+b("air browse")+"      <backend-ip:port>                 "+dim("what tools/resources/prompts a backend exposes"))
 	fmt.Fprintln(os.Stderr, "  "+b("air dns")+"         <domain> --control <mesh-ip:port>  "+dim("print DNS records for domain-name discovery"))
 	fmt.Fprintln(os.Stderr, "  "+b("air sessions")+"    <control-ip:port>                 "+dim("list live sessions on a gateway"))
 	fmt.Fprintln(os.Stderr, "  "+b("air steer")+"       <control-ip:port> --backend b --session id [--param k=v]")

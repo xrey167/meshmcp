@@ -54,7 +54,12 @@ meshmcp peers --all      # include offline peers
 meshmcp air whoami       # the mesh identity a gateway's allow-list + audit see me as
 meshmcp air catalog 100.x.y.z:9600   # what backends can I reach on this gateway?
 meshmcp air map 100.x.y.z:9600       # your reachable mesh as a tree (you → gateway → backends)
+meshmcp air browse 100.x.y.z:9101    # what tools/resources/prompts a backend exposes
 ```
+
+Discovery has a further horizon — **vision**, **stream**, **browse**, **computer-use**, and
+**phone-use** — each grounded in the same identity + firewall + ledger. `air browse` is the
+first concrete step; see [AIR-VISION.md](AIR-VISION.md) for the full arc.
 
 `air map` composes `whoami` and the catalog into a topology view — a tree of *you → the
 gateway → the backends you may reach*, each tagged with its transport and whether it is
