@@ -80,6 +80,8 @@ func cmdAir(args []string) error {
 		return cmdAirDNS(args[1:])
 	case "kg":
 		return cmdAirKG(args[1:])
+	case "database", "db":
+		return cmdAirDatabase(args[1:])
 	case "sessions":
 		return cmdAirSessions(args[1:])
 	case "steer":
@@ -103,7 +105,7 @@ func cmdAir(args []string) error {
 	case "-h", "--help", "help":
 		return airUsage()
 	default:
-		return fmt.Errorf("meshmcp air: unknown subcommand %q (want home | nearby | announce | node | handoff | whoami | map | browse | stream | vision | bind | film | play | ring | listen | cast | drive | screen | catalog | change | osint | dns | kg | sessions | steer | launch | agent-steer | tasks | task-steer | workflow | graph | rag | serve)", args[0])
+		return fmt.Errorf("meshmcp air: unknown subcommand %q (want home | nearby | announce | node | handoff | whoami | map | browse | stream | vision | bind | film | play | ring | listen | cast | drive | screen | catalog | change | osint | dns | kg | database | sessions | steer | launch | agent-steer | tasks | task-steer | workflow | graph | rag | serve)", args[0])
 	}
 }
 
@@ -138,6 +140,7 @@ func airUsage() error {
 	fmt.Fprintln(os.Stderr, "  "+b("air play")+"        <film> [--speed N]                "+dim("replay a film (shortcut for air film play)"))
 	fmt.Fprintln(os.Stderr, "  "+b("air dns")+"         <domain> --control <mesh-ip:port>  "+dim("print DNS records for domain-name discovery"))
 	fmt.Fprintln(os.Stderr, "  "+b("air kg")+"          assert|query|neighbors|subgraph|verify|serve  "+dim("the mesh's governed, audited knowledge graph"))
+	fmt.Fprintln(os.Stderr, "  "+b("air database")+"    query|serve|ls                   "+dim("the governed firewall between an agent and a database (SELECT-only, per-table grants, audited)"))
 	fmt.Fprintln(os.Stderr, "  "+b("air sessions")+"    <control-ip:port>                 "+dim("list live sessions on a gateway"))
 	fmt.Fprintln(os.Stderr, "  "+b("air steer")+"       <control-ip:port> --backend b --session id [--param k=v]")
 	fmt.Fprintln(os.Stderr, "  "+b("air tasks")+"       <backend-ip:port>                 "+dim("list a backend's async tasks"))
