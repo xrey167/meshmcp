@@ -170,6 +170,53 @@ func TestAirServeReceiptsAndConfig(t *testing.T) {
 	}
 }
 
+// TestAirServeVision covers the Vision gallery endpoints end to end: /api/config
+// advertises it, /api/gallery lists the inbox images, /api/image serves one with
+// the exact content type, and a traversal name is refused.
+func TestAirServeVision(t *testing.T) {
+	dir := t.TempDir()
+	writeImage(t, dir, "shot.png", 5)
+	h := airServeHandler(airServeDeps{
+		gallery: func(limit int) ([]galleryImage, error) { return listGalleryImages(dir, limit) },
+		image:   func(name string) ([]byte, string, error) { return readGalleryImage(dir, name) },
+	})
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"vision":true`) {
+		t.Fatalf("config: %d %s", rr.Code, rr.Body)
+	}
+
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/gallery", nil))
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "shot.png") {
+		t.Fatalf("gallery: %d %s", rr.Code, rr.Body)
+	}
+
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/image?name=shot.png", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("image: %d %s", rr.Code, rr.Body)
+	}
+	if ct := rr.Header().Get("Content-Type"); ct != "image/png" {
+		t.Fatalf("image content-type = %q, want image/png", ct)
+	}
+
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/image?name=../secret.png", nil))
+	if rr.Code == http.StatusOK {
+		t.Fatalf("traversal served: %d %s", rr.Code, rr.Body)
+	}
+
+	// Disabled by default.
+	off := airServeHandler(airServeDeps{})
+	rr = httptest.NewRecorder()
+	off.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/gallery", nil))
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("gallery off = %d, want 503", rr.Code)
+	}
+}
+
 // TestAirServeViewerACL proves a non-empty --allow list gates every route by
 // the browser's mesh identity.
 func TestAirServeViewerACL(t *testing.T) {

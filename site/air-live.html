@@ -159,6 +159,20 @@
     .grabber{display:none}
   }
 
+  /* Vision gallery — a grid of received images */
+  .gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:10px}
+  .shot{position:relative;display:block;aspect-ratio:1;border-radius:14px;overflow:hidden;
+    background:var(--nav);border:1px solid var(--hair);text-decoration:none;
+    box-shadow:0 1px 2px rgba(0,0,0,.06);transition:transform .18s ease,box-shadow .18s ease}
+  .shot:hover{transform:translateY(-2px);box-shadow:0 6px 18px rgba(0,0,0,.14)}
+  .shot img{width:100%;height:100%;object-fit:cover;display:block}
+  .shot .cap{position:absolute;left:0;right:0;bottom:0;padding:16px 8px 6px;
+    font-size:11px;font-weight:600;color:#fff;letter-spacing:-.01em;
+    background:linear-gradient(transparent,rgba(0,0,0,.62));
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .shot .meta{position:absolute;top:6px;right:6px;padding:2px 7px;border-radius:999px;
+    font-size:10px;font-weight:600;color:#fff;background:rgba(0,0,0,.42);backdrop-filter:blur(6px)}
+
   .fade-in{animation:fadeIn .35s ease both}
   @keyframes fadeIn{from{opacity:0;transform:translateY(6px)}}
   .check{display:inline-block;animation:pop-check .4s cubic-bezier(.2,1.4,.4,1)}
@@ -224,6 +238,12 @@
       </a>
       <div class="hint">Opens directly against the approvals server, so your own mesh identity signs the decision.</div>
     </div>
+  </section>
+
+  <section id="visionWrap" hidden>
+    <h2 class="sec-head">Vision</h2>
+    <div class="gallery" id="gallery"></div>
+    <div class="hint">Images the mesh dropped to this node — served identity-gated, audited by content hash.</div>
   </section>
 
   <section id="recWrap" hidden>
@@ -344,12 +364,13 @@
   };
 
   /* ---- Config-gated sections ---- */
-  var cfg={push:false,receipts:false,approvals:"",catalog:false};
+  var cfg={push:false,receipts:false,vision:false,approvals:"",catalog:false};
   async function loadConfig(){
     try{
       cfg=await getJSON("api/config");
       $("catWrap").hidden=!cfg.catalog;
       $("pushWrap").hidden=!cfg.push;$("recWrap").hidden=!cfg.receipts;
+      $("visionWrap").hidden=!cfg.vision;
       $("apprWrap").hidden=!cfg.approvals;
       if(cfg.approvals)$("apprLink").href="http://"+cfg.approvals+"/";
     }catch(e){}
@@ -400,12 +421,31 @@
     }catch(e){el.innerHTML='<div class="err">'+esc(e.message)+'</div>'}
   }
 
+  /* ---- Vision gallery ---- */
+  function fmtBytes(n){n=+n||0;if(n<1000)return n+" B";var u=["k","M","G","T"],i=-1;do{n/=1000;i++}while(n>=1000&&i<u.length-1);return n.toFixed(1)+" "+u[i]+"B"}
+  function fmtAge(mod){var s=Math.max(0,Math.floor(Date.now()/1000-(+mod||0)));
+    if(s<60)return s+"s";if(s<3600)return(s/60|0)+"m";if(s<86400)return(s/3600|0)+"h";return(s/86400|0)+"d"}
+  async function loadVision(){
+    if(!cfg.vision)return;var el=$("gallery");if(!el.dataset.loaded)el.innerHTML=skeleton(2);
+    try{
+      var d=await getJSON("api/gallery?limit=60");var gs=d.images||[];el.dataset.loaded="1";
+      if(!gs.length){el.innerHTML=emptyState("🖼️","Nothing dropped here yet");return}
+      el.innerHTML=gs.map(function(g){
+        var u="api/image?name="+encodeURIComponent(g.name);
+        return '<a class="shot fade-in" href="'+esc(u)+'" target="_blank" rel="noopener" title="'+esc(g.name)+'">'+
+          '<img loading="lazy" src="'+esc(u)+'" alt="'+esc(g.name)+'">'+
+          '<span class="meta">'+esc(fmtAge(g.mod))+'</span>'+
+          '<span class="cap">'+esc(g.name)+' · '+esc(fmtBytes(g.size))+'</span></a>';
+      }).join("");
+    }catch(e){el.innerHTML='<div class="err">'+esc(e.message)+'</div>'}
+  }
+
   var refreshBtn=$("refresh");
   function refresh(){refreshBtn.classList.remove("spin");void refreshBtn.offsetWidth;refreshBtn.classList.add("spin");
-    loadPeers();loadCatalog();loadSessions();loadReceipts()}
+    loadPeers();loadCatalog();loadSessions();loadReceipts();loadVision()}
   refreshBtn.onclick=refresh;
   loadConfig().then(refresh);
-  setInterval(function(){loadPeers();loadCatalog();loadSessions();loadReceipts()},10000);
+  setInterval(function(){loadPeers();loadCatalog();loadSessions();loadReceipts();loadVision()},10000);
 })();
 </script>
 </body>

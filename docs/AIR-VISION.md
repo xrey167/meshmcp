@@ -47,14 +47,16 @@ as it lands. It is the terminal-native counterpart to the served Receipts page.
 - **The meshmcp angle:** subscription is a capability; every delivery is attributable; a
   stream is deny-by-default like every other surface.
 
-## Air · Vision — *seeing over the mesh*  ·  **partly buildable**
+## Air · Vision — *seeing over the mesh*  ·  **buildable now**
 
 Air already moves bytes; Vision is about moving and viewing **visual context** — a
 screenshot, an image, a live frame — with the same identity, ACL, and receipt as a file drop.
 
-- **Buildable now:** images already ride `drop`/`push`; the served page grows a **Receive**
-  gallery that renders image drops inline (a phone sees what a laptop dropped, gated by the
-  viewer ACL). `air push screenshot.png` → a peer's page shows it, audited by content hash.
+- **Shipped as the third step of this doc:** a drop inbox is a directory of files that landed
+  by cryptographic identity, each audited by content hash. `air serve --gallery <inbox>` grows
+  a **Vision** section on the phone-first page that renders those images inline — a phone *sees*
+  what a laptop dropped, served path-safely and gated by the viewer ACL. `air vision <inbox>` is
+  the terminal inventory of the same (`airvision.go`, `airserve.go`, `site/air-live.html`).
 - **Deeper:** a governed **screen-share** primitive — frames pushed over the resumable session
   channel, viewed on a peer's page, ACL'd and audited frame-by-frame; a roam mid-share
   resumes. The transport (`session/`) already carries ordered, resumable byte regions.
@@ -110,7 +112,7 @@ WireGuard key that proves who, a policy that decides may, and a hash-chained rec
 it happened. Air's moat is not any one verb; it is that *all of them share one identity and one
 proof*.
 
-Build order: **browse** and **stream** (shipped-primitive CLIs) → **vision** (image drops on the
-page, then a resumable frame stream) → **computer-use** (an example + policy pattern) → the
-**phone actuator** (once the native binding is built). Discovery was the first leg; this is the
-rest of the walk.
+Build order: **browse**, **stream**, and **vision** (shipped — CLIs plus the served page's Vision
+gallery) → a resumable frame stream on top of vision → **computer-use** (an example + policy
+pattern) → the **phone actuator** (once the native binding is built). Discovery was the first leg;
+this is the rest of the walk.
