@@ -12,77 +12,19 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"regexp"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/netbirdio/netbird/client/embed"
-	"gopkg.in/yaml.v3"
 
+	"github.com/xrey167/meshmcp/air"
 	"github.com/xrey167/meshmcp/mcpclient"
 )
 
-// airWorkflow is a declarative sequence of Air steps (P4): launch an agent,
-// steer a session, steer an agent's inbox, or call a tool — run in order over
-// one mesh membership. OnError controls whether a failed step stops the run
-// ("stop", the default) or lets the remaining steps run ("continue"). Cleanup
-// decides what happens to launched agents when the run ends: "leave" (default —
-// they keep running as their own mesh identities) or "stop" (kill them).
-type airWorkflow struct {
-	Name    string            `yaml:"name"`
-	OnError string            `yaml:"on_error"` // "stop" (default) | "continue"
-	Cleanup string            `yaml:"cleanup"`  // "leave" (default) | "stop"
-	Steps   []airWorkflowStep `yaml:"steps"`
-}
-
-// airWorkflowStep is one step: exactly one of launch/steer/agent_steer/call/
-// parallel must be set. As names a variable that captures the step's output (a
-// launch's identity, a call's result) for later ${as.field} references. Timeout
-// bounds a network step (steer/agent_steer/call); Parallel runs its children
-// concurrently.
-type airWorkflowStep struct {
-	Launch     *launchStep       `yaml:"launch"`
-	Steer      *steerStep        `yaml:"steer"`
-	AgentSteer *agentSteerStep   `yaml:"agent_steer"`
-	Call       *callStep         `yaml:"call"`
-	Parallel   []airWorkflowStep `yaml:"parallel"`
-	As         string            `yaml:"as"`
-	Timeout    string            `yaml:"timeout"` // e.g. "30s"; default stepDefaultTimeout
-}
-
-type launchStep struct {
-	Role      string `yaml:"role"`
-	Gateway   string `yaml:"gateway"`
-	NBConfig  string `yaml:"nb_config"`
-	SteerPort int    `yaml:"steer_port"` // if >0, launch with a P1 steer inbox on this mesh port
-	Interval  string `yaml:"interval"`   // agent's delay between calls (passed through)
-}
-
-// agentSteerStep sends one steer envelope to a launched agent's P1 inbox —
-// the workflow counterpart to `meshmcp air agent-steer`.
-type agentSteerStep struct {
-	Target string         `yaml:"target"` // agent steer inbox (mesh-ip:port)
-	Type   string         `yaml:"type"`   // task | nudge | cancel
-	Tool   string         `yaml:"tool"`   // type=task: tool to call
-	Args   map[string]any `yaml:"args"`   // type=task: tool args
-	Text   string         `yaml:"text"`   // type=nudge: guidance
-	ID     string         `yaml:"id"`     // caller correlation id (audited)
-}
-
-type steerStep struct {
-	Control string         `yaml:"control"` // gateway control endpoint (ip:port)
-	Backend string         `yaml:"backend"`
-	Session string         `yaml:"session"`
-	Method  string         `yaml:"method"`
-	Params  map[string]any `yaml:"params"`
-}
-
-type callStep struct {
-	Target string         `yaml:"target"` // backend mesh address (ip:port)
-	Tool   string         `yaml:"tool"`
-	Args   map[string]any `yaml:"args"`
-}
+// The workflow schema, validation, and ${var.field} expansion live in the air
+// package (air/workflow.go); this file is the mesh-coupled runner that executes
+// a parsed workflow against a live membership. The step types and expand
+// helpers are aliased in airalias.go so the runner reads the same names.
 
 // stepDefaultTimeout bounds a steer/call step when it sets no timeout.
 const stepDefaultTimeout = 30 * time.Second
@@ -92,115 +34,13 @@ const stepDefaultTimeout = 30 * time.Second
 // joining the mesh, so a launch→steer sequence doesn't race.
 const connRetryCap = 10 * time.Second
 
-func (s airWorkflowStep) kind() string {
-	switch {
-	case s.Launch != nil:
-		return "launch " + s.Launch.Role
-	case s.Steer != nil:
-		return "steer " + s.Steer.Backend + "/" + s.Steer.Session
-	case s.AgentSteer != nil:
-		return "agent-steer " + s.AgentSteer.Type + "@" + s.AgentSteer.Target
-	case s.Call != nil:
-		return "call " + s.Call.Tool + "@" + s.Call.Target
-	case s.Parallel != nil:
-		return fmt.Sprintf("parallel (%d)", len(s.Parallel))
-	default:
-		return "empty"
-	}
-}
-
-func (s airWorkflowStep) validate(i int) error {
-	n := 0
-	if s.Launch != nil {
-		n++
-		if s.Launch.Role == "" || s.Launch.Gateway == "" {
-			return fmt.Errorf("step %d launch: role and gateway are required", i+1)
-		}
-		if s.Launch.Interval != "" {
-			if _, err := time.ParseDuration(s.Launch.Interval); err != nil {
-				return fmt.Errorf("step %d launch: bad interval %q: %w", i+1, s.Launch.Interval, err)
-			}
-		}
-	}
-	if s.Steer != nil {
-		n++
-		if s.Steer.Control == "" || s.Steer.Backend == "" || s.Steer.Session == "" {
-			return fmt.Errorf("step %d steer: control, backend and session are required", i+1)
-		}
-	}
-	if s.AgentSteer != nil {
-		n++
-		if s.AgentSteer.Target == "" {
-			return fmt.Errorf("step %d agent_steer: target is required", i+1)
-		}
-		switch s.AgentSteer.Type {
-		case "task":
-			if s.AgentSteer.Tool == "" {
-				return fmt.Errorf("step %d agent_steer: type task needs tool", i+1)
-			}
-		case "nudge", "cancel":
-		default:
-			return fmt.Errorf("step %d agent_steer: type must be task, nudge, or cancel (got %q)", i+1, s.AgentSteer.Type)
-		}
-	}
-	if s.Call != nil {
-		n++
-		if s.Call.Target == "" || s.Call.Tool == "" {
-			return fmt.Errorf("step %d call: target and tool are required", i+1)
-		}
-	}
-	if s.Parallel != nil {
-		n++
-		if len(s.Parallel) == 0 {
-			return fmt.Errorf("step %d parallel: no children", i+1)
-		}
-		if len(s.Parallel) > maxParallelWidth {
-			return fmt.Errorf("step %d parallel: %d children exceeds the cap of %d", i+1, len(s.Parallel), maxParallelWidth)
-		}
-		for j, child := range s.Parallel {
-			if child.Parallel != nil {
-				return fmt.Errorf("step %d parallel child %d: nested parallel is not allowed", i+1, j+1)
-			}
-			if err := child.validate(j); err != nil {
-				return fmt.Errorf("step %d %w", i+1, err)
-			}
-		}
-	}
-	if n != 1 {
-		return fmt.Errorf("step %d: exactly one of launch, steer, agent_steer, call, parallel must be set (got %d)", i+1, n)
-	}
-	if s.Timeout != "" {
-		if _, err := time.ParseDuration(s.Timeout); err != nil {
-			return fmt.Errorf("step %d: bad timeout %q: %w", i+1, s.Timeout, err)
-		}
-	}
-	return nil
-}
-
+// loadAirWorkflow reads a workflow file; parsing and validation live in air.
 func loadAirWorkflow(path string) (*airWorkflow, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read workflow: %w", err)
 	}
-	var wf airWorkflow
-	if err := yaml.Unmarshal(data, &wf); err != nil {
-		return nil, fmt.Errorf("parse workflow %s: %w", path, err)
-	}
-	if len(wf.Steps) == 0 {
-		return nil, fmt.Errorf("workflow %s: no steps", path)
-	}
-	if wf.OnError != "" && wf.OnError != "stop" && wf.OnError != "continue" {
-		return nil, fmt.Errorf("workflow %s: on_error must be stop or continue (got %q)", path, wf.OnError)
-	}
-	if wf.Cleanup != "" && wf.Cleanup != "leave" && wf.Cleanup != "stop" {
-		return nil, fmt.Errorf("workflow %s: cleanup must be leave or stop (got %q)", path, wf.Cleanup)
-	}
-	for i, s := range wf.Steps {
-		if err := s.validate(i); err != nil {
-			return nil, err
-		}
-	}
-	return &wf, nil
+	return air.ParseWorkflow(data)
 }
 
 // stepResult is one executed step's outcome, for the --json run summary.
@@ -215,10 +55,6 @@ type stepResult struct {
 // maxWorkflowLaunches caps the agents one workflow run may spawn — a backstop
 // against a mis-generated or malicious YAML fanning out unbounded processes.
 const maxWorkflowLaunches = 32
-
-// maxParallelWidth caps how many children a single parallel: block may hold, so
-// a workflow cannot request thousands of concurrent goroutines/steps at once.
-const maxParallelWidth = 64
 
 // wfRun carries the mesh membership and the variable store shared across a
 // workflow's steps, plus the pids of agents it launched (for cleanup: stop).
@@ -320,9 +156,9 @@ func cmdAirWorkflow(args []string) error {
 	if *dryRun {
 		kinds := make([]string, len(wf.Steps))
 		for i, s := range wf.Steps {
-			kinds[i] = s.kind()
+			kinds[i] = s.Kind()
 			if !*jsonOut {
-				fmt.Printf("  step %d: %s\n", i+1, s.kind())
+				fmt.Printf("  step %d: %s\n", i+1, s.Kind())
 			}
 		}
 		if *jsonOut {
@@ -374,7 +210,7 @@ func (r *wfRun) runSteps(ctx context.Context, name string, steps []airWorkflowSt
 	var results []stepResult
 	var firstErr error
 	for i, s := range steps {
-		log.Printf("workflow %q step %d/%d: %s", name, i+1, len(steps), s.kind())
+		log.Printf("workflow %q step %d/%d: %s", name, i+1, len(steps), s.Kind())
 		res := r.runOne(ctx, s)
 		results = append(results, res...)
 		failed := false
@@ -385,7 +221,7 @@ func (r *wfRun) runSteps(ctx context.Context, name string, steps []airWorkflowSt
 		}
 		if failed {
 			if firstErr == nil {
-				firstErr = fmt.Errorf("workflow %q step %d (%s) failed", name, i+1, s.kind())
+				firstErr = fmt.Errorf("workflow %q step %d (%s) failed", name, i+1, s.Kind())
 			}
 			if onError != "continue" {
 				return results, firstErr
@@ -403,7 +239,7 @@ func (r *wfRun) runOne(ctx context.Context, s airWorkflowStep) []stepResult {
 	}
 	start := time.Now()
 	out, captured, err := r.execStep(ctx, s)
-	res := stepResult{Kind: s.kind(), OK: err == nil, DurationMS: time.Since(start).Milliseconds(), Output: out}
+	res := stepResult{Kind: s.Kind(), OK: err == nil, DurationMS: time.Since(start).Milliseconds(), Output: out}
 	if err != nil {
 		res.Error = err.Error()
 	} else {
@@ -496,67 +332,6 @@ func (r *wfRun) stepContext(ctx context.Context, timeout string) (context.Contex
 		}
 	}
 	return context.WithTimeout(ctx, d)
-}
-
-// wfVarRe matches ${name.field} variable references.
-var wfVarRe = regexp.MustCompile(`\$\{([a-zA-Z0-9_]+)\.([a-zA-Z0-9_]+)\}`)
-
-// expand substitutes ${name.field} tokens from vars; unknown tokens are left as-is.
-func expand(s string, vars map[string]any) string {
-	if !strings.Contains(s, "${") {
-		return s
-	}
-	return wfVarRe.ReplaceAllStringFunc(s, func(m string) string {
-		sub := wfVarRe.FindStringSubmatch(m)
-		if v, ok := vars[sub[1]]; ok {
-			if fields, ok := v.(map[string]any); ok {
-				if fv, ok := fields[sub[2]]; ok {
-					return fmt.Sprint(fv)
-				}
-			}
-		}
-		return m
-	})
-}
-
-// expandMap returns a copy of m with ${var} references expanded in string values.
-func expandMap(m map[string]any, vars map[string]any) map[string]any {
-	if m == nil {
-		return nil
-	}
-	out := make(map[string]any, len(m))
-	for k, v := range m {
-		if sv, ok := v.(string); ok {
-			out[k] = expand(sv, vars)
-		} else {
-			out[k] = v
-		}
-	}
-	return out
-}
-
-func expandSteer(s steerStep, vars map[string]any) steerStep {
-	s.Control = expand(s.Control, vars)
-	s.Backend = expand(s.Backend, vars)
-	s.Session = expand(s.Session, vars)
-	s.Method = expand(s.Method, vars)
-	s.Params = expandMap(s.Params, vars)
-	return s
-}
-
-func expandAgentSteer(s agentSteerStep, vars map[string]any) agentSteerStep {
-	s.Target = expand(s.Target, vars)
-	s.Tool = expand(s.Tool, vars)
-	s.Text = expand(s.Text, vars)
-	s.Args = expandMap(s.Args, vars)
-	return s
-}
-
-func expandCall(c callStep, vars map[string]any) callStep {
-	c.Target = expand(c.Target, vars)
-	c.Tool = expand(c.Tool, vars)
-	c.Args = expandMap(c.Args, vars)
-	return c
 }
 
 // retryConn retries fn while it returns a connection-level error, up to cap. It

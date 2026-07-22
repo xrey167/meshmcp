@@ -74,14 +74,23 @@ host:port, and fetches it over the mesh. meshmcp doesn't run DNS (`air dns` only
 records for the operator to publish), and the pointer is a public-ish record — the catalog
 it points to is still mesh-only and identity-gated.
 
-**Module layout.** Air's portable, mesh-independent core — the catalog model
-(`Catalog`/`CatalogEntry`), the steer envelope, and the ARD record generation + resolution
-(with input validation that refuses zone-record injection) — lives in the
-[`air`](../air) package (`air/catalog.go`, `air/discovery.go`, `air/steer.go`), with its own
-tests (`air/discovery_test.go`). The command-line and HTTP wiring that binds those to a live
-mesh — the `air` CLI verbs, the served page, and the gateway control endpoint's per-caller
-filtering — lives in the main package and imports `air`. So the reusable Air model can be
-tested and evolved on its own, independent of the mesh, policy, and session layers.
+**Module layout.** Air's portable, mesh-independent core lives in the [`air`](../air)
+package, tested on its own:
+- `air/catalog.go` — the discovery `Catalog`/`CatalogEntry` model (+ `Entry`, `Steerable`,
+  `Resumable` helpers).
+- `air/discovery.go` — ARD record generation + TXT/SRV parsing & resolution, with input
+  validation that refuses zone-record injection and caps the untrusted URL.
+- `air/steer.go` — the steer envelope, its `Validate()`, the `Task`/`Nudge`/`Cancel`
+  constructors, and the newline-JSON `ParseEnvelopes`/`WriteEnvelope` framing.
+- `air/target.go` — the `Target` addressing grammar (`agent|session|task|group`).
+- `air/workflow.go` — the declarative workflow schema, its validation, and `${var.field}`
+  expansion (the runner that executes it against a live mesh stays in the main package).
+
+The command-line and HTTP wiring that binds those to a live mesh — the `air` CLI verbs, the
+served page, the gateway control endpoint's per-caller filtering, and the workflow runner —
+lives in the main package and imports `air` (reading the same names through thin aliases in
+`airalias.go`). So the reusable Air model can be tested and evolved independent of the mesh,
+policy, and session layers.
 
 ### Drop
 ```bash
