@@ -35,7 +35,11 @@ and a **gateway-signed, tamper-evident audit log** of every decision.
 
 <br><br>
 
-**[▶ Live showcase — see what's possible](https://xrey167.github.io/meshmcp/)**
+[![▶ Try the live Air experience](https://img.shields.io/badge/▶_Try_the_live_Air_experience-0071E3?style=for-the-badge)](https://xrey167.github.io/meshmcp/)
+
+**Govern a live AI agent's MCP tool-calls** — allow · co-sign · deny — run any of the 15 Air verbs,
+and watch your own data become a **tamper-evident, hash-chained proof**. Runs entirely in your
+browser (camera / screen / mic work too): **[xrey167.github.io/meshmcp](https://xrey167.github.io/meshmcp/)**
 
 </div>
 
