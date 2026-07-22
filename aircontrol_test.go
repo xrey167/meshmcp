@@ -31,6 +31,16 @@ func (f *fakeAirControl) sessions(pubKey, fqdn string) []AirSession {
 	}
 	return f.list
 }
+func (f *fakeAirControl) catalog(pubKey, fqdn string) AirCatalog {
+	var eps []AirCatalogEntry
+	for _, s := range f.list {
+		if f.denyOnFqdn != "" && fqdn == f.denyOnFqdn && s.Backend == "fs" {
+			continue
+		}
+		eps = append(eps, AirCatalogEntry{Name: s.Backend, Address: "100.64.0.2:9101", Transport: "stdio", Steerable: true})
+	}
+	return AirCatalog{Service: "meshmcp", Version: "test", Endpoints: eps}
+}
 func (f *fakeAirControl) steer(pubKey, fqdn, backend, id, method string, _ any) error {
 	if f.denyOnFqdn != "" && fqdn == f.denyOnFqdn && backend == "fs" {
 		return errBackendForbidden
@@ -309,5 +319,72 @@ func TestAirControlOnBehalfRequiresProxyAllow(t *testing.T) {
 	h.ServeHTTP(rr, req)
 	if len(recs) != 1 || recs[0].OnBehalf != "phone.mesh" {
 		t.Fatalf("listed proxy attestation not honoured: %+v", recs)
+	}
+}
+
+// TestAirCatalogFiltersPerCaller proves the well-known Air catalog lists only
+// the backends the caller's identity is permitted to reach (per-backend ACL),
+// and refuses an unidentifiable peer entirely.
+func TestAirCatalogFiltersPerCaller(t *testing.T) {
+	c := &fakeAirControl{
+		list:       []AirSession{{Backend: "fs"}, {Backend: "kg"}},
+		denyOnFqdn: "outsider.mesh",
+	}
+
+	// A caller denied on fs sees only kg.
+	h := handlerWithIdentity(c, "keyX", "outsider.mesh", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, airCatalogPath, nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("catalog status = %d, want 200", rr.Code)
+	}
+	var cat AirCatalog
+	if err := json.Unmarshal(rr.Body.Bytes(), &cat); err != nil {
+		t.Fatalf("bad catalog json: %v", err)
+	}
+	if len(cat.Endpoints) != 1 || cat.Endpoints[0].Name != "kg" {
+		t.Fatalf("fs must be filtered for the denied caller: %+v", cat.Endpoints)
+	}
+	if cat.Service != "meshmcp" {
+		t.Fatalf("catalog service = %q", cat.Service)
+	}
+
+	// An unidentifiable peer (no key, no fqdn) is refused.
+	unid := airControlHandler(c, func(*http.Request) (string, string) { return "", "" },
+		newACL(nil), newACL(nil), nil)
+	rr = httptest.NewRecorder()
+	unid.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, airCatalogPath, nil))
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("unidentified peer catalog = %d, want 403", rr.Code)
+	}
+}
+
+// TestAirCatalogAudited proves a discovery read is recorded with the air/catalog
+// method.
+func TestAirCatalogAudited(t *testing.T) {
+	c := &fakeAirControl{list: []AirSession{{Backend: "fs"}}}
+	var recs []airSteerAudit
+	h := handlerWithIdentity(c, "k1", "caller.mesh", func(r airSteerAudit) { recs = append(recs, r) })
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, airCatalogPath, nil))
+	if len(recs) != 1 || recs[0].Method != "air/catalog" || !recs[0].OK {
+		t.Fatalf("catalog read not audited: %+v", recs)
+	}
+}
+
+// TestBuildCatalogBackends covers transport classification and addressing.
+func TestBuildCatalogBackends(t *testing.T) {
+	got := buildCatalogBackends([]*Backend{
+		{Name: "fs", Port: 9101, Stdio: []string{"srv"}, Resumable: true},
+		{Name: "web", Port: 9102, HTTP: "http://127.0.0.1:8080"},
+	}, "100.64.0.2")
+	if len(got) != 2 {
+		t.Fatalf("want 2, got %d", len(got))
+	}
+	if got[0].transport != "stdio" || got[0].address != "100.64.0.2:9101" || !got[0].resumable {
+		t.Fatalf("fs entry wrong: %+v", got[0])
+	}
+	if got[1].transport != "http" || got[1].address != "100.64.0.2:9102" {
+		t.Fatalf("web entry wrong: %+v", got[1])
 	}
 }
