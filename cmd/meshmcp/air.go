@@ -81,12 +81,14 @@ func cmdAir(args []string) error {
 		return cmdAirTaskSteer(args[1:])
 	case "workflow":
 		return cmdAirWorkflow(args[1:])
+	case "rag":
+		return cmdAirRag(args[1:])
 	case "serve":
 		return cmdAirServe(args[1:])
 	case "-h", "--help", "help":
 		return airUsage()
 	default:
-		return fmt.Errorf("meshmcp air: unknown subcommand %q (want home | whoami | map | browse | stream | vision | bind | film | play | ring | listen | cast | screen | catalog | change | dns | kg | sessions | steer | launch | agent-steer | tasks | task-steer | workflow | serve)", args[0])
+		return fmt.Errorf("meshmcp air: unknown subcommand %q (want home | whoami | map | browse | stream | vision | bind | film | play | ring | listen | cast | screen | catalog | change | dns | kg | sessions | steer | launch | agent-steer | tasks | task-steer | workflow | rag | serve)", args[0])
 	}
 }
 
@@ -123,6 +125,7 @@ func airUsage() error {
 	fmt.Fprintln(os.Stderr, dim("LAUNCH & AUTOMATE"))
 	fmt.Fprintln(os.Stderr, "  "+b("air launch")+"      --role <role> [--nb-config dir] <gateway-ip:port>")
 	fmt.Fprintln(os.Stderr, "  "+b("air workflow")+"    [--dry-run] <file.yaml>           "+dim("run a declarative launch/steer/call flow"))
+	fmt.Fprintln(os.Stderr, "  "+b("air rag")+"         serve|ingest|search              "+dim("governed hybrid retrieval (dense + BM25 + RRF, per-corpus scoped, audited)"))
 	fmt.Fprintln(os.Stderr, "  "+b("air bind")+"        <bindings.yaml> --audit <f>       "+dim("fire governed reactions when audit records match (a la rebind)"))
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, dim("SERVE"))

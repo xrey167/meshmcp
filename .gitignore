@@ -48,6 +48,9 @@ audit-signing-key.json
 # (the /kg binary is ignored, but the kg/ importable store library — S1 — is tracked)
 /kg
 !/kg/
+# (the /vectors binary is ignored, but the vectors/ importable index library is tracked)
+/vectors
+!/vectors/
 /memory
 /bus
 /scheduler
