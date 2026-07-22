@@ -55,11 +55,14 @@ meshmcp air whoami       # the mesh identity a gateway's allow-list + audit see 
 meshmcp air catalog 100.x.y.z:9600   # what backends can I reach on this gateway?
 meshmcp air map 100.x.y.z:9600       # your reachable mesh as a tree (you → gateway → backends)
 meshmcp air browse 100.x.y.z:9101    # what tools/resources/prompts a backend exposes
+meshmcp air stream ./audit.jsonl     # watch governed Air activity live (tail the ledger)
+meshmcp air vision ./inbox           # images the mesh dropped here (view them on a phone via serve --gallery)
 ```
 
 Discovery has a further horizon — **vision**, **stream**, **browse**, **computer-use**, and
-**phone-use** — each grounded in the same identity + firewall + ledger. `air browse` is the
-first concrete step; see [AIR-VISION.md](AIR-VISION.md) for the full arc.
+**phone-use** — each grounded in the same identity + firewall + ledger. `air browse`, `air
+stream`, and `air vision` (with the served page's Vision gallery) are the first three concrete
+steps; see [AIR-VISION.md](AIR-VISION.md) for the full arc.
 
 `air map` composes `whoami` and the catalog into a topology view — a tree of *you → the
 gateway → the backends you may reach*, each tagged with its transport and whether it is
@@ -344,7 +347,7 @@ Honesty about the seam, so nobody mistakes the mockup for shipped product:
 | **Steer/Launch** — the `meshmcp air` CLI (`sessions --json` · `steer` · `launch` · `agent-steer --target/--id` · `tasks` · `task-steer` · `workflow`) + P4 runner | **Ships now** | `air.go` · `airworkflow.go` · `examples/air-workflow.yaml` |
 | **Workflow** — variables between steps (`as:` + `${var.field}`) · `parallel:` blocks · `on_error` · per-step `timeout` · `--json` summary · launch-race retry | **Ships now** | `airworkflow.go` · `airworkflow_test.go` |
 | Assistant tools `air_peers` · `air_push` · `air_fetch` · `air_launch` (opt-in) | **Ships now** | `mcpapp.go` · `mcpapp_air_test.go` |
-| A served **live** Air web page over the mesh (`meshmcp air serve`) — Nearby · Sessions/Steer · **Push/Drop** (sent over the relay's identity) · **Approvals link-out** (browser keeps its own identity) · **Receipts** (`--audit` tail) · viewer `--allow` ACL. A phone-first, Apple-style UI (frosted large-title header, grouped inset cards, segmented steer sheet, light/dark), hardened as a browser surface: strict CSP, `nosniff`/frame-deny/no-referrer headers, and a same-origin guard on every state-changing POST (CSRF / DNS-rebinding). | **Ships now** | `airserve.go` · `site/air-live.html` · `airserve_test.go` |
+| A served **live** Air web page over the mesh (`meshmcp air serve`) — Nearby · Sessions/Steer · **Push/Drop** (sent over the relay's identity) · **Approvals link-out** (browser keeps its own identity) · **Receipts** (`--audit` tail) · **Vision** gallery (`--gallery` inbox — image drops rendered inline, path-safe) · viewer `--allow` ACL. A phone-first, Apple-style UI (frosted large-title header, grouped inset cards, segmented steer sheet, light/dark), hardened as a browser surface: strict CSP, `nosniff`/frame-deny/no-referrer headers, and a same-origin guard on every state-changing POST (CSRF / DNS-rebinding). | **Ships now** | `airserve.go` · `site/air-live.html` · `airserve_test.go` |
 | Push-wake seam (device registry + notify hook) + a **webhook Notifier** delivering over the network (no vendor creds) | **Ships now** | `pushwake.go` · `webhooknotify.go` · `approvals.go` (`--notify-webhook`) · `pushwake_test.go` · `webhooknotify_test.go` — [MOBILE.md §4](MOBILE.md) |
 | Native mobile **binding package** (`mobile/`, compiles; `gomobile bind` external) | **Ships now** | `mobile/mobile.go` · `mobile/mobile_test.go` — [MOBILE.md §3](MOBILE.md) |
 | A shipped native mobile **app** (bound + built + on a device) | **External** | needs the iOS/Android toolchain + a device |

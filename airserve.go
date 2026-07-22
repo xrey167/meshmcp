@@ -38,6 +38,8 @@ type airServeDeps struct {
 
 	push         func(ctx context.Context, target, name string, data []byte) error // deliver a payload to a peer's drop inbox (nil = push/drop disabled)
 	receipts     func(limit int) ([]json.RawMessage, error)                        // tail of the local audit ledger (nil = receipts disabled)
+	gallery      func(limit int) ([]galleryImage, error)                           // images that landed in a drop inbox — the Vision view (nil = disabled)
+	image        func(name string) (data []byte, contentType string, err error)    // read one gallery image, path-safe (nil = disabled)
 	approvals    string                                                            // approvals server (mesh-ip:port) the page links out to ("" = hidden)
 	allow        acl                                                               // page-wide viewer ACL; empty = any mesh peer
 	allowedHosts []string                                                          // Host values the page may be served at (mesh ip/fqdn:port); empty = no Host check (dev)
@@ -62,6 +64,7 @@ func airServeHandler(d airServeDeps) http.Handler {
 			"approvals": d.approvals,
 			"push":      d.push != nil,
 			"receipts":  d.receipts != nil,
+			"vision":    d.gallery != nil,
 			"catalog":   d.controlBase != "",
 		})
 	})
@@ -174,6 +177,55 @@ func airServeHandler(d airServeDeps) http.Handler {
 			recs = []json.RawMessage{}
 		}
 		writeJSONResp(w, http.StatusOK, map[string]any{"receipts": recs})
+	})
+
+	// Air · Vision: list the images that landed in the drop inbox, and serve one
+	// by name. Both are read-only and path-safe (readGalleryImage re-validates the
+	// name against the inbox root); the page-wide viewer ACL, if set, gates them
+	// like every other endpoint.
+	mux.HandleFunc("/api/gallery", func(w http.ResponseWriter, r *http.Request) {
+		if d.gallery == nil {
+			http.Error(w, "the Vision gallery is not enabled on this page", http.StatusServiceUnavailable)
+			return
+		}
+		limit := 60
+		if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 && n <= maxGalleryImages {
+			limit = n
+		}
+		imgs, err := d.gallery(limit)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if imgs == nil {
+			imgs = []galleryImage{}
+		}
+		writeJSONResp(w, http.StatusOK, map[string]any{"images": imgs})
+	})
+
+	mux.HandleFunc("/api/image", func(w http.ResponseWriter, r *http.Request) {
+		if d.image == nil {
+			http.Error(w, "the Vision gallery is not enabled on this page", http.StatusServiceUnavailable)
+			return
+		}
+		name := r.URL.Query().Get("name")
+		if name == "" {
+			http.Error(w, "name is required", http.StatusBadRequest)
+			return
+		}
+		data, contentType, err := d.image(name)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		// Exact type, never sniffed (nosniff is set globally); rendered inline, not
+		// downloaded; cached briefly since inbox files are content-stable.
+		h := w.Header()
+		h.Set("Content-Type", contentType)
+		h.Set("Content-Disposition", "inline")
+		h.Set("Cache-Control", "private, max-age=60")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(data)
 	})
 
 	mux.HandleFunc("/api/sessions", func(w http.ResponseWriter, r *http.Request) {
@@ -354,6 +406,7 @@ func cmdAirServe(args []string) error {
 	control := fs.String("control", "", "gateway control endpoint (mesh-ip:port) for the sessions/steer views")
 	approvals := fs.String("approvals", "", "approvals server (mesh-ip:port) the Approvals view links out to — the browser talks to it directly, keeping human attribution")
 	auditPath := fs.String("audit", "", "local audit JSONL to serve as the Receipts view (read-only tail)")
+	gallery := fs.String("gallery", "", "drop-inbox directory to render as the Vision gallery (images the mesh dropped to this node)")
 	allow := multiFlag{}
 	fs.Var(&allow, "allow", "identity permitted to open the page (FQDN glob or pubkey:<key>); repeatable; empty = any mesh peer")
 	if err := fs.Parse(args); err != nil {
@@ -365,6 +418,11 @@ func cmdAirServe(args []string) error {
 		d := airServeDeps{
 			peers:        func() ([]airPeerRow, error) { return nil, nil },
 			allowedHosts: []string{*addr},
+		}
+		if *gallery != "" {
+			galleryDir := *gallery
+			d.gallery = func(limit int) ([]galleryImage, error) { return listGalleryImages(galleryDir, limit) }
+			d.image = func(name string) ([]byte, string, error) { return readGalleryImage(galleryDir, name) }
 		}
 		fmt.Fprintf(os.Stderr, "Air (live) on http://%s (LOCAL — no mesh; peers/sessions unavailable)\n", *addr)
 		return newLocalHTTPServer(*addr, airServeHandler(d)).ListenAndServe()
@@ -459,6 +517,14 @@ func cmdAirServe(args []string) error {
 	}
 	if *auditPath != "" {
 		d.receipts = func(limit int) ([]json.RawMessage, error) { return tailAuditRecords(*auditPath, limit) }
+	}
+	// Air · Vision: render the images that landed in a drop inbox. Read-only —
+	// like Receipts, it exposes what THIS node already received, so it needs no
+	// --allow; when --allow is set, the viewer gate covers it too.
+	if *gallery != "" {
+		galleryDir := *gallery
+		d.gallery = func(limit int) ([]galleryImage, error) { return listGalleryImages(galleryDir, limit) }
+		d.image = func(name string) ([]byte, string, error) { return readGalleryImage(galleryDir, name) }
 	}
 
 	ln, err := client.ListenTCP(fmt.Sprintf(":%d", *port))
