@@ -40,13 +40,24 @@ func cmdAirStream(args []string) error {
 }
 
 // streamAudit follows an append-only audit file, rendering each new audit record
-// through formatAuditLine. It is rotation-aware (a file that shrank is reopened
-// from the start) and stops when ctx is cancelled. Factored out so the follow
-// loop is exercisable without a real terminal.
+// through formatAuditLine. It is rotation-aware and stops when ctx is cancelled.
 func streamAudit(ctx context.Context, path string, fromStart bool, backend string, interval time.Duration, w io.Writer) error {
+	return followAudit(ctx, path, fromStart, interval, func(line []byte) {
+		if s, ok := formatAuditLine(bytes.TrimSpace(line), backend); ok {
+			fmt.Fprintln(w, s)
+		}
+	})
+}
+
+// followAudit tails an append-only audit ledger, invoking handle once per
+// complete newline-terminated line as records land. It is rotation-aware (a file
+// that shrank below our offset is reopened from the start) and stops when ctx is
+// cancelled. This is the shared engine under `air stream` (which renders each
+// line) and `air bind` (which matches each line against reaction rules).
+func followAudit(ctx context.Context, path string, fromStart bool, interval time.Duration, handle func(line []byte)) error {
 	f, err := os.Open(path)
 	if err != nil {
-		return fmt.Errorf("air stream: %w", err)
+		return fmt.Errorf("follow audit: %w", err)
 	}
 	defer f.Close()
 
@@ -69,9 +80,7 @@ func streamAudit(ctx context.Context, path string, fromStart bool, backend strin
 				reader.Reset(f)
 				return
 			}
-			if s, ok := formatAuditLine(bytes.TrimSpace(line), backend); ok {
-				fmt.Fprintln(w, s)
-			}
+			handle(line)
 		}
 	}
 	drain()
@@ -108,15 +117,27 @@ type streamRecord struct {
 	Reason   string `json:"reason"`
 }
 
+// parseStreamRecord decodes one audit JSONL line into the subset that air stream
+// and air bind care about, reporting false if the line is not a renderable audit
+// record (bad JSON, or no decision — the field that marks a policy record).
+func parseStreamRecord(line []byte) (streamRecord, bool) {
+	line = bytes.TrimSpace(line)
+	if len(line) == 0 {
+		return streamRecord{}, false
+	}
+	var r streamRecord
+	if json.Unmarshal(line, &r) != nil || r.Decision == "" {
+		return streamRecord{}, false
+	}
+	return r, true
+}
+
 // formatAuditLine renders one audit JSONL line as a coloured stream row, or
 // (‑, false) if the line is not a renderable audit record or is filtered out by
 // backend. The decision drives the colour: allow green, deny red, cosign amber.
 func formatAuditLine(line []byte, backend string) (string, bool) {
-	if len(line) == 0 {
-		return "", false
-	}
-	var r streamRecord
-	if json.Unmarshal(line, &r) != nil || r.Decision == "" {
+	r, ok := parseStreamRecord(line)
+	if !ok {
 		return "", false
 	}
 	if backend != "" && r.Backend != backend {

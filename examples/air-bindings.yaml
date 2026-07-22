@@ -1,0 +1,44 @@
+# Air bindings — a programmable, governed reaction layer for the mesh
+# (Air · Bind). Like rebind (docs.rebind.gg) turns an input event into a
+# scripted response, `air bind` turns a governed mesh event into a declared
+# reaction — watching the hash-chained audit ledger and firing when a record
+# matches.
+#
+#   meshmcp air bind examples/air-bindings.yaml --audit ./demo/audit.jsonl
+#   meshmcp air bind examples/air-bindings.yaml --audit ./demo/audit.jsonl --allow-exec
+#   meshmcp air bind ... --from-start   # replay existing records first, then follow
+#
+# Each binding has:
+#   name  — a unique label (shown when the reaction fires)
+#   on    — the trigger: a glob per audit field; an empty/absent field matches
+#           anything; an all-empty `on` fires on every record. Fields:
+#           decision (allow|deny|cosign) · backend · method · tool · peer
+#   do    — exactly one action:
+#           print: "<template>"   emit a line (always safe)
+#           run:   [meshmcp, ...] spawn a governed child action (needs --allow-exec)
+#
+# Templates expand {peer} {tool} {method} {backend} {decision} {reason} {time}.
+#
+# The Air difference: the trigger is an already-governed, already-audited action,
+# and a `run` reaction is ITSELF a governed mesh action (it re-enters the
+# firewall) — deny-by-default, so it runs only when you pass --allow-exec.
+
+bindings:
+  # Surface every denial as it happens — a live security notifier.
+  - name: notify-on-deny
+    on: { decision: deny }
+    do: { print: "⛔ DENIED {peer} · {method} {tool} — {reason}" }
+
+  # Note every file that lands in a drop inbox (backend=drop, allow).
+  - name: log-drops
+    on: { backend: drop, decision: allow }
+    do: { print: "📥 {peer} dropped {tool}" }
+
+  # React to a co-sign hold by nudging an on-call agent to review it.
+  # Requires --allow-exec, because it ACTS rather than merely notifies.
+  - name: escalate-cosign
+    on: { decision: cosign }
+    do:
+      run: ["air", "agent-steer", "100.64.0.5:9120",
+            "--type", "nudge",
+            "--text", "co-sign hold: {peer} wants {method} {tool}"]

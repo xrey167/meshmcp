@@ -57,6 +57,7 @@ meshmcp air map 100.x.y.z:9600       # your reachable mesh as a tree (you → ga
 meshmcp air browse 100.x.y.z:9101    # what tools/resources/prompts a backend exposes
 meshmcp air stream ./audit.jsonl     # watch governed Air activity live (tail the ledger)
 meshmcp air vision ./inbox           # images the mesh dropped here (view them on a phone via serve --gallery)
+meshmcp air bind binds.yaml --audit ./audit.jsonl   # fire governed reactions when audit records match (a la rebind)
 ```
 
 Discovery has a further horizon — **vision**, **stream**, **browse**, **computer-use**, and
