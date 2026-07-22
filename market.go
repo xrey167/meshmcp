@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"meshmcp/policy"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // The plugin marketplace (F14) is a governed exchange for signed bundle

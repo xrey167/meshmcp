@@ -134,6 +134,74 @@ func TestLeaseConcurrentTakeoverSingleWinner(t *testing.T) {
 	}
 }
 
+// TestLeaseTakeover: an identity-bound reattach takes over even a still-LIVE
+// lease (unlike AcquireLease), bumping the generation so the previous owner is
+// fenced — while still enforcing the generation CAS so exactly one of several
+// racing takers wins.
+func TestLeaseTakeover(t *testing.T) {
+	for name, s := range leaseStores(t) {
+		t.Run(name, func(t *testing.T) {
+			now := time.Unix(1000, 0)
+			// gw1 holds a live lease (long TTL — not expired).
+			l1, ok, _ := s.AcquireLease("sess", "gw1", 0, time.Hour, now)
+			if !ok {
+				t.Fatal("gw1 initial acquire should succeed")
+			}
+			// AcquireLease cannot steal the live lease...
+			if _, ok, _ := s.AcquireLease("sess", "gw2", l1.Generation, time.Minute, now.Add(time.Second)); ok {
+				t.Fatal("AcquireLease must not steal a live lease")
+			}
+			// ...but an authenticated reattach (TakeoverLease) can, fencing gw1.
+			l2, ok, _ := s.TakeoverLease("sess", "gw2", l1.Generation, time.Minute, now.Add(time.Second))
+			if !ok {
+				t.Fatal("TakeoverLease should take over a live lease on an identity-bound reattach")
+			}
+			if l2.Generation <= l1.Generation {
+				t.Fatalf("takeover must bump the generation: %d -> %d", l1.Generation, l2.Generation)
+			}
+			// gw1 is fenced; gw2 owns.
+			if ok, _ := s.SaveIfOwned(PersistedSession{ID: "sess"}, "gw1", l1.Generation); ok {
+				t.Fatal("previous owner must be fenced after takeover")
+			}
+			if ok, _ := s.SaveIfOwned(PersistedSession{ID: "sess"}, "gw2", l2.Generation); !ok {
+				t.Fatal("new owner should be able to write after takeover")
+			}
+			// A stale takeover (wrong expectedGen) must lose the CAS.
+			if _, ok, _ := s.TakeoverLease("sess", "gw3", l1.Generation, time.Minute, now.Add(2*time.Second)); ok {
+				t.Fatal("a takeover with a stale expectedGen must fail the CAS")
+			}
+		})
+	}
+}
+
+// TestLeaseConcurrentTakeoverLiveSingleWinner: many gateways racing to take over
+// the SAME still-live lease (same expectedGen) — exactly one wins, so an
+// authenticated migration can never split-brain into two owners.
+func TestLeaseConcurrentTakeoverLiveSingleWinner(t *testing.T) {
+	for name, s := range leaseStores(t) {
+		t.Run(name, func(t *testing.T) {
+			now := time.Unix(1000, 0)
+			l1, _, _ := s.AcquireLease("sess", "gw1", 0, time.Hour, now) // live, not expired
+			var winners int64
+			var wg sync.WaitGroup
+			for i := 0; i < 24; i++ {
+				wg.Add(1)
+				go func(i int) {
+					defer wg.Done()
+					owner := fmt.Sprintf("taker%d", i)
+					if _, ok, err := s.TakeoverLease("sess", owner, l1.Generation, time.Minute, now); err == nil && ok {
+						atomic.AddInt64(&winners, 1)
+					}
+				}(i)
+			}
+			wg.Wait()
+			if winners != 1 {
+				t.Fatalf("exactly one gateway may take over a live lease, got %d", winners)
+			}
+		})
+	}
+}
+
 // TestLeaseRenewAndRelease: renew extends and preserves the generation; release
 // frees the lease; both reject a wrong owner or stale generation.
 func TestLeaseRenewAndRelease(t *testing.T) {

@@ -31,6 +31,8 @@ func cmdApprovals(args []string) error {
 	fs.Var(&approvers, "approver", "identity allowed to approve (FQDN glob or 'pubkey:<key>'); repeatable; REQUIRED in mesh mode")
 	devices := fs.String("devices", "", "directory to persist push-wake device tokens (enables /v1/devices + notify on new pendings)")
 	notifyWebhook := fs.String("notify-webhook", "", "POST push-wake notifications to this URL instead of logging them (needs --devices; the endpoint fans out to APNs/FCM with its own credentials)")
+	approvalKey := fs.String("approval-key", "", "Ed25519 key file shared with the gateway; when set, /v1/approve mints signed, single-use, argument-bound approvals (must match the backend's approval_signing_key)")
+	ttlApprovalSec := fs.Int("approval-ttl", 0, "TTL in seconds for a minted request-bound approval (0 = default 5m, capped at 1h)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -59,6 +61,18 @@ func cmdApprovals(args []string) error {
 		log.Printf("push-wake enabled: devices in %s (register via POST /v1/devices; delivery: %s)", *devices, delivery)
 	} else if *notifyWebhook != "" {
 		return fmt.Errorf("meshmcp approvals: --notify-webhook requires --devices")
+	}
+	// Request-bound approvals: load the shared signing key (fail closed — a
+	// configured-but-unreadable key is a security-config error, not a fallback to
+	// the weaker ambient grant).
+	if *approvalKey != "" {
+		signer, err := policy.LoadSigner(*approvalKey)
+		if err != nil {
+			return fmt.Errorf("meshmcp approvals: --approval-key %s: %w", *approvalKey, err)
+		}
+		reqStore := policy.NewFileApprovalStore(*store, time.Duration(*ttlApprovalSec)*time.Second, signer)
+		opts = append(opts, withRequestBound(reqStore))
+		log.Printf("request-bound approvals enabled (signer %s); /v1/approve mints single-use, argument-bound tokens", signer.PubKeyHex()[:16])
 	}
 
 	// Local/dev mode: no mesh, a fixed approver identity.
@@ -108,6 +122,7 @@ func cmdApprovals(args []string) error {
 type approvalsOpts struct {
 	devices  *DeviceStore
 	notifier Notifier
+	reqStore *policy.FileApprovalStore // set: /v1/approve also mints a request-bound token
 }
 
 // approvalsOption configures approvalsHandler without breaking its callers.
@@ -117,6 +132,13 @@ type approvalsOption func(*approvalsOpts)
 // registered devices when a new approval request is recorded.
 func withPushWake(d *DeviceStore, n Notifier) approvalsOption {
 	return func(o *approvalsOpts) { o.devices, o.notifier = d, n }
+}
+
+// withRequestBound makes /v1/approve additionally mint a signed, single-use,
+// argument-bound approval (consumed by the gateway's DecideToolCallBound) for
+// the exact held call — the request-bound half of the co-sign flow.
+func withRequestBound(store *policy.FileApprovalStore) approvalsOption {
+	return func(o *approvalsOpts) { o.reqStore = store }
 }
 
 // approvalsHandler builds the approver HTTP surface. approver resolves the
@@ -130,6 +152,11 @@ func approvalsHandler(ps *policy.FilePending, approver func(*http.Request) strin
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/v1/pending", func(w http.ResponseWriter, r *http.Request) {
+		// Enumerating every held request is approver-only state.
+		if authorized != nil && !authorized(r) {
+			http.Error(w, "forbidden: not an authorized approver", http.StatusForbidden)
+			return
+		}
 		list, err := ps.List()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -152,13 +179,54 @@ func approvalsHandler(ps *policy.FilePending, approver func(*http.Request) strin
 				return
 			}
 			r.Body = http.MaxBytesReader(w, r.Body, 64<<10) // bound the request body
-			var body struct{ Peer, Tool string }
+			var body struct {
+				Peer       string `json:"peer"`
+				Tool       string `json:"tool"`
+				ArgsHash   string `json:"args_hash"`   // echo from /v1/pending (TOCTOU guard)
+				PolicyHash string `json:"policy_hash"` // same
+			}
 			if json.NewDecoder(r.Body).Decode(&body) != nil || body.Peer == "" || body.Tool == "" {
 				http.Error(w, "peer and tool are required", http.StatusBadRequest)
 				return
 			}
 			who := approver(r)
 			if grant {
+				// Mint the request-bound approval BEFORE clearing the pending record
+				// (it holds the argument + policy binding). A configured request-bound
+				// store makes the grant argument-scoped and single-use; a failure here
+				// must fail the approval rather than silently fall back to the weaker
+				// ambient grant.
+				if opt.reqStore != nil {
+					p, ok := ps.Get(body.Peer, body.Tool)
+					if !ok || p.ArgsHash == "" {
+						http.Error(w, "no held request-bound call for this peer+tool", http.StatusConflict)
+						return
+					}
+					// TOCTOU guard: the approver must echo back the args_hash they
+					// saw in /v1/pending. If the agent submitted a new call (different
+					// args) between the approver reading /v1/pending and clicking
+					// Approve, the pending record is overwritten and the hashes diverge.
+					// Reject rather than silently mint a token for a call the human did
+					// not review. The UI passes these fields; a missing args_hash (empty)
+					// never matches a non-empty pending hash, so omission is caught too.
+					if body.ArgsHash != p.ArgsHash {
+						http.Error(w, "conflict: held call args changed since you read them — reload and re-approve", http.StatusConflict)
+						return
+					}
+					if body.PolicyHash != "" && body.PolicyHash != p.PolicyHash {
+						http.Error(w, "conflict: policy changed since you read the pending request — reload and re-approve", http.StatusConflict)
+						return
+					}
+					if _, err := opt.reqStore.Grant(p.ApprovalRequest(), who, p.PolicyHash, now()); err != nil {
+						http.Error(w, "request-bound grant failed: "+err.Error(), http.StatusInternalServerError)
+						return
+					}
+				}
+				// The ambient (peer, tool) grant is written in both the request-bound
+				// and non-request-bound paths. When reqStore is set, the engine tries
+				// DecideToolCallBound first (engine.go), so the request-bound token
+				// takes precedence; the ambient grant is only visible to /v1/status
+				// and does not widen access beyond the single-use bound token.
 				if err := policy.Grant(ps.Dir, body.Peer, body.Tool, who, now()); err != nil {
 					http.Error(w, err.Error(), http.StatusInternalServerError)
 					return
@@ -195,6 +263,11 @@ func approvalsHandler(ps *policy.FilePending, approver func(*http.Request) strin
 			http.Error(w, "peer and tool are required", http.StatusBadRequest)
 			return
 		}
+		// NOTE: /v1/request is the framework-facing "ask for approval" endpoint —
+		// a proxy (e.g. the Air web-proxy) legitimately registers a request on
+		// behalf of a named agent, so the body Peer is honored here. The security
+		// controls are downstream: approve/deny are approver-ACL gated, and a
+		// granted approval is request-bound and single-use.
 		// Fresh request: clear any stale decision, then record it pending.
 		_ = policy.Revoke(ps.Dir, body.Peer, body.Tool)
 		_ = policy.ClearDeny(ps.Dir, body.Peer, body.Tool)
@@ -238,6 +311,12 @@ func approvalsHandler(ps *policy.FilePending, approver func(*http.Request) strin
 		peer, tool := r.URL.Query().Get("peer"), r.URL.Query().Get("tool")
 		if peer == "" || tool == "" {
 			http.Error(w, "peer and tool query params are required", http.StatusBadRequest)
+			return
+		}
+		// A requester may poll only its OWN (peer, tool); an authorized approver
+		// may poll any. This prevents a peer probing another peer's approvals.
+		if authorized != nil && approver(r) != peer && !authorized(r) {
+			http.Error(w, "forbidden: not the requester or an authorized approver", http.StatusForbidden)
 			return
 		}
 		state := "unknown"
@@ -306,8 +385,10 @@ border-radius:10px;padding:10px 16px;font-size:13px;opacity:0;transition:opacity
 function toast(m){var t=document.getElementById('toast');t.textContent=m;t.classList.add('show');setTimeout(function(){t.classList.remove('show')},1800)}
 function ago(ts){var d=(Date.now()-Date.parse(ts))/1000;if(isNaN(d))return '';if(d<60)return Math.floor(d)+'s ago';if(d<3600)return Math.floor(d/60)+'m ago';return Math.floor(d/3600)+'h ago'}
 function el(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e}
-function act(peer,tool,grant){
-  fetch(grant?'/v1/approve':'/v1/deny',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({peer:peer,tool:tool})})
+function act(peer,tool,grant,p){
+  var payload={peer:peer,tool:tool};
+  if(p&&p.args_hash){payload.args_hash=p.args_hash;if(p.policy_hash)payload.policy_hash=p.policy_hash;}
+  fetch(grant?'/v1/approve':'/v1/deny',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})
    .then(function(r){return r.json()}).then(function(){toast((grant?'✓ approved ':'✗ denied ')+tool);load()})
    .catch(function(e){toast('error: '+e)});
 }
@@ -325,8 +406,8 @@ function load(){
       meta.appendChild(document.createTextNode(' · '+(p.backend||'')+' · '+ago(p.requested)));
       card.appendChild(meta);
       var row=el('div','row');
-      var ok=el('button','ok','Approve'); ok.addEventListener('click',function(){act(p.peer,p.tool,true)});
-      var no=el('button','no','Deny');    no.addEventListener('click',function(){act(p.peer,p.tool,false)});
+      var ok=el('button','ok','Approve'); ok.addEventListener('click',function(){act(p.peer,p.tool,true,p)});
+      var no=el('button','no','Deny');    no.addEventListener('click',function(){act(p.peer,p.tool,false,p)});
       row.appendChild(ok); row.appendChild(no); card.appendChild(row);
       c.appendChild(card);
     });

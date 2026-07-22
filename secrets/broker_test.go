@@ -109,3 +109,83 @@ func TestBrokerUnavailableSecret(t *testing.T) {
 		t.Fatalf("missing secret must be denied, got ok=%v reason=%q", ok, reason)
 	}
 }
+
+// TestBrokerOnlyInjectsIntoArguments: a secret marker OUTSIDE params.arguments
+// (e.g. in params.name) is left literal and never resolved — injection is
+// confined to declared argument locations, not the whole message.
+func TestBrokerOnlyInjectsIntoArguments(t *testing.T) {
+	b := testBroker(nil)
+	// Marker in params.name (not an argument) plus a real one in arguments.
+	line := []byte(`{"method":"tools/call","params":{"name":"charge {{secret:openai}}","arguments":{"k":"{{secret:openai}}"}}}`)
+	out, _, ok, reason := b.Resolve(caller(), "charge", line, nil)
+	if !ok {
+		t.Fatalf("resolve should succeed: %s", reason)
+	}
+	var msg map[string]any
+	if err := json.Unmarshal(out, &msg); err != nil {
+		t.Fatal(err)
+	}
+	params := msg["params"].(map[string]any)
+	// The name still contains the literal marker (not injected).
+	if !strings.Contains(params["name"].(string), "{{secret:openai}}") {
+		t.Fatalf("marker outside arguments must be left literal, got name=%q", params["name"])
+	}
+	// The argument value IS injected.
+	if params["arguments"].(map[string]any)["k"].(string) != "sk-abc" {
+		t.Fatalf("argument marker should be injected, got %v", params["arguments"])
+	}
+}
+
+// TestBrokerLocationBinding: a grant bound to an argument location injects only
+// there; a reference at another location is denied.
+func TestBrokerLocationBinding(t *testing.T) {
+	b := New(
+		MapStore{"tok": "SEKRET"},
+		[]Grant{{Peers: []string{"*"}, Secrets: []string{"tok"}, Locations: []string{"headers.*"}}},
+		nil,
+	)
+	c := policy.Caller{Backend: "b", Peer: "p", PeerKey: "K"}
+
+	// Allowed location.
+	ok1 := []byte(`{"params":{"name":"call","arguments":{"headers":{"Authorization":"Bearer {{secret:tok}}"}}}}`)
+	out, _, ok, reason := b.Resolve(c, "call", ok1, nil)
+	if !ok {
+		t.Fatalf("headers.Authorization should be allowed: %s", reason)
+	}
+	if !strings.Contains(string(out), "Bearer SEKRET") {
+		t.Fatalf("value not injected at allowed location: %s", out)
+	}
+
+	// Disallowed location.
+	bad := []byte(`{"params":{"name":"call","arguments":{"body":{"token":"{{secret:tok}}"}}}}`)
+	_, _, ok, reason = b.Resolve(c, "call", bad, nil)
+	if ok {
+		t.Fatal("a secret reference outside the granted location must be denied")
+	}
+	if !strings.Contains(reason, "location") {
+		t.Fatalf("reason should mention location, got %q", reason)
+	}
+}
+
+// TestBrokerNestedAndMultiple: multiple secrets across nested arguments and
+// arrays, incl. Unicode, are all injected correctly.
+func TestBrokerNestedAndMultiple(t *testing.T) {
+	b := New(
+		MapStore{"a": "AAA", "b": "BBB-üñïçödé"},
+		[]Grant{{Peers: []string{"*"}, Secrets: []string{"a", "b"}}},
+		nil,
+	)
+	c := policy.Caller{Backend: "x", Peer: "p", PeerKey: "K"}
+	line := []byte(`{"params":{"name":"t","arguments":{"list":["{{secret:a}}","x"],"obj":{"deep":{"v":"pre-{{secret:b}}-post"}}}}}`)
+	out, injected, ok, reason := b.Resolve(c, "t", line, nil)
+	if !ok {
+		t.Fatalf("resolve: %s", reason)
+	}
+	s := string(out)
+	if !strings.Contains(s, `"AAA"`) || !strings.Contains(s, "pre-BBB-üñïçödé-post") {
+		t.Fatalf("nested/multiple/unicode injection wrong: %s", s)
+	}
+	if len(injected) < 2 {
+		t.Fatalf("expected injected values reported for redaction, got %d", len(injected))
+	}
+}

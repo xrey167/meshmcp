@@ -82,18 +82,43 @@ claim the connection is held open — it is not.)
   (`Engine.SetRequestApprovals`); otherwise it falls back to the legacy ambient
   co-sign store.
 - `policy/filter.go` — the tool-call path calls `DecideToolCallBound` with the
-  backend and the actual arguments.
+  backend and the actual arguments, and records the held call's `ArgsHash` +
+  `PolicyHash` on the `Pending` record so the approver can mint a bound token.
+- `approvals.go` — with `--approval-key`, `/v1/approve` reads the held
+  `Pending` and calls `FileApprovalStore.Grant`, minting a signed, single-use,
+  argument-bound approval (`Pending.ApprovalRequest()`).
+- `serve.go` / `config.go` — the backend option `approval_signing_key` (the
+  Ed25519 key **shared** with the approver) makes the gateway
+  `SetRequestApprovals`; it is loaded fail-closed and requires `cosign_store`.
 
 Tests: `policy/approval_token_test.go` — argument binding, canonical-args
 stability, single-use, concurrent-single-winner, backend binding, TTL
 (expiry + non-disableable + clamp), signature/pinning, `0600` perms, and an
-end-to-end filter test.
+end-to-end filter test. `approvals_test.go` — the approver mints a correctly
+request-bound token from a held record (`TestApproverMintsRequestBoundApproval`)
+and fails closed with no held call. `config_test.go` — the config guard.
 
-## Not yet wired (follow-up)
+## Enabling request-bound approvals
 
-The **approver HTTP service** (`approvals.go`) still grants the legacy ambient
-`(peer, tool)` approval; granting a request-bound `ApprovalToken` (and showing
-the human the exact canonical operation) uses `FileApprovalStore.Grant`, which
-is ready but not yet connected in the CLI/UI. The enforcement primitive and the
-gateway decision path are complete and tested; the approver UI grant path is the
-remaining integration step.
+Request-bound approvals are **opt-in**. Generate one shared Ed25519 key and give
+it to both sides (the approver signs; the gateway pins its public key):
+
+```yaml
+# gateway backend
+backends:
+  - name: pay
+    stdio: ["./pay-server"]
+    cosign_store: ./cosign            # shared directory
+    approval_signing_key: ./approval.key   # shared key; fail-closed if unreadable
+    policy: { default_allow: false, rules: [ { peers: ["*"], tools: ["transfer"], allow: true, require_cosign: true } ] }
+```
+
+```sh
+# approver (e.g. on a phone-facing host), same key + directory
+meshmcp approvals --store ./cosign --approval-key ./approval.key --approver 'pubkey:<phone-key>'
+```
+
+With the key set, a `require_cosign` call is released ONLY by a signed,
+single-use token bound to its exact arguments and policy version; ambient
+`meshmcp approve` grants no longer release it. With no key configured, the
+ambient co-sign path is unchanged.

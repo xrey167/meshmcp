@@ -77,7 +77,7 @@ func NewFilter(inner io.ReadWriteCloser, caller Caller, pol *Policy, audit *Audi
 func NewFilterEngine(inner io.ReadWriteCloser, caller Caller, eng *Engine, audit *AuditLog, tracer *Tracer) *Filter {
 	r, w := io.Pipe()
 	f := &Filter{inner: inner, eng: eng, audit: audit, tracer: tracer, caller: caller,
-		labels: map[string]bool{}, outR: r, outW: w}
+		labels: map[string]bool{}, outR: r, outW: w, redactor: &Redactor{}}
 	go f.pumpInner()
 	return f
 }
@@ -393,11 +393,10 @@ func (f *Filter) handleToolCall(line []byte, tool string, id, args json.RawMessa
 			}
 			// Record injected values so the response pump can scrub them: a
 			// backend must not be able to echo an injected credential back to
-			// the agent (best-effort; see Redactor / the threat model).
+			// the agent (best-effort; see Redactor / the threat model). The
+			// redactor is created at construction, so this Add is concurrency-safe
+			// against pumpInner's Redact.
 			if len(injected) > 0 {
-				if f.redactor == nil {
-					f.redactor = &Redactor{}
-				}
 				f.redactor.Add(injected...)
 			}
 			outLine = resolved
@@ -408,9 +407,12 @@ func (f *Filter) handleToolCall(line []byte, tool string, id, args json.RawMessa
 		// Record the held request so a human (e.g. a phone on the mesh) can
 		// see and approve it — the co-sign becomes an inbox, not a silent deny.
 		if f.pending != nil {
+			// Carry the argument + policy binding so an approver can mint a
+			// request-bound approval for exactly these arguments under this policy.
 			_ = f.pending.Record(Pending{
 				Peer: f.caller.Peer, PeerKey: f.caller.PeerKey, Backend: f.caller.Backend,
 				Tool: tool, RPCID: string(id),
+				ArgsHash: canonicalArgsHash(args), PolicyHash: f.eng.PolicyHash(),
 			})
 		}
 		f.writeDenial(id, fmt.Sprintf("tool %q requires a human co-sign on the mesh: %s", tool, dec.Reason))

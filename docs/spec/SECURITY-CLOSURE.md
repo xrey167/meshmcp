@@ -568,17 +568,15 @@ co-sign path is unchanged. A gateway opts in by attaching a `FileApprovalStore`.
 
 ### Residual risk / follow-up
 
-- The **approver HTTP service** still grants the legacy ambient approval;
-  connecting it to `FileApprovalStore.Grant` (and showing the human the exact
-  canonical operation in the UI) is the remaining integration step. The
-  enforcement primitive and gateway decision path are complete and tested.
+- The approver-service grant wiring (the last mile) lands in **F-P3.2** below.
+  Now closed.
 - Spec: `docs/spec/APPROVAL-TOKEN.md`.
 
 ### Definition-of-Done item satisfied
 
 - *"Approvals are signed, short-lived, request-bound and single-use"* (the
-  enforcement primitive and gateway path; approver-UI grant wiring is the
-  documented follow-up).
+  enforcement primitive and gateway path here; end-to-end approver wiring in
+  **F-P3.2**).
 
 ### Commit
 
@@ -636,16 +634,15 @@ the lease API is additive.
 
 ### Residual risk / follow-up
 
-- The session **server** still checkpoints via unconditional `Save`; routing its
-  failover through `AcquireLease` (lease-expiry-driven takeover) and fencing
-  every backend write via `SaveIfOwned` is the remaining integration step, and
-  needs the migration tests updated for lease-gated takeover. The invariant is
-  established and enforceable at the store layer today.
+- Store-layer primitive only; the server-side wiring (checkpoints through
+  `SaveIfOwned`, fence-on-supersede, takeover-on-reattach) lands in **F-P6.1w**
+  below. Now closed.
 
 ### Definition-of-Done item satisfied
 
 - *"Two gateways cannot concurrently own the same production session"* — enforced
-  and proven at the store layer (server wiring is the documented follow-up).
+  and proven at the store layer here, then wired into the running server in
+  **F-P6.1w**.
 
 ### Commit
 
@@ -886,3 +883,455 @@ unaffected.
 ### Commit
 
 `policy: shared JSON-RPC classifier for stdio/HTTP enforcement parity`
+
+---
+
+## F-R1..R4 · Correctness defects in shipped primitives (review follow-up) — FIXED
+
+A code review found real correctness bugs in the primitives above. Each is fixed
+with a regression test.
+
+- **R1 — argument-hash integer collision.** `canonicalArgsHash` decoded numbers
+  through `float64`, so distinct integers above 2^53 (e.g. two large amounts)
+  collided to the same hash — an approval/delegation bound to one amount could
+  match another. Now decodes with `UseNumber()` (exact) and rejects trailing
+  data. Test: `TestApprovalArgsHashIntegerPrecision` (2^53+1 vs 2^53+2). Applies
+  to both approval tokens and delegation `req_hash`.
+- **R2 — redactor lazy-init data race.** `Filter.redactor` was created lazily in
+  the `Write` goroutine while `pumpInner` read it concurrently. It is now created
+  at filter construction (always non-nil); the lazy init is removed. Verified
+  under `-race`.
+- **R3 — HTTP audit not fail-closed.** The HTTP enforcer discarded audit-write
+  errors, so `audit_fail_closed` did not fail closed there. It now denies an
+  allowed `tools/call`/method when the record cannot be written and the log is
+  fail-closed, matching stdio. Test: `TestHTTPEnforcerFailsClosedOnAuditError`.
+- **R4 — audit chain linkage unverified.** `VerifySigned` recomputed hashes but
+  never compared the stored `Hash` or verified `PrevHash` linkage, so a tampered
+  record in the unsealed tail (not Merkle-covered) went undetected. It now
+  verifies, per record, that the stored hash matches the content and that
+  `PrevHash` links to the previous record — the whole chain (including the tail)
+  is validated. Tests: `TestSignedVerifyDetectsBrokenLinkage`,
+  `TestSignedVerifyDetectsTailTamper`; and `TestSignedVerifyDetectsFullRewrite`
+  now genuinely re-hashes the plain chain to prove only the signed Merkle root
+  catches an insider rewrite.
+
+### Commit
+
+`policy: fix review-found defects (arg-hash precision, redactor race, HTTP fail-closed, audit linkage)`
+
+---
+
+## F-P5.1 · Audit chain reset on gateway restart — REPRODUCED, FIXED (wired)
+
+**Severity:** High (a restart silently forks the audit chain — a second `seq 1`
+and a fresh checkpoint root in the same file — making it unverifiable).
+
+**Component:** `serve.go` (audit + checkpoint construction).
+
+**Reproduced:** Yes. `serve.go` opened the audit and checkpoint files in append
+mode but constructed the `AuditLog`/`Checkpointer` with sequence and checkpoint
+state at zero. After a restart the next record was `seq 1` again and a new
+checkpoint chain (`prev_checkpoint: ""`) began in the same file.
+
+### Fix (runtime wiring)
+
+- `seedAuditFromExisting` reads and **verifies** the existing log (`VerifyChain`)
+  and returns its tail `(seq, lastHash)`; `seedCheckpointFromExisting` returns
+  the last checkpoint's ordinal + hash. Both are wired into the shared-audit,
+  per-backend-audit, and checkpointer construction paths, calling
+  `AuditLog.SeedFrom` / `Checkpointer.SeedFrom` so a restart continues the SAME
+  chain.
+- **Fail closed:** if the existing log does not verify, startup **refuses to
+  append** (rather than silently resetting the chain).
+
+### Tests (`serve_restart_test.go`)
+
+- `TestAuditRestartContinuity` — write 4 records + a checkpoint, "restart" via
+  the seed helpers, write 4 more; the combined file verifies as one **sealed,
+  trusted** chain with 8 contiguous records, 2 checkpoints, and exactly one
+  `seq 1`.
+- `TestAuditRestartRefusesTamperedLog` — seeding refuses a tampered existing log.
+
+### Definition-of-Done item satisfied
+
+- *"Restarting a gateway does not silently break its audit chain."*
+
+### Commit
+
+`serve: seed audit + checkpoint chain from the verified tail on restart`
+
+---
+
+## F-P3.1 · Approval binding gaps + unprotected approver endpoints (review) — FIXED
+
+**Component:** `policy/approval_token.go`, `policy/engine.go`, `approvals.go`.
+
+Review follow-ups on the request-bound approval work:
+
+- **Session binding.** `bindingKey` now includes the session id, so an approval
+  for one session cannot be consumed under another. Test:
+  `TestApprovalSessionBinding`.
+- **Policy-version binding.** `ApprovalToken`/`ApprovalRequest` carry a policy
+  hash; `ConsumeApproval` rejects a token whose policy hash differs from the
+  request's (both non-empty) — an approval granted under one policy is not
+  honored after the policy changes. The engine computes and passes its policy
+  hash (`Engine.PolicyHash`, cached). Test: `TestApprovalPolicyHashBinding`.
+- **Approver endpoint protection.** `/v1/pending` (enumerating every held
+  request) is now approver-ACL-only; `/v1/status` is restricted to the requester
+  (own peer) or an authorized approver, so a peer cannot probe another's
+  approvals. `/v1/request` remains the framework-facing ask (a proxy legitimately
+  registers on behalf of a named agent); its security controls are downstream
+  (approve/deny are ACL-gated; grants are request-bound + single-use). Test:
+  `TestApprovalsEndpointsProtected`.
+
+Remaining (tracked): the approver service does not yet *grant* a request-bound
+token, and `serve.go` does not yet attach a `FileApprovalStore` — closed in
+**F-P3.2** below.
+
+### Commit
+
+`approvals: session + policy-version binding; protect pending/status endpoints`
+
+---
+
+## F-P3.2 · Request-bound approvals not wired to the approver or the gateway — FIXED (wired)
+
+**Severity:** High (the request-bound primitive and the gateway decision path
+existed, but nothing minted request-bound tokens and `serve.go` never attached a
+store — so in production a `require_cosign` call was still released by an
+**ambient** `(peer, tool)` grant, not one bound to the exact arguments. The
+hardened path was unreachable end-to-end).
+
+**Component:** `policy/pending.go`, `policy/filter.go`, `approvals.go`,
+`serve.go`, `config.go`.
+
+**Reproduced:** Yes. `Engine.SetRequestApprovals` + `DecideToolCallBound`
+consumed argument-bound approvals, but (a) `Pending` carried no argument/policy
+binding, (b) the approver's `/v1/approve` only wrote an ambient `policy.Grant`,
+and (c) no runtime path called `SetRequestApprovals`. So a gateway that opted in
+could never have a held call released (the approver's ambient grant is ignored in
+request-bound mode); a gateway that did not opt in bound approvals only to
+`(peer, tool)`.
+
+### Fix (runtime wiring, opt-in, fail-closed)
+
+- **Held call carries its binding.** `Pending` gains `ArgsHash` + `PolicyHash`;
+  the filter records `canonicalArgsHash(args)` and `Engine.PolicyHash()` on every
+  held `require_cosign` call. `Pending.ApprovalRequest()` rebuilds the exact
+  request-bound operation, so the approver never needs the raw arguments or a copy
+  of the policy.
+- **Approver mints the token.** With a shared signing key
+  (`meshmcp approvals --approval-key`), `/v1/approve` reads the held record and
+  calls `FileApprovalStore.Grant`, minting a signed, single-use approval bound to
+  the exact arguments + policy version. A grant with no held request-bound call
+  fails closed (`409`), never a silent ambient-only fallback. The ambient grant
+  is still written for backward compatibility / the `/v1/status` view.
+- **Gateway enforces it.** A new backend config `approval_signing_key` (the
+  Ed25519 key SHARED with the approver) makes `serve.go` load the key
+  **fail-closed** and call `eng.SetRequestApprovals(NewFileApprovalStore(...))`.
+  Once set, ambient co-sign no longer releases held calls — only a request-bound
+  token does. `config.go` rejects `approval_signing_key` without `cosign_store`
+  (a security-config error must fail startup).
+
+### Key model (explicit, not silent)
+
+Gateway and approver share one Ed25519 key file: the approver signs minted
+approvals; the gateway pins that public key to trust them. It is **opt-in** — with
+no `approval_signing_key` / `--approval-key`, the ambient co-sign path is
+unchanged, so no existing deployment changes behavior.
+
+### Tests
+
+- `approvals_test.go`
+  - `TestApproverMintsRequestBoundApproval` — a held call recorded as the filter
+    writes it, approved via `/v1/approve` with a request-bound store, yields a
+    token the gateway consumes for the **exact** arguments, refuses a
+    different-argument call, is single-use, and clears the pending record.
+  - `TestApproverRequestBoundNoHeldCall` — approving with no held request-bound
+    call fails closed (`409`), never an unbound grant.
+- `config_test.go`
+  - `TestConfigApprovalKeyRequiresCosignStore` — `approval_signing_key` without
+    `cosign_store` fails startup; paired, it validates.
+- Existing `policy.TestFilterRequestBoundCosignEndToEnd`,
+  `TestApprovalPolicyHashBinding`, and the approver-endpoint/ACL tests are
+  unchanged and still pass (argument, policy, single-use, and endpoint-protection
+  guarantees).
+
+### Compatibility impact
+
+None by default. The new `Pending` fields are `omitempty`; the approver option
+and the gateway config are opt-in; the ambient path is preserved when the key is
+absent.
+
+### Residual risk / follow-up
+
+- The pending file is keyed by `(peer, tool)`, so two concurrently-held calls to
+  the same tool with different arguments collapse to the latest record; the other
+  stays blocked (fail-closed) until re-requested. Keying pending by the full
+  binding is a future refinement. Logged, not silent.
+- Distributing the shared approval key across hosts is an operator concern (same
+  as any signing key); single-operator setups share one file over the mesh.
+
+### Definition-of-Done item satisfied
+
+- *"Approvals are signed, short-lived, request-bound and single-use"* — now
+  reachable end-to-end: the human approver mints the argument-bound token and the
+  gateway enforces it in place of ambient co-sign.
+
+### Commit
+
+`approvals: wire request-bound grant end-to-end (approver mints, gateway enforces)`
+
+---
+
+## F-P4.Air · Air control default-allows on empty ACL + arbitrary steer methods — FIXED (wired)
+
+**Severity:** High (any mesh peer could list and steer live sessions; a steer
+could inject arbitrary server->client methods).
+
+**Component:** `aircontrol.go`, `acl.go`, `serve.go`.
+
+**Reproduced:** Yes. The Air control endpoint gated on `acl.allows`, which
+returns true for an empty pattern list, so an unconfigured ACL admitted any
+identified mesh peer. The steer method was unrestricted.
+
+### Fix
+
+- **Default-deny:** the Air handler treats an **empty ACL as deny-all**
+  (`acl.empty()`), so an operator must explicitly allowlist steerers.
+- **Startup guard:** `serve.go` refuses to start the Air control endpoint when
+  `control.allow` is empty.
+- **Steer method allowlist:** only `notifications/*` (server->client
+  notifications) may be steered; a server->client request (`sampling/*`,
+  `roots/list`, …) or any other method is rejected and audited.
+
+### Tests (`aircontrol_test.go`)
+
+- `TestAirControlEmptyACLDeniesAll` — empty ACL ⇒ 403 on sessions and steer.
+- `TestAirControlSteerMethodAllowlist` — `sampling/createMessage`, `tools/call`,
+  `roots/list`, `initialize` all rejected. Existing Air tests updated to an
+  explicit allowlist (default-deny) and pass.
+
+### Commit
+
+`air: default-deny control ACL + steer-method allowlist`
+
+---
+
+## F-P8.2 · Secret injection regex-replaces across the whole message — FIXED
+
+**Severity:** Medium (a marker outside declared arguments could be substituted;
+injection was not bound to a declared argument location).
+
+**Component:** `secrets/broker.go`.
+
+**Reproduced:** Yes. `Resolve` ran `refRe.ReplaceAllFunc` over the entire raw
+JSON line, so a `{{secret:NAME}}` marker anywhere (method, id, params.name,
+_meta) would be resolved, and there was no argument-location binding.
+
+### Fix
+
+- Injection is **confined to `params.arguments`**: the request is parsed, and
+  markers are collected and substituted only in string values within arguments.
+  A marker anywhere else is left literal and never resolved.
+- `replaceMarkers` rebuilds the arguments value and `json.Marshal` re-escapes
+  each secret, so a value with quotes/backslashes/newlines cannot break the
+  message.
+- New `Grant.Locations` binds a grant to declared argument paths (dotted globs,
+  e.g. `headers.*`); a secret reference at a non-matching location is denied.
+
+### Tests (`secrets/broker_test.go`)
+
+- `TestBrokerOnlyInjectsIntoArguments` — a marker in `params.name` stays literal;
+  the argument marker is injected.
+- `TestBrokerLocationBinding` — allowed at `headers.*`, denied elsewhere.
+- `TestBrokerNestedAndMultiple` — nested objects/arrays, multiple secrets,
+  Unicode. Existing broker tests still pass.
+
+### Commit
+
+`secrets: inject only into declared argument locations, not whole-message regex`
+
+---
+
+## F-P4.2 · Router serves any mesh peer (confused deputy) — FIXED (caller ACL)
+
+**Severity:** High (any mesh peer could drive any upstream tool through the
+router under the router's identity).
+
+**Component:** `router.go`.
+
+**Reproduced:** Yes. `handleRouterConn` served every connecting mesh peer with no
+caller ACL.
+
+### Fix (the mission's "at minimum" for delegation)
+
+- New `RouterConfig.Allow` — a **default-deny** caller ACL (`pubkey:<key>` or FQDN
+  globs). `loadRouterConfig` **fails startup** when it is empty.
+- `handleRouterConn` derives the caller's WireGuard identity and rejects any
+  caller not on the allow list (`routerCallerAllowed`; empty ACL admits no one),
+  so the router can no longer act as an unrestricted confused deputy.
+- Example router configs updated with an `allow` list.
+
+### Tests (`router_test.go`)
+
+- `TestRouterRequiresAllowList` — config without `allow` fails to load;
+  `routerCallerAllowed` denies on empty ACL, admits a listed caller, denies an
+  unlisted one.
+- `TestRouterExampleConfigsLoad` — shipped example router configs load.
+
+### Residual risk
+
+Full tool policy at the router and signed, hop-bound delegation to upstreams
+(so upstream policy computes caller ∩ router ∩ delegation) remain the next step
+— the primitive exists (`policy/delegation.go`) and is tracked in
+`docs/spec/ROUTER-DELEGATION.md`. The caller ACL removes the open-deputy exposure.
+
+### Commit
+
+`router: default-deny caller ACL (close open confused-deputy exposure)`
+
+---
+
+## F-P6.1w · Session ownership lease wired into the running server — FIXED (wired)
+
+**Severity:** High (until wired, the CAS lease existed but the server still
+checkpointed via unconditional `Save`: two gateways could still both write — and
+thus both execute — the same session, and a superseded gateway was never fenced).
+
+**Component:** `session/server.go`, `session/store.go`.
+
+**Reproduced:** Yes. Before this change `Server.checkpoint` called
+`s.store.Save(ps)` unconditionally, so a gateway that had been superseded kept
+overwriting the new owner's persisted state.
+
+### Fix (runtime wiring)
+
+- `Server` detects a lease-capable store (`WithStore` type-asserts `LeaseStore`)
+  and records the fencing generation it holds per session (`serverSession.leaseGen`).
+- **Open (fresh session):** `attach` calls `AcquireLease(id, instance, 0, ttl, now)`
+  before pumping; a store error degrades to serving without migration rather than
+  failing the client.
+- **Reattach / failover:** `rehydrate` calls a new **`TakeoverLease`** primitive
+  *before* spawning the backend. `attach` has already verified the reattach
+  carries the session **creator's** transport identity, so this is an authorized
+  takeover: it bumps the fencing generation (fencing the previous gateway) and,
+  among racing takers, only one wins the generation CAS. A lost race fails the
+  reattach cleanly with no wasted backend spawn.
+- **Every checkpoint:** writes go through `SaveIfOwned(ps, instance, leaseGen)`.
+  When it reports the lease is no longer held, the gateway logs the supersede and
+  **yields the session** (`go s.remove`), so a fenced gateway stops serving and
+  the same session is never driven by two gateways at once.
+- `TakeoverLease` is deliberately distinct from `AcquireLease`: unlike acquire it
+  does not refuse a still-*live* lease (a client-driven migration must not wait
+  out the whole TTL), but it keeps the generation CAS so a takeover can never
+  split-brain into two owners. It is gated on a verified creator-identity
+  reattach — it is not a general lease-steal.
+
+### Tests
+
+- `session/lease_cas_test.go`
+  - `TestLeaseTakeover` — `AcquireLease` cannot steal a live lease, but an
+    identity-bound `TakeoverLease` can, bumps the generation, fences the old
+    owner, and rejects a stale-generation takeover.
+  - `TestLeaseConcurrentTakeoverLiveSingleWinner` — 24 gateways racing to take
+    over the same *live* lease: exactly one wins.
+- `session/server_lease_test.go`
+  - `TestServerCheckpointFencedAfterTakeover` — once a second gateway takes the
+    session over, the original gateway's `checkpoint` is fenced and cannot
+    overwrite the new owner's persisted state.
+- `session/migration_test.go` — `TestSessionMigratesAcrossGateways` still passes,
+  now exercising the full acquire → takeover → `SaveIfOwned` path end-to-end
+  (unchanged assertions; not weakened).
+
+### Compatibility impact
+
+None. A store that does not implement `LeaseStore` still uses the best-effort
+`Save` path. `MemStore`/`FileStore` gain `TakeoverLease`; all prior session and
+lease tests are unchanged.
+
+### Residual risk / follow-up
+
+- The lease TTL equals the session TTL and is not renewed per-checkpoint, so a
+  session served continuously past its TTL runs on a lapsed (but still owned)
+  lease; writes still succeed via owner+generation match, and takeover still
+  requires an authenticated reattach, so this is benign. Per-checkpoint renewal
+  is a cheap future refinement.
+- `FileStore`'s CAS is single-host (cross-process file lock), not distributed HA
+  — already documented on `LeaseStore`.
+
+### Definition-of-Done item satisfied
+
+- *"Two gateways cannot concurrently own the same production session"* — now
+  enforced in the running server: fresh sessions acquire, reattaches take over
+  with a fencing generation bump, and every checkpoint is lease-gated so a
+  superseded gateway is fenced out of writes and yields.
+
+### Commit
+
+`session: wire CAS ownership lease + fencing into the running server`
+
+---
+
+## F-P4.3 · Router forwards any tool for an admitted caller — FIXED (router-side policy)
+
+**Severity:** High (the default-deny caller ACL controls *who* may reach the
+router, but an admitted caller could still drive *any* upstream tool the router
+could reach — the router applied no per-call authorization before forwarding).
+
+**Component:** `router.go`.
+
+**Reproduced:** Yes. `handleRouterConn` admitted a caller by ACL and then proxied
+every upstream tool unconditionally; there was no per-`tools/call` policy check.
+
+### Fix (the mission's "at minimum": full tool policy at the router)
+
+- `RouterConfig.Policy` (optional) — a standard `policy.Policy` enforced at the
+  router. When set, `cmdRouter` builds one `policy.Engine`.
+- Every proxied `tools/call` is authorized in the proxy tool handler **before**
+  dispatch, keyed by the ORIGINAL caller's transport identity (`fqdn`, `pubKey`
+  from `peerIdentity`, never `_meta`) and the **namespaced** tool name
+  (`svca.transfer`). A non-allow decision returns an `isError` denial and the
+  call is **never dispatched upstream** (`enforce` runs before `pool.call`).
+- Router policy uses allow/deny/rate rules; a `require_cosign` rule denies at the
+  router (it is not a co-sign enforcement point). Optional — with no policy the
+  router keeps prior mesh + caller-ACL admission.
+
+This cannot widen a caller's authority (it only denies), reducing the
+confused-deputy blast radius from "any upstream tool" to exactly what the router
+policy permits — enforcement the router owns locally, with no wire-protocol
+change and no upstream changes.
+
+### Tests (`router_test.go`)
+
+- `TestRouterEnforcesToolPolicy` — an admitted caller may call `svc.ok` (allowed
+  by policy) but is denied `svc.secret`; the denied call returns an `isError`
+  result AND the upstream tool handler is never invoked (`secretCalls == 0`).
+- `TestRouterExampleConfigsLoad` — now also loads `examples/router-policy.yaml`
+  (a router with a tool policy + rate limit).
+
+### Compatibility impact
+
+None. `Policy` is optional and additive; the three internal `buildAggregate`
+call sites gain a `nil` enforcer (no enforcement) and behave exactly as before.
+
+### Residual risk / follow-up
+
+- Router-side policy covers `tools/call` (the confused-deputy tool-driving risk).
+  Resource/prompt read policy at the router is a follow-up.
+- The router has no audit sink of its own yet; denials are logged with the caller
+  identity. A hash-chained router audit (recording caller + router + tool) is a
+  follow-up.
+- The full **signed-delegation** upstream verification (per-hop `DelegationToken`
+  minted by the router, `VerifyDelegation` + `AuthorizeDelegated` at the upstream)
+  remains Labs — it needs the audience-discovery, authority-key-distribution, and
+  token-transport decisions called out in `docs/spec/ROUTER-DELEGATION.md`.
+
+### Definition-of-Done item satisfied
+
+- The router's stated minimum — *default-deny caller ACL (F-P4.2) **and** full
+  tool policy at the router before forwarding* — is now enforced end to end.
+
+### Commit
+
+`router: enforce tool policy per caller before forwarding`

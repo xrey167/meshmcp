@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -188,5 +189,178 @@ func TestApprovalsRequiresApproverACLInMeshMode(t *testing.T) {
 	err := cmdApprovals([]string{"--store", t.TempDir()})
 	if err == nil || !strings.Contains(err.Error(), "approver") {
 		t.Fatalf("expected a fail-closed startup error requiring --approver, got %v", err)
+	}
+}
+
+// TestApprovalsEndpointsProtected verifies the pending/status/request endpoints
+// are not equivalently open: enumerating pending is approver-only, status is
+// requester-or-approver, and a request is attributed to the transport identity
+// (an agent cannot forge a request as another peer).
+// TestApproverMintsRequestBoundApproval is the F-P3.2 regression: when the
+// approver is configured with the shared signing key, /v1/approve mints a
+// signed, single-use approval bound to the held call's EXACT arguments + policy
+// (read from the pending record the gateway filter wrote) — not an ambient
+// (peer, tool) grant. This is the missing runtime link between the request-bound
+// primitive and the human approver.
+func TestApproverMintsRequestBoundApproval(t *testing.T) {
+	dir := t.TempDir()
+	ps := &policy.FilePending{Dir: dir}
+
+	// The approver signs; the gateway (sharing the key) verifies. Store lives in
+	// the same directory the gateway reads.
+	signer, err := policy.GenerateSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqStore := policy.NewFileApprovalStore(dir, time.Minute, signer)
+
+	// A held require_cosign call, exactly as the gateway filter records it:
+	// carrying the requesting peer's key + the argument and policy binding.
+	args := []byte(`{"amount":10}`)
+	argsHash := policy.NewApprovalRequest("AGENTKEY", "pay", "transfer", args, "").ArgsHash
+	_ = ps.Record(policy.Pending{
+		Peer: "agent.mesh", PeerKey: "AGENTKEY", Backend: "pay", Tool: "transfer",
+		ArgsHash: argsHash, PolicyHash: "POLICYV1",
+	})
+
+	fixedNow := time.Unix(1000, 0)
+	h := approvalsHandler(ps, func(*http.Request) string { return "approver.mesh" }, nil,
+		func() time.Time { return fixedNow }, withRequestBound(reqStore))
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	// Include args_hash and policy_hash so the TOCTOU guard is satisfied.
+	post(t, ts.URL+"/v1/approve", fmt.Sprintf(
+		`{"peer":"agent.mesh","tool":"transfer","args_hash":%q,"policy_hash":"POLICYV1"}`,
+		argsHash,
+	))
+
+	// A DIFFERENT-argument call is not covered by the minted approval (test the
+	// negative first — it must not consume the real token).
+	diff := policy.ApprovalRequest{
+		PeerKey: "AGENTKEY", Backend: "pay", Tool: "transfer", PolicyHash: "POLICYV1",
+		ArgsHash: policy.NewApprovalRequest("AGENTKEY", "pay", "transfer", []byte(`{"amount":999}`), "").ArgsHash,
+	}
+	if ok, _ := reqStore.ConsumeApproval(diff, fixedNow); ok {
+		t.Fatal("a request-bound approval must not authorize a different-argument call")
+	}
+	// The EXACT held call is authorized, once (single-use). (Policy-version
+	// binding is covered separately by policy.TestApprovalPolicyHashBinding; it
+	// shares this binding key, so consuming it here would spend the single-use
+	// token before the exact-match assertion.)
+	exact := policy.ApprovalRequest{PeerKey: "AGENTKEY", Backend: "pay", Tool: "transfer", ArgsHash: argsHash, PolicyHash: "POLICYV1"}
+	if ok, reason := reqStore.ConsumeApproval(exact, fixedNow); !ok {
+		t.Fatalf("the approver-minted approval should authorize the exact held call: %s", reason)
+	}
+	if ok, _ := reqStore.ConsumeApproval(exact, fixedNow); ok {
+		t.Fatal("a request-bound approval is single-use; a replay must not be honored")
+	}
+	// The held request was cleared by the approval.
+	if _, ok := ps.Get("agent.mesh", "transfer"); ok {
+		t.Fatal("approving should have cleared the pending record")
+	}
+}
+
+// TestApproverRequestBoundNoHeldCall: with a request-bound store configured, an
+// approve for which there is no held call (no argument binding to sign) must
+// fail closed rather than mint an unbound or ambient-only grant.
+func TestApproverRequestBoundNoHeldCall(t *testing.T) {
+	dir := t.TempDir()
+	ps := &policy.FilePending{Dir: dir}
+	signer, _ := policy.GenerateSigner()
+	reqStore := policy.NewFileApprovalStore(dir, time.Minute, signer)
+
+	h := approvalsHandler(ps, func(*http.Request) string { return "approver.mesh" }, nil,
+		time.Now, withRequestBound(reqStore))
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/v1/approve", "application/json",
+		strings.NewReader(`{"peer":"ghost.mesh","tool":"transfer"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("approving with no held request-bound call should fail closed (409), got %d", resp.StatusCode)
+	}
+}
+
+// TestApproverRejectsStaleArgsHash is the M1 TOCTOU regression: when the agent
+// submits a new call (different args) between the approver reading /v1/pending
+// and clicking Approve, the pending record is overwritten. The handler must
+// reject with 409 rather than silently mint a token for the new, unreviewed call.
+func TestApproverRejectsStaleArgsHash(t *testing.T) {
+	dir := t.TempDir()
+	ps := &policy.FilePending{Dir: dir}
+	signer, _ := policy.GenerateSigner()
+	reqStore := policy.NewFileApprovalStore(dir, time.Minute, signer)
+
+	// The approver first reads the pending list and sees args A.
+	argsA := policy.NewApprovalRequest("KEY", "pay", "transfer", []byte(`{"amount":10}`), "").ArgsHash
+	_ = ps.Record(policy.Pending{
+		Peer: "agent.mesh", PeerKey: "KEY", Backend: "pay", Tool: "transfer",
+		ArgsHash: argsA, PolicyHash: "V1",
+	})
+
+	h := approvalsHandler(ps, func(*http.Request) string { return "approver.mesh" }, nil,
+		time.Now, withRequestBound(reqStore))
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	// Before the approver clicks, the agent re-requests with different args (B).
+	argsB := policy.NewApprovalRequest("KEY", "pay", "transfer", []byte(`{"amount":9999}`), "").ArgsHash
+	_ = ps.Record(policy.Pending{
+		Peer: "agent.mesh", PeerKey: "KEY", Backend: "pay", Tool: "transfer",
+		ArgsHash: argsB, PolicyHash: "V1",
+	})
+
+	// The approver submits the approve body with the stale args_hash (A).
+	resp, err := http.Post(ts.URL+"/v1/approve", "application/json",
+		strings.NewReader(fmt.Sprintf(
+			`{"peer":"agent.mesh","tool":"transfer","args_hash":%q,"policy_hash":"V1"}`,
+			argsA,
+		)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("stale args_hash should be rejected with 409 (Conflict), got %d", resp.StatusCode)
+	}
+	// No token should have been minted for either args set.
+	reqA := policy.ApprovalRequest{PeerKey: "KEY", Backend: "pay", Tool: "transfer", ArgsHash: argsA, PolicyHash: "V1"}
+	reqB := policy.ApprovalRequest{PeerKey: "KEY", Backend: "pay", Tool: "transfer", ArgsHash: argsB, PolicyHash: "V1"}
+	if ok, _ := reqStore.ConsumeApproval(reqA, time.Now()); ok {
+		t.Fatal("no token should exist for the stale args")
+	}
+	if ok, _ := reqStore.ConsumeApproval(reqB, time.Now()); ok {
+		t.Fatal("no token should exist for the new args either (the approve was rejected)")
+	}
+}
+
+func TestApprovalsEndpointsProtected(t *testing.T) {
+	dir := t.TempDir()
+	ps := &policy.FilePending{Dir: dir}
+	_ = ps.Record(policy.Pending{Peer: "victim.mesh", Backend: "pay", Tool: "wire", RPCID: "1"})
+
+	// Caller identity is "intruder.mesh"; it is NOT an authorized approver.
+	h := approvalsHandler(ps,
+		func(*http.Request) string { return "intruder.mesh" },
+		func(*http.Request) bool { return false },
+		time.Now)
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	// /v1/pending: enumerating all held requests is approver-only → 403.
+	if resp, _ := http.Get(ts.URL + "/v1/pending"); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("/v1/pending should be approver-only (403), got %d", resp.StatusCode)
+	}
+
+	// /v1/status for another peer → 403 (not the requester, not an approver).
+	if resp, _ := http.Get(ts.URL + "/v1/status?peer=victim.mesh&tool=wire"); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("polling another peer's status should be 403, got %d", resp.StatusCode)
+	}
+	// /v1/status for the caller's OWN identity → allowed.
+	if resp, _ := http.Get(ts.URL + "/v1/status?peer=intruder.mesh&tool=wire"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("polling own status should be allowed, got %d", resp.StatusCode)
 	}
 }

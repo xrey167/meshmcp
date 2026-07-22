@@ -43,11 +43,13 @@ func (f *fakeAirControl) steer(pubKey, fqdn, backend, id, method string, _ any) 
 	return nil
 }
 
-func newTestHandler(c airController, allowAll bool) http.Handler {
+func newTestHandler(c airController, allowCaller bool) http.Handler {
 	id := func(*http.Request) (string, string) { return "key1", "caller.mesh" }
-	allow := newACL(nil)
-	if !allowAll {
-		allow = newACL([]string{"pubkey:someone-else"})
+	// The Air endpoint is default-deny: allowing the caller requires an explicit
+	// ACL entry for its key; the deny case uses an ACL that does not list it.
+	allow := newACL([]string{"pubkey:someone-else"})
+	if allowCaller {
+		allow = newACL([]string{"pubkey:key1"})
 	}
 	return airControlHandler(c, id, allow, nil)
 }

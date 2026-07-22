@@ -18,6 +18,7 @@ import (
 
 	"github.com/xrey167/meshmcp/mcp"
 	"github.com/xrey167/meshmcp/mcpclient"
+	"github.com/xrey167/meshmcp/policy"
 	"github.com/xrey167/meshmcp/registry"
 )
 
@@ -30,6 +31,33 @@ type RouterConfig struct {
 	ListenPort int                 `yaml:"listen_port"`
 	Upstreams  map[string]Upstream `yaml:"upstreams"` // static: name -> one or more peer:port
 	Registry   string              `yaml:"registry"`  // dir: discover upstreams dynamically
+	// Allow lists the mesh identities permitted to use the router
+	// ("pubkey:<key>" or an FQDN glob). The router is DEFAULT-DENY: reaching its
+	// port is not enough, and an empty allow list is a startup error. This keeps
+	// the router from acting as an unrestricted confused deputy (delegated
+	// identity to upstreams is still experimental — see docs/spec/ROUTER-DELEGATION.md).
+	Allow []string `yaml:"allow"`
+	// Policy, when set, is enforced at the router on every forwarded tools/call,
+	// keyed by the ORIGINAL caller's transport identity and the namespaced tool
+	// name (e.g. "svca.transfer"). It narrows what an admitted caller may drive
+	// through the router from "any upstream tool" to exactly what the policy
+	// allows — the confused-deputy blast-radius reduction the router owns locally,
+	// independent of the (Labs) signed-delegation upstream verification. Router
+	// policy should use allow/deny/rate rules; a require_cosign rule denies here
+	// (the router is not a co-sign enforcement point). Optional; when unset the
+	// router only does mesh + caller-ACL admission (prior behavior).
+	Policy *policy.Policy `yaml:"policy"`
+}
+
+// toolEnforcer authorizes one forwarded tools/call by its namespaced name and
+// arguments, returning a non-nil error (a denial) when the router policy forbids
+// it. nil means no router-side tool policy is configured.
+type toolEnforcer func(namespacedTool string, args json.RawMessage) error
+
+// callerAllowed reports whether a caller may use the router. Default-deny: an
+// empty allow list admits no one.
+func routerCallerAllowed(allow acl, pubKey, fqdn string) bool {
+	return !allow.empty() && allow.allows(pubKey, fqdn)
 }
 
 // Upstream is a set of interchangeable replica addresses for one logical
@@ -75,6 +103,9 @@ func loadRouterConfig(path string) (*RouterConfig, error) {
 	}
 	if len(cfg.Upstreams) == 0 && cfg.Registry == "" {
 		return nil, errors.New("at least one upstream or a registry is required")
+	}
+	if len(cfg.Allow) == 0 {
+		return nil, errors.New("router requires an allow list (default-deny): set 'allow' to the mesh identities (pubkey:<key> or FQDN globs) permitted to use the router")
 	}
 	for name, up := range cfg.Upstreams {
 		if len(up.Addrs) == 0 {
@@ -137,13 +168,21 @@ func cmdRouter(args []string) error {
 	signal.Notify(sig, os.Interrupt)
 	go func() { <-sig; ln.Close() }()
 
+	allow := newACL(cfg.Allow)
+	log.Printf("router: caller allow list active (%v)", cfg.Allow)
+	var eng *policy.Engine
+	if cfg.Policy != nil {
+		eng = policy.NewEngine(cfg.Policy, func() time.Time { return time.Now() }, nil)
+		log.Printf("router: tool policy active (%d rules, default_allow=%v) — forwarded tools/call is authorized per caller",
+			len(cfg.Policy.Rules), cfg.Policy.DefaultAllow)
+	}
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			log.Println("router shutting down")
 			return nil
 		}
-		go handleRouterConn(client, conn, discover())
+		go handleRouterConn(client, conn, discover(), allow, eng)
 	}
 }
 
@@ -165,20 +204,46 @@ type dialFunc func(ctx context.Context, addr string) (net.Conn, error)
 
 // handleRouterConn serves one downstream client: it discovers every
 // upstream, presents their union, and routes calls until the client leaves.
-func handleRouterConn(client *embed.Client, conn net.Conn, upstreams map[string][]string) {
+func handleRouterConn(client *embed.Client, conn net.Conn, upstreams map[string][]string, allow acl, eng *policy.Engine) {
 	defer conn.Close()
 	ctx := context.Background()
 
 	// The end client's cryptographic mesh identity, carried through to
 	// upstreams as an "on behalf of" hint in request _meta.
 	pubKey, fqdn := peerIdentity(client, conn.RemoteAddr())
+	// Default-deny caller ACL: the router only serves explicitly-allowed mesh
+	// identities, so it cannot be used as an open confused deputy.
+	if !routerCallerAllowed(allow, pubKey, fqdn) {
+		log.Printf("router: DENIED client %s (%s) — not on the caller allow list", fqdn, conn.RemoteAddr())
+		return
+	}
 	log.Printf("router: serving client %s (%s)", fqdn, conn.RemoteAddr())
 	origin := map[string]any{"meshmcpOriginPeer": fqdn, "meshmcpOriginKey": pubKey}
+
+	// When a router policy is configured, authorize every forwarded tools/call
+	// against the ORIGINAL caller's transport identity (never _meta). This is a
+	// router-local enforcement point: it cannot be used to widen a caller's
+	// authority, only to narrow it.
+	var enforce toolEnforcer
+	if eng != nil {
+		enforce = func(namespacedTool string, _ json.RawMessage) error {
+			dec := eng.DecideToolCall(fqdn, pubKey, namespacedTool, nil)
+			if dec.Outcome != policy.OutcomeAllow {
+				reason := dec.Reason
+				if reason == "" {
+					reason = "not permitted by router policy"
+				}
+				log.Printf("router: DENY tool %q for %s (%s): %s", namespacedTool, fqdn, pubKey, reason)
+				return fmt.Errorf("router policy denies %q: %s", namespacedTool, reason)
+			}
+			return nil
+		}
+	}
 
 	dial := func(ctx context.Context, addr string) (net.Conn, error) {
 		return client.Dial(ctx, "tcp", addr)
 	}
-	s, cleanup := buildAggregate(ctx, dial, upstreams, origin)
+	s, cleanup := buildAggregate(ctx, dial, upstreams, origin, enforce)
 	defer cleanup()
 	_ = s.Serve(ctx, conn, conn)
 }
@@ -386,7 +451,7 @@ func (p *upstreamPool) runHealth(stop <-chan struct{}) {
 // name; resources keyed by URI, first owner wins). Calls are load-balanced
 // and failed over across replicas; upstream notifications are forwarded to
 // the client and origin identity is stamped into every request's _meta.
-func buildAggregate(ctx context.Context, dial dialFunc, upstreams map[string][]string, origin map[string]any) (*mcp.Server, func()) {
+func buildAggregate(ctx context.Context, dial dialFunc, upstreams map[string][]string, origin map[string]any, enforce toolEnforcer) (*mcp.Server, func()) {
 	s := mcp.New("meshmcp-router", "0.1.0")
 	var pools []*upstreamPool
 	seenURI := map[string]bool{}
@@ -414,7 +479,7 @@ func buildAggregate(ctx context.Context, dial dialFunc, upstreams map[string][]s
 		}
 		if tools, err := uc.ListTools(ctx); err == nil {
 			for _, t := range tools {
-				registerProxyTool(s, name, t, pool)
+				registerProxyTool(s, name, t, pool, enforce)
 			}
 		}
 		if res, err := uc.ListResources(ctx); err == nil {
@@ -448,16 +513,25 @@ func buildAggregate(ctx context.Context, dial dialFunc, upstreams map[string][]s
 	}
 }
 
-func registerProxyTool(s *mcp.Server, ns string, t mcpclient.Tool, pool *upstreamPool) {
+func registerProxyTool(s *mcp.Server, ns string, t mcpclient.Tool, pool *upstreamPool, enforce toolEnforcer) {
 	var schema map[string]any
 	if len(t.InputSchema) > 0 {
 		_ = json.Unmarshal(t.InputSchema, &schema)
 	}
+	namespaced := ns + "." + t.Name
 	s.AddTool(mcp.Tool{
-		Name:        ns + "." + t.Name,
+		Name:        namespaced,
 		Description: t.Description,
 		InputSchema: schema,
 		Handler: func(ctx context.Context, args json.RawMessage) (mcp.ToolResult, error) {
+			// Authorize against the router's own policy BEFORE forwarding, so an
+			// admitted caller can drive only the tools the router permits — never
+			// the full upstream surface.
+			if enforce != nil {
+				if err := enforce(namespaced, args); err != nil {
+					return mcp.ToolResult{}, err
+				}
+			}
 			raw, err := pool.call(ctx, "tools/call", map[string]any{"name": t.Name, "arguments": args})
 			if err != nil {
 				return mcp.ToolResult{}, err

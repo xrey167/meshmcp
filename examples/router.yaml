@@ -13,3 +13,8 @@ upstreams:
   fleet:                                           # replica set (load-balanced + failover)
     - "100.81.215.9:9102"
     - "100.81.215.9:9103"
+
+# The router is DEFAULT-DENY: list the mesh identities allowed to use it
+# ("pubkey:<key>" or FQDN globs). An empty allow list is a startup error.
+allow:
+  - "*.netbird.cloud"   # replace with the specific callers permitted to use the router

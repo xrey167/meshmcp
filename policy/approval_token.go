@@ -1,12 +1,14 @@
 package policy
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -31,11 +33,21 @@ const (
 // identical arguments hash equally regardless of key order or insignificant
 // whitespace; arrays keep their order. Non-JSON bytes are hashed as-is.
 func canonicalArgsHash(args []byte) string {
+	// Decode with UseNumber so numbers stay exact (as json.Number/string) rather
+	// than being coerced through float64 — otherwise distinct integers above 2^53
+	// (e.g. two different large amounts) would collide to the same value and an
+	// approval for one could authorize another.
+	dec := json.NewDecoder(bytes.NewReader(args))
+	dec.UseNumber()
 	var v any
-	if len(args) > 0 && json.Unmarshal(args, &v) == nil {
-		if canon, err := json.Marshal(v); err == nil {
-			sum := sha256.Sum256(canon)
-			return hex.EncodeToString(sum[:])
+	if len(args) > 0 && dec.Decode(&v) == nil {
+		// Reject trailing data so two concatenated documents can't canonicalize
+		// to the same hash as one.
+		if _, err := dec.Token(); err == io.EOF {
+			if canon, err := json.Marshal(v); err == nil {
+				sum := sha256.Sum256(canon)
+				return hex.EncodeToString(sum[:])
+			}
 		}
 	}
 	sum := sha256.Sum256(args)
@@ -49,7 +61,10 @@ type ApprovalRequest struct {
 	Backend  string
 	Tool     string
 	ArgsHash string
-	Session  string // optional session id
+	Session  string // optional session id — bound into the approval when set
+	// PolicyHash, when set on both the request and the token, must match: an
+	// approval granted under one policy version is not honored under another.
+	PolicyHash string
 }
 
 // NewApprovalRequest builds a request from a caller, tool, and raw arguments.
@@ -64,7 +79,7 @@ func NewApprovalRequest(peerKey, backend, tool string, args []byte, session stri
 // arguments yields a different key, so an approval for one operation cannot be
 // found for another.
 func (r ApprovalRequest) bindingKey() string {
-	h := sha256.Sum256([]byte(r.PeerKey + "\x00" + r.Backend + "\x00" + r.Tool + "\x00" + r.ArgsHash))
+	h := sha256.Sum256([]byte(r.PeerKey + "\x00" + r.Backend + "\x00" + r.Tool + "\x00" + r.ArgsHash + "\x00" + r.Session))
 	return hex.EncodeToString(h[:])
 }
 
@@ -93,7 +108,7 @@ func (t ApprovalToken) signingBytes() []byte {
 }
 
 func (t ApprovalToken) request() ApprovalRequest {
-	return ApprovalRequest{PeerKey: t.PeerKey, Backend: t.Backend, Tool: t.Tool, ArgsHash: t.ArgsHash, Session: t.Session}
+	return ApprovalRequest{PeerKey: t.PeerKey, Backend: t.Backend, Tool: t.Tool, ArgsHash: t.ArgsHash, Session: t.Session, PolicyHash: t.PolicyHash}
 }
 
 // RequestApprovalStore atomically consumes a single-use, argument-bound
@@ -166,8 +181,33 @@ func (s *FileApprovalStore) Grant(req ApprovalRequest, approver, policyHash stri
 	tok.PubKey = s.signer.PubKeyHex()
 	tok.Sig = hex.EncodeToString(ed25519.Sign(s.signer.priv, tok.signingBytes()))
 	b, _ := json.MarshalIndent(tok, "", "  ")
-	// 0600: an approval is a bearer-ish authorization; restrict it.
-	if err := os.WriteFile(s.file(req.bindingKey()), b, 0o600); err != nil {
+	// Atomic write: Grant and ConsumeApproval can race — ConsumeApproval does
+	// an os.Rename (atomic) which can steal a partially-written file and read
+	// garbled bytes, leaving the approval spent but unverifiable ("approval
+	// malformed"). Write to a sibling .tmp file, sync, then rename into place
+	// so there is no partial-write window for the consumer to hit.
+	dst := s.file(req.bindingKey())
+	tmp := dst + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return ApprovalToken{}, err
+	}
+	if _, werr := f.Write(b); werr != nil {
+		f.Close()
+		_ = os.Remove(tmp)
+		return ApprovalToken{}, werr
+	}
+	if serr := f.Sync(); serr != nil {
+		f.Close()
+		_ = os.Remove(tmp)
+		return ApprovalToken{}, serr
+	}
+	if cerr := f.Close(); cerr != nil {
+		_ = os.Remove(tmp)
+		return ApprovalToken{}, cerr
+	}
+	if err = os.Rename(tmp, dst); err != nil {
+		_ = os.Remove(tmp)
 		return ApprovalToken{}, err
 	}
 	return tok, nil
@@ -222,9 +262,16 @@ func (s *FileApprovalStore) ConsumeApproval(req ApprovalRequest, now time.Time) 
 		return false, "operation was explicitly denied"
 	}
 	// Defense in depth: the token's own fields must match the request (the
-	// filename already binds them, this catches tampering/collisions).
+	// filename already binds peer/backend/tool/args/session; this catches
+	// tampering/collisions).
 	if tok.request().bindingKey() != req.bindingKey() {
 		return false, "approval does not match this request"
+	}
+	// Policy binding: when both the token and the request carry a policy hash,
+	// they must match — an approval granted under one policy version is not
+	// honored after the policy changes.
+	if req.PolicyHash != "" && tok.PolicyHash != "" && tok.PolicyHash != req.PolicyHash {
+		return false, "policy changed since the approval was granted"
 	}
 	if now.Unix() > tok.ExpiresAt {
 		return false, "approval expired"

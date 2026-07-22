@@ -63,12 +63,25 @@ audience — a first-hop token does not carry over.
   tests for forged origin, wrong backend/audience/router, changed args, expiry
   (+ lifetime cap), replay, nested hops, compromised-router-widening, and the
   intersection in both directions.
-- **Not yet wired (follow-up):** the router does not yet mint tokens per hop, and
-  upstreams do not yet call `VerifyDelegation` + `AuthorizeDelegated` in the
-  proxy path. Until that lands, router aggregation and federation remain
-  **experimental / Labs** (see the capability matrix). The minimum interim
-  hardening — a **default-deny caller ACL** on the router and applying full tool
-  policy at the router before forwarding — is tracked with the wiring.
+- **Interim router hardening — WIRED:** the router is default-deny on a caller
+  ACL (`routerCallerAllowed`), and — when a `policy:` block is configured — it now
+  **applies full tool policy at the router before forwarding**. Every proxied
+  `tools/call` is authorized against the ORIGINAL caller's transport identity and
+  the namespaced tool name; a denied call is refused at the router and never
+  dispatched upstream (`router.go`, `TestRouterEnforcesToolPolicy`,
+  `examples/router-policy.yaml`). This reduces the confused-deputy blast radius
+  from "any upstream tool" to exactly what the router policy permits — enforcement
+  the router owns locally, with no wire-protocol change.
+- **Signed-delegation upstream verification — still Labs (follow-up):** the router
+  does not yet mint per-hop `DelegationToken`s, and upstreams do not yet call
+  `VerifyDelegation` + `AuthorizeDelegated` in the proxy path. That step still
+  needs three decisions the primitive does not settle: (a) how the router learns
+  each upstream's **audience** identity, (b) where the trusted **authority signing
+  key** lives and how it is distributed, and (c) the **wire transport** for the
+  token (a signed `_meta` field, never trusted as identity). Until it lands,
+  cross-identity federation to upstreams remains **experimental / Labs** (see the
+  capability matrix); the router-side policy above is the enforced guarantee
+  today.
 
 ## Audit
 

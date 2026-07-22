@@ -1,6 +1,9 @@
 package policy
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"path"
 	"strconv"
@@ -165,6 +168,20 @@ type Engine struct {
 
 	mu      sync.Mutex
 	buckets map[string]*bucket // key: ruleID|peerKey
+
+	phOnce sync.Once
+	ph     string // cached policy hash
+}
+
+// PolicyHash returns a stable hash of the active policy, used to bind a
+// request-approval to the policy version in force when it was granted.
+func (e *Engine) PolicyHash() string {
+	e.phOnce.Do(func() {
+		b, _ := json.Marshal(e.pol)
+		sum := sha256.Sum256(b)
+		e.ph = hex.EncodeToString(sum[:])
+	})
+	return e.ph
 }
 
 // SetRequestApprovals attaches a request-bound approval store. When set,
@@ -272,7 +289,7 @@ func (e *Engine) decideTool(peerFQDN, peerKey, backend, tool string, args []byte
 			// Request-bound approvals (preferred): a signed, single-use approval
 			// bound to these exact arguments and backend. Consume atomically.
 			if bound && e.reqApprovals != nil {
-				req := ApprovalRequest{PeerKey: peerKey, Backend: backend, Tool: tool, ArgsHash: canonicalArgsHash(args)}
+				req := ApprovalRequest{PeerKey: peerKey, Backend: backend, Tool: tool, ArgsHash: canonicalArgsHash(args), PolicyHash: e.PolicyHash()}
 				if ok, _ := e.reqApprovals.ConsumeApproval(req, now); ok {
 					return Decision{Allow: true, RuleID: i, Outcome: OutcomeAllow,
 						Reason: "request-bound co-sign consumed", AddLabels: r.emitSet(), Cost: ruleCost(r)}
