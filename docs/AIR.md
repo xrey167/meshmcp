@@ -72,7 +72,16 @@ then discovers the gateway: it follows the TXT pointer (leg 2) when present, oth
 falls back to the SRV record (leg 3), builds the well-known catalog URL from the resolved
 host:port, and fetches it over the mesh. meshmcp doesn't run DNS (`air dns` only prints
 records for the operator to publish), and the pointer is a public-ish record — the catalog
-it points to is still mesh-only and identity-gated (`airdns.go`).
+it points to is still mesh-only and identity-gated.
+
+**Module layout.** Air's portable, mesh-independent core — the catalog model
+(`Catalog`/`CatalogEntry`), the steer envelope, and the ARD record generation + resolution
+(with input validation that refuses zone-record injection) — lives in the
+[`air`](../air) package (`air/catalog.go`, `air/discovery.go`, `air/steer.go`), with its own
+tests (`air/discovery_test.go`). The command-line and HTTP wiring that binds those to a live
+mesh — the `air` CLI verbs, the served page, and the gateway control endpoint's per-caller
+filtering — lives in the main package and imports `air`. So the reusable Air model can be
+tested and evolved on its own, independent of the mesh, policy, and session layers.
 
 ### Drop
 ```bash
