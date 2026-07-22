@@ -222,6 +222,7 @@ the session ones) wrap the same commands the way `drop_file` wraps `drop`:
 
 | Tool | Status | Wraps | Assistant can say |
 |---|---|---|---|
+| `air_catalog` | ships | `GET /.well-known/ai-catalog.json` → `air.FetchCatalog` | "What backends can I reach here?" |
 | `air_sessions` | ships | `GET /v1/sessions` → `Server.Sessions()` | "List the live sessions." |
 | `air_steer` | ships | `POST /v1/steer` → `Server.Steer` | "Steer session 9f2a on fs to re-read customer 42." |
 | `air_tasks` | ships | `mcpclient.ListTasks` | "What tasks are running on the analyst?" |
