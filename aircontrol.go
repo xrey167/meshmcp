@@ -62,6 +62,9 @@ func airControlHandler(c airController, identify func(*http.Request) (pubkey, fq
 	mux.HandleFunc(airCatalogPath, func(w http.ResponseWriter, r *http.Request) {
 		pubKey, fqdn := identify(r)
 		if pubKey == "" && fqdn == "" {
+			if audit != nil {
+				audit(airSteerAudit{Peer: fqdnOr(fqdn), PeerKey: pubKey, Method: "air/catalog", OK: false})
+			}
 			http.Error(w, "unidentified mesh peer", http.StatusForbidden)
 			return
 		}

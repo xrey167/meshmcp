@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"net"
 	"strings"
 	"testing"
 )
@@ -82,5 +83,67 @@ func TestResolveCatalogURL(t *testing.T) {
 	// No ARD record among the results is an error, not a silent empty.
 	if _, err := resolveCatalogURL(func(string) ([]string, error) { return []string{"v=spf1 -all"}, nil }, "x"); err == nil {
 		t.Fatal("missing ARD record should error")
+	}
+}
+
+// TestResolveCatalogSRV covers SRV resolution: the highest-priority target's
+// host:port is returned, and empty/"." targets and lookup errors are rejected.
+func TestResolveCatalogSRV(t *testing.T) {
+	var askedSvc, askedProto, askedName string
+	lookup := func(service, proto, name string) (string, []*net.SRV, error) {
+		askedSvc, askedProto, askedName = service, proto, name
+		return "", []*net.SRV{
+			{Target: "gateway.netbird.cloud.", Port: 9600, Priority: 0, Weight: 5},
+			{Target: "backup.netbird.cloud.", Port: 9600, Priority: 10, Weight: 5},
+		}, nil
+	}
+	host, port, err := resolveCatalogSRV(lookup, "mesh.example.com")
+	if err != nil || host != "gateway.netbird.cloud" || port != 9600 {
+		t.Fatalf("srv resolve = %q:%d err=%v", host, port, err)
+	}
+	if askedSvc != "air" || askedProto != "tcp" || askedName != "mesh.example.com" {
+		t.Fatalf("looked up wrong SRV: %s/%s/%s", askedSvc, askedProto, askedName)
+	}
+
+	// No records is an error.
+	if _, _, err := resolveCatalogSRV(func(string, string, string) (string, []*net.SRV, error) {
+		return "", nil, nil
+	}, "x"); err == nil {
+		t.Fatal("empty SRV set should error")
+	}
+	// A "." target (RFC 2782 "not available") is rejected.
+	if _, _, err := resolveCatalogSRV(func(string, string, string) (string, []*net.SRV, error) {
+		return "", []*net.SRV{{Target: ".", Port: 0}}, nil
+	}, "x"); err == nil {
+		t.Fatal(`"." SRV target should be rejected`)
+	}
+}
+
+// TestResolveCatalogPrefersTXTThenSRV proves the combined resolver uses the TXT
+// pointer when present, falls back to SRV when TXT is absent, and errors when
+// neither answers.
+func TestResolveCatalogPrefersTXTThenSRV(t *testing.T) {
+	txtOK := func(string) ([]string, error) {
+		return []string{"v=ard1; catalog=http://100.64.0.2:9600/.well-known/ai-catalog.json"}, nil
+	}
+	txtMissing := func(string) ([]string, error) { return []string{"v=spf1 -all"}, nil }
+	srvOK := func(string, string, string) (string, []*net.SRV, error) {
+		return "", []*net.SRV{{Target: "gateway.netbird.cloud.", Port: 9600}}, nil
+	}
+	srvNone := func(string, string, string) (string, []*net.SRV, error) { return "", nil, nil }
+
+	// TXT present → via TXT, full URL from the record.
+	u, via, err := resolveCatalog(txtOK, srvNone, "d")
+	if err != nil || via != "TXT" || u != "http://100.64.0.2:9600/.well-known/ai-catalog.json" {
+		t.Fatalf("TXT path: %q via=%q err=%v", u, via, err)
+	}
+	// TXT absent → fall back to SRV, URL built from host:port.
+	u, via, err = resolveCatalog(txtMissing, srvOK, "d")
+	if err != nil || via != "SRV" || u != "http://gateway.netbird.cloud:9600/.well-known/ai-catalog.json" {
+		t.Fatalf("SRV fallback: %q via=%q err=%v", u, via, err)
+	}
+	// Neither → error.
+	if _, _, err := resolveCatalog(txtMissing, srvNone, "d"); err == nil {
+		t.Fatal("no TXT and no SRV should error")
 	}
 }

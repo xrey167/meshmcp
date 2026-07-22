@@ -68,10 +68,11 @@ counterpart to Air's drive verbs (`aircatalog.go`).
 domain*, `meshmcp air dns <domain> --control <mesh-ip:port>` prints the DNS records to
 publish — a `_catalog._agents.<domain>` TXT pointing at the well-known catalog URL and an
 `_air._tcp.<domain>` SRV for the control endpoint. `meshmcp air catalog --resolve <domain>`
-then follows the TXT record to the catalog and fetches it over the mesh. meshmcp doesn't
-run DNS (`air dns` only prints records for the operator to publish), and the pointer is a
-public-ish record — the catalog it points to is still mesh-only and identity-gated
-(`airdns.go`).
+then discovers the gateway: it follows the TXT pointer (leg 2) when present, otherwise
+falls back to the SRV record (leg 3), builds the well-known catalog URL from the resolved
+host:port, and fetches it over the mesh. meshmcp doesn't run DNS (`air dns` only prints
+records for the operator to publish), and the pointer is a public-ish record — the catalog
+it points to is still mesh-only and identity-gated (`airdns.go`).
 
 ### Drop
 ```bash
