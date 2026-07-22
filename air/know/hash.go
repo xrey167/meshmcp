@@ -11,6 +11,9 @@
 //   - S4 (audit.go) the knowledge-ops audit vocabulary: canonical verbs and
 //     constructors that build correctly-shaped policy.AuditRecords, so ingest,
 //     recall, and loop control-flow land on one verifiable chain.
+//   - S6 (envelope.go) the untrusted-content envelope + trust-weighting: fences
+//     retrieved/ingested content as DATA before it enters a prompt, and weights
+//     knowledge by the asserting Peer identity, never by self-asserted confidence.
 package know
 
 import (
