@@ -364,3 +364,48 @@ func TestApprovalsEndpointsProtected(t *testing.T) {
 		t.Fatalf("polling own status should be allowed, got %d", resp.StatusCode)
 	}
 }
+
+// TestApprovalsRequesterACL proves POST /v1/request is gated by the requester
+// predicate when set: a permitted caller registers a pending, a non-permitted
+// caller is refused (403) and records nothing.
+func TestApprovalsRequesterACL(t *testing.T) {
+	dir := t.TempDir()
+	ps := &policy.FilePending{Dir: dir}
+
+	// A predicate that admits only requests carrying header X-Test-Ok: yes.
+	mayRequest := func(r *http.Request) bool { return r.Header.Get("X-Test-Ok") == "yes" }
+	h := approvalsHandler(ps, func(*http.Request) string { return "approver.mesh" }, nil, time.Now,
+		withRequesterACL(mayRequest))
+
+	// Denied requester → 403, nothing pending.
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/request", strings.NewReader(`{"peer":"victim.mesh","tool":"delete_all"}`))
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("unlisted requester = %d, want 403", rr.Code)
+	}
+	if list, _ := ps.List(); len(list) != 0 {
+		t.Fatalf("a refused request must not be recorded: %+v", list)
+	}
+
+	// Permitted requester → 200, pending recorded.
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/request", strings.NewReader(`{"peer":"agent.mesh","tool":"charge"}`))
+	req.Header.Set("X-Test-Ok", "yes")
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("permitted requester = %d, want 200: %s", rr.Code, rr.Body)
+	}
+	list, _ := ps.List()
+	if len(list) != 1 || list[0].Peer != "agent.mesh" || list[0].Tool != "charge" {
+		t.Fatalf("permitted request not recorded: %+v", list)
+	}
+
+	// With no predicate (nil), any caller may register (backward-compatible).
+	open := approvalsHandler(&policy.FilePending{Dir: t.TempDir()}, func(*http.Request) string { return "a" }, nil, time.Now)
+	rr = httptest.NewRecorder()
+	open.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/request", strings.NewReader(`{"peer":"p","tool":"t"}`)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("open /v1/request = %d, want 200", rr.Code)
+	}
+}

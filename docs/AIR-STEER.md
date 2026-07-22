@@ -331,10 +331,14 @@ audited mesh call, never a backdoor. (Agent-target steer and launch are CLI verb
   ledger records who steered/launched what, when — provable with the public key alone.
 - **Relay-attested web attribution.** The served Air page (`airserve.go`) is a mesh peer that
   proxies steers to the control endpoint. It resolves the *browser's own* mesh identity and
-  forwards it as `X-Air-On-Behalf`, which the control endpoint honours **only because the proxy
-  is itself ACL-allowed** — so a receipt shows the human who clicked, with the relay recorded in
-  the `Reason` for chain-of-custody. This is relay-attested, not a cryptographic binding: it is
-  as strong as trusting the air-serve node, which the mesh already admits.
+  forwards it as `X-Air-On-Behalf`, which the control endpoint honours **only when the proxy is
+  named in a dedicated `control.on_behalf_allow` list** — a list separate from `control.allow`,
+  so an ordinary allowed caller cannot forge attribution, and one that **fails closed**: with no
+  `on_behalf_allow` entry, no header is honoured and the receipt attributes the verified
+  connecting peer. A receipt then shows the human who clicked, with the relay recorded in the
+  `Reason` for chain-of-custody (and the attested browser key, if sent, kept in `Reason` as a
+  labelled claim — never in the verified `PeerKey`). This is relay-attested, not a cryptographic
+  binding: it is as strong as trusting the air-serve node the operator explicitly listed.
 - **ACL'd inbox.** An agent's steer port admits only allow-listed senders (`acl.go`,
   `examples/drop.yaml` `allow:`), and `--steer-audit` records one hash-chained audit
   record per delivered envelope.

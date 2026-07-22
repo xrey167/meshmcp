@@ -212,3 +212,13 @@ not json
 		t.Fatalf("unexpected tail: %v", recs)
 	}
 }
+
+// TestAirServeControlRequiresAllow proves the relay refuses to expose the
+// privileged (confused-deputy) endpoints without an --allow list naming who may
+// drive them — so no arbitrary mesh peer can steer/push with the relay's key.
+func TestAirServeControlRequiresAllow(t *testing.T) {
+	err := cmdAirServe([]string{"--control", "100.64.0.2:9600"})
+	if err == nil || !strings.Contains(err.Error(), "--allow") {
+		t.Fatalf("air serve --control without --allow must fail closed, got: %v", err)
+	}
+}

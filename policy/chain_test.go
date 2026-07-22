@@ -109,3 +109,33 @@ func TestChainResumesAcrossRestart(t *testing.T) {
 		t.Fatalf("expected 5 records across restart, got %d", res.Count)
 	}
 }
+
+// TestAuditClampsOversizedFields proves a caller-influenced field (Tool/Method/
+// RPCID) is bounded before hashing, so one peer sending a multi-megabyte tool
+// name cannot produce a record that exceeds the verifier's 16 MiB line cap and
+// render the whole chain unverifiable.
+func TestAuditClampsOversizedFields(t *testing.T) {
+	var buf bytes.Buffer
+	a := NewAuditLog(&buf, func() string { return "T" })
+	huge := strings.Repeat("A", 20<<20) // 20 MiB, larger than the verifier's line cap
+	if err := a.write(AuditRecord{
+		Backend: "kg", Peer: "p", Method: huge, Tool: huge, RPCID: huge,
+		Decision: "deny", Rule: -1,
+	}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	// A normal follow-up record extends the chain.
+	if err := a.write(AuditRecord{Backend: "kg", Peer: "p", Method: "tools/call", Tool: "read_file", Decision: "allow", Rule: 0}); err != nil {
+		t.Fatalf("write 2: %v", err)
+	}
+	if buf.Len() > 1<<20 {
+		t.Fatalf("clamped record still too large: %d bytes", buf.Len())
+	}
+	res, err := VerifyChain(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("verify must still succeed on a clamped record: %v", err)
+	}
+	if !res.OK || res.Count != 2 {
+		t.Fatalf("chain should verify with 2 records: %+v", res)
+	}
+}

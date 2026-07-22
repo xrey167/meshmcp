@@ -287,22 +287,35 @@ func recvOne(br *bufio.Reader, place placer, hdr dropHeader) (recvInfo, error) {
 	return recvInfo{Name: hdr.Name, SHA256: got, Bytes: hdr.Size, Path: dest}, nil
 }
 
-// copyFile is the cross-filesystem fallback for os.Rename.
+// copyFile is the cross-filesystem fallback for os.Rename. It writes to a fresh
+// temp file in the destination's own directory and renames it into place, so it
+// never opens dst directly with O_TRUNC — which would FOLLOW a symlink planted
+// at dst and truncate/overwrite the link's target (a write outside the drop
+// dir). os.Rename replaces a symlink atomically with the real file instead.
 func copyFile(src, dst string, mode os.FileMode) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	tmp, err := os.CreateTemp(filepath.Dir(dst), ".copy-*")
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op after a successful rename
+	if _, err := io.Copy(tmp, in); err != nil {
+		tmp.Close()
 		return err
 	}
-	return out.Close()
+	if err := tmp.Chmod(mode); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, dst)
 }
 
 // sanitizeDest resolves name against dir and rejects any path that is absolute

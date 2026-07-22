@@ -103,6 +103,28 @@ func clientFetch(t *testing.T, addr, hash, dest string) error {
 	if err := json.NewEncoder(conn).Encode(fetchReq{Hash: hash}); err != nil {
 		return err
 	}
-	_, err = fetchBlob(conn, hash, dest)
+	_, err = fetchBlob(conn, hash, dest, defaultFetchMaxBytes)
 	return err
+}
+
+// TestFetchBlobRejectsOversizedDeclaredSize proves the fetcher refuses a
+// peer-declared blob size larger than the cap before streaming any bytes, so a
+// malicious holder cannot fill the requester's disk ahead of the hash check.
+func TestFetchBlobRejectsOversizedDeclaredSize(t *testing.T) {
+	// A response claiming a huge size, followed by no payload.
+	resp, _ := json.Marshal(fetchResp{Found: true, Size: 1 << 40}) // 1 TiB
+	r := bytes.NewReader(append(resp, '\n'))
+	dest := filepath.Join(t.TempDir(), "out.bin")
+	_, err := fetchBlob(r, "deadbeef", dest, 256<<20)
+	if err == nil {
+		t.Fatal("fetchBlob must reject an over-cap declared size")
+	}
+	if _, statErr := os.Stat(dest); statErr == nil {
+		t.Fatal("no destination file should be written when the size is rejected")
+	}
+	// A negative size is also rejected.
+	respNeg, _ := json.Marshal(fetchResp{Found: true, Size: -1})
+	if _, err := fetchBlob(bytes.NewReader(append(respNeg, '\n')), "deadbeef", dest, 256<<20); err == nil {
+		t.Fatal("fetchBlob must reject a negative declared size")
+	}
 }

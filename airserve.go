@@ -288,7 +288,18 @@ func cmdAirServe(args []string) error {
 	if *addr != "" {
 		d := airServeDeps{peers: func() ([]airPeerRow, error) { return nil, nil }}
 		fmt.Fprintf(os.Stderr, "Air (live) on http://%s (LOCAL — no mesh; peers/sessions unavailable)\n", *addr)
-		return http.ListenAndServe(*addr, airServeHandler(d))
+		return newLocalHTTPServer(*addr, airServeHandler(d)).ListenAndServe()
+	}
+
+	// The privileged endpoints (steer/sessions via --control, push, drop) act
+	// with THIS relay's mesh identity: any browser that reaches them borrows
+	// the relay's authority. So they are exposed only when --allow names who
+	// may use them — the viewer gate then admits only those identities. Without
+	// --allow the page is read-only (peers + receipts), never a confused deputy
+	// letting an arbitrary mesh peer steer sessions or drop files as the relay.
+	privileged := len(allow) > 0
+	if *control != "" && !privileged {
+		return fmt.Errorf("air serve: --control requires --allow (the browsers permitted to steer/push through this relay); without it any mesh peer could act with the relay's identity")
 	}
 
 	o.BlockInbound = false // we listen for browsers on the mesh
@@ -304,14 +315,6 @@ func cmdAirServe(args []string) error {
 		// The browser is itself a mesh peer; resolve its WireGuard identity so
 		// steers it drives are attributed to the human, not this relay.
 		identify: func(r *http.Request) (string, string) { return peerIdentityStr(client, r.RemoteAddr) },
-		// Push/Drop send over THIS relay's mesh identity (the receiver's ACL and
-		// audit see the air-serve node); the browser identity is the page viewer.
-		push: func(ctx context.Context, target, name string, data []byte) error {
-			pr, pw := io.Pipe()
-			go func() { pw.CloseWithError(sendData(pw, name, data)) }()
-			dial := func(ctx context.Context) (net.Conn, error) { return client.Dial(ctx, "tcp", target) }
-			return session.NewClient(dial, log.Printf).Run(ctx, sendStream{r: pr})
-		},
 		peers: func() ([]airPeerRow, error) {
 			st, err := client.Status()
 			if err != nil {
@@ -334,6 +337,17 @@ func cmdAirServe(args []string) error {
 			return rows, nil
 		},
 	}
+	// Push/Drop send over THIS relay's mesh identity (the receiver's ACL and
+	// audit see the air-serve node; the browser identity is the allow-listed
+	// page viewer). Enabled only when --allow gates who may drive the relay.
+	if privileged {
+		d.push = func(ctx context.Context, target, name string, data []byte) error {
+			pr, pw := io.Pipe()
+			go func() { pw.CloseWithError(sendData(pw, name, data)) }()
+			dial := func(ctx context.Context) (net.Conn, error) { return client.Dial(ctx, "tcp", target) }
+			return session.NewClient(dial, log.Printf).Run(ctx, sendStream{r: pr})
+		}
+	}
 	if *control != "" {
 		d.controlBase = "http://air-control"
 		d.controlHC = &http.Client{
@@ -355,5 +369,7 @@ func cmdAirServe(args []string) error {
 	}
 	defer ln.Close()
 	fmt.Fprintf(os.Stderr, "Air (live) on mesh port %d (open it from any device on the mesh)\n", *port)
-	return http.Serve(ln, airServeHandler(d))
+	// Read/header timeouts even on the mesh: any admitted peer could otherwise
+	// dribble headers forever and exhaust the listener (Slowloris).
+	return newLocalHTTPServer("", airServeHandler(d)).Serve(ln)
 }

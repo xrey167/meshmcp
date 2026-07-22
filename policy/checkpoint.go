@@ -151,16 +151,27 @@ func (c *Checkpointer) flushLocked(toSeq int, chainHead string) {
 	cp = c.signer.sign(cp)
 	b, err := json.Marshal(cp)
 	if err != nil {
+		// The checkpoint could not be produced. Do NOT advance prevCP or clear
+		// the leaves: rolling the state forward here would drop this batch from
+		// all signed-checkpoint coverage and link the next checkpoint's PrevCP
+		// to one absent from the file. Retain the batch so the next flush
+		// retries exactly these records, keeping coverage contiguous.
+		c.cpSeq--
 		c.reportErr(fmt.Errorf("checkpoint marshal: %w", err))
-	} else {
-		b = append(b, '\n')
-		if n, werr := c.w.Write(b); werr != nil || n != len(b) {
-			if werr == nil {
-				werr = io.ErrShortWrite
-			}
-			c.reportErr(fmt.Errorf("checkpoint write: %w", werr))
-		}
+		return
 	}
+	b = append(b, '\n')
+	if n, werr := c.w.Write(b); werr != nil || n != len(b) {
+		if werr == nil {
+			werr = io.ErrShortWrite
+		}
+		c.cpSeq--
+		c.reportErr(fmt.Errorf("checkpoint write: %w", werr))
+		return
+	}
+	// The checkpoint is durably written; the anchor is a best-effort external
+	// witness, so an anchor failure is reported but does not un-commit the
+	// checkpoint that already landed in the file.
 	if c.anchor != nil {
 		if aerr := c.anchor.Anchor(cp); aerr != nil {
 			c.reportErr(fmt.Errorf("checkpoint anchor: %w", aerr))

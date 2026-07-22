@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"sort"
@@ -102,6 +103,13 @@ func cmdAgent(args []string) error {
 	// Steer-enabled agents must also accept inbound mesh connections (the
 	// default dialMCP path is outbound-only), so they join the mesh directly.
 	if *steerPort > 0 {
+		// The steer inbox lets a peer inject tool calls that run under THIS
+		// agent's identity (borrowed authority), so it is default-deny like the
+		// gateway control endpoint: an empty allow-list is a startup error, not
+		// "any mesh peer". Name who may steer with --steer-allow.
+		if len(steerAllow) == 0 {
+			return fmt.Errorf("meshmcp agent: --steer-port requires at least one --steer-allow identity (the steer inbox runs tool calls under this agent's identity; it is deny-by-default)")
+		}
 		return runSteerableAgent(o, target, steps, *count, *interval, *steerPort, steerAllow, *steerAudit, logf)
 	}
 
@@ -124,17 +132,20 @@ func runSteerableAgent(o *meshOptions, target string, steps []agentStep, count i
 	}
 	defer stopMesh(client)
 
-	// One audit record per delivered steer envelope (the drop receiver's
-	// audit wiring, applied to the steer inbox).
-	var audit *policy.AuditLog
+	// One audit record per delivered steer envelope. A steer runs a tool call
+	// under this agent's identity, so it is ALWAYS recorded (to --steer-audit
+	// when given, else stderr) — an injected instruction must never be
+	// unattributable, regardless of whether a file sink was configured.
+	var auditW io.Writer = os.Stderr
 	if auditPath != "" {
 		f, err := os.OpenFile(auditPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		if err != nil {
 			return fmt.Errorf("open steer audit log %s: %w", auditPath, err)
 		}
 		defer f.Close()
-		audit = policy.NewAuditLog(f, func() string { return time.Now().UTC().Format(time.RFC3339) })
+		auditW = f
 	}
+	audit := policy.NewAuditLog(auditW, func() string { return time.Now().UTC().Format(time.RFC3339) })
 
 	conn, err := client.Dial(context.Background(), "tcp", target)
 	if err != nil {

@@ -230,10 +230,19 @@ func cmdServe(args []string) error {
 		ctl := &gatewayAirControl{servers: servers, acls: backendACLs, mu: &serversMu}
 		identify := func(r *http.Request) (string, string) { return peerIdentityStr(client, r.RemoteAddr) }
 		allow := newACL(cfg.Control.Allow)
-		h := airControlHandler(ctl, identify, allow, airAuditFunc(sharedAudit))
-		log.Printf("Air control endpoint on mesh port %d (GET /v1/sessions · POST /v1/steer)", cfg.Control.Port)
+		// Dedicated proxy allow list for X-Air-On-Behalf attestation; empty ⇒
+		// no peer may attest (attribution stays the verified connecting peer).
+		onBehalfAllow := newACL(cfg.Control.OnBehalfAllow)
+		h := airControlHandler(ctl, identify, allow, onBehalfAllow, airAuditFunc(sharedAudit))
+		obNote := ""
+		if len(cfg.Control.OnBehalfAllow) > 0 {
+			obNote = fmt.Sprintf(" · on-behalf proxies: %v", cfg.Control.OnBehalfAllow)
+		}
+		log.Printf("Air control endpoint on mesh port %d (GET /v1/sessions · POST /v1/steer)%s", cfg.Control.Port, obNote)
 		wg.Add(1)
-		go func() { defer wg.Done(); _ = http.Serve(ln, h) }()
+		// Read/header timeouts: a mesh peer must not be able to hold the control
+		// listener open with a slow/half-open request (Slowloris).
+		go func() { defer wg.Done(); _ = newLocalHTTPServer("", h).Serve(ln) }()
 	}
 
 	sig := make(chan os.Signal, 1)
@@ -740,7 +749,10 @@ func serveHTTP(client *embed.Client, b *Backend, ln net.Listener, enf *httpEnfor
 		proxy.ServeHTTP(w, r)
 	})
 
-	srv := &http.Server{Handler: handler}
+	// ReadHeaderTimeout bounds a slow/half-open header dribble (Slowloris)
+	// without a Read/Write timeout that would sever legitimate long-lived SSE
+	// streams or large uploads this reverse proxy must pass through.
+	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 	if err := srv.Serve(ln); err != nil &&
 		!errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
 		log.Printf("backend %q: serve: %v", b.Name, err)

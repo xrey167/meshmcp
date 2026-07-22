@@ -61,6 +61,12 @@ type Config struct {
 type ControlConfig struct {
 	Port  int      `yaml:"port"`  // mesh port to serve the control endpoint on
 	Allow []string `yaml:"allow"` // identities permitted to list/steer (FQDN globs or pubkey:<key>); required (default-deny — empty is a startup error)
+	// OnBehalfAllow lists the proxy identities (the air-serve relay) permitted
+	// to attest an X-Air-On-Behalf browser identity for audit attribution. It
+	// is deliberately SEPARATE from Allow so a general allowed caller cannot
+	// forge attribution, and it fails closed: empty ⇒ no peer may attest, so
+	// receipts stay attributed to the verified connecting peer.
+	OnBehalfAllow []string `yaml:"on_behalf_allow"`
 }
 
 // TraceConfig turns on a gateway-wide trace of every MCP message (both
