@@ -21,6 +21,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/xrey167/meshmcp/air"
 	"github.com/xrey167/meshmcp/policy"
 	"github.com/xrey167/meshmcp/session"
 )
@@ -364,17 +365,21 @@ func (sendStream) Close() error                 { return nil }
 func cmdDrop(args []string) error {
 	fs := flag.NewFlagSet("drop", flag.ExitOnError)
 	o := meshFlags(fs)
+	control := fs.String("control", "", "sender: Air control gateway used to resolve a Nearby name, FQDN, or full public key")
 	cfgPath := fs.String("config", "", "run a drop receiver from this config file (instead of sending)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *cfgPath != "" {
+		if *control != "" {
+			return errors.New("drop: --control is only valid when sending")
+		}
 		return dropReceive(*cfgPath)
 	}
 	if fs.NArg() < 2 {
-		return errors.New("usage: meshmcp drop [flags] <peer-ip:port> <file...>   (or: meshmcp drop --config drop.yaml)")
+		return errors.New("usage: meshmcp drop [flags] <target> <file...>   (use --control <gateway> for a Nearby selector; or: meshmcp drop --config drop.yaml)")
 	}
-	target := fs.Arg(0)
+	targetRef := fs.Arg(0)
 	files := fs.Args()[1:]
 	for _, f := range files {
 		if _, err := os.Stat(f); err != nil {
@@ -388,6 +393,10 @@ func cmdDrop(args []string) error {
 		return err
 	}
 	defer stopMesh(client)
+	target, err := resolveAirTargetOverMesh(context.Background(), client, targetRef, *control, air.ServiceInbox)
+	if err != nil {
+		return fmt.Errorf("drop: %w", err)
+	}
 
 	pr, pw := io.Pipe()
 	go func() { pw.CloseWithError(sendFiles(pw, files)) }()

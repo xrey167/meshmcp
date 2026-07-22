@@ -19,9 +19,10 @@ type Dialer func(ctx context.Context) (net.Conn, error)
 // session server, transparently reconnecting and resyncing whenever the
 // transport drops.
 type Client struct {
-	dial Dialer
-	logf func(string, ...any)
-	ep   *endpoint
+	dial      Dialer
+	logf      func(string, ...any)
+	ep        *endpoint
+	drainWait time.Duration
 }
 
 // NewClient creates a session client. logf may be nil.
@@ -30,9 +31,10 @@ func NewClient(dial Dialer, logf func(string, ...any)) *Client {
 		logf = func(string, ...any) {}
 	}
 	return &Client{
-		dial: dial,
-		logf: logf,
-		ep:   newEndpoint(sessionID{}), // id assigned by the server on first ATTACH_OK
+		dial:      dial,
+		logf:      logf,
+		ep:        newEndpoint(sessionID{}), // id assigned by the server on first ATTACH_OK
+		drainWait: drainTimeout,
 	}
 }
 
@@ -47,6 +49,7 @@ func (c *Client) Run(ctx context.Context, local io.ReadWriteCloser) error {
 			n, err := local.Read(buf)
 			if n > 0 {
 				if serr := c.ep.Send(buf[:n]); serr != nil {
+					c.ep.closeWith(serr)
 					return
 				}
 			}
@@ -57,7 +60,10 @@ func (c *Client) Run(ctx context.Context, local io.ReadWriteCloser) error {
 				// unread in our receive buffer turns the close into a TCP
 				// RST, which can discard our in-flight DATA/CLOSE frames in
 				// the peer's receive buffer (a drop then never finalizes).
-				c.awaitDrain()
+				if derr := c.awaitDrain(); derr != nil {
+					c.ep.closeWith(derr)
+					return
+				}
 				c.ep.sendClose()
 				return
 			}
@@ -95,7 +101,7 @@ func (c *Client) reconnectLoop(ctx context.Context) error {
 
 	for {
 		if c.ep.isClosed() {
-			return c.ep.closeErr
+			return c.ep.closeError()
 		}
 		if err := ctx.Err(); err != nil {
 			c.ep.closeWith(err)
@@ -105,12 +111,16 @@ func (c *Client) reconnectLoop(ctx context.Context) error {
 		conn, recv, r, err := c.handshake(ctx)
 		if err != nil {
 			if c.ep.isClosed() {
-				return c.ep.closeErr
+				return c.ep.closeError()
 			}
 			c.logf("session: reconnect failed: %v (retrying in %s)", err, backoff)
-			if !sleepCtx(ctx, backoff) {
-				c.ep.closeWith(ctx.Err())
-				return ctx.Err()
+			if !sleepCtx(ctx, c.ep.Done(), backoff) {
+				if c.ep.isClosed() {
+					return c.ep.closeError()
+				}
+				err := ctx.Err()
+				c.ep.closeWith(err)
+				return err
 			}
 			backoff = nextBackoff(backoff, maxBackoff)
 			continue
@@ -127,7 +137,7 @@ func (c *Client) reconnectLoop(ctx context.Context) error {
 		// fresh reader would discard it.
 		err = c.ep.pumpReader(conn, r, gen)
 		if c.ep.isClosed() {
-			return c.ep.closeErr
+			return c.ep.closeError()
 		}
 		if errors.Is(err, errRebound) {
 			continue
@@ -145,6 +155,20 @@ func (c *Client) handshake(ctx context.Context) (net.Conn, uint64, *bufio.Reader
 	if err != nil {
 		return nil, 0, nil, err
 	}
+	// Until bind installs conn on the endpoint, closeWith cannot reach it. A
+	// silent or protocol-incompatible peer could otherwise hold readFrame until
+	// the long idle deadline even after the caller or finite-send drain expired.
+	watchDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-c.ep.Done():
+			_ = conn.Close()
+		case <-watchDone:
+		}
+	}()
+	defer close(watchDone)
 	_ = conn.SetDeadline(time.Now().Add(idleTimeout))
 
 	w := bufio.NewWriter(conn)
@@ -177,15 +201,46 @@ func (c *Client) handshake(ctx context.Context) (net.Conn, uint64, *bufio.Reader
 // acknowledge all sent data before closing the transport anyway.
 const drainTimeout = 10 * time.Second
 
+var (
+	errDrainTimeout = errors.New("session: peer did not acknowledge sent data before close timeout")
+	errDrainClosed  = errors.New("session: peer closed before acknowledging sent data")
+)
+
 // awaitDrain blocks until every sent DATA frame is acknowledged, the session
-// ends, or drainTimeout passes — whichever comes first.
-func (c *Client) awaitDrain() {
-	deadline := time.Now().Add(drainTimeout)
-	for !c.ep.drained() && time.Now().Before(deadline) {
+// ends, or the bounded drain wait passes. An unacknowledged timeout is an
+// error: callers must never report a one-shot Push/Drop/Ring as delivered when
+// no receiver accepted its transport frames.
+func (c *Client) awaitDrain() error {
+	if c.ep.drained() {
+		return nil
+	}
+	wait := c.drainWait
+	if wait <= 0 {
+		wait = drainTimeout
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
 		select {
 		case <-c.ep.Done():
-			return
-		case <-time.After(10 * time.Millisecond):
+			if c.ep.drained() {
+				return nil
+			}
+			if err := c.ep.closeError(); err != nil {
+				return err
+			}
+			return errDrainClosed
+		case <-timer.C:
+			if c.ep.drained() {
+				return nil
+			}
+			return errDrainTimeout
+		case <-tick.C:
+			if c.ep.drained() {
+				return nil
+			}
 		}
 	}
 }
@@ -217,11 +272,13 @@ func nextBackoff(cur, max time.Duration) time.Duration {
 	return next - next/10 + j
 }
 
-func sleepCtx(ctx context.Context, d time.Duration) bool {
+func sleepCtx(ctx context.Context, done <-chan struct{}, d time.Duration) bool {
 	t := time.NewTimer(d)
 	defer t.Stop()
 	select {
 	case <-ctx.Done():
+		return false
+	case <-done:
 		return false
 	case <-t.C:
 		return true

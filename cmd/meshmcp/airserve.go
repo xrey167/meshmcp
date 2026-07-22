@@ -6,6 +6,7 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -27,8 +28,16 @@ import (
 //go:embed site/air-live.html
 var airLiveHTML []byte
 
-// maxAirUpload bounds a browser Drop/Push payload accepted by the served page.
-const maxAirUpload = 8 << 20
+const (
+	// maxAirUpload bounds a browser Drop/Push payload accepted by the served page.
+	maxAirUpload = 8 << 20
+	// maxAirActionJSON bounds small control requests such as Ring before their
+	// stricter domain validation runs.
+	maxAirActionJSON = 64 << 10
+	// maxAirMultipart admits one maxAirUpload file plus bounded multipart
+	// boundaries and form fields. The file itself is checked separately.
+	maxAirMultipart = maxAirUpload + maxAirActionJSON
+)
 
 // airServeDeps are the injectable dependencies of the served Air page, so the
 // handler is testable with httptest (no mesh).
@@ -39,6 +48,7 @@ type airServeDeps struct {
 	controlBase string                                    // base URL for the control endpoint (empty = sessions/steer disabled)
 
 	push         func(ctx context.Context, target, name string, data []byte) error // deliver a payload to a peer's drop inbox (nil = push/drop disabled)
+	ring         func(ctx context.Context, target string, notice air.Notice) error // deliver an attention notice to a peer's ring inbox (nil = disabled)
 	receipts     func(limit int) ([]json.RawMessage, error)                        // tail of the local audit ledger (nil = receipts disabled)
 	gallery      func(limit int) ([]galleryImage, error)                           // images that landed in a drop inbox — the Vision view (nil = disabled)
 	image        func(name string) (data []byte, contentType string, err error)    // read one gallery image, path-safe (nil = disabled)
@@ -54,7 +64,8 @@ type airServeDeps struct {
 }
 
 // airServeHandler builds the live Air page + its /api surface: proxied
-// sessions/steer, relay-sent push/drop, a receipts tail, and an approvals link.
+// sessions/steer, relay-sent push/drop/ring, a receipts tail, and an approvals
+// link.
 func airServeHandler(d airServeDeps) http.Handler {
 	mux := http.NewServeMux()
 	registerAgentOSAssets(mux)
@@ -75,6 +86,7 @@ func airServeHandler(d airServeDeps) http.Handler {
 		writeJSONResp(w, http.StatusOK, map[string]any{
 			"approvals": d.approvals,
 			"push":      d.push != nil,
+			"ring":      d.ring != nil,
 			"receipts":  d.receipts != nil,
 			"vision":    d.gallery != nil,
 			"cast":      d.cast != nil,
@@ -184,13 +196,23 @@ func airServeHandler(d airServeDeps) http.Handler {
 			http.Error(w, "push is not enabled on this page", http.StatusServiceUnavailable)
 			return
 		}
-		var body struct{ Target, Name, Text string }
-		if json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAirUpload)).Decode(&body) != nil || body.Target == "" || body.Text == "" {
-			http.Error(w, "target and text are required", http.StatusBadRequest)
+		var body struct {
+			Target    string `json:"target"`
+			Recipient string `json:"recipient"`
+			Name      string `json:"name"`
+			Text      string `json:"text"`
+		}
+		if status, err := decodeAirJSON(w, r, &body, maxAirUpload); err != nil {
+			http.Error(w, err.Error(), status)
 			return
 		}
-		if !validMeshTarget(body.Target) {
-			http.Error(w, "target must be a mesh host:port", http.StatusBadRequest)
+		if body.Text == "" {
+			http.Error(w, "text is required", http.StatusBadRequest)
+			return
+		}
+		target, status, err := d.resolveActionTarget(r, body.Target, body.Recipient, air.ServiceInbox)
+		if err != nil {
+			http.Error(w, err.Error(), status)
 			return
 		}
 		// Base-sanitize the sender-supplied name (the receiver re-checks, but the
@@ -199,11 +221,11 @@ func airServeHandler(d airServeDeps) http.Handler {
 		if name == "" || name == "." || name == string(filepath.Separator) {
 			name = "clip.txt"
 		}
-		if err := d.push(r.Context(), body.Target, name, []byte(body.Text)); err != nil {
+		if err := d.push(r.Context(), target, name, []byte(body.Text)); err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
-		writeJSONResp(w, http.StatusOK, map[string]string{"status": "pushed", "target": body.Target, "name": name})
+		writeJSONResp(w, http.StatusOK, map[string]string{"status": "pushed", "target": target, "name": name})
 	})
 
 	mux.HandleFunc("/api/drop", func(w http.ResponseWriter, r *http.Request) {
@@ -215,25 +237,36 @@ func airServeHandler(d airServeDeps) http.Handler {
 			http.Error(w, "drop is not enabled on this page", http.StatusServiceUnavailable)
 			return
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, maxAirUpload)
+		r.Body = http.MaxBytesReader(w, r.Body, maxAirMultipart)
 		if err := r.ParseMultipartForm(maxAirUpload); err != nil {
+			var tooLarge *http.MaxBytesError
+			if errors.As(err, &tooLarge) {
+				http.Error(w, fmt.Sprintf("upload request exceeds %d bytes", maxAirMultipart), http.StatusRequestEntityTooLarge)
+				return
+			}
 			http.Error(w, "bad upload: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		target := r.FormValue("target")
+		targetInput := r.FormValue("target")
+		recipient := r.FormValue("recipient")
 		file, hdr, err := r.FormFile("file")
-		if target == "" || err != nil {
-			http.Error(w, "target and file are required", http.StatusBadRequest)
-			return
-		}
-		if !validMeshTarget(target) {
-			http.Error(w, "target must be a mesh host:port", http.StatusBadRequest)
+		if err != nil {
+			http.Error(w, "file is required", http.StatusBadRequest)
 			return
 		}
 		defer file.Close()
-		data, err := io.ReadAll(io.LimitReader(file, maxAirUpload))
+		target, status, err := d.resolveActionTarget(r, targetInput, recipient, air.ServiceInbox)
+		if err != nil {
+			http.Error(w, err.Error(), status)
+			return
+		}
+		data, err := io.ReadAll(io.LimitReader(file, maxAirUpload+1))
 		if err != nil {
 			http.Error(w, "read upload: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if len(data) > maxAirUpload {
+			http.Error(w, fmt.Sprintf("file exceeds %d bytes", maxAirUpload), http.StatusRequestEntityTooLarge)
 			return
 		}
 		name := filepath.Base(hdr.Filename)
@@ -245,6 +278,47 @@ func airServeHandler(d airServeDeps) http.Handler {
 			return
 		}
 		writeJSONResp(w, http.StatusOK, map[string]any{"status": "dropped", "target": target, "name": name, "bytes": len(data)})
+	})
+
+	mux.HandleFunc("/api/ring", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		if d.ring == nil {
+			http.Error(w, "ring is not enabled on this page", http.StatusServiceUnavailable)
+			return
+		}
+		var body struct {
+			Target    string `json:"target"`
+			Recipient string `json:"recipient"`
+			Message   string `json:"message"`
+			Priority  string `json:"priority"`
+		}
+		if status, err := decodeAirJSON(w, r, &body, maxAirActionJSON); err != nil {
+			http.Error(w, err.Error(), status)
+			return
+		}
+		notice := air.Notice{
+			Kind: air.NoticeRing, Message: body.Message, Priority: body.Priority,
+		}
+		if err := notice.Validate(); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		notice = notice.Normalized()
+		target, status, err := d.resolveActionTarget(r, body.Target, body.Recipient, air.ServiceRing)
+		if err != nil {
+			http.Error(w, err.Error(), status)
+			return
+		}
+		if err := d.ring(r.Context(), target, notice); err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		writeJSONResp(w, http.StatusOK, map[string]string{
+			"status": "rung", "target": target, "priority": notice.Priority,
+		})
 	})
 
 	mux.HandleFunc("/api/receipts", func(w http.ResponseWriter, r *http.Request) {
@@ -442,15 +516,73 @@ func getOnly(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
+// decodeAirJSON decodes one bounded JSON object and rejects trailing values.
+// Callers receive 413 for a size violation and 400 for malformed JSON.
+func decodeAirJSON(w http.ResponseWriter, r *http.Request, dst any, limit int64) (int, error) {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
+	if err := dec.Decode(dst); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return http.StatusRequestEntityTooLarge, fmt.Errorf("request body exceeds %d bytes", limit)
+		}
+		return http.StatusBadRequest, fmt.Errorf("invalid JSON body")
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return http.StatusRequestEntityTooLarge, fmt.Errorf("request body exceeds %d bytes", limit)
+		}
+		return http.StatusBadRequest, fmt.Errorf("request body must contain one JSON object")
+	}
+	return 0, nil
+}
+
+// resolveActionTarget keeps explicit host:port compatibility while making a
+// logical recipient a fail-closed lookup in the browser-attributed Presence
+// directory. A failed selector is never retried as a raw address.
+func (d airServeDeps) resolveActionTarget(r *http.Request, target, recipient string, kind air.ServiceKind) (string, int, error) {
+	target = strings.TrimSpace(target)
+	recipient = strings.TrimSpace(recipient)
+	if target != "" && recipient != "" {
+		return "", http.StatusBadRequest, fmt.Errorf("target and recipient are mutually exclusive")
+	}
+	if target != "" {
+		if !validMeshTarget(target) {
+			return "", http.StatusBadRequest, fmt.Errorf("target must be a mesh host:port")
+		}
+		return target, 0, nil
+	}
+	if recipient == "" {
+		return "", http.StatusBadRequest, fmt.Errorf("target or recipient is required")
+	}
+	if d.controlBase == "" || d.controlHC == nil {
+		return "", http.StatusServiceUnavailable, fmt.Errorf("presence resolver is not configured")
+	}
+	cards, err := d.loadPresence(r)
+	if err != nil {
+		return "", http.StatusBadGateway, fmt.Errorf("presence resolver unavailable: %w", err)
+	}
+	resolved, err := air.ResolvePresence(cards, recipient, kind)
+	if err != nil {
+		return "", http.StatusBadRequest, err
+	}
+	if !validMeshTarget(resolved.Service.Address) {
+		return "", http.StatusBadGateway, fmt.Errorf("presence resolver returned an invalid %s address", kind)
+	}
+	return resolved.Service.Address, 0, nil
+}
+
 // validMeshTarget reports whether target is a well-formed mesh host:port — a
-// syntactic guard so the relay's push/drop cannot be pointed at garbage (and,
-// with a bad port, at an unintended local service).
+// syntactic guard so the relay's push/drop/ring cannot be pointed at garbage
+// (and, with a bad port, at an unintended local service).
 func validMeshTarget(target string) bool {
 	host, port, err := net.SplitHostPort(target)
 	if err != nil || host == "" || port == "" {
 		return false
 	}
-	if _, err := strconv.Atoi(port); err != nil {
+	p, err := strconv.Atoi(port)
+	if err != nil || p < 1 || p > 65535 {
 		return false
 	}
 	return true
@@ -551,30 +683,46 @@ func (d airServeDeps) assembleHome(r *http.Request) air.Home {
 	return h
 }
 
-// relayPresence fetches identity-stamped Air cards with browser attribution,
-// returning nil (an empty section) on any gateway or decoding failure.
-func (d airServeDeps) relayPresence(r *http.Request) []air.Presence {
+// loadPresence fetches one bounded, browser-attributed Presence snapshot. It is
+// shared by Home and action-time logical recipient resolution.
+func (d airServeDeps) loadPresence(r *http.Request) ([]air.Presence, error) {
+	if d.controlBase == "" || d.controlHC == nil {
+		return nil, fmt.Errorf("no control endpoint configured")
+	}
 	req, _ := http.NewRequestWithContext(r.Context(), http.MethodGet, d.controlBase+"/v1/presence", nil)
 	d.attest(req, r)
 	resp, err := d.controlHC.Do(req)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil
+		return nil, fmt.Errorf("presence endpoint returned %s", resp.Status)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPresenceListBytes+1))
-	if err != nil || len(body) > maxPresenceListBytes {
-		return nil
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxPresenceListBytes {
+		return nil, fmt.Errorf("presence response exceeds %d bytes", maxPresenceListBytes)
 	}
 	var out struct {
 		Presence []air.Presence `json:"presence"`
 	}
-	if json.Unmarshal(body, &out) != nil {
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("invalid presence response: %w", err)
+	}
+	return out.Presence, nil
+}
+
+// relayPresence fetches identity-stamped Air cards with browser attribution,
+// returning nil (an empty section) on any gateway or decoding failure.
+func (d airServeDeps) relayPresence(r *http.Request) []air.Presence {
+	cards, err := d.loadPresence(r)
+	if err != nil {
 		return nil
 	}
-	return out.Presence
+	return cards
 }
 
 // relaySessions fetches the gateway's live sessions with browser attestation,
@@ -709,15 +857,15 @@ func cmdAirServe(args []string) error {
 		return newLocalHTTPServer(*addr, airServeHandler(d)).ListenAndServe()
 	}
 
-	// The privileged endpoints (steer/sessions via --control, push, drop) act
+	// The privileged endpoints (steer/sessions via --control, push, drop, ring) act
 	// with THIS relay's mesh identity: any browser that reaches them borrows
 	// the relay's authority. So they are exposed only when --allow names who
 	// may use them — the viewer gate then admits only those identities. Without
 	// --allow the page is read-only (peers + receipts), never a confused deputy
-	// letting an arbitrary mesh peer steer sessions or drop files as the relay.
+	// letting an arbitrary mesh peer steer sessions or send actions as the relay.
 	privileged := len(allow) > 0
 	if *control != "" && !privileged {
-		return fmt.Errorf("air serve: --control requires --allow (the browsers permitted to steer/push through this relay); without it any mesh peer could act with the relay's identity")
+		return fmt.Errorf("air serve: --control requires --allow (the browsers permitted to steer or resolve actions through this relay); without it any mesh peer could act with the relay's identity")
 	}
 
 	o.BlockInbound = false // we listen for browsers on the mesh
@@ -783,7 +931,7 @@ func cmdAirServe(args []string) error {
 			PubKey: shortKey(st.LocalPeerState.PubKey),
 		}
 	}
-	// Push/Drop send over THIS relay's mesh identity (the receiver's ACL and
+	// Push/Drop/Ring send over THIS relay's mesh identity (the receiver's ACL and
 	// audit see the air-serve node; the browser identity is the allow-listed
 	// page viewer). Enabled only when --allow gates who may drive the relay.
 	if privileged {
@@ -796,6 +944,9 @@ func cmdAirServe(args []string) error {
 			go func() { pw.CloseWithError(sendData(pw, name, data)) }()
 			dial := func(ctx context.Context) (net.Conn, error) { return client.Dial(ctx, "tcp", target) }
 			return session.NewClient(dial, log.Printf).Run(ctx, sendStream{r: pr})
+		}
+		d.ring = func(ctx context.Context, target string, notice air.Notice) error {
+			return sendNotice(ctx, client, target, notice)
 		}
 	}
 	if *control != "" {

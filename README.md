@@ -275,11 +275,11 @@ Watch it live with `meshmcp dash --audit audit.jsonl`; re-run a past session wit
 | `federate --config <f>` | Cross-org boundary: bridge granted tools between meshes, identity-mapped & audited. |
 | `connect [flags] <peer:port>` | Stdio ⇄ remote stdio bridge for MCP client configs (`--resumable`). |
 | `forward <local> <peer:port>` | Forward a local TCP port to a mesh peer (for HTTP backends). |
-| `drop <peer:port> <file...>` | **AirDrop** files to a mesh peer by identity — resumable, E2E-encrypted, policy-gated, audited (`--config` runs a receiver). |
+| `drop [--control <gateway>] <target> <file...>` | **AirDrop** to a raw mesh address or verified Nearby selector — resumable, E2E-encrypted, policy-gated, audited (`--config` runs a receiver). |
 | `peers` | List reachable mesh identities — the "who can I drop to" view. |
 | `fetch <peer:port> <sha256>` | Fetch a blob by content hash from a peer's content-addressed store. |
-| `push <peer:port>` | Push a stdin payload (clipboard / a task) to a peer's inbox over the resumable channel. |
-| `air <home·nearby·announce·node·handoff·whoami·map·catalog·browse·…>` | **Air Agent OS · Continuity**: see the mesh at a glance, publish identity-stamped Presence + Activity cards, resolve friendly nodes, and move inert work context over exact-key-pinned device and agent hops. Handoff requires local acceptance and a destination-selected tool, keeps bounded delivery receipts, makes unknown delivery explicitly re-armable, and never pretends to transfer a live session. The same surface discovers, steers, shares, launches, approves, automates, and serves the responsive Air Home. Run `meshmcp air help` for every verb. |
+| `push [--control <gateway>] <target>` | Push a stdin payload to a raw mesh address or verified Nearby inbox selector over the resumable channel. |
+| `air <home·nearby·announce·node·handoff·whoami·map·catalog·browse·…>` | **Air Agent OS · Continuity**: see the mesh at a glance, publish identity-stamped Presence + Activity cards, use Universal Actions to resolve verified nodes to live services, and move inert work context over exact-key-pinned device and agent hops. Handoff requires local acceptance and a destination-selected tool, keeps bounded delivery receipts, makes unknown delivery explicitly re-armable, and never pretends to transfer a live session. The same surface discovers, steers, shares, rings, launches, approves, automates, and serves the responsive Air Home. Run `meshmcp air help` for every verb. |
 | `pubsub --config <f>` · `publish` · `subscribe <peer:port> <topic>` | Identity-gated, audited **event bus** on the mesh — durable + resumable; `publish`/`subscribe` a broker topic (see [docs/PUBSUB.md](docs/PUBSUB.md)). |
 | `graphrag --config <f>` | Serve `graph_search`: vector retrieval + knowledge-graph entity expansion over the mesh. |
 | `ls · call · read · prompt <peer:port>` | Drive tools / resources / prompts from the terminal. |

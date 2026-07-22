@@ -232,9 +232,15 @@
     position:relative;display:grid;grid-template-columns:repeat(3,minmax(220px,1fr));gap:14px;
   }
   .near-card{
+    appearance:none;width:100%;color:inherit;font:inherit;text-align:left;cursor:pointer;position:relative;
     min-height:98px;padding:14px 16px;border:1px solid var(--line);border-radius:15px;background:var(--panel);
-    display:grid;grid-template-columns:auto minmax(0,1fr);gap:12px;align-items:center;box-shadow:var(--shadow-soft);
+    display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:12px;align-items:center;box-shadow:var(--shadow-soft);
+    transition:transform .16s,border-color .16s,box-shadow .16s,background .16s;
   }
+  .near-card:hover{transform:translateY(-1px);border-color:color-mix(in srgb,var(--blue) 28%,var(--line));box-shadow:var(--shadow)}
+  .near-card:active{transform:scale(.99)}
+  .near-card .card-arrow{color:var(--faint);transition:color .16s,transform .16s}
+  .near-card:hover .card-arrow{color:var(--blue);transform:translateX(2px)}
   .agent-avatar{
     position:relative;width:58px;height:58px;border-radius:50%;font-size:13px;
     background:linear-gradient(145deg,var(--avatar-a,#277cff),var(--avatar-b,#7c59e9));
@@ -424,6 +430,59 @@
   .segmented label{min-height:38px;flex:1;display:grid;place-items:center;border-radius:9px;cursor:pointer;font-size:12px}
   .segmented input:checked + label{background:var(--panel-solid);box-shadow:var(--shadow-soft);font-weight:680}
 
+  /* Universal Actions */
+  .command-panel{
+    width:min(660px,calc(100vw - 28px));margin:12vh auto 0;padding:14px;border:1px solid var(--line);
+    border-radius:20px;background:var(--panel-solid);box-shadow:0 24px 80px rgba(0,0,0,.28);
+  }
+  .command-search{
+    min-height:52px;padding:0 12px;border:2px solid var(--blue);border-radius:12px;
+    display:flex;align-items:center;gap:10px;background:var(--panel-solid);box-shadow:0 0 0 3px color-mix(in srgb,var(--blue) 9%,transparent);
+  }
+  .command-search .icon{width:20px;height:20px;color:var(--muted)}
+  .command-search input{min-width:0;flex:1;border:0;outline:0;background:transparent;color:var(--ink);font-size:16px}
+  kbd,.key-hint{
+    min-width:30px;padding:3px 7px;border:1px solid var(--line);border-radius:7px;background:var(--panel-soft);
+    color:var(--muted);font:11px var(--mono);text-align:center;box-shadow:0 1px 1px rgba(16,24,40,.05);
+  }
+  .command-results{max-height:min(510px,62vh);overflow:auto;padding:8px 0 0}
+  .command-group + .command-group{border-top:1px solid var(--line);margin-top:7px;padding-top:7px}
+  .command-group-title{padding:5px 4px 6px;color:var(--muted);font-size:12px;font-weight:690}
+  .command-row{
+    appearance:none;width:100%;min-height:58px;padding:7px 10px;border:1px solid transparent;border-radius:10px;
+    display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:11px;align-items:center;
+    background:transparent;color:var(--ink);text-align:left;cursor:pointer;font:inherit;
+  }
+  .command-row:hover,.command-row.selected{background:var(--blue-soft);border-color:color-mix(in srgb,var(--blue) 17%,var(--line))}
+  .command-row .result-icon{width:34px;height:34px;border-radius:50%;display:grid;place-items:center;color:var(--blue);background:var(--panel-soft)}
+  .command-row .result-icon .icon{width:20px;height:20px}
+  .command-copy{min-width:0}.command-title{font-size:13.5px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .command-sub{margin-top:2px;color:var(--muted);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .command-empty{padding:30px 12px;text-align:center;color:var(--muted);font-size:13px}
+  .command-footer{padding:11px 4px 1px;border-top:1px solid var(--line);color:var(--muted);font-size:11px}
+
+  .action-sheet{width:min(490px,calc(100vw - 28px));padding:20px}
+  .action-head{display:grid;grid-template-columns:auto minmax(0,1fr);gap:13px;align-items:center;margin-bottom:15px}
+  .action-head .agent-avatar{width:58px;height:58px;border-radius:17px}
+  .action-head h2{font-size:20px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .action-state{margin-top:3px;color:var(--green);font-size:13px;text-transform:capitalize}
+  .action-identity{margin-top:2px;color:var(--muted);font:10.5px var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .action-list{overflow:hidden;border:1px solid var(--line);border-radius:14px;background:var(--panel)}
+  .action-row{
+    appearance:none;width:100%;min-height:54px;padding:8px 13px;border:0;border-bottom:1px solid var(--line);
+    display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:12px;align-items:center;
+    color:var(--ink);background:transparent;text-align:left;cursor:pointer;font:inherit;
+  }
+  .action-row:last-child{border-bottom:0}.action-row:hover{background:var(--blue-soft);color:var(--blue)}
+  .action-row .icon{width:22px;height:22px;color:var(--blue)}
+  .action-row strong{font-size:14px;font-weight:610}.action-row small{display:block;color:var(--muted);font-size:10.5px;margin-top:2px}
+  .action-row .card-arrow{color:var(--faint)}
+  .activity-action{margin-top:12px}
+  .action-trust{margin:13px 2px 0;display:flex;gap:8px;align-items:flex-start;color:var(--muted);font-size:10.5px;line-height:1.45}
+  .action-trust .icon{width:16px;height:16px;color:var(--green);flex:none;margin-top:1px}
+  .action-ring[hidden],.action-menu[hidden]{display:none}
+  .action-ring .segmented{margin-top:2px}
+
   .bottom-nav{display:none}
   .fade-in{animation:fade-in .28s ease both}
   @keyframes fade-in{from{opacity:0;transform:translateY(5px)}}
@@ -469,6 +528,7 @@
     .nearby-rail{display:flex;overflow-x:auto;gap:10px;margin:0 -16px;padding:0 16px 4px;scroll-snap-type:x proximity;scrollbar-width:none}
     .nearby-rail::-webkit-scrollbar{display:none}
     .near-card{flex:0 0 138px;min-height:170px;display:flex;flex-direction:column;justify-content:center;text-align:center;padding:13px 10px;scroll-snap-align:start}
+    .near-card .card-arrow{position:absolute;right:9px;top:50%;transform:translateY(-50%)}
     .agent-avatar{width:62px;height:62px}.agent-avatar .icon{width:29px;height:29px}
     .near-title{font-size:14px;margin-top:7px}.near-state{font-size:12px;margin-top:4px}.chips{justify-content:center}
     .near-card .chips .chip:nth-child(n+3){display:none}.identity-detail{max-width:116px;font-size:8.5px}
@@ -488,6 +548,12 @@
       position:fixed;left:0;right:0;bottom:0;width:100%;margin:0;border-radius:22px 22px 0 0;border-bottom:0;
       padding:20px 20px calc(18px + env(safe-area-inset-bottom));
     }
+    .command-panel{
+      position:fixed;left:0;right:0;bottom:0;width:100%;margin:0;border-radius:22px 22px 0 0;border-bottom:0;
+      padding:14px 14px calc(14px + env(safe-area-inset-bottom));
+    }
+    .command-results{max-height:56vh}.command-footer{padding-bottom:4px}
+    .action-sheet{max-height:calc(100dvh - 96px);overflow:auto}
     .grabber{display:block;width:36px;height:5px;border-radius:99px;background:var(--line-strong);margin:-6px auto 15px}
     .bottom-nav{
       position:fixed;z-index:40;left:0;right:0;bottom:0;min-height:calc(70px + env(safe-area-inset-bottom));
@@ -536,6 +602,8 @@
   <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9"/><path d="M18 13v6H5V6h6"/></symbol>
   <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m4 17 5-4 4 3 3-2 4 3"/></symbol>
   <symbol id="i-arrow" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></symbol>
+  <symbol id="i-ring" viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/></symbol>
 </svg>
 
 <div class="shell">
@@ -579,6 +647,9 @@
       </div>
       <div class="top-spacer"></div>
       <span class="who" id="you"></span>
+      <button class="refresh command-open" id="commandOpen" type="button" aria-label="Open Universal Actions" title="Open Universal Actions (Command or Control K)">
+        <svg class="icon"><use href="#i-search"/></svg>
+      </button>
       <button class="refresh" id="refresh" type="button" aria-label="Refresh mesh state">
         <svg class="icon"><use href="#i-refresh"/></svg>
       </button>
@@ -637,8 +708,8 @@
         <nav class="panel quick-actions" aria-label="Quick actions">
           <button class="quick-action" id="quickSend" type="button" disabled><svg class="icon"><use href="#i-share"/></svg><span>Send</span></button>
           <button class="quick-action" id="quickDrop" type="button" disabled><svg class="icon"><use href="#i-file"/></svg><span>Drop file</span></button>
-          <button class="quick-action" id="quickSteer" type="button" disabled><svg class="icon"><use href="#i-steer"/></svg><span>Steer</span></button>
-          <button class="quick-action" id="quickBrowse" type="button" disabled><svg class="icon"><use href="#i-grid"/></svg><span>Browse tools</span></button>
+          <button class="quick-action" id="quickRing" type="button" disabled><svg class="icon"><use href="#i-ring"/></svg><span>Ring</span></button>
+          <button class="quick-action" id="quickActions" type="button"><svg class="icon"><use href="#i-search"/></svg><span>Actions</span></button>
         </nav>
 
         <div class="home-grid">
@@ -679,8 +750,8 @@
               <label class="fld" for="pushRecipient">Recipient</label>
               <select class="select" id="pushRecipient"></select>
             </div>
-            <details class="advanced-address" id="addressDetails" open>
-              <summary>Address</summary>
+            <details class="advanced-address" id="addressDetails">
+              <summary>Advanced address</summary>
               <div class="advanced-inner">
                 <label class="fld" for="pushTarget">Inbox address</label>
                 <input class="txt" id="pushTarget" placeholder="mesh address:port" inputmode="url" autocomplete="off" spellcheck="false">
@@ -780,17 +851,73 @@
   </div>
 </dialog>
 
+<dialog id="actionDlg" aria-labelledby="actionTitle">
+  <div class="sheet action-sheet">
+    <div class="grabber" aria-hidden="true"></div>
+    <div class="action-head">
+      <div class="agent-avatar device" id="actionAvatar" aria-hidden="true"></div>
+      <div>
+        <h2 id="actionTitle">Agent</h2>
+        <div class="action-state" id="actionState">Available</div>
+        <div class="action-identity" id="actionIdentity">verified identity</div>
+      </div>
+    </div>
+    <div class="action-menu" id="actionMenu">
+      <div class="action-list" id="actionList" aria-label="Available actions"></div>
+      <div class="action-list activity-action" id="activityActionWrap" hidden>
+        <button class="action-row" id="viewActivity" type="button">
+          <svg class="icon"><use href="#i-clock"/></svg>
+          <span><strong>View activity</strong><small id="actionActivity"></small></span>
+          <svg class="icon card-arrow"><use href="#i-arrow"/></svg>
+        </button>
+      </div>
+      <p class="action-trust"><svg class="icon"><use href="#i-security"/></svg><span>Actions use this agent's verified services and remain policy governed.</span></p>
+    </div>
+    <div class="action-ring" id="actionRing" hidden>
+      <div class="segmented" role="radiogroup" aria-label="Ring priority">
+        <input type="radio" name="ringPriority" id="ring-normal" value="normal" checked><label for="ring-normal">Normal</label>
+        <input type="radio" name="ringPriority" id="ring-urgent" value="urgent"><label for="ring-urgent">Urgent</label>
+      </div>
+      <label class="fld" for="ringText">Message</label>
+      <textarea class="txt" id="ringText" rows="3" maxlength="500" placeholder="What needs this agent's attention?"></textarea>
+      <div class="status" id="ringOut" role="status" aria-live="polite" aria-atomic="true"></div>
+      <div class="btn-row">
+        <button class="btn plain" id="ringBack" type="button">Back</button>
+        <button class="btn primary" id="ringSend" type="button"><svg class="icon sm"><use href="#i-ring"/></svg>Ring</button>
+      </div>
+    </div>
+    <div class="btn-row">
+      <button class="btn plain" id="actionClose" type="button">Close</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="commandDlg" aria-label="Universal Actions">
+  <div class="command-panel">
+    <div class="command-search">
+      <svg class="icon" aria-hidden="true"><use href="#i-search"/></svg>
+      <input id="commandInput" type="search" role="combobox" autocomplete="off" spellcheck="false" placeholder="Search agents, sessions, and actions" aria-label="Search agents, sessions, and actions" aria-controls="commandResults" aria-expanded="true" aria-autocomplete="list">
+      <kbd id="commandShortcut">⌘ K</kbd>
+    </div>
+    <div class="command-results" id="commandResults" role="listbox" aria-label="Universal Action results"></div>
+    <div class="command-footer">Verified destinations · actions remain policy governed</div>
+  </div>
+</dialog>
+
 <script>
 (function(){
   "use strict";
 
   var $=function(id){return document.getElementById(id)};
   var esc=function(s){return String(s==null?"":s).replace(/[&<>"']/g,function(c){return({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]})};
-  var cfg={push:false,receipts:false,vision:false,cast:false,approvals:"",catalog:false};
+  var cfg={push:false,ring:false,receipts:false,vision:false,cast:false,approvals:"",catalog:false};
   var sessions=[];
   var nearbyCards=[];
   var continueItem=null;
   var lastHome=null;
+  var actionNode=null;
+  var commandItems=[];
+  var commandIndex=0;
   var HUES=[210,145,275,25,340,190,50,300];
 
   function icon(id,cls){return '<svg class="icon '+(cls||"")+'" aria-hidden="true"><use href="#'+id+'"></use></svg>'}
@@ -806,6 +933,50 @@
   function shortKey(k){k=String(k||"");return k.length>18?k.slice(0,8)+"…"+k.slice(-6):k}
   function nodeKey(n){return n.public_key||n.pubkey||n.fqdn||n.ip||n.name||""}
   function nodeIcon(n){var k=String(n.kind||"").toLowerCase();if(k==="gateway")return"i-gateway";if(k==="device")return"i-device";return"i-agent"}
+  function serviceFor(n,kind){
+    var services=array(n&&n.services);
+    for(var i=0;i<services.length;i++)if(services[i]&&services[i].kind===kind)return services[i];
+    return null;
+  }
+  function selectorForNode(n){
+    if(!n)return"";
+    var key=n.public_key||n.pubkey||"";
+    if(key)return "pubkey:"+String(key);
+    return n.fqdn?String(n.fqdn):"";
+  }
+  function sameVerifiedNode(a,b){
+    if(!a||!b)return false;
+    var ak=a.public_key||a.pubkey||"",bk=b.public_key||b.pubkey||"";
+    if(ak&&bk)return String(ak)===String(bk);
+    if(a.fqdn&&b.fqdn)return String(a.fqdn).toLowerCase()===String(b.fqdn).toLowerCase();
+    return !!(a.ip&&b.ip&&String(a.ip)===String(b.ip));
+  }
+  function sessionForNode(n){
+    if(!n)return null;
+    // A Presence name and Activity target are client-authored presentation
+    // metadata. Never let either one confer steering authority. Sessions may
+    // be associated only through transport-stamped identity fields.
+    var ids=[n.fqdn,n.public_key,n.pubkey,n.ip].filter(Boolean).map(String);
+    for(var i=0;i<sessions.length;i++)if(ids.indexOf(String(sessions[i].peer||""))>=0)return sessions[i];
+    return null;
+  }
+  function actionsForNode(n){
+    var actions=[],selector=selectorForNode(n),session=sessionForNode(n);
+    if(cfg.push&&selector&&serviceFor(n,"inbox")){
+      actions.push({id:"send",title:"Send message",subtitle:"Private governed delivery",icon:"i-share",node:n});
+      actions.push({id:"drop",title:"Drop file",subtitle:"Resumable file transfer",icon:"i-file",node:n});
+    }
+    if(cfg.ring&&selector&&serviceFor(n,"ring"))actions.push({id:"ring",title:"Ring",subtitle:"Request this agent's attention",icon:"i-ring",node:n});
+    if(session)actions.push({id:"steer",title:"Steer session",subtitle:session.backend||"Live session",icon:"i-steer",node:n,session:session});
+    return actions;
+  }
+  function updateActionAvailability(){
+    var inbox=nearbyCards.some(function(n){return !!(selectorForNode(n)&&serviceFor(n,"inbox"))});
+    var ring=nearbyCards.some(function(n){return !!(selectorForNode(n)&&serviceFor(n,"ring"))});
+    $("quickSend").disabled=!cfg.push||!inbox;
+    $("quickDrop").disabled=!cfg.push||!inbox;
+    $("quickRing").disabled=!cfg.ring||!ring;
+  }
   function skeleton(n){var s='<div class="skeleton">';for(var i=0;i<n;i++)s+='<div class="skeleton-row"><span class="sk" style="width:44px;height:44px;border-radius:14px"></span><span style="flex:1"><span class="sk" style="display:block;width:'+(46+i*8)+'%;height:12px"></span><span class="sk" style="display:block;width:68%;height:9px;margin-top:8px"></span></span></div>';return s+"</div>"}
   function emptyState(iconID,msg){return '<div class="empty"><span class="glyph">'+icon(iconID)+'</span>'+esc(msg)+"</div>"}
   async function getJSON(url){var r=await fetch(url,{headers:{"Accept":"application/json"}});if(!r.ok)throw new Error(r.status+" "+(await r.text()).trim());return r.json()}
@@ -855,7 +1026,7 @@
     nearbyCards=normalizeNearby(presence,peers);
     var el=$("peers");el.setAttribute("aria-busy","false");
     $("nearbyCount").textContent=nearbyCards.length?nearbyCards.length+" nearby":"";
-    if(!nearbyCards.length){el.dataset.sig="";el.innerHTML=emptyState("i-nearby","No nearby agents or peers");renderRecipients([]);return}
+    if(!nearbyCards.length){el.dataset.sig="";el.innerHTML=emptyState("i-nearby","No nearby agents or peers");renderRecipients([]);updateActionAvailability();return}
     var sig=JSON.stringify(nearbyCards.map(function(n){return{
       name:n.name,kind:n.kind,status:n.status,labels:n.labels,services:n.services,activity:n.activity,
       public_key:n.public_key||n.pubkey,fqdn:n.fqdn,ip:n.ip,fallback:n.fallback
@@ -869,31 +1040,38 @@
         var chips=hints.map(function(x){return'<span class="chip">'+esc(x)+"</span>"}).join("");
         var key=n.fqdn||n.ip||shortKey(nodeKey(n));
         var avatar=(n.kind==="device"||n.kind==="gateway"||n.fallback)?icon(nodeIcon(n)):esc(initials(name));
-        return '<article class="near-card fade-in" id="presence-card-'+i+'" tabindex="-1">'+
+        return '<button class="near-card fade-in" id="presence-card-'+i+'" type="button" data-node="'+i+'" aria-label="Open actions for '+esc(name)+'">'+
           '<div class="agent-avatar '+(n.kind==="device"?"device":"")+'" style="'+avatarVars(nodeKey(n))+'">'+
             avatar+'<span class="avatar-status '+esc(status)+'" aria-hidden="true"></span></div>'+
           '<div class="near-copy"><div class="near-title">'+esc(name)+'</div>'+
             '<div class="near-state '+(activity&&activity.state==="running"?"running":"")+'">'+esc(subtitle)+'</div>'+
             (chips?'<div class="chips">'+chips+"</div>":"")+
-            '<div class="identity-detail">'+esc(key)+"</div></div></article>";
+            '<div class="identity-detail">'+esc(key)+'</div></div><svg class="icon card-arrow" aria-hidden="true"><use href="#i-arrow"></use></svg></button>';
       }).join("");
+      Array.prototype.forEach.call(el.querySelectorAll("[data-node]"),function(button){
+        button.addEventListener("click",function(){openNodeActions(nearbyCards[+button.dataset.node])});
+      });
     }
     renderRecipients(nearbyCards);
+    updateActionAvailability();
   }
 
   function renderRecipients(nodes){
     var options=[];
     array(nodes).forEach(function(n){
       array(n.services).forEach(function(s){
-        if(s&&s.kind==="inbox"&&s.address)options.push({name:nodeName(n),address:s.address});
+        var selector=selectorForNode(n);
+        if(s&&s.kind==="inbox"&&s.address&&selector)options.push({name:nodeName(n),selector:selector});
       });
     });
     var field=$("recipientField"),select=$("pushRecipient");
     var sig=JSON.stringify(options);
-    if(!options.length){field.hidden=true;if(changed(select,sig))select.textContent="";return}
+    if(!options.length){field.hidden=true;if(changed(select,sig)){select.textContent="";$("addressDetails").open=true}return}
     field.hidden=false;
     if(!changed(select,sig))return;
-    select.innerHTML='<option value="">Choose a nearby inbox</option>'+options.map(function(o){return'<option value="'+esc(o.address)+'">'+esc(o.name)+"</option>"}).join("");
+    var previous=select.value;
+    select.innerHTML='<option value="">Choose a verified recipient</option>'+options.map(function(o){return'<option value="'+esc(o.selector)+'">'+esc(o.name)+"</option>"}).join("");
+    if(options.some(function(o){return o.selector===previous}))select.value=previous;
   }
 
   function renderCatalog(entries){
@@ -914,7 +1092,6 @@
 
   function renderSessions(items){
     var el=$("sessions");sessions=array(items);el.setAttribute("aria-busy","false");
-    $("quickSteer").disabled=!sessions.length;
     $("sessionCount").textContent=sessions.length?sessions.length+" active":"";
     if(!sessions.length){el.dataset.sig="";el.innerHTML=emptyState("i-session","No live sessions");return}
     var sig=JSON.stringify(sessions.map(function(s){return{backend:s.backend,id:s.id,peer:s.peer}}));
@@ -1010,14 +1187,11 @@
   }
 
   function matchingSession(item){
-    if(!item||!item.activity)return null;
-    var a=item.activity,target=String(a.target||""),id="";
-    if(target.indexOf("session:")===0)id=target.slice(8);
-    if(id)for(var i=0;i<sessions.length;i++)if(String(sessions[i].id)===id)return sessions[i];
-    var n=item.node,key=nodeKey(n);
+    if(!item||!item.node)return null;
+    var n=item.node,ids=[n.fqdn,n.public_key,n.pubkey,n.ip].filter(Boolean).map(String);
     for(var j=0;j<sessions.length;j++){
       var p=String(sessions[j].peer||"");
-      if(p&&(p===n.fqdn||p===n.name||p===key))return sessions[j];
+      if(p&&ids.indexOf(p)>=0)return sessions[j];
     }
     return null;
   }
@@ -1073,23 +1247,50 @@
   function renderHome(d){
     d=d&&typeof d==="object"?d:{};
     lastHome=d;
+    var actionNotice=false;
     var nodes=normalizeNearby(d.nearby,d.peers);
     renderIdentity(d.you);
     renderNearby(d.nearby,d.peers);
     renderSessions(d.sessions);
+    if(actionDlg&&actionDlg.open&&actionNode){
+      var current=nearbyCards.filter(function(n){return sameVerifiedNode(n,actionNode)})[0];
+      if(!current){
+        closeAction();$("commandOpen").focus();actionNotice=true;
+        setStatus($("systemStatus"),"That peer is no longer nearby.","bad");
+      }
+      else{
+        actionNode=current;
+        paintActionHeader(current);
+        // Keep the hidden Back destination current while Ring is composed.
+        // The material signature prevents unchanged polls from rebuilding it.
+        renderActionMenu();
+        if(!$("actionRing").hidden&&!(cfg.ring&&serviceFor(current,"ring"))){
+          var restoreFocus=$("actionRing").contains(document.activeElement);
+          $("actionRing").hidden=true;$("actionMenu").hidden=false;renderActionMenu();
+          if(restoreFocus){
+            var fallback=$("actionList").querySelector(".action-row")||(!$("activityActionWrap").hidden&&$("viewActivity"))||$("actionClose");
+            fallback.focus();
+          }
+          actionNotice=true;
+          setStatus($("systemStatus"),"Ring is no longer advertised by this peer.","bad");
+        }
+      }
+    }
     renderCurrentActivities(nodes);
     renderContinue(nodes);
     if(cfg.catalog)renderCatalog(d.reachable);
     if(cfg.receipts)renderReceipts(d.activity);
     if(cfg.cast)renderCast(d.showing);
     updateSummary(d.summary);
+    if(commandDlg.open)renderCommandResults();
+    return actionNotice;
   }
 
   async function loadHome(){
     try{
       var d=await getJSON("api/home");
-      renderHome(d);
-      setStatus($("systemStatus"),"Mesh state updated","muted",true);
+      var actionNotice=renderHome(d);
+      if(!actionNotice)setStatus($("systemStatus"),"Mesh state updated","muted",true);
     }catch(e){
       var sessionEl=$("sessions"),nearbyEl=$("peers");
       sessionEl.setAttribute("aria-busy","false");nearbyEl.setAttribute("aria-busy","false");
@@ -1104,7 +1305,7 @@
   }
 
   async function loadConfig(){
-    try{cfg=await getJSON("api/config")}catch(e){cfg={push:false,receipts:false,vision:false,cast:false,approvals:"",catalog:false}}
+    try{cfg=await getJSON("api/config")}catch(e){cfg={push:false,ring:false,receipts:false,vision:false,cast:false,approvals:"",catalog:false}}
     $("catWrap").hidden=!cfg.catalog;
     $("nearbyServicesLink").hidden=!cfg.catalog;
     $("pushWrap").hidden=!cfg.push;
@@ -1114,11 +1315,198 @@
     $("castWrap").hidden=!cfg.cast;
     $("apprWrap").hidden=!cfg.approvals;
     $("approvalUnavailable").hidden=!!cfg.approvals;
-    $("quickSend").disabled=!cfg.push;$("quickDrop").disabled=!cfg.push;
-    $("quickBrowse").disabled=!cfg.catalog;
+    updateActionAvailability();
     if(cfg.approvals)$("apprLink").href="http://"+cfg.approvals+"/";
     if(lastHome)renderAttention(lastHome.summary||{});
   }
+
+  /* Universal Actions: one verified identity, only the actions it advertises. */
+  var actionDlg=$("actionDlg"),commandDlg=$("commandDlg");
+
+  function selectRecipient(n){
+    var selector=selectorForNode(n),select=$("pushRecipient");
+    if(!selector)return false;
+    select.value=selector;
+    if(select.value!==selector)return false;
+    $("pushTarget").value="";
+    $("addressDetails").open=false;
+    return true;
+  }
+
+  function renderActionMenu(){
+    var list=$("actionList"),actions=actionsForNode(actionNode);
+    var activityFocused=$("activityActionWrap").contains(document.activeElement);
+    var sig=JSON.stringify({node:selectorForNode(actionNode)||nodeKey(actionNode),actions:actions.map(function(a){return{
+      id:a.id,title:a.title,subtitle:a.subtitle,session:a.session&&{id:a.session.id,peer:a.session.peer,backend:a.session.backend}
+    }})});
+    if(changed(list,sig)){
+      var active=document.activeElement,focusedID=list.contains(active)&&active.dataset?active.dataset.actionId:"";
+      if(!actions.length){
+        list.innerHTML='<div class="command-empty">No advertised actions are available for this peer.</div>';
+      }else{
+        list.innerHTML=actions.map(function(a,i){
+          return '<button class="action-row" type="button" data-node-action="'+i+'" data-action-id="'+esc(a.id)+'">'+icon(a.icon)+
+            '<span><strong>'+esc(a.title)+'</strong><small>'+esc(a.subtitle||"")+'</small></span>'+icon("i-arrow","card-arrow")+'</button>';
+        }).join("");
+        Array.prototype.forEach.call(list.querySelectorAll("[data-node-action]"),function(button){
+          button.addEventListener("click",function(){runNodeAction(actions[+button.dataset.nodeAction])});
+        });
+      }
+      if(focusedID){
+        var restored=list.querySelector('[data-action-id="'+focusedID+'"]')||list.querySelector(".action-row")||$("actionClose");
+        restored.focus();
+      }
+    }
+    var activity=actionNode&&actionNode.activity;
+    $("activityActionWrap").hidden=!activity;
+    $("actionActivity").textContent=activity?(activity.title||activity.summary||"Active work"):"";
+    if(!activity&&activityFocused){
+      var fallback=list.querySelector(".action-row")||$("actionClose");fallback.focus();
+    }
+  }
+
+  function paintActionHeader(n){
+    var name=nodeName(n),status=safeStatus(n.status),verified=!!(n.fqdn||n.public_key||n.pubkey);
+    $("actionTitle").textContent=name;
+    $("actionState").textContent=status;
+    $("actionState").style.color=status==="away"?"var(--muted)":status==="busy"||status==="focus"?"var(--orange)":"var(--green)";
+    $("actionIdentity").textContent=(n.fqdn||shortKey(n.public_key||n.pubkey)||n.ip||"Connected peer")+(verified?" · verified":" · no Presence card");
+    var avatar=$("actionAvatar");
+    avatar.className="agent-avatar "+(n.kind==="device"||n.kind==="gateway"||n.fallback?"device":"");
+    avatar.style.cssText=avatarVars(nodeKey(n));
+    avatar.innerHTML=(n.kind==="device"||n.kind==="gateway"||n.fallback)?icon(nodeIcon(n)):esc(initials(name));
+  }
+
+  function openNodeActions(n){
+    if(!n)return;
+    actionNode=n;
+    paintActionHeader(n);
+    $("actionMenu").hidden=false;$("actionRing").hidden=true;
+    $("ringText").value="";$("ring-normal").checked=true;setStatus($("ringOut"),"","muted");
+    renderActionMenu();
+    if(!actionDlg.open)actionDlg.showModal();
+  }
+
+  function closeAction(){if(actionDlg.open)actionDlg.close()}
+  function showRingComposer(){
+    $("actionMenu").hidden=true;$("actionRing").hidden=false;setStatus($("ringOut"),"","muted");
+    setTimeout(function(){$("ringText").focus()},0);
+  }
+
+  function runNodeAction(action){
+    if(!action)return;
+    if(action.id==="send"||action.id==="drop"){
+      if(!selectRecipient(action.node)){setStatus($("systemStatus"),"This recipient no longer has a verified inbox.","bad");return}
+      closeAction();goTo("share",action.id==="send"?"pushText":null);
+      if(action.id==="drop")$("dropFile").click();
+      return;
+    }
+    if(action.id==="ring"){showRingComposer();return}
+    if(action.id==="steer"){closeAction();openSteer(action.session||sessionForNode(action.node));return}
+  }
+
+  $("actionClose").addEventListener("click",closeAction);
+  actionDlg.addEventListener("click",function(e){if(e.target===actionDlg)closeAction()});
+  $("ringBack").addEventListener("click",function(){
+    $("actionRing").hidden=true;$("actionMenu").hidden=false;
+    var action=$("actionList").querySelector('[data-action-id="ring"]');if(action)action.focus();
+  });
+  $("viewActivity").addEventListener("click",function(){closeAction();goTo("activities")});
+  $("ringSend").addEventListener("click",async function(){
+    var selector=selectorForNode(actionNode),message=$("ringText").value.trim(),priority=$("ring-urgent").checked?"urgent":"normal";
+    var out=$("ringOut"),button=this;
+    if(!selector||!message){setStatus(out,"A verified recipient and message are required.","bad");return}
+    setStatus(out,"Ringing…","muted");button.disabled=true;
+    try{
+      var response=await fetch("api/ring",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({recipient:selector,message:message,priority:priority})});
+      var body=(await response.text()).trim();if(!response.ok)throw new Error(response.status+" "+body);
+      setStatus(out,"Ring delivered","ok");
+      setTimeout(function(){if(actionDlg.open&&selectorForNode(actionNode)===selector)closeAction()},700);
+    }catch(e){setStatus(out,e.message,"bad")}finally{button.disabled=false}
+  });
+
+  function buildCommandItems(){
+    var items=[];
+    nearbyCards.forEach(function(n){
+      items.push({group:"Nearby",kind:"node",title:nodeName(n),subtitle:(n.activity&&n.activity.title)||String(n.status||n.kind||"Nearby"),icon:nodeIcon(n),node:n});
+      actionsForNode(n).forEach(function(a){
+        var title=a.title+" · "+nodeName(n);
+        if(a.id==="send")title="Send to "+nodeName(n);
+        else if(a.id==="drop")title="Drop file to "+nodeName(n);
+        else if(a.id==="ring")title="Ring "+nodeName(n);
+        else if(a.id==="steer")title="Steer "+((n.activity&&n.activity.title)||nodeName(n));
+        items.push({group:"Actions",kind:"action",title:title,subtitle:a.subtitle,icon:a.icon,action:a});
+      });
+    });
+    var seen={};
+    items.forEach(function(item){if(item.action&&item.action.id==="steer"&&item.action.session)seen[String(item.action.session.id||"")]=true});
+    sessions.forEach(function(s){
+      if(!seen[String(s.id||"")])items.push({group:"Actions",kind:"session",title:"Steer "+(s.backend||"session"),subtitle:(s.peer||"Unknown peer")+" · "+(s.id||""),icon:"i-steer",session:s});
+    });
+    if(cfg.catalog)items.push({group:"Actions",kind:"global",id:"browse",title:"Browse reachable services",subtitle:"Open the mesh-wide service catalog",icon:"i-grid"});
+    return items;
+  }
+
+  function renderCommandResults(){
+    var query=$("commandInput").value.trim().toLowerCase(),all=buildCommandItems();
+    commandItems=all.filter(function(item){return !query||(item.title+" "+item.subtitle+" "+item.group).toLowerCase().indexOf(query)>=0});
+    if(commandIndex>=commandItems.length)commandIndex=Math.max(0,commandItems.length-1);
+    var result=$("commandResults");
+    if(!commandItems.length){result.innerHTML='<div class="command-empty">No matching agents or actions.</div>';$("commandInput").removeAttribute("aria-activedescendant");return}
+    var groups=["Nearby","Actions"],html="";
+    groups.forEach(function(group){
+      var members=commandItems.filter(function(item){return item.group===group});if(!members.length)return;
+      html+='<section class="command-group"><div class="command-group-title">'+group+'</div>';
+      members.forEach(function(item){
+        var index=commandItems.indexOf(item),selected=index===commandIndex;
+        html+='<button class="command-row'+(selected?' selected':'')+'" id="command-result-'+index+'" type="button" tabindex="-1" data-command="'+index+'" role="option" aria-selected="'+selected+'">'+
+          '<span class="result-icon">'+icon(item.icon)+'</span><span class="command-copy"><span class="command-title">'+esc(item.title)+'</span><span class="command-sub">'+esc(item.subtitle||"")+'</span></span><span class="key-hint">↵</span></button>';
+      });
+      html+='</section>';
+    });
+    result.innerHTML=html;
+    Array.prototype.forEach.call(result.querySelectorAll("[data-command]"),function(button){
+      button.addEventListener("mouseenter",function(){var next=+button.dataset.command;if(commandIndex!==next){commandIndex=next;renderCommandResults()}});
+      button.addEventListener("click",function(){executeCommand(commandItems[+button.dataset.command])});
+    });
+    var selected=result.querySelector(".command-row.selected");
+    if(selected){$("commandInput").setAttribute("aria-activedescendant",selected.id);selected.scrollIntoView({block:"nearest"})}
+  }
+
+  function executeCommand(item){
+    if(!item)return;
+    if(commandDlg.open)commandDlg.close();
+    if(item.kind==="node"){openNodeActions(item.node);return}
+    if(item.kind==="action"){
+      if(item.action.id==="ring"){openNodeActions(item.action.node);showRingComposer();return}
+      actionNode=item.action.node;runNodeAction(item.action);return;
+    }
+    if(item.kind==="session"){openSteer(item.session)}
+    if(item.kind==="global"&&item.id==="browse"){$("catWrap").open=true;goTo("nearbyServices")}
+  }
+
+  function openCommand(query){
+    if(actionDlg.open)closeAction();
+    if(dlg&&dlg.open)dlg.close();
+    commandIndex=0;$("commandInput").value=query||"";
+    if(!commandDlg.open)commandDlg.showModal();
+    renderCommandResults();setTimeout(function(){$("commandInput").focus();$("commandInput").select()},0);
+  }
+  $("commandInput").addEventListener("input",function(){commandIndex=0;renderCommandResults()});
+  $("commandInput").addEventListener("keydown",function(e){
+    if(e.key==="ArrowDown"){e.preventDefault();commandIndex=Math.min(commandItems.length-1,commandIndex+1);renderCommandResults()}
+    else if(e.key==="ArrowUp"){e.preventDefault();commandIndex=Math.max(0,commandIndex-1);renderCommandResults()}
+    else if(e.key==="Enter"){e.preventDefault();executeCommand(commandItems[commandIndex])}
+  });
+  commandDlg.addEventListener("click",function(e){if(e.target===commandDlg)commandDlg.close()});
+  $("commandOpen").addEventListener("click",function(){openCommand("")});
+  $("quickActions").addEventListener("click",function(){openCommand("")});
+  document.addEventListener("keydown",function(e){
+    if((e.metaKey||e.ctrlKey)&&String(e.key).toLowerCase()==="k"){
+      e.preventDefault();if(commandDlg.open)commandDlg.close();else openCommand("");
+    }
+  });
+  if(!/Mac|iPhone|iPad/.test(navigator.platform||""))$("commandShortcut").textContent="Ctrl K";
 
   /* Steer */
   var dlg=$("steerDlg"),cur=null;
@@ -1151,24 +1539,27 @@
   });
 
   /* Push and Drop */
-  $("pushRecipient").addEventListener("change",function(){if(this.value){$("pushTarget").value=this.value;$("addressDetails").open=false}});
+  $("pushRecipient").addEventListener("change",function(){if(this.value){$("pushTarget").value="";$("addressDetails").open=false}});
+  $("pushTarget").addEventListener("input",function(){if(this.value.trim())$("pushRecipient").value=""});
   $("dropFile").addEventListener("change",function(){var f=this.files[0];$("dropLabel").textContent=f?f.name:"Choose file"});
   $("pushSend").addEventListener("click",async function(){
-    var target=$("pushTarget").value.trim(),message=$("pushText").value,btn=this,out=$("pushOut");
-    if(!target||!message){setStatus(out,"Recipient and message are required","bad");return}
+    var recipient=$("pushRecipient").value.trim(),target=$("pushTarget").value.trim(),message=$("pushText").value,btn=this,out=$("pushOut");
+    if((!recipient&&!target)||!message){setStatus(out,"Recipient and message are required","bad");return}
     setStatus(out,"Sending…","muted");btn.disabled=true;
     try{
-      var r=await fetch("api/push",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({target:target,text:message})});
+      var payload={text:message};if(recipient)payload.recipient=recipient;else payload.target=target;
+      var r=await fetch("api/push",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
       var t=(await r.text()).trim();if(!r.ok)throw new Error(r.status+" "+t);
       setStatus(out,"Message sent","ok");$("pushText").value="";
     }catch(e){setStatus(out,e.message,"bad")}finally{btn.disabled=false}
   });
   $("dropSend").addEventListener("click",async function(){
-    var target=$("pushTarget").value.trim(),f=$("dropFile").files[0],btn=this,out=$("pushOut");
-    if(!target||!f){setStatus(out,"Recipient and a chosen file are required","bad");return}
+    var recipient=$("pushRecipient").value.trim(),target=$("pushTarget").value.trim(),f=$("dropFile").files[0],btn=this,out=$("pushOut");
+    if((!recipient&&!target)||!f){setStatus(out,"Recipient and a chosen file are required","bad");return}
+    if(f.size>8*1024*1024){setStatus(out,"This Air page accepts files up to 8 MiB.","bad");return}
     setStatus(out,"Dropping "+f.name+"…","muted");btn.disabled=true;
     try{
-      var form=new FormData();form.append("target",target);form.append("file",f);
+      var form=new FormData();if(recipient)form.append("recipient",recipient);else form.append("target",target);form.append("file",f);
       var r=await fetch("api/drop",{method:"POST",body:form});
       var t=(await r.text()).trim();if(!r.ok)throw new Error(r.status+" "+t);
       setStatus(out,"Dropped "+f.name,"ok");$("dropFile").value="";$("dropLabel").textContent="Choose file";
@@ -1208,18 +1599,14 @@
     el.scrollIntoView({behavior:window.matchMedia("(prefers-reduced-motion: reduce)").matches?"auto":"smooth",block:"start"});
     if(focus)setTimeout(function(){var target=$(focus);if(target&&!target.disabled)target.focus()},350);
   }
-  $("quickSend").addEventListener("click",function(){goTo("share","pushText")});
-  $("quickDrop").addEventListener("click",function(){goTo("share","dropFile")});
-  $("quickSteer").addEventListener("click",function(){
-    if(sessions.length)openSteer(sessions[0]);else goTo("activities");
-  });
-  $("quickBrowse").addEventListener("click",function(){$("catWrap").open=true;goTo("nearbyServices")});
+  $("quickSend").addEventListener("click",function(){openCommand("Send to")});
+  $("quickDrop").addEventListener("click",function(){openCommand("Drop file")});
+  $("quickRing").addEventListener("click",function(){openCommand("Ring")});
   $("continueBtn").addEventListener("click",function(){
     var session=matchingSession(continueItem);
     if(session){openSteer(session);return}
-    var index=nearbyCards.indexOf(continueItem&&continueItem.node);
+    if(continueItem&&continueItem.node){openNodeActions(continueItem.node);return}
     goTo("nearby");
-    setTimeout(function(){var card=$("presence-card-"+Math.max(0,index));if(card)card.focus()},350);
   });
 
   function setActiveNav(name){

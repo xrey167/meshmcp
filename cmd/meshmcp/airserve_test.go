@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -159,6 +161,33 @@ func TestAirServePushDrop(t *testing.T) {
 		t.Fatalf("drop not delivered: %+v", got[1])
 	}
 
+	// The advertised limit applies to file bytes, not the multipart envelope:
+	// an exact-limit file lands, while max+1 is rejected without truncation.
+	dropRequest := func(size int) *http.Request {
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		_ = writer.WriteField("target", "100.64.0.9:9110")
+		part, _ := writer.CreateFormFile("file", "bounded.bin")
+		_, _ = part.Write(bytes.Repeat([]byte{'x'}, size))
+		_ = writer.Close()
+		req := httptest.NewRequest(http.MethodPost, "/api/drop", &body)
+		req.Header.Set("Content-Type", writer.FormDataContentType())
+		return req
+	}
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, dropRequest(maxAirUpload))
+	if rr.Code != http.StatusOK || len(got) != 3 {
+		t.Fatalf("exact-limit drop = %d, deliveries=%d: %s", rr.Code, len(got), rr.Body)
+	}
+	if len(got[2].data) != maxAirUpload {
+		t.Fatalf("exact-limit delivery bytes = %d, want %d", len(got[2].data), maxAirUpload)
+	}
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, dropRequest(maxAirUpload+1))
+	if rr.Code != http.StatusRequestEntityTooLarge || len(got) != 3 {
+		t.Fatalf("oversize drop = %d, deliveries=%d; want 413 without delivery", rr.Code, len(got))
+	}
+
 	// Missing fields are 400s.
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/push", strings.NewReader(`{"text":"x"}`)))
@@ -175,11 +204,262 @@ func TestAirServePushDrop(t *testing.T) {
 	}
 }
 
+func TestValidMeshTargetPortRange(t *testing.T) {
+	for _, target := range []string{"100.64.0.9:0", "100.64.0.9:65536", "100.64.0.9:-1"} {
+		if validMeshTarget(target) {
+			t.Errorf("validMeshTarget(%q) = true, want false", target)
+		}
+	}
+	for _, target := range []string{"100.64.0.9:1", "100.64.0.9:65535", "[fd00::1]:9121"} {
+		if !validMeshTarget(target) {
+			t.Errorf("validMeshTarget(%q) = false, want true", target)
+		}
+	}
+}
+
+// TestAirServeLogicalPushDropResolveInbox proves logical recipients are
+// resolved at action time through the browser-attributed Presence directory.
+func TestAirServeLogicalPushDropResolveInbox(t *testing.T) {
+	presenceCalls := 0
+	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/presence" {
+			http.NotFound(w, r)
+			return
+		}
+		presenceCalls++
+		if got := r.Header.Get("X-Air-On-Behalf"); got != "phone.mesh" {
+			t.Errorf("presence request on behalf of %q, want phone.mesh", got)
+		}
+		if got := r.Header.Get("X-Air-On-Behalf-Key"); got != "phone-key" {
+			t.Errorf("presence request key %q, want phone-key", got)
+		}
+		_, _ = io.WriteString(w, `{"presence":[{"name":"Research Agent","fqdn":"research.mesh","public_key":"research-key","services":[{"kind":"inbox","address":"100.64.0.9:9110"}]}]}`)
+	}))
+	defer control.Close()
+
+	type sent struct {
+		target, name string
+		data         []byte
+	}
+	var got []sent
+	h := airServeHandler(airServeDeps{
+		controlHC:   control.Client(),
+		controlBase: control.URL,
+		identify:    func(*http.Request) (string, string) { return "phone-key", "phone.mesh" },
+		push: func(_ context.Context, target, name string, data []byte) error {
+			got = append(got, sent{target: target, name: name, data: append([]byte(nil), data...)})
+			return nil
+		},
+	})
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/push", strings.NewReader(`{"recipient":"Research Agent","text":"meet at 15:00"}`)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("logical push = %d: %s", rr.Code, rr.Body)
+	}
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	_ = mw.WriteField("recipient", "research.mesh")
+	fw, _ := mw.CreateFormFile("file", "report.pdf")
+	_, _ = fw.Write([]byte("PDFDATA"))
+	_ = mw.Close()
+	req := httptest.NewRequest(http.MethodPost, "/api/drop", &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("logical drop = %d: %s", rr.Code, rr.Body)
+	}
+
+	if presenceCalls != 2 {
+		t.Fatalf("presence calls = %d, want one fresh resolution per action", presenceCalls)
+	}
+	if len(got) != 2 || got[0].target != "100.64.0.9:9110" || got[1].target != "100.64.0.9:9110" {
+		t.Fatalf("logical actions resolved to wrong targets: %+v", got)
+	}
+	if got[0].name != "clip.txt" || string(got[0].data) != "meet at 15:00" || got[1].name != "report.pdf" || string(got[1].data) != "PDFDATA" {
+		t.Fatalf("logical action payloads changed: %+v", got)
+	}
+}
+
+// TestAirServeLogicalRecipientErrorsDoNotFallback proves a logical selector is
+// never reinterpreted as a raw address when resolution is ambiguous, missing,
+// or lacks the requested service.
+func TestAirServeLogicalRecipientErrorsDoNotFallback(t *testing.T) {
+	tests := []struct {
+		name     string
+		selector string
+		presence string
+		wantText string
+	}{
+		{
+			name:     "ambiguous name",
+			selector: "agent",
+			presence: `{"presence":[{"name":"Agent","public_key":"k1","services":[{"kind":"inbox","address":"100.64.0.1:9110"}]},{"name":"agent","public_key":"k2","services":[{"kind":"inbox","address":"100.64.0.2:9110"}]}]}`,
+			wantText: "ambiguous",
+		},
+		{
+			name:     "missing inbox service",
+			selector: "Agent",
+			presence: `{"presence":[{"name":"Agent","public_key":"k1","services":[{"kind":"ring","address":"100.64.0.1:9121"}]}]}`,
+			wantText: "does not advertise service",
+		},
+		{
+			name:     "address-like selector is not raw fallback",
+			selector: "100.64.0.9:9110",
+			presence: `{"presence":[]}`,
+			wantText: "no nearby node matches",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, tt.presence)
+			}))
+			defer control.Close()
+			called := false
+			h := airServeHandler(airServeDeps{
+				controlHC: control.Client(), controlBase: control.URL,
+				push: func(context.Context, string, string, []byte) error { called = true; return nil },
+			})
+			rr := httptest.NewRecorder()
+			body := `{"recipient":` + strconv.Quote(tt.selector) + `,"text":"hello"}`
+			h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/push", strings.NewReader(body)))
+			if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), tt.wantText) {
+				t.Fatalf("logical push = %d %q, want 400 containing %q", rr.Code, rr.Body.String(), tt.wantText)
+			}
+			if called {
+				t.Fatal("push ran after logical recipient resolution failed")
+			}
+		})
+	}
+}
+
+func TestAirServeLogicalRecipientResolverUnavailable(t *testing.T) {
+	t.Run("not configured", func(t *testing.T) {
+		called := false
+		h := airServeHandler(airServeDeps{
+			push: func(context.Context, string, string, []byte) error { called = true; return nil },
+		})
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/push", strings.NewReader(`{"recipient":"Agent","text":"hello"}`)))
+		if rr.Code != http.StatusServiceUnavailable || !strings.Contains(rr.Body.String(), "presence") {
+			t.Fatalf("unconfigured logical resolver = %d %q, want 503", rr.Code, rr.Body.String())
+		}
+		if called {
+			t.Fatal("push ran without a configured Presence resolver")
+		}
+	})
+
+	t.Run("upstream unavailable", func(t *testing.T) {
+		control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "offline", http.StatusServiceUnavailable)
+		}))
+		defer control.Close()
+		called := false
+		h := airServeHandler(airServeDeps{
+			controlHC: control.Client(), controlBase: control.URL,
+			push: func(context.Context, string, string, []byte) error { called = true; return nil },
+		})
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/push", strings.NewReader(`{"recipient":"Agent","text":"hello"}`)))
+		if rr.Code != http.StatusBadGateway || !strings.Contains(rr.Body.String(), "unavailable") {
+			t.Fatalf("failed logical resolver = %d %q, want 502", rr.Code, rr.Body.String())
+		}
+		if called {
+			t.Fatal("push ran after the Presence resolver failed")
+		}
+	})
+}
+
+func TestAirServeRing(t *testing.T) {
+	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Air-On-Behalf"); got != "phone.mesh" {
+			t.Errorf("ring resolution on behalf of %q, want phone.mesh", got)
+		}
+		_, _ = io.WriteString(w, `{"presence":[{"name":"Studio Mac","fqdn":"studio.mesh","public_key":"studio-key","services":[{"kind":"ring","address":"100.64.0.8:9121"}]}]}`)
+	}))
+	defer control.Close()
+
+	type delivered struct {
+		target string
+		notice air.Notice
+	}
+	var got []delivered
+	h := airServeHandler(airServeDeps{
+		controlHC: control.Client(), controlBase: control.URL,
+		identify: func(*http.Request) (string, string) { return "phone-key", "phone.mesh" },
+		ring: func(_ context.Context, target string, notice air.Notice) error {
+			got = append(got, delivered{target: target, notice: notice})
+			return nil
+		},
+	})
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/ring", strings.NewReader(`{"recipient":"Studio Mac","message":"Build finished","priority":"urgent"}`)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("logical ring = %d: %s", rr.Code, rr.Body)
+	}
+	if len(got) != 1 || got[0].target != "100.64.0.8:9121" || got[0].notice.Kind != air.NoticeRing || got[0].notice.Priority != air.PriorityUrgent || got[0].notice.Message != "Build finished" {
+		t.Fatalf("logical ring delivered wrong notice: %+v", got)
+	}
+
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/ring", strings.NewReader(`{"target":"100.64.0.7:9121","message":"Hello"}`)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("raw ring = %d: %s", rr.Code, rr.Body)
+	}
+	if len(got) != 2 || got[1].target != "100.64.0.7:9121" || got[1].notice.Priority != air.PriorityNormal {
+		t.Fatalf("raw ring compatibility failed: %+v", got)
+	}
+
+	for _, body := range []string{
+		`{"target":"100.64.0.7:9121","message":"","priority":"normal"}`,
+		`{"target":"100.64.0.7:9121","message":"hello","priority":"loud"}`,
+	} {
+		rr = httptest.NewRecorder()
+		h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/ring", strings.NewReader(body)))
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("invalid ring %s = %d, want 400", body, rr.Code)
+		}
+	}
+	if len(got) != 2 {
+		t.Fatalf("invalid rings were delivered: %+v", got)
+	}
+
+	tooLarge := `{"target":"100.64.0.7:9121","message":"` + strings.Repeat("x", maxAirActionJSON) + `"}`
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/ring", strings.NewReader(tooLarge)))
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversize ring = %d, want 413", rr.Code)
+	}
+
+	off := airServeHandler(airServeDeps{})
+	rr = httptest.NewRecorder()
+	off.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/ring", strings.NewReader(`{"target":"100.64.0.7:9121","message":"hello"}`)))
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("disabled ring = %d, want 503", rr.Code)
+	}
+
+	failed := airServeHandler(airServeDeps{
+		ring: func(context.Context, string, air.Notice) error {
+			return errors.New("delivery was not acknowledged")
+		},
+	})
+	rr = httptest.NewRecorder()
+	failed.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/ring", strings.NewReader(`{"target":"100.64.0.7:9121","message":"hello"}`)))
+	if rr.Code != http.StatusBadGateway || !strings.Contains(rr.Body.String(), "not acknowledged") {
+		t.Fatalf("failed ring = %d %q, want 502 delivery error", rr.Code, rr.Body.String())
+	}
+}
+
 // TestAirServeReceiptsAndConfig covers the receipts tail endpoint and the
 // config endpoint the page uses to toggle views.
 func TestAirServeReceiptsAndConfig(t *testing.T) {
 	h := airServeHandler(airServeDeps{
 		approvals: "100.64.0.2:9310",
+		ring:      func(context.Context, string, air.Notice) error { return nil },
 		receipts: func(limit int) ([]json.RawMessage, error) {
 			return []json.RawMessage{json.RawMessage(`{"decision":"allow","peer":"a.mesh"}`)}, nil
 		},
@@ -191,7 +471,7 @@ func TestAirServeReceiptsAndConfig(t *testing.T) {
 	}
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/config", nil))
-	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "9310") {
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "9310") || !strings.Contains(rr.Body.String(), `"ring":true`) {
 		t.Fatalf("config: %d %s", rr.Code, rr.Body)
 	}
 }

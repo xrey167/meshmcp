@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xrey167/meshmcp/air"
 	"github.com/xrey167/meshmcp/policy"
 	"github.com/xrey167/meshmcp/session"
 )
@@ -33,11 +34,12 @@ import (
 // history is provable in the ledger even though only the latest persists. View
 // it with `air serve --cast <dir>` (the newest frame is the "Now Showing" slot).
 //
-//	SENDER:   meshmcp air screen <peer-ip:port> --watch <frame-file> [--interval 500ms] [--max-frames N]
+//	SENDER:   meshmcp air screen --watch <frame-file> [--control <gateway>] [--interval 500ms] [--max-frames N] <target>
 //	RECEIVER: meshmcp air screen --recv --dir <dir> --allow <id> [--port 9121] [--audit f]
 func cmdAirScreen(args []string) error {
 	fs := flag.NewFlagSet("air screen", flag.ExitOnError)
 	o := meshFlags(fs)
+	control := fs.String("control", "", "sender: Air control gateway used to resolve a Nearby name, FQDN, or full public key")
 	recv := fs.Bool("recv", false, "run a screen receiver (writes dir/<sender>/current.<ext>)")
 	dir := fs.String("dir", "", "receiver: directory to write rolling frames into")
 	watch := fs.String("watch", "", "sender: image file to stream each time it changes")
@@ -51,10 +53,13 @@ func cmdAirScreen(args []string) error {
 		return err
 	}
 	if *recv {
+		if *control != "" {
+			return errors.New("air screen: --control is only valid when sending")
+		}
 		return screenReceive(o, *dir, allow, *port, *auditPath)
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: meshmcp air screen [flags] <peer-ip:port> --watch <frame-file>   (or --recv --dir <dir> --allow <id>)")
+		return errors.New("usage: meshmcp air screen --watch <frame-file> [--control <gateway>] [sender-flags] <target>   (or --recv --dir <dir> --allow <id>)")
 	}
 	if *watch == "" {
 		return errors.New("air screen: --watch <frame-file> is required for the sender")
@@ -62,7 +67,7 @@ func cmdAirScreen(args []string) error {
 	if _, ok := imageType(*watch); !ok {
 		return fmt.Errorf("air screen: --watch %q is not an image", filepath.Base(*watch))
 	}
-	peer := fs.Arg(0)
+	peerRef := fs.Arg(0)
 
 	o.BlockInbound = true
 	client, err := startMesh(o, os.Stderr)
@@ -70,6 +75,10 @@ func cmdAirScreen(args []string) error {
 		return err
 	}
 	defer stopMesh(client)
+	peer, err := resolveAirTargetOverMesh(context.Background(), client, peerRef, *control, air.ServiceScreen)
+	if err != nil {
+		return fmt.Errorf("air screen: %w", err)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
