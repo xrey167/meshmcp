@@ -176,7 +176,11 @@ func FetchCatalog(hc *http.Client, url string) (Catalog, []byte, error) {
 	if err := json.Unmarshal(body, &cat); err != nil {
 		return Catalog{}, body, fmt.Errorf("bad catalog response: %w", err)
 	}
-	return cat, body, nil
+	normalized, err := cat.Normalized()
+	if err != nil {
+		return Catalog{}, body, fmt.Errorf("invalid catalog response: %w", err)
+	}
+	return normalized, body, nil
 }
 
 // ResolveCatalog performs ARD discovery from a domain: the TXT pointer (leg 2)

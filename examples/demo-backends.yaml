@@ -7,8 +7,13 @@ mesh:
 
 backends:
   - name: demo
+    # An explicit Component Card id survives display-name and address changes.
+    id: demo-main
+    version: "0.1.0"
     port: 9101
     stdio: ["./cmd/mcpserver/mcpserver.exe", "--root", ".", "--allow-cmd", "cmd,git"]
   - name: echo
+    id: echo-main
+    version: "0.1.0"
     port: 9102
     stdio: ["./cmd/mcpecho/mcpecho.exe"]

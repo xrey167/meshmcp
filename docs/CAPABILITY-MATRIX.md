@@ -39,6 +39,7 @@ continuously tested.
 | Router aggregation / delegated identity | Experimental | Router forwards under its own identity; downstream caller is unsigned `_meta`. Signed delegation (Phase 4) not yet implemented — potential confused deputy. Use a default-deny caller ACL. |
 | Federation (cross-org) | Experimental | Same delegation/identity-intersection gaps as the router at the org boundary. |
 | Air (agent orchestration) | Experimental | Control-endpoint hardening in progress (see PR #9); not a core security surface. |
+| Air Component Cards v1 | Experimental | Caller-filtered discovery metadata with stable ID, kind, version, advertised owner, canonical features, and lifecycle. Cards are validated and backward-compatible, but unsigned and advisory: live transport identity, ACL, policy, and capability verification remain authoritative. |
 | Pub/sub fabric | Experimental | Rich delivery semantics; at-least-once with caveats; not part of the security wedge. |
 | GraphRAG / knowledge graph | Experimental | Payload-layer feature. |
 | Agent memory fabric | Experimental | Payload-layer feature. |
@@ -64,6 +65,11 @@ continuously tested.
 | Extend strict config (`KnownFields`) to the remaining subsystem configs (gateway config + control ACL done) | 9 |
 | MCP protocol-version negotiation + supported-version matrix | 9 |
 | Required CI (build/test/race/vuln/fuzz) and signed releases + SBOM | 11 |
+| Trust Card + Library: signed provenance and install lifecycle layered over Component Cards and marketplace manifests; discovery never auto-activates code | Ecosystem 2 |
+| Universal Resolver: resolve stable IDs, names, intents, and resource references without widening authority or choosing ambiguous names | Ecosystem 3 |
+| Continuity Capsules: target-accepted work/artifact references only; no identity swap, token transfer, hidden-context replay, or automatic execution | Ecosystem 4 |
+| Governed Automations: schedules and events resolve a concrete actor; every effect passes normal policy, approval, and audit | Ecosystem 5 |
+| Native companion app over the existing mobile bindings, with hardware-backed device identity and explicit confirmation for privileged actions | Ecosystem 6 |
 
 ## Recommended v0.1 production surface
 

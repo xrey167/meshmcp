@@ -59,6 +59,15 @@ first, fixed with the smallest robust change, and documented in
 
 ### Added
 
+- **Component Card v1 ecosystem spine** — Air catalogs now carry a backward-compatible,
+  validated descriptor for each reachable component: stable ID, kind, version, advertised
+  owner identity, canonical versioned features, and lifecycle. Stable-ID-aware catalog
+  changes distinguish a rename or address move from remove+add, and the same metadata feeds
+  Air catalog/map/home/change views. Cards are discovery metadata only—transport identity,
+  ACL, policy, co-sign, and capability verification remain authoritative. Added
+  `docs/ECOSYSTEM.md` for the **discover → understand → use → continue** contract and the
+  Trust Library, Universal Resolver, Continuity Capsule, automation, and native-companion
+  roadmap.
 - **Air vision arc** — new identity-gated, firewalled, audited CLI verbs:
   `air browse` (a backend's tools/resources/prompts, filtered to your identity),
   `air stream` (watch governed Air activity live by tailing the audit ledger,

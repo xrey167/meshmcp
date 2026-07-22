@@ -193,14 +193,14 @@ func (h Home) Signature() string {
 	}
 
 	reach := append([]CatalogEntry(nil), h.Reachable...)
-	sort.Slice(reach, func(i, j int) bool {
-		if reach[i].Name != reach[j].Name {
-			return reach[i].Name < reach[j].Name
-		}
-		return reach[i].Address < reach[j].Address
-	})
+	sort.Slice(reach, func(i, j int) bool { return entryLess(reach[i], reach[j]) })
 	for _, e := range reach {
-		line("reach", e.Name, e.Address, e.Transport,
+		owner := e.Owner.normalized()
+		lifecycle := e.Lifecycle.normalized()
+		line("reach", e.ID, string(e.Kind), e.Name, e.Version,
+			owner.PubKey, owner.FQDN, owner.SPIFFE,
+			e.Address, e.Transport, featureKey(e.Features),
+			string(lifecycle.State), lifecycle.Since, strconv.FormatUint(lifecycle.Generation, 10),
 			strconv.FormatBool(e.Resumable), strconv.FormatBool(e.Steerable))
 	}
 

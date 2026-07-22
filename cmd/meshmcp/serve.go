@@ -19,6 +19,7 @@ import (
 
 	"github.com/netbirdio/netbird/client/embed"
 
+	"github.com/xrey167/meshmcp/air"
 	"github.com/xrey167/meshmcp/policy"
 	"github.com/xrey167/meshmcp/registry"
 	"github.com/xrey167/meshmcp/secrets"
@@ -51,10 +52,12 @@ func cmdServe(args []string) error {
 	}
 	defer stopMesh(client)
 
-	meshIP := ""
+	meshIP, meshFQDN, meshPubKey := "", "", ""
 	if st, err := client.Status(); err == nil {
 		log.Printf("mesh peer up: %s (%s)", st.LocalPeerState.IP, st.LocalPeerState.FQDN)
 		meshIP = strings.SplitN(st.LocalPeerState.IP, "/", 2)[0]
+		meshFQDN = st.LocalPeerState.FQDN
+		meshPubKey = st.LocalPeerState.PubKey
 	}
 
 	// Optionally advertise backends in the discovery registry so a router can
@@ -246,14 +249,22 @@ func cmdServe(args []string) error {
 		for _, b := range cfg.Backends {
 			backendACLs[b.Name] = newACL(b.Allow)
 		}
-		gwFQDN := ""
-		if st, err := client.Status(); err == nil {
-			gwFQDN = st.LocalPeerState.FQDN
+		cards, err := buildCatalogBackends(cfg.Backends, meshIP, air.IdentityRef{
+			PubKey: meshPubKey,
+			FQDN:   meshFQDN,
+		})
+		if err != nil {
+			close(shutdown)
+			for _, l := range listeners {
+				l.Close()
+			}
+			wg.Wait()
+			return fmt.Errorf("control: build component catalog: %w", err)
 		}
 		ctl := &gatewayAirControl{
 			servers: servers, acls: backendACLs, mu: &serversMu,
-			backends: buildCatalogBackends(cfg.Backends, meshIP),
-			gateway:  gwFQDN,
+			backends: cards,
+			gateway:  meshFQDN,
 		}
 		identify := func(r *http.Request) (string, string) { return peerIdentityStr(client, r.RemoteAddr) }
 		allow := newACL(cfg.Control.Allow)

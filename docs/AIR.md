@@ -1,4 +1,4 @@
-# Air — the AirDrop-native face of meshmcp
+# Air — the coherent agent experience on meshmcp
 
 **Air** is one name and one product surface for meshmcp's payload + human-in-the-loop
 layer: **discover** who's on your mesh, **drop** a file, **push** a snippet or a task,
@@ -6,12 +6,17 @@ layer: **discover** who's on your mesh, **drop** a file, **push** a snippet or a
 **launch** a fresh one, and **approve** a held call — from a phone, an assistant, or a
 laptop.
 
-It looks like Apple AirDrop. It is not. Every Air transfer is between **cryptographic
-identities on a dark mesh** — no cloud, no accounts, no open ports — is **resumable**
-across a network roam, is **policy-gated** by the receiver's firewall, and is
-**provable** in a tamper-evident ledger. AirDrop asks "is this person near me?"; Air
-asks "does this WireGuard key prove who they are, and may they do this?" — and writes
-down the answer.
+Air aims for the coherence of an integrated consumer platform: one identity, a small
+shared vocabulary, predictable continuity, and privacy by default. It uses meshmcp's
+own protocols and interaction model; it does not implement or imitate Apple's AirDrop
+protocol or visual design. meshmcp is independent and is not affiliated with or
+endorsed by Apple Inc.
+
+Every Air transfer is between **cryptographic identities on a dark mesh** — no public
+application ingress and no caller-supplied identity — is **resumable** across a network
+roam, is **policy-gated** by the receiver's firewall, and is recorded in the
+tamper-evident ledger. Air asks two separate questions: “which identity did the
+transport prove?” and “may that identity do this?”
 
 > Air is a coherent face over primitives meshmcp already ships (`peers`, `drop`, `push`,
 > `fetch`, `approvals`) plus the **steer** and **launch** primitives built on top — the agent
@@ -24,14 +29,15 @@ down the answer.
 
 ## 1 · What Air is
 
-meshmcp's moat is that the **same WireGuard key that authorizes a tool call also
-stamps a dropped file, a pushed task, and a co-sign**. So "who sent what to whom, and
-who approved it" is cryptographic by construction — not a header, not a claim. Air is
-the consumer-facing product of that one fact.
+meshmcp's moat is that the **same WireGuard key that identifies the caller for tool
+authorization also stamps a dropped file, a pushed task, and a co-sign**. So “who sent
+what to whom, and who approved it” starts from a transport-proved identity—not a
+header or body claim. Policy still decides what that identity may do. Air is the
+consumer-facing product of that separation.
 
 | Air action | Backed by (exists today) | One line |
 |---|---|---|
-| **Discover** — who's on my mesh | `peers.go` · `client.Status()` | Each row is a WireGuard identity + mesh FQDN, not a claim. |
+| **Discover** — who's on my mesh and what can I use | `peers.go` · `air/catalog.go` · `client.Status()` | Peer identity plus per-caller Component Cards; discovery never grants access. |
 | **Drop** — send files | `drop.go` (`sendFiles`, `session` client) | Resumable, E2E-encrypted, sender-ACL gated, content-hash audited. |
 | **Push** — send clipboard / a task | `push.go` (`sendData`) | A small stdin payload to a peer's resumable inbox, by identity. |
 | **Fetch** — pull by content hash | `cas.go` · `fetch` | Zero-exposure content-addressed retrieval from a peer's store. |
@@ -66,19 +72,26 @@ Discovery has a further horizon — **vision**, **stream**, **browse**, **bind**
 bind` are the first four concrete steps; see [AIR-VISION.md](AIR-VISION.md) for the full arc.
 
 `air map` composes `whoami` and the catalog into a topology view — a tree of *you → the
-gateway → the backends you may reach*, each tagged with its transport and whether it is
-resumable/steerable — so you can see the shape of your reachable mesh at a glance, not just
-flat lists (`airmap.go`).
+gateway → the backends you may reach*. Component Card v1 gives the map and the other Air
+views one vocabulary for stable ID, kind, version, owner, features, and lifecycle, rather
+than treating an address or display name as the component's identity (`airmap.go`).
 Peer rows come straight from the mesh (`client.Status()` in `peers.go`): status, mesh IP,
 FQDN, short public key. The identity is the transport's, so it can't be spoofed.
 
 **Air catalog** adds an ARD-style (Agentic Resource Discovery) well-known document —
 `GET /.well-known/ai-catalog.json`, served on the gateway's control port — so a peer can
 ask a gateway "what can I reach here?" and get back the backends *its own identity is
-permitted to use* (address, transport, whether resumable/steerable). Discovery respects
-the firewall: the list is filtered per-caller by each backend's ACL, an unidentifiable
-peer discovers nothing, and every read is audited (`air/catalog`). It is the discovery
-counterpart to Air's drive verbs (`aircatalog.go`).
+permitted to use*. New catalogs advertise schema `com.meshmcp.air.catalog/v1`; each endpoint
+can carry a Component Card while legacy `resumable`/`steerable` booleans remain compatible.
+The standard features emitted when applicable are `mcp.2025-06-18`, `air.browse.v1`,
+`air.resume.v1`, `air.steer.v1`, and `authz.capability.v1`.
+
+**A card advertises; it never authorizes.** `owner` is descriptive metadata, not a
+replacement for the identity proved by the live WireGuard transport. A feature is a
+support claim, not a capability token. The list is filtered per-caller by each backend's
+ACL, an unidentifiable peer discovers nothing, every read is audited (`air/catalog`), and
+the real operation passes policy again at its enforcement point. See
+[ECOSYSTEM.md](ECOSYSTEM.md) for the complete Component Card contract and roadmap.
 
 **Discover from a domain name (ARD legs 2–3).** So a peer can find a gateway from *just a
 domain*, `meshmcp air dns <domain> --control <mesh-ip:port>` prints the DNS records to
@@ -92,10 +105,12 @@ it points to is still mesh-only and identity-gated.
 
 **Module layout.** Air's portable, mesh-independent core lives in the [`air`](../air)
 package, tested on its own:
-- `air/catalog.go` — the discovery `Catalog`/`CatalogEntry` model (+ `Entry`, `Steerable`,
-  `Resumable` helpers).
+- `air/component.go` · `air/catalog.go` — Component Card vocabulary plus the discovery
+  `Catalog`/`CatalogEntry` model (`Resolve`, `Supports`, `Steerable`, and `Resumable`).
 - `air/discovery.go` — ARD record generation + TXT/SRV parsing & resolution, with input
   validation that refuses zone-record injection and caps the untrusted URL.
+- `air/change.go` · `air/home.go` — stable-ID-aware changes and a deterministic home
+  signature over the same component metadata.
 - `air/steer.go` — the steer envelope, its `Validate()`, the `Task`/`Nudge`/`Cancel`
   constructors, and the newline-JSON `ParseEnvelopes`/`WriteEnvelope` framing.
 - `air/target.go` — the `Target` addressing grammar (`agent|session|task|group`).
@@ -337,6 +352,7 @@ Honesty about the seam, so nobody mistakes the mockup for shipped product:
 
 | Piece | Status | Where |
 |---|---|---|
+| **Component Card v1** — stable ID · kind · version · owner · deterministic features · lifecycle; legacy catalogs remain readable | **Ships now (Labs discovery metadata)** | `air/component.go` · `air/catalog.go` · `air/change.go` · `air/home.go` · [ECOSYSTEM.md](ECOSYSTEM.md) |
 | `discover` / `drop` / `push` / `fetch` / `approvals` CLI | **Ships now** | `peers.go` · `drop.go` · `push.go` · `cas.go` · `approvals.go` |
 | Resumable, E2E, sender-ACL, per-file audit on transfers | **Ships now** | `session/` · `drop.go` · `policy/` |
 | Assistant Air tools `drop_file` · `network` · `pending_approvals` · `approve`/`deny` | **Ships now** | `mcpapp.go` · [MCP-APP.md](MCP-APP.md) |
@@ -348,7 +364,7 @@ Honesty about the seam, so nobody mistakes the mockup for shipped product:
 | **Steer/Launch** — the `meshmcp air` CLI (`sessions --json` · `steer` · `launch` · `agent-steer --target/--id` · `tasks` · `task-steer` · `workflow`) + P4 runner | **Ships now** | `air.go` · `airworkflow.go` · `examples/air-workflow.yaml` |
 | **Workflow** — variables between steps (`as:` + `${var.field}`) · `parallel:` blocks · `on_error` · per-step `timeout` · `--json` summary · launch-race retry | **Ships now** | `airworkflow.go` · `airworkflow_test.go` |
 | Assistant tools `air_peers` · `air_push` · `air_fetch` · `air_launch` (opt-in) | **Ships now** | `mcpapp.go` · `mcpapp_air_test.go` |
-| A served **live** Air web page over the mesh (`meshmcp air serve`) — Nearby · Sessions/Steer · **Push/Drop** (sent over the relay's identity) · **Approvals link-out** (browser keeps its own identity) · **Receipts** (`--audit` tail) · **Vision** gallery (`--gallery` inbox — image drops rendered inline, path-safe) · viewer `--allow` ACL. A phone-first, Apple-style UI (frosted large-title header, grouped inset cards, segmented steer sheet, light/dark), hardened as a browser surface: strict CSP, `nosniff`/frame-deny/no-referrer headers, and a same-origin guard on every state-changing POST (CSRF / DNS-rebinding). | **Ships now** | `airserve.go` · `cmd/meshmcp/site/air-live.html` · `airserve_test.go` |
+| A served **live** Air web page over the mesh (`meshmcp air serve`) — Nearby · Sessions/Steer · **Push/Drop** (sent over the relay's identity) · **Approvals link-out** (browser keeps its own identity) · **Receipts** (`--audit` tail) · **Vision** gallery (`--gallery` inbox — image drops rendered inline, path-safe) · viewer `--allow` ACL. A phone-first, polished consumer UI (large-title header, grouped cards, segmented steer sheet, light/dark), hardened as a browser surface: strict CSP, `nosniff`/frame-deny/no-referrer headers, and a same-origin guard on every state-changing POST (CSRF / DNS-rebinding). | **Ships now** | `airserve.go` · `cmd/meshmcp/site/air-live.html` · `airserve_test.go` |
 | **Vision arc** — `air browse` (backend tools/resources/prompts, identity-filtered) · `air stream` (live audit tail, decision-coloured, rotation-aware) · `air vision` (drop-inbox image inventory) · `air bind` (audit-triggered governed reactions, deny-by-default `run`) | **Ships now** | `airbrowse.go` · `airstream.go` · `airvision.go` · `airbind.go` (+ tests) · [AIR-VISION.md](AIR-VISION.md) · `examples/air-bindings.yaml` |
 | Push-wake seam (device registry + notify hook) + a **webhook Notifier** delivering over the network (no vendor creds) | **Ships now** | `pushwake.go` · `webhooknotify.go` · `approvals.go` (`--notify-webhook`) · `pushwake_test.go` · `webhooknotify_test.go` — [MOBILE.md §4](MOBILE.md) |
 | Native mobile **binding package** (`mobile/`, compiles; `gomobile bind` external) | **Ships now** | `mobile/mobile.go` · `mobile/mobile_test.go` — [MOBILE.md §3](MOBILE.md) |
@@ -361,8 +377,14 @@ the default**.
 
 ## 7 · Roadmap
 
-The Air surface is built. What's left is genuinely external — it needs credentials or a
-device this repo can't exercise:
+This section tracks delivery of the current Air surfaces. The broader ecosystem sequence—
+**Trust Card + Library → Universal Resolver → explicitly accepted Continuity Capsules →
+Automations → native companion**—is specified in [ECOSYSTEM.md](ECOSYSTEM.md). In
+particular, continuity will not reassign a live session's identity or transfer bearer,
+capability, or secret tokens.
+
+The current Air surface is built. What's left in this delivery track is genuinely external —
+it needs credentials or a device this repo can't exercise:
 
 1. **Done — the full Air surface.** `discover` / `drop` / `push` / `fetch` / `approve`, and
    **Steer/Launch**: the P1–P4 primitives ([AIR-STEER.md](AIR-STEER.md)), the gateway control

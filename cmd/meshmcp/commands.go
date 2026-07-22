@@ -64,7 +64,7 @@ var builtinCommands = []string{
 	"ls", "call", "read", "prompt", "functions", "function-call", "router",
 	"orchestrate", "graphrag", "control", "federate", "audit", "capability",
 	"approve", "approvals", "agent", "air", "secrets", "dash", "room", "mcp",
-	"pubsub", "publish", "subscribe",
+	"pubsub", "publish", "subscribe", "request", "respond",
 	"insight", "replay", "config", "status", "budget", "doctor", "hook",
 	"plugins", "spotlight", "market", "version",
 }

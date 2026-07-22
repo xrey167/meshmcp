@@ -5,8 +5,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/xrey167/meshmcp/air"
 	"github.com/xrey167/meshmcp/session"
 )
 
@@ -374,17 +376,107 @@ func TestAirCatalogAudited(t *testing.T) {
 
 // TestBuildCatalogBackends covers transport classification and addressing.
 func TestBuildCatalogBackends(t *testing.T) {
-	got := buildCatalogBackends([]*Backend{
-		{Name: "fs", Port: 9101, Stdio: []string{"srv"}, Resumable: true},
+	owner := air.IdentityRef{PubKey: "gateway-key", FQDN: "gateway.mesh"}
+	got, err := buildCatalogBackends([]*Backend{
+		{Name: "fs", ID: "com.example.fs", Version: "2.1.0", Port: 9101, Stdio: []string{"srv"}, Resumable: true, Capabilities: &CapabilitiesConfig{}},
 		{Name: "web", Port: 9102, HTTP: "http://127.0.0.1:8080"},
-	}, "100.64.0.2")
-	if len(got) != 2 {
-		t.Fatalf("want 2, got %d", len(got))
+		{Name: "remote", Port: 9103, Remote: &RemoteBackendConfig{Endpoint: "https://example.test/mcp"}},
+	}, "100.64.0.2", owner)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got[0].transport != "stdio" || got[0].address != "100.64.0.2:9101" || !got[0].resumable {
+	if len(got) != 3 {
+		t.Fatalf("want 3, got %d", len(got))
+	}
+	if got[0].Transport != air.TransportStdio || got[0].Address != "100.64.0.2:9101" || !got[0].Resumable {
 		t.Fatalf("fs entry wrong: %+v", got[0])
 	}
-	if got[1].transport != "http" || got[1].address != "100.64.0.2:9102" {
+	if got[0].ID != "com.example.fs" || got[0].Version != "2.1.0" || got[0].Kind != air.ComponentBackend || got[0].Owner != owner {
+		t.Fatalf("fs component identity wrong: %+v", got[0])
+	}
+	for _, feature := range []string{air.FeatureMCP20250618, air.FeatureAirBrowseV1, air.FeatureAirResumeV1, air.FeatureCapabilityV1} {
+		if !got[0].Supports(feature) {
+			t.Errorf("fs card missing feature %q: %+v", feature, got[0].Features)
+		}
+	}
+	if got[0].Lifecycle.State != air.LifecycleServing {
+		t.Fatalf("fs lifecycle = %q, want serving", got[0].Lifecycle.State)
+	}
+	if got[1].Transport != air.TransportHTTP || got[1].Address != "100.64.0.2:9102" {
 		t.Fatalf("web entry wrong: %+v", got[1])
+	}
+	if got[1].ID == "" || got[1].ID == got[0].ID {
+		t.Fatalf("derived component id missing or duplicated: %+v", got[1])
+	}
+	if got[2].Transport != air.TransportRemote {
+		t.Fatalf("remote transport wrong: %+v", got[2])
+	}
+	ipv6, err := buildCatalogBackends([]*Backend{
+		{Name: "v6", Port: 9104, Stdio: []string{"srv"}},
+	}, "2001:db8::1", owner)
+	if err != nil || len(ipv6) != 1 || ipv6[0].Address != "[2001:db8::1]:9104" {
+		t.Fatalf("IPv6 component address was not joined safely: %+v, err=%v", ipv6, err)
+	}
+
+	control := &gatewayAirControl{
+		servers:  map[string]*session.Server{"fs": &session.Server{}},
+		acls:     map[string]acl{},
+		mu:       &sync.Mutex{},
+		backends: got,
+		gateway:  owner.FQDN,
+	}
+	cat := control.catalog("caller-key", "caller.mesh")
+	if cat.Schema != air.CatalogSchemaV1 || len(cat.Endpoints) != 3 {
+		t.Fatalf("component catalog metadata wrong: %+v", cat)
+	}
+	if !cat.Endpoints[0].Supports(air.FeatureAirSteerV1) || !cat.Endpoints[0].Steerable {
+		t.Fatalf("live steer feature missing: %+v", cat.Endpoints[0])
+	}
+}
+
+func TestComponentCardCanonicalNameKeepsBackendACL(t *testing.T) {
+	cfg, err := loadConfig(writeConfig(t, `
+backends:
+  - name: " restricted "
+    port: 9101
+    stdio: ["echo"]
+    allow: ["pubkey:trusted"]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Backends[0].Name != "restricted" {
+		t.Fatalf("backend name was not canonicalized once at load: %q", cfg.Backends[0].Name)
+	}
+	cards, err := buildCatalogBackends(cfg.Backends, "100.64.0.2", air.IdentityRef{PubKey: "gateway-key", FQDN: "gateway.mesh"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	control := &gatewayAirControl{
+		servers:  map[string]*session.Server{},
+		acls:     map[string]acl{cfg.Backends[0].Name: newACL(cfg.Backends[0].Allow)},
+		mu:       &sync.Mutex{},
+		backends: cards,
+	}
+	if got := control.catalog("outsider", "outsider.mesh"); len(got.Endpoints) != 0 {
+		t.Fatalf("canonical card name missed its restricted ACL: %+v", got.Endpoints)
+	}
+	if got := control.catalog("trusted", "trusted.mesh"); len(got.Endpoints) != 1 || got.Endpoints[0].Name != "restricted" {
+		t.Fatalf("authorized caller did not receive the canonical card: %+v", got.Endpoints)
+	}
+}
+
+func TestBuildCatalogBackendsRejectsExplicitDerivedIDCollision(t *testing.T) {
+	owner := air.IdentityRef{PubKey: "gateway-key", FQDN: "gateway.mesh"}
+	derived, err := air.StableComponentID(owner.PubKey, air.ComponentBackend, "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = buildCatalogBackends([]*Backend{
+		{Name: "fs", ID: derived, Port: 9101, Stdio: []string{"echo"}},
+		{Name: "web", Port: 9102, Stdio: []string{"echo"}},
+	}, "100.64.0.2", owner)
+	if err == nil || !strings.Contains(err.Error(), "collides") {
+		t.Fatalf("explicit/derived component id collision accepted: %v", err)
 	}
 }

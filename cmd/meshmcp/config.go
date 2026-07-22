@@ -11,6 +11,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/xrey167/meshmcp/air"
 	"github.com/xrey167/meshmcp/policy"
 	"github.com/xrey167/meshmcp/secrets"
 )
@@ -93,7 +94,14 @@ type MeshConfig struct {
 // Exactly one of Stdio or HTTP must be set.
 type Backend struct {
 	Name string `yaml:"name"`
-	Port int    `yaml:"port"`
+	// ID is the stable component-card identity. Set it explicitly when a
+	// backend may be renamed; otherwise the gateway derives one from its mesh
+	// public key, component kind, and Name.
+	ID string `yaml:"id,omitempty"`
+	// Version is the backend's advertised product/protocol version. It is
+	// discovery metadata only and never changes authorization.
+	Version string `yaml:"version,omitempty"`
+	Port    int    `yaml:"port"`
 	// Stdio spawns this command per inbound connection and pipes the
 	// connection to its stdin/stdout (raw JSON-RPC transport).
 	Stdio []string `yaml:"stdio"`
@@ -277,10 +285,37 @@ func loadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("config %s: no backends defined", path)
 	}
 	seen := map[int]string{}
+	seenNames := map[string]bool{}
+	seenIDs := map[string]string{}
 	for i, b := range cfg.Backends {
 		b.groups = cfg.Groups
+		// Canonicalize once before the name becomes a key in listener, ACL,
+		// session-server, registry, and component-card maps. Letting the card
+		// trim a different value later could miss the configured ACL and fall
+		// back to the permissive empty-ACL behavior during discovery.
+		b.Name = strings.TrimSpace(b.Name)
 		if b.Name == "" {
 			return nil, fmt.Errorf("backend #%d: name is required", i+1)
+		}
+		if len(b.Name) > 256 || strings.IndexFunc(b.Name, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+			return nil, fmt.Errorf("backend %q: name must be at most 256 bytes and contain no control characters", b.Name)
+		}
+		if seenNames[b.Name] {
+			return nil, fmt.Errorf("backend %q: name is already used", b.Name)
+		}
+		seenNames[b.Name] = true
+		b.Version = strings.TrimSpace(b.Version)
+		if b.ID != "" {
+			if err := air.ValidateComponentID(b.ID); err != nil {
+				return nil, fmt.Errorf("backend %q: id: %w", b.Name, err)
+			}
+			if other, dup := seenIDs[b.ID]; dup {
+				return nil, fmt.Errorf("backend %q: component id %q already used by %q", b.Name, b.ID, other)
+			}
+			seenIDs[b.ID] = b.Name
+		}
+		if len(b.Version) > 128 || strings.IndexFunc(b.Version, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+			return nil, fmt.Errorf("backend %q: version must be at most 128 bytes and contain no control characters", b.Name)
 		}
 		if b.Port <= 0 || b.Port > 65535 {
 			return nil, fmt.Errorf("backend %q: port must be 1-65535", b.Name)

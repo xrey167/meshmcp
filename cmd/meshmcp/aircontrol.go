@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/xrey167/meshmcp/air"
 	"github.com/xrey167/meshmcp/policy"
 	"github.com/xrey167/meshmcp/session"
 )
@@ -200,8 +201,8 @@ type gatewayAirControl struct {
 	servers  map[string]*session.Server
 	acls     map[string]acl
 	mu       *sync.Mutex
-	backends []catalogBackend // static per-backend discovery data (Air catalog)
-	gateway  string           // this gateway's mesh FQDN, for the catalog
+	backends []AirCatalogEntry // canonical cards; live steerability is added per response
+	gateway  string            // this gateway's mesh FQDN, for the catalog
 }
 
 func (g *gatewayAirControl) backendAllows(backend, pubKey, fqdn string) bool {
@@ -231,18 +232,25 @@ func (g *gatewayAirControl) sessions(pubKey, fqdn string) []AirSession {
 // discovery that respects the per-backend ACL, so a peer never learns of a
 // backend it could not already call.
 func (g *gatewayAirControl) catalog(pubKey, fqdn string) AirCatalog {
-	cat := AirCatalog{Service: "meshmcp", Version: version, Gateway: g.gateway}
+	cat := AirCatalog{Schema: air.CatalogSchemaV1, Service: "meshmcp", Version: version, Gateway: g.gateway}
 	for _, b := range g.backends {
-		if !g.backendAllows(b.name, pubKey, fqdn) {
+		if !g.backendAllows(b.Name, pubKey, fqdn) {
 			continue
 		}
 		g.mu.Lock()
-		_, steerable := g.servers[b.name]
+		_, steerable := g.servers[b.Name]
 		g.mu.Unlock()
-		cat.Endpoints = append(cat.Endpoints, AirCatalogEntry{
-			Name: b.name, Address: b.address, Transport: b.transport,
-			Resumable: b.resumable, Steerable: steerable,
-		})
+		entry := b
+		entry.Features = append([]air.Feature(nil), b.Features...)
+		if steerable {
+			entry.Steerable = true
+			entry.Features = append(entry.Features, air.Feature{Name: air.FeatureAirSteerV1})
+		}
+		// Static cards were validated at startup and the only dynamic addition
+		// is the standard steer feature, so normalization cannot fail here.
+		if normalized, err := entry.Normalized(); err == nil {
+			cat.Endpoints = append(cat.Endpoints, normalized)
+		}
 	}
 	return cat
 }

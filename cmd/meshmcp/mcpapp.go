@@ -238,7 +238,7 @@ func (a *meshApp) register(s *mcp.Server) {
 	})
 	s.AddTool(mcp.Tool{
 		Name:        "air_catalog",
-		Description: "Discover the backends you may reach on a gateway (Air · ARD well-known catalog). Requires --control. Returns each backend's name, mesh address, transport, and whether it is resumable/steerable — filtered to your identity.",
+		Description: "Discover the components you may reach on a gateway (Air component-card catalog). Requires --control. Returns stable ID, kind, version, advertised owner, mesh address, lifecycle, and versioned features — filtered to your identity. Cards advertise support; live transport identity and policy still authorize every operation.",
 		InputSchema: appObj(nil),
 		Handler:     a.toolAirCatalog,
 	})
