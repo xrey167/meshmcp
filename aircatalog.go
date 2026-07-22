@@ -7,7 +7,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 )
 
@@ -56,19 +58,43 @@ func cmdAirCatalog(args []string) error {
 	fs := flag.NewFlagSet("air catalog", flag.ExitOnError)
 	o := meshFlags(fs)
 	asJSON := fs.Bool("json", false, "print the raw catalog JSON instead of a table")
+	resolve := fs.String("resolve", "", "discover the control endpoint from a domain's ARD DNS record instead of a positional address")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if fs.NArg() != 1 {
-		return errors.New("usage: meshmcp air catalog [flags] <control-ip:port>")
+
+	// Two ways in: a known control address, or ARD leg-2 DNS discovery from a
+	// domain name (the `--resolve` bootstrap). Resolution yields a catalog URL
+	// whose mesh host:port is the control endpoint we then dial over the mesh.
+	control, catalogURL := "", "http://air-control"+airCatalogPath
+	switch {
+	case *resolve != "":
+		if fs.NArg() != 0 {
+			return errors.New("air catalog: give either --resolve <domain> or a <control-ip:port>, not both")
+		}
+		u, err := resolveCatalogURL(net.LookupTXT, *resolve)
+		if err != nil {
+			return fmt.Errorf("air catalog: %w", err)
+		}
+		parsed, err := url.Parse(u)
+		if err != nil {
+			return fmt.Errorf("air catalog: resolved a bad catalog url %q: %w", u, err)
+		}
+		control, catalogURL = parsed.Host, u
+		fmt.Fprintln(os.Stderr, dim("resolved "+*resolve+" → "+u))
+	case fs.NArg() == 1:
+		control = fs.Arg(0)
+	default:
+		return errors.New("usage: meshmcp air catalog [flags] <control-ip:port>  (or --resolve <domain>)")
 	}
-	hc, cleanup, err := airControlHTTP(o, fs.Arg(0))
+
+	hc, cleanup, err := airControlHTTP(o, control)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
 
-	resp, err := hc.Get("http://air-control" + airCatalogPath)
+	resp, err := hc.Get(catalogURL)
 	if err != nil {
 		return fmt.Errorf("air catalog: %w", err)
 	}
