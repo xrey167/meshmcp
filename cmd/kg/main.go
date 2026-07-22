@@ -17,6 +17,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/xrey167/meshmcp/kg"
 	"github.com/xrey167/meshmcp/mcp"
 )
 
@@ -27,7 +28,7 @@ func main() {
 			storePath = os.Args[i+1]
 		}
 	}
-	st, err := openStore(storePath, func() string { return time.Now().UTC().Format(time.RFC3339) })
+	st, err := kg.Open(storePath, func() string { return time.Now().UTC().Format(time.RFC3339) })
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "kg:", err)
 		os.Exit(1)
@@ -38,7 +39,7 @@ func main() {
 	if peer == "" {
 		peer = os.Getenv("MESHMCP_PEER")
 	}
-	fmt.Fprintf(os.Stderr, "kg: started for peer %q, store %s (%d records)\n", peer, storePath, st.head())
+	fmt.Fprintf(os.Stderr, "kg: started for peer %q, store %s (%d records)\n", peer, storePath, st.Head())
 
 	s := mcp.New("meshmcp-kg", "0.1.0")
 	registerKG(s, st, peer)
@@ -49,7 +50,7 @@ func main() {
 	}
 }
 
-func registerKG(s *mcp.Server, st *store, peer string) {
+func registerKG(s *mcp.Server, st *kg.Store, peer string) {
 	s.AddTool(mcp.Tool{
 		Name:        "kg_assert",
 		Description: "Assert a (subject, predicate, object) triple. Stamped with the caller's mesh identity and hash-chained (non-repudiable).",
@@ -63,7 +64,7 @@ func registerKG(s *mcp.Server, st *store, peer string) {
 			if err := json.Unmarshal(args, &a); err != nil {
 				return mcp.ToolResult{}, fmt.Errorf("invalid arguments: %w", err)
 			}
-			r, err := st.assert(a.Subject, a.Predicate, a.Object, peer)
+			r, err := st.Assert(a.Subject, a.Predicate, a.Object, peer)
 			if err != nil {
 				return errText("%v", err), nil
 			}
@@ -86,7 +87,7 @@ func registerKG(s *mcp.Server, st *store, peer string) {
 				AsOf                       int `json:"as_of"`
 			}
 			_ = json.Unmarshal(args, &a)
-			return jsonResult(triplesOut(st.query(a.Subject, a.Predicate, a.Object, a.AsOf))), nil
+			return jsonResult(triplesOut(st.Query(a.Subject, a.Predicate, a.Object, a.AsOf))), nil
 		},
 	})
 
@@ -105,7 +106,7 @@ func registerKG(s *mcp.Server, st *store, peer string) {
 			if err := json.Unmarshal(args, &a); err != nil || a.Node == "" {
 				return errText("node is required"), nil
 			}
-			return jsonResult(triplesOut(st.neighbors(a.Node, a.AsOf))), nil
+			return jsonResult(triplesOut(st.Neighbors(a.Node, a.AsOf))), nil
 		},
 	})
 
@@ -118,7 +119,7 @@ func registerKG(s *mcp.Server, st *store, peer string) {
 			if err := json.Unmarshal(args, &a); err != nil || a.ID == "" {
 				return errText("id is required"), nil
 			}
-			r, err := st.del(a.ID, peer)
+			r, err := st.Delete(a.ID, peer)
 			if err != nil {
 				return errText("%v", err), nil
 			}
@@ -131,23 +132,23 @@ func registerKG(s *mcp.Server, st *store, peer string) {
 		Description: "Verify the graph's hash chain — proves no fact was edited, reordered, or deleted from history. Returns the head sequence.",
 		InputSchema: obj(map[string]any{}),
 		Handler: func(_ context.Context, _ json.RawMessage) (mcp.ToolResult, error) {
-			if err := st.verify(); err != nil {
+			if err := st.Verify(); err != nil {
 				return errText("VERIFY FAILED: %v", err), nil
 			}
-			return jsonResult(map[string]any{"ok": true, "head": st.head()}), nil
+			return jsonResult(map[string]any{"ok": true, "head": st.Head()}), nil
 		},
 	})
 
 	s.AddResource(mcp.Resource{
 		URI: "kg://head", Name: "kg-head", Description: "Current sequence number of the knowledge graph.", MimeType: "text/plain",
 		Read: func(_ context.Context) (mcp.ResourceContents, error) {
-			return mcp.ResourceContents{URI: "kg://head", MimeType: "text/plain", Text: fmt.Sprintf("%d", st.head())}, nil
+			return mcp.ResourceContents{URI: "kg://head", MimeType: "text/plain", Text: fmt.Sprintf("%d", st.Head())}, nil
 		},
 	})
 }
 
 // triplesOut renders records for a tool result.
-func triplesOut(recs []record) map[string]any {
+func triplesOut(recs []kg.Record) map[string]any {
 	items := make([]map[string]any, 0, len(recs))
 	for _, r := range recs {
 		items = append(items, map[string]any{

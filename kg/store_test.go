@@ -1,4 +1,4 @@
-package main
+package kg
 
 import (
 	"os"
@@ -6,9 +6,9 @@ import (
 	"testing"
 )
 
-func newStore(t *testing.T) *store {
+func newStore(t *testing.T) *Store {
 	t.Helper()
-	st, err := openStore(filepath.Join(t.TempDir(), "kg.jsonl"), func() string { return "t" })
+	st, err := Open(filepath.Join(t.TempDir(), "kg.jsonl"), func() string { return "t" })
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -17,14 +17,14 @@ func newStore(t *testing.T) *store {
 
 func TestAssertQueryProvenance(t *testing.T) {
 	st := newStore(t)
-	if _, err := st.assert("alice", "knows", "bob", "KEYA"); err != nil {
+	if _, err := st.Assert("alice", "knows", "bob", "KEYA"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.assert("alice", "role", "engineer", "KEYB"); err != nil {
+	if _, err := st.Assert("alice", "role", "engineer", "KEYB"); err != nil {
 		t.Fatal(err)
 	}
 
-	got := st.query("alice", "", "", 0)
+	got := st.Query("alice", "", "", 0)
 	if len(got) != 2 {
 		t.Fatalf("query alice: got %d triples, want 2", len(got))
 	}
@@ -37,18 +37,18 @@ func TestAssertQueryProvenance(t *testing.T) {
 			t.Errorf("role triple provenance = %q, want KEYB", r.Peer)
 		}
 	}
-	if n := st.query("", "knows", "", 0); len(n) != 1 {
+	if n := st.Query("", "knows", "", 0); len(n) != 1 {
 		t.Errorf("predicate query: got %d, want 1", len(n))
 	}
 }
 
 func TestNeighbors(t *testing.T) {
 	st := newStore(t)
-	st.assert("alice", "knows", "bob", "K")
-	st.assert("carol", "knows", "alice", "K")
-	st.assert("dave", "knows", "erin", "K")
+	st.Assert("alice", "knows", "bob", "K")
+	st.Assert("carol", "knows", "alice", "K")
+	st.Assert("dave", "knows", "erin", "K")
 
-	got := st.neighbors("alice", 0)
+	got := st.Neighbors("alice", 0)
 	if len(got) != 2 {
 		t.Fatalf("neighbors(alice): got %d, want 2 (as subject and object)", len(got))
 	}
@@ -56,22 +56,22 @@ func TestNeighbors(t *testing.T) {
 
 func TestTimeTravel(t *testing.T) {
 	st := newStore(t)
-	r1, _ := st.assert("x", "status", "draft", "K")
-	_, _ = st.assert("x", "status", "final", "K") // seq 2
-	st.del(r1.ID, "K")                            // seq 3: draft tombstoned
+	r1, _ := st.Assert("x", "status", "draft", "K")
+	_, _ = st.Assert("x", "status", "final", "K") // seq 2
+	st.Delete(r1.ID, "K")                          // seq 3: draft tombstoned
 
 	// Now: only "final" remains.
-	now := st.query("x", "status", "", 0)
+	now := st.Query("x", "status", "", 0)
 	if len(now) != 1 || now[0].O != "final" {
 		t.Fatalf("current: got %v, want just final", now)
 	}
 	// As of seq 1: only "draft" existed.
-	past := st.query("x", "status", "", 1)
+	past := st.Query("x", "status", "", 1)
 	if len(past) != 1 || past[0].O != "draft" {
 		t.Fatalf("as_of=1: got %v, want just draft", past)
 	}
 	// As of seq 2: both draft and final (delete not yet applied).
-	if mid := st.query("x", "status", "", 2); len(mid) != 2 {
+	if mid := st.Query("x", "status", "", 2); len(mid) != 2 {
 		t.Fatalf("as_of=2: got %d, want 2", len(mid))
 	}
 }
@@ -79,23 +79,23 @@ func TestTimeTravel(t *testing.T) {
 func TestVerifyDetectsTampering(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "kg.jsonl")
-	st, _ := openStore(path, func() string { return "t" })
-	st.assert("a", "b", "c", "K")
-	st.assert("d", "e", "f", "K")
-	if err := st.verify(); err != nil {
+	st, _ := Open(path, func() string { return "t" })
+	st.Assert("a", "b", "c", "K")
+	st.Assert("d", "e", "f", "K")
+	if err := st.Verify(); err != nil {
 		t.Fatalf("clean store should verify: %v", err)
 	}
 
 	// Reload persisted state and confirm it still verifies (chain survives restart).
-	st2, err := openStore(path, func() string { return "t" })
+	st2, err := Open(path, func() string { return "t" })
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st2.verify(); err != nil {
+	if err := st2.Verify(); err != nil {
 		t.Fatalf("reloaded store should verify: %v", err)
 	}
-	if st2.head() != 2 {
-		t.Fatalf("reloaded head = %d, want 2", st2.head())
+	if st2.Head() != 2 {
+		t.Fatalf("reloaded head = %d, want 2", st2.Head())
 	}
 
 	// Tamper with the file: flip a byte in the object of the first record.
@@ -108,11 +108,11 @@ func TestVerifyDetectsTampering(t *testing.T) {
 	tampered[idx+5] = 'X' // change the object value "c" -> "X" (still valid JSON)
 	os.WriteFile(path, tampered, 0o600)
 
-	st3, err := openStore(path, func() string { return "t" })
+	st3, err := Open(path, func() string { return "t" })
 	if err != nil {
 		t.Fatalf("reopen tampered: %v", err)
 	}
-	if err := st3.verify(); err == nil {
+	if err := st3.Verify(); err == nil {
 		t.Fatal("verify should FAIL on a tampered store")
 	}
 }
