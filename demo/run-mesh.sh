@@ -10,7 +10,7 @@ cd "$(dirname "$0")/.."   # repo root
 [ -n "${NB_SETUP_KEY:-}" ] || { echo "Set NB_SETUP_KEY to a reusable NetBird setup key first." >&2; exit 1; }
 
 echo "==> building binaries"
-go build -o meshmcp .
+go build -o meshmcp ./cmd/meshmcp
 go build -o cmd/mcpserver/mcpserver ./cmd/mcpserver/prompt_mcp
 
 mkdir -p demo

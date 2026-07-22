@@ -394,7 +394,7 @@ func TestRouterEnforcesToolPolicy(t *testing.T) {
 // TestRouterExampleConfigsLoad: the shipped router example configs include an
 // allow list and load.
 func TestRouterExampleConfigsLoad(t *testing.T) {
-	for _, f := range []string{"examples/router.yaml", "examples/router-failover.yaml", "examples/router-policy.yaml"} {
+	for _, f := range []string{"../../examples/router.yaml", "../../examples/router-failover.yaml", "../../examples/router-policy.yaml"} {
 		if _, err := loadRouterConfig(f); err != nil {
 			t.Errorf("%s should load: %v", f, err)
 		}
