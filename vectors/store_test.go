@@ -1,14 +1,15 @@
-package main
+package vectors
 
 import (
-	"github.com/xrey167/meshmcp/embed"
 	"path/filepath"
 	"testing"
+
+	"github.com/xrey167/meshmcp/embed"
 )
 
-func newIndex(t *testing.T) *index {
+func newIndex(t *testing.T) *Index {
 	t.Helper()
-	ix, err := openIndex(filepath.Join(t.TempDir(), "v.jsonl"), embed.NewHashing(256))
+	ix, err := Open(filepath.Join(t.TempDir(), "v.jsonl"), embed.NewHashing(256))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -38,7 +39,7 @@ func TestSearchRanksByRelevance(t *testing.T) {
 func TestUpsertProvenanceAndPersistence(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "v.jsonl")
-	ix, _ := openIndex(path, embed.NewHashing(256))
+	ix, _ := Open(path, embed.NewHashing(256))
 	d, err := ix.Upsert("doc-1", "hello mesh knowledge", "legal", "PUBKEYX")
 	if err != nil {
 		t.Fatal(err)
@@ -48,12 +49,12 @@ func TestUpsertProvenanceAndPersistence(t *testing.T) {
 	}
 
 	// Reload from disk and confirm the doc (and its corpus) survived.
-	ix2, err := openIndex(path, embed.NewHashing(256))
+	ix2, err := Open(path, embed.NewHashing(256))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ix2.count() != 1 {
-		t.Fatalf("reloaded count = %d, want 1", ix2.count())
+	if ix2.Count() != 1 {
+		t.Fatalf("reloaded count = %d, want 1", ix2.Count())
 	}
 	hits := ix2.Search("knowledge", 5, "legal")
 	if len(hits) != 1 || hits[0].Doc.Peer != "PUBKEYX" {
@@ -69,8 +70,8 @@ func TestUpsertReplaces(t *testing.T) {
 	ix := newIndex(t)
 	ix.Upsert("d1", "first version", "", "K")
 	ix.Upsert("d1", "second version", "", "K")
-	if ix.count() != 1 {
-		t.Fatalf("upsert should replace, count = %d", ix.count())
+	if ix.Count() != 1 {
+		t.Fatalf("upsert should replace, count = %d", ix.Count())
 	}
 	hits := ix.Search("second version", 1, "")
 	if hits[0].Doc.Text != "second version" {

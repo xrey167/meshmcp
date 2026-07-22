@@ -15,6 +15,7 @@ import (
 
 	"github.com/xrey167/meshmcp/embed"
 	"github.com/xrey167/meshmcp/mcp"
+	"github.com/xrey167/meshmcp/vectors"
 )
 
 func main() {
@@ -27,7 +28,7 @@ func main() {
 			fmt.Sscanf(os.Args[i+1], "%d", &dim)
 		}
 	}
-	ix, err := openIndex(indexPath, embed.NewHashing(dim))
+	ix, err := vectors.Open(indexPath, embed.NewHashing(dim))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "vectors:", err)
 		os.Exit(1)
@@ -36,7 +37,7 @@ func main() {
 	if peer == "" {
 		peer = os.Getenv("MESHMCP_PEER")
 	}
-	fmt.Fprintf(os.Stderr, "vectors: started for peer %q, index %s (%d docs, dim %d)\n", peer, indexPath, ix.count(), dim)
+	fmt.Fprintf(os.Stderr, "vectors: started for peer %q, index %s (%d docs, dim %d)\n", peer, indexPath, ix.Count(), dim)
 
 	s := mcp.New("meshmcp-vectors", "0.1.0")
 	registerVectors(s, ix, peer)
@@ -47,7 +48,7 @@ func main() {
 	}
 }
 
-func registerVectors(s *mcp.Server, ix *index, peer string) {
+func registerVectors(s *mcp.Server, ix *vectors.Index, peer string) {
 	s.AddTool(mcp.Tool{
 		Name:        "upsert",
 		Description: "Add or replace a document in the corpus. Its embedding is computed and stored, stamped with the caller's mesh identity.",
@@ -114,14 +115,14 @@ func registerVectors(s *mcp.Server, ix *index, peer string) {
 			if err := json.Unmarshal(args, &a); err != nil || a.Text == "" {
 				return errText("text is required"), nil
 			}
-			return jsonResult(map[string]any{"dim": ix.emb.Dim(), "vector": ix.emb.Embed(a.Text)}), nil
+			return jsonResult(map[string]any{"dim": ix.Embedder().Dim(), "vector": ix.Embedder().Embed(a.Text)}), nil
 		},
 	})
 
 	s.AddResource(mcp.Resource{
 		URI: "vectors://count", Name: "doc-count", Description: "Number of documents in the index.", MimeType: "text/plain",
 		Read: func(_ context.Context) (mcp.ResourceContents, error) {
-			return mcp.ResourceContents{URI: "vectors://count", MimeType: "text/plain", Text: fmt.Sprintf("%d", ix.count())}, nil
+			return mcp.ResourceContents{URI: "vectors://count", MimeType: "text/plain", Text: fmt.Sprintf("%d", ix.Count())}, nil
 		},
 	})
 }
