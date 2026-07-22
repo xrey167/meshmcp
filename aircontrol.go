@@ -17,15 +17,6 @@ import (
 // backdoor. The steer itself is the line-safe server->client notification P2
 // shipped (session.Server.Steer).
 
-// AirSession is one live session in the control endpoint's view: the session
-// layer's SessionInfo enriched with the backend it belongs to.
-type AirSession struct {
-	Backend string `json:"backend"`
-	ID      string `json:"id"`
-	Peer    string `json:"peer"`
-	AgeSec  int    `json:"age_sec"`
-}
-
 // airController is the gateway capability the HTTP handler needs, injectable so
 // the handler is testable with a fake (mirrors approvalsHandler's approver). Both
 // methods take the resolved caller identity so the controller can enforce the

@@ -9,6 +9,8 @@ import "github.com/xrey167/meshmcp/air"
 type (
 	AirCatalog      = air.Catalog
 	AirCatalogEntry = air.CatalogEntry
+	AirSession      = air.Session
+	airPeerRow      = air.PeerRow
 	steerEnvelope   = air.SteerEnvelope
 
 	// Workflow schema, carved into air; the runner (airworkflow.go) reads these.
