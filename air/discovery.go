@@ -19,6 +19,10 @@ import (
 func TXTName(domain string) string { return "_catalog._agents." + strings.Trim(domain, ".") }
 func SRVName(domain string) string { return "_air._tcp." + strings.Trim(domain, ".") }
 
+// ARDVersion is the meshmcp ARD profile version, tagged into the TXT record so
+// a resolver can validate the profile it parses.
+const ARDVersion = "ard1"
+
 // maxCatalogURL bounds the catalog URL a TXT record may carry — a hostile or
 // corrupt record cannot make a resolver buffer an unbounded string.
 const maxCatalogURL = 2048
@@ -26,7 +30,7 @@ const maxCatalogURL = 2048
 // CatalogTXTValue builds the TXT record value that points at a catalog URL,
 // tagged with the profile version so a resolver can validate what it parses.
 func CatalogTXTValue(catalogURL string) string {
-	return "v=ard1; catalog=" + catalogURL
+	return "v=" + ARDVersion + "; catalog=" + catalogURL
 }
 
 // dnsRecordSafe reports whether s can be placed into a zone-file record without
@@ -62,7 +66,7 @@ func ParseCatalogTXT(txt string) (string, bool) {
 			catalog = c
 		}
 	}
-	if version != "ard1" || catalog == "" || len(catalog) > maxCatalogURL {
+	if version != ARDVersion || catalog == "" || len(catalog) > maxCatalogURL {
 		return "", false
 	}
 	u, err := url.Parse(catalog)

@@ -1,14 +1,12 @@
 package main
 
 import (
-	"bufio"
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 
+	"github.com/xrey167/meshmcp/air"
 	"github.com/xrey167/meshmcp/policy"
 	"github.com/xrey167/meshmcp/session"
 )
@@ -48,21 +46,7 @@ func newSteerFactory(ctx context.Context, ch chan<- steerEnvelope, audit *policy
 	}
 }
 
-// recvEnvelopes decodes newline-delimited JSON steer envelopes from r and calls
-// onEnv for each. A malformed line ends the stream with an error.
-func recvEnvelopes(r io.Reader, onEnv func(steerEnvelope)) error {
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 1<<16), 1<<20)
-	for sc.Scan() {
-		line := bytes.TrimSpace(sc.Bytes())
-		if len(line) == 0 {
-			continue
-		}
-		var env steerEnvelope
-		if err := json.Unmarshal(line, &env); err != nil {
-			return fmt.Errorf("bad steer envelope: %w", err)
-		}
-		onEnv(env)
-	}
-	return sc.Err()
-}
+// recvEnvelopes is the pure newline-delimited envelope parser, carved into the
+// air package (air.ParseEnvelopes); this alias keeps the receive path reading
+// the same name.
+var recvEnvelopes = air.ParseEnvelopes

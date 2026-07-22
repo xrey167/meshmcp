@@ -18,6 +18,7 @@ import (
 
 	"github.com/netbirdio/netbird/client/embed"
 
+	"github.com/xrey167/meshmcp/air"
 	"github.com/xrey167/meshmcp/session"
 )
 
@@ -425,21 +426,15 @@ func cmdAirAgentSteer(args []string) error {
 	if fs.NArg() != 1 {
 		return errors.New("usage: meshmcp air agent-steer [flags] <agent-ip:port>")
 	}
-	switch *typ {
-	case "task":
-		if *tool == "" {
-			return errors.New("air agent-steer --type task needs --tool")
-		}
-	case "nudge", "cancel":
-	default:
-		return fmt.Errorf("air agent-steer: unknown --type %q (want task | nudge | cancel)", *typ)
-	}
 	agentAddr := fs.Arg(0)
 
 	env := steerEnvelope{Type: *typ, Tool: *tool, Text: *text, Target: *target, ID: *id}
 	if len(steerArgs) > 0 {
 		b, _ := json.Marshal(map[string]any(steerArgs))
 		env.Args = b
+	}
+	if err := env.Validate(); err != nil {
+		return fmt.Errorf("air agent-steer: %w", err)
 	}
 
 	o.BlockInbound = true
@@ -460,10 +455,8 @@ func cmdAirAgentSteer(args []string) error {
 // an existing mesh membership — the same resumable, line-framed channel as a
 // push. Shared by `air agent-steer` and the workflow runner's agent_steer step.
 func sendSteerEnvelope(ctx context.Context, client *embed.Client, addr string, env steerEnvelope) error {
-	line, _ := json.Marshal(env)
-	line = append(line, '\n')
 	pr, pw := io.Pipe()
-	go func() { _, werr := pw.Write(line); pw.CloseWithError(werr) }()
+	go func() { pw.CloseWithError(air.WriteEnvelope(pw, env)) }()
 	dial := func(ctx context.Context) (net.Conn, error) { return client.Dial(ctx, "tcp", addr) }
 	return session.NewClient(dial, log.Printf).Run(ctx, sendStream{r: pr})
 }
