@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"sort"
@@ -80,7 +79,7 @@ func cmdAgent(args []string) error {
 	count := fs.Int("count", 0, "total calls to make (0 = run until stopped)")
 	steerPort := fs.Int("steer-port", 0, "if >0, also listen on this mesh port for steer instructions (Air · Steer, P1)")
 	steerAllow := multiFlag{}
-	fs.Var(&steerAllow, "steer-allow", "identity permitted to steer this agent (FQDN glob or pubkey:<key>); repeatable; empty = any mesh peer")
+	fs.Var(&steerAllow, "steer-allow", "identity permitted to steer this agent (FQDN glob or pubkey:<key>); repeatable; required with --steer-port")
 	steerAudit := fs.String("steer-audit", "", "JSONL hash-chained audit log recording every delivered steer envelope (with --steer-port)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -93,6 +92,17 @@ func cmdAgent(args []string) error {
 		return fmt.Errorf("usage: meshmcp agent --role <%s> [flags] <peer-ip:port>", roleNames())
 	}
 	target := fs.Arg(0)
+	if *steerPort < 0 || *steerPort > 65535 {
+		return fmt.Errorf("meshmcp agent: --steer-port must be between 1 and 65535 when enabled")
+	}
+	if *steerPort == 0 && (len(steerAllow) > 0 || *steerAudit != "") {
+		return fmt.Errorf("meshmcp agent: --steer-allow/--steer-audit require --steer-port")
+	}
+	for _, identity := range steerAllow {
+		if strings.TrimSpace(identity) == "" || identity != strings.TrimSpace(identity) || len(identity) > 512 || handoffHasControl(identity) {
+			return fmt.Errorf("meshmcp agent: --steer-allow identities must be bounded and have no surrounding whitespace or control characters")
+		}
+	}
 
 	// Persistent identity: use a per-agent nb-config so the gateway sees a
 	// stable WireGuard key for this role (that's how policy distinguishes apps).
@@ -133,20 +143,26 @@ func runSteerableAgent(o *meshOptions, target string, steps []agentStep, count i
 	}
 	defer stopMesh(client)
 
-	// One audit record per delivered steer envelope. A steer runs a tool call
-	// under this agent's identity, so it is ALWAYS recorded (to --steer-audit
-	// when given, else stderr) — an injected instruction must never be
-	// unattributable, regardless of whether a file sink was configured.
-	var auditW io.Writer = os.Stderr
+	// A valid steer gets separate authorization and enqueue receipts. A steer
+	// runs a tool call under this agent's identity, so the boundary is ALWAYS
+	// recorded (to --steer-audit when given, else stderr) — an injected
+	// instruction must never be unattributable.
+	var audit *policy.AuditLog
 	if auditPath != "" {
-		f, err := os.OpenFile(auditPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		owner, err := acquireHandoffPathLock(auditPath+".steer-receiver.lock", defaultHandoffLockTimeout)
 		if err != nil {
-			return fmt.Errorf("open steer audit log %s: %w", auditPath, err)
+			return fmt.Errorf("lock steer audit log %s: %w", auditPath, err)
 		}
-		defer f.Close()
-		auditW = f
+		defer owner.release()
+		var closeAudit func()
+		audit, closeAudit, err = openHandoffAudit(auditPath)
+		if err != nil {
+			return fmt.Errorf("open and verify steer audit log %s: %w", auditPath, err)
+		}
+		defer closeAudit()
+	} else {
+		audit = policy.NewAuditLog(os.Stderr, nowRFC3339).WithFailClosed(true)
 	}
-	audit := policy.NewAuditLog(auditW, func() string { return time.Now().UTC().Format(time.RFC3339) })
 
 	conn, err := client.Dial(context.Background(), "tcp", target)
 	if err != nil {

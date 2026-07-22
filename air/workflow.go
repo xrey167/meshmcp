@@ -1,6 +1,7 @@
 package air
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -41,11 +42,12 @@ type WorkflowStep struct {
 
 // LaunchStep spawns a new agent identity against a gateway.
 type LaunchStep struct {
-	Role      string `yaml:"role"`
-	Gateway   string `yaml:"gateway"`
-	NBConfig  string `yaml:"nb_config"`
-	SteerPort int    `yaml:"steer_port"` // if >0, launch with a P1 steer inbox on this mesh port
-	Interval  string `yaml:"interval"`   // agent's delay between calls (passed through)
+	Role       string   `yaml:"role" json:"role"`
+	Gateway    string   `yaml:"gateway" json:"gateway"`
+	NBConfig   string   `yaml:"nb_config" json:"nb_config,omitempty"`
+	SteerPort  int      `yaml:"steer_port" json:"steer_port,omitempty"`   // if >0, launch with a P1 steer inbox on this mesh port
+	SteerAllow []string `yaml:"steer_allow" json:"steer_allow,omitempty"` // identities allowed to use the steer inbox; passed as repeatable flags
+	Interval   string   `yaml:"interval" json:"interval,omitempty"`       // agent's delay between calls (passed through)
 }
 
 // AgentSteerStep sends one steer envelope to a launched agent's P1 inbox.
@@ -106,6 +108,20 @@ func (s WorkflowStep) Validate(i int) error {
 		if s.Launch.Role == "" || s.Launch.Gateway == "" {
 			return fmt.Errorf("step %d launch: role and gateway are required", i+1)
 		}
+		if s.Launch.SteerPort < 0 || s.Launch.SteerPort > 65535 {
+			return fmt.Errorf("step %d launch: steer_port must be between 1 and 65535 when enabled", i+1)
+		}
+		if s.Launch.SteerPort > 0 && len(s.Launch.SteerAllow) == 0 {
+			return fmt.Errorf("step %d launch: steer_port requires at least one steer_allow identity", i+1)
+		}
+		if s.Launch.SteerPort == 0 && len(s.Launch.SteerAllow) > 0 {
+			return fmt.Errorf("step %d launch: steer_allow requires steer_port", i+1)
+		}
+		for _, identity := range s.Launch.SteerAllow {
+			if strings.TrimSpace(identity) == "" || identity != strings.TrimSpace(identity) || len(identity) > 512 || steerHasControl(identity) {
+				return fmt.Errorf("step %d launch: steer_allow identities must be bounded and have no surrounding whitespace or control characters", i+1)
+			}
+		}
 		if s.Launch.Interval != "" {
 			if _, err := time.ParseDuration(s.Launch.Interval); err != nil {
 				return fmt.Errorf("step %d launch: bad interval %q: %w", i+1, s.Launch.Interval, err)
@@ -123,7 +139,11 @@ func (s WorkflowStep) Validate(i int) error {
 		if s.AgentSteer.Target == "" {
 			return fmt.Errorf("step %d agent_steer: target is required", i+1)
 		}
-		if err := (SteerEnvelope{Type: s.AgentSteer.Type, Tool: s.AgentSteer.Tool}).Validate(); err != nil {
+		env := SteerEnvelope{Type: s.AgentSteer.Type, Tool: s.AgentSteer.Tool, Text: s.AgentSteer.Text, ID: s.AgentSteer.ID}
+		if len(s.AgentSteer.Args) > 0 {
+			env.Args, _ = json.Marshal(s.AgentSteer.Args)
+		}
+		if err := env.Validate(); err != nil {
 			return fmt.Errorf("step %d agent_steer: %w", i+1, err)
 		}
 	}

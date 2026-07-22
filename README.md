@@ -279,7 +279,7 @@ Watch it live with `meshmcp dash --audit audit.jsonl`; re-run a past session wit
 | `peers` | List reachable mesh identities — the "who can I drop to" view. |
 | `fetch <peer:port> <sha256>` | Fetch a blob by content hash from a peer's content-addressed store. |
 | `push <peer:port>` | Push a stdin payload (clipboard / a task) to a peer's inbox over the resumable channel. |
-| `air <home·nearby·announce·node·whoami·map·catalog·browse·…>` | **Air Agent OS**: see the mesh at a glance, publish identity-stamped agent/device Presence + Activity cards, resolve friendly nodes to live services, continue/steer work, share, approve, automate, and serve the responsive Air Home — all governed + audited. Run `meshmcp air help` for the complete grouped surface. |
+| `air <home·nearby·announce·node·handoff·whoami·map·catalog·browse·…>` | **Air Agent OS · Continuity**: see the mesh at a glance, publish identity-stamped Presence + Activity cards, resolve friendly nodes, and move inert work context over exact-key-pinned device and agent hops. Handoff requires local acceptance and a destination-selected tool, keeps bounded delivery receipts, makes unknown delivery explicitly re-armable, and never pretends to transfer a live session. The same surface discovers, steers, shares, launches, approves, automates, and serves the responsive Air Home. Run `meshmcp air help` for every verb. |
 | `pubsub --config <f>` · `publish` · `subscribe <peer:port> <topic>` | Identity-gated, audited **event bus** on the mesh — durable + resumable; `publish`/`subscribe` a broker topic (see [docs/PUBSUB.md](docs/PUBSUB.md)). |
 | `graphrag --config <f>` | Serve `graph_search`: vector retrieval + knowledge-graph entity expansion over the mesh. |
 | `ls · call · read · prompt <peer:port>` | Drive tools / resources / prompts from the terminal. |
@@ -335,6 +335,7 @@ registry/    file-based discovery registry
 embed/       local, deterministic text embedder (shared by RAG + semantic policy)
 mobile/      gomobile-bindable Mesh/Conn/Approvals surface for an iOS/Android app
 cmd/meshmcp/ the meshmcp binary: serve · router · orchestrate · control · Air · CLI + embedded web surfaces
+             Air Continuity: airhandoff.go · airhandoff_store.go · steerinbox.go
 cmd/         mcpserver (demo) · mcpecho · mcphttp · kg (provenance knowledge graph) · vectors (zero-exposure RAG) · memory (agent-memory fabric)
 examples/    ready-to-adapt configs        docs/  design docs + open specs
 ```
@@ -357,6 +358,7 @@ examples/    ready-to-adapt configs        docs/  design docs + open specs
 - **[docs/AIR-ECOSYSTEM.md](docs/AIR-ECOSYSTEM.md)** — the Agent-OS spine: verified Presence, privacy-safe Activities, friendly service resolution, Air Node, Context Capsules, truthful Handoff, and Spaces — including what ships now versus what remains deliberately staged.
 - **[docs/UX-AGENT-OS.md](docs/UX-AGENT-OS.md)** — the whole-product UX/UI system: Home/Nearby/Activities/Share/Security architecture, shared state language and components, desktop/mobile references, accessibility contract, and migration of Approvals/Dashboard/Control Room.
 - **[docs/AIR-STEER.md](docs/AIR-STEER.md)** — Air · **Steer**: send to / cancel / nudge an agent, session, or task, and launch new agents/workflows. All four primitives ship — the agent steer inbox, session enumeration + a line-safe session steer, `tasks/steer`, and launch/workflow — plus the gateway control endpoint, the `air_*` assistant tools, and the `meshmcp air` CLI.
+- **[docs/AIR-CONTINUITY.md](docs/AIR-CONTINUITY.md)** — Air · **Handoff**: transfer a bounded, exact-key-bound Context Capsule, accept it locally, then continue through a receiver-selected governed tool; includes the honest boundary between application-level continuation and future live session migration.
 - **[docs/PUBSUB.md](docs/PUBSUB.md)** — the identity-native **event bus**: an on-mesh pub/sub broker (durable event log, resumable subscribers, signed checkpoints, capability grants, cross-broker federation) and gateway hooks that publish policy decisions.
 - **[docs/MOBILE.md](docs/MOBILE.md)** — how the whole stack could reach phones (a phone is a human identity on the mesh — the natural co-sign approver).
 - **[examples/hitl/](examples/hitl/)** — route any agent framework's approval hook (e.g. OpenAI Agents SDK `ShellTool.on_approval`) to the mesh approver — approve from your phone, identity-attributed and audited.

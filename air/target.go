@@ -33,6 +33,9 @@ func ParseTarget(s string) (Target, error) {
 	if s == "" {
 		return Target{}, nil
 	}
+	if s != strings.TrimSpace(s) || len(s) > 512 || targetHasControl(s) {
+		return Target{}, fmt.Errorf("target must be bounded, single-line, and have no surrounding whitespace")
+	}
 	kind, value, found := strings.Cut(s, ":")
 	if !found || value == "" {
 		return Target{}, fmt.Errorf("bad target %q (want <kind>:<value>, e.g. task:9f2a)", s)
@@ -43,6 +46,15 @@ func ParseTarget(s string) (Target, error) {
 	default:
 		return Target{}, fmt.Errorf("unknown target kind %q (want agent, session, task, or group)", kind)
 	}
+}
+
+func targetHasControl(s string) bool {
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
 }
 
 // Empty reports whether no sub-work is addressed (the steer applies to the

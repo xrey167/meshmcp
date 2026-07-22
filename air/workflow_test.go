@@ -32,20 +32,25 @@ steps:
 
 func TestParseWorkflowRejects(t *testing.T) {
 	cases := map[string]string{
-		"two-actions":             "name: bad\nsteps:\n  - launch: { role: r, gateway: g:1 }\n    call: { target: t:1, tool: x }\n",
-		"empty-step":              "name: bad\nsteps:\n  - {}\n",
-		"no-steps":                "name: bad\nsteps: []\n",
-		"launch-missing-gateway":  "name: bad\nsteps:\n  - launch: { role: reader }\n",
-		"steer-missing-session":   "name: bad\nsteps:\n  - steer: { control: c:1, backend: fs }\n",
-		"nested-parallel":         "name: bad\nsteps:\n  - parallel:\n      - parallel:\n          - call: { target: x, tool: y }\n",
-		"empty-parallel":          "name: bad\nsteps:\n  - parallel: []\n",
-		"bad-timeout":             "name: bad\nsteps:\n  - call: { target: t:1, tool: a }\n    timeout: nope\n",
-		"bad-on-error":            "name: bad\non_error: maybe\nsteps:\n  - call: { target: x, tool: y }\n",
-		"bad-cleanup":             "name: bad\ncleanup: nuke\nsteps:\n  - call: { target: x, tool: y }\n",
-		"agent_steer-no-target":   "name: bad\nsteps:\n  - agent_steer: { type: task, tool: t }\n",
-		"agent_steer-task-notool": "name: bad\nsteps:\n  - agent_steer: { target: a:1, type: task }\n",
-		"agent_steer-bad-type":    "name: bad\nsteps:\n  - agent_steer: { target: a:1, type: pause }\n",
-		"launch-bad-interval":     "name: bad\nsteps:\n  - launch: { role: r, gateway: g:1, interval: soon }\n",
+		"two-actions":              "name: bad\nsteps:\n  - launch: { role: r, gateway: g:1 }\n    call: { target: t:1, tool: x }\n",
+		"empty-step":               "name: bad\nsteps:\n  - {}\n",
+		"no-steps":                 "name: bad\nsteps: []\n",
+		"launch-missing-gateway":   "name: bad\nsteps:\n  - launch: { role: reader }\n",
+		"steer-missing-session":    "name: bad\nsteps:\n  - steer: { control: c:1, backend: fs }\n",
+		"nested-parallel":          "name: bad\nsteps:\n  - parallel:\n      - parallel:\n          - call: { target: x, tool: y }\n",
+		"empty-parallel":           "name: bad\nsteps:\n  - parallel: []\n",
+		"bad-timeout":              "name: bad\nsteps:\n  - call: { target: t:1, tool: a }\n    timeout: nope\n",
+		"bad-on-error":             "name: bad\non_error: maybe\nsteps:\n  - call: { target: x, tool: y }\n",
+		"bad-cleanup":              "name: bad\ncleanup: nuke\nsteps:\n  - call: { target: x, tool: y }\n",
+		"agent_steer-no-target":    "name: bad\nsteps:\n  - agent_steer: { type: task, tool: t }\n",
+		"agent_steer-task-notool":  "name: bad\nsteps:\n  - agent_steer: { target: a:1, type: task }\n",
+		"agent_steer-bad-type":     "name: bad\nsteps:\n  - agent_steer: { target: a:1, type: pause }\n",
+		"launch-bad-interval":      "name: bad\nsteps:\n  - launch: { role: r, gateway: g:1, interval: soon }\n",
+		"launch-steer-no-allow":    "name: bad\nsteps:\n  - launch: { role: r, gateway: g:1, steer_port: 9120 }\n",
+		"launch-empty-steer-allow": "name: bad\nsteps:\n  - launch: { role: r, gateway: g:1, steer_port: 9120, steer_allow: [''] }\n",
+		"launch-allow-no-port":     "name: bad\nsteps:\n  - launch: { role: r, gateway: g:1, steer_allow: [operator] }\n",
+		"launch-invalid-port":      "name: bad\nsteps:\n  - launch: { role: r, gateway: g:1, steer_port: 70000, steer_allow: [operator] }\n",
+		"launch-spaced-allow":      "name: bad\nsteps:\n  - launch: { role: r, gateway: g:1, steer_port: 9120, steer_allow: [' operator'] }\n",
 	}
 	for name, body := range cases {
 		if _, err := ParseWorkflow([]byte(body)); err == nil {
@@ -59,7 +64,12 @@ func TestParseWorkflowAgentSteerAndOptions(t *testing.T) {
 name: demo
 cleanup: stop
 steps:
-  - launch: { role: reader, gateway: 1.2.3.4:9101, steer_port: 9120, interval: 1s }
+  - launch:
+      role: reader
+      gateway: 1.2.3.4:9101
+      steer_port: 9120
+      steer_allow: [operator.example.net, "pubkey:controller-key"]
+      interval: 1s
     as: reader
   - agent_steer: { target: 1.2.3.4:9120, type: task, tool: read_file, args: { path: README.md } }
   - agent_steer: { target: 1.2.3.4:9120, type: nudge, text: focus }
@@ -76,6 +86,29 @@ steps:
 	}
 	if wf.Steps[0].Launch.SteerPort != 9120 || wf.Steps[0].Launch.Interval != "1s" {
 		t.Fatalf("launch options not parsed: %+v", wf.Steps[0].Launch)
+	}
+	if got := wf.Steps[0].Launch.SteerAllow; len(got) != 2 || got[0] != "operator.example.net" || got[1] != "pubkey:controller-key" {
+		t.Fatalf("launch steer_allow not parsed: %#v", got)
+	}
+}
+
+func TestParseWorkflowJSONSteerAllow(t *testing.T) {
+	wf, err := ParseWorkflow([]byte(`{
+  "name": "json-workflow",
+  "steps": [{
+    "launch": {
+      "role": "reader",
+      "gateway": "1.2.3.4:9101",
+      "steer_port": 9120,
+      "steer_allow": ["operator.example.net"]
+    }
+  }]
+}`))
+	if err != nil {
+		t.Fatalf("parse JSON workflow: %v", err)
+	}
+	if got := wf.Steps[0].Launch.SteerAllow; len(got) != 1 || got[0] != "operator.example.net" {
+		t.Fatalf("JSON steer_allow not parsed: %#v", got)
 	}
 }
 

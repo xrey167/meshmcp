@@ -298,3 +298,18 @@ func TestAgentSteerPortRequiresAllow(t *testing.T) {
 		t.Fatalf("agent --steer-port without --steer-allow must fail closed, got: %v", err)
 	}
 }
+
+func TestAgentRejectsInvalidSteerListenerConfiguration(t *testing.T) {
+	for name, args := range map[string][]string{
+		"invalid port":    {"--role", "reader", "--steer-port", "70000", "--steer-allow", "operator", "1.2.3.4:9101"},
+		"allow no port":   {"--role", "reader", "--steer-allow", "operator", "1.2.3.4:9101"},
+		"audit no port":   {"--role", "reader", "--steer-audit", "audit.jsonl", "1.2.3.4:9101"},
+		"spaced identity": {"--role", "reader", "--steer-port", "9120", "--steer-allow", " operator", "1.2.3.4:9101"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := cmdAgent(args); err == nil {
+				t.Fatalf("invalid steer listener configuration was accepted: %v", args)
+			}
+		})
+	}
+}

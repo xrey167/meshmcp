@@ -45,17 +45,15 @@ channel, and one control endpoint.
 
 ## 1 · The steer envelope (shared wire type)
 
-One JSON object, framed as a single drop/push record (`sendData`, `push.go:33-46`) so it
-rides the same resumable, audited, ACL'd channel as a file drop:
+One bounded JSON object, newline-framed on its own resumable, audited, ACL'd steer channel:
 
 ```jsonc
 {
-  "type": "task" | "cancel" | "nudge" | "launch",
+  "type": "task" | "cancel" | "nudge",
   "tool":   "read_file",          // type=task: the tool to run
   "args":   { "path": "README" }, // type=task: its arguments
   "text":   "focus on the API",   // type=nudge: free-form guidance
-  "target": "task:9f2a" ,          // optional: task/session id when addressing sub-work
-  "role":   "reader",             // type=launch: agent role or workflow name
+  "target": "task:9f2a",          // optional: task/session id when addressing sub-work
   "id":     "str-17"              // caller-chosen correlation id (audited)
 }
 ```
@@ -64,17 +62,18 @@ The envelope is the single vocabulary across all three target types; each primit
 consumes the subset it understands. It is authorized **before delivery, at whichever gate
 its transport crosses** — the drop-inbox sender ACL (P1), the control-plane auth (P2), or
 the MCP `methods:` policy filter (P3, `tasks/steer`). See [§7](#7--governance--security-all-reused);
-the gates differ by path, and only `tasks/steer` is a policy `methods:` rule. Every delivery
-is audited with the caller's WireGuard identity.
+the gates differ by path, and only `tasks/steer` is a policy `methods:` rule. Successful
+agent-inbox delivery has separate identity-attributed `air/steer/authorize` and
+`air/steer/enqueue` receipts, so authorization alone is never mistaken for enqueue.
 
 ---
 
 ## 2 · P1 — Steerable agent (the receive path)  ✅ *shipped*
 
-Implemented: `steerenvelope.go` (`steerEnvelope`), `steerinbox.go`
+Implemented: `air/steer.go` (`SteerEnvelope`) and `cmd/meshmcp/steerinbox.go`
 (`newSteerFactory`/`recvEnvelopes`, reusing `dropSink`), and `agent.go` — a `--steer-port`
-(with `--steer-allow`, and `--steer-audit` for one hash-chained record per delivered
-envelope) starts the agent inbound-enabled via `runSteerableAgent`, and `runAgentLoop`
+(with `--steer-allow`, and `--steer-audit` for two-phase authorization/enqueue receipts)
+starts the agent inbound-enabled via `runSteerableAgent`, and `runAgentLoop`
 gained a `steer` channel + `applySteer` (task→`CallTool`; nudge→a guidance field carried
 as a `guidance` argument on the following scripted steps; cancel→stop). An envelope
 carrying a `task:<id>` target is routed to that task on the agent's backend
@@ -115,16 +114,18 @@ func runAgentLoop(ctx, mc, steps, count, interval, steer <-chan steerEnvelope, l
 
 - **Mirrors (not verbatim):** the `dropReceive` / `newDropFactory` listener shape
   (`drop.go:302-432`), `sendData` (`push.go:33-46`) for the sender, `acl.go` for the sender
-  allow-list, and the `policy` audit for one record per delivered envelope. The steer factory
-  is a new parallel that reads envelope JSON, not the file-frame parser.
+  allow-list, and the `policy` audit. The steer factory writes a fail-closed authorization
+  record before enqueue, then a distinct enqueue allow/deny record; only the latter proves
+  channel delivery. It is a new parallel that reads envelope JSON, not the file-frame parser.
 - **Governance:** the steer port is ACL'd exactly like a drop receiver (`examples/drop.yaml`
-  `allow:`), so only permitted identities may steer this agent.
+  `allow:`), so only permitted identities may steer this agent. It is deny-by-default:
+  `--steer-port` requires at least one repeatable `--steer-allow` identity.
 - **`type=task`** injects a `mc.CallTool` step; **`nudge`** updates a guidance field the
   agent's next step reads; **`cancel`** breaks the loop. The agent stays a governed mesh
   client — every steered call still hits the gateway firewall.
 
-`meshmcp agent --steer-port 9120 --role reader <gateway>` starts an agent that also
-listens for steers.
+`meshmcp agent --steer-port 9120 --steer-allow 'operator-*.netbird.cloud' --role reader
+<gateway>` starts an agent that also listens for steers.
 
 ---
 
@@ -240,7 +241,7 @@ func (c *Client) SteerTask(ctx context.Context, id string, payload json.RawMessa
 ## 5 · P4 — Launch (spawn an agent or a workflow)  ✅ *shipped*
 
 Implemented: `air launch` reuses `spawnAgent` (`air.go`) to child-exec `meshmcp agent`; the
-declarative runner is `airworkflow.go` (`loadAirWorkflow` + `runWorkflowStep`:
+declarative runner is `airworkflow.go` (`loadAirWorkflow` + `wfRun.execStep`:
 launch/steer/call), with `examples/air-workflow.yaml` and `airworkflow_test.go`.
 
 **Problem.** There was no first-class "start new work on the mesh" verb; agents were launched
@@ -251,29 +252,38 @@ by hand and there was no parent→children workflow object.
 - **Launch an agent:** `air launch --role <role> <gateway>` spawns a new agent identity by
   child-exec of `meshmcp agent` (`spawnAgent`, reusing `roleScripts`) with a fresh
   `--nb-config`, so it joins as its own WireGuard key and immediately appears in `peers` and
-  in the gateway's sessions view. Add `--steer-port` to the child for a steer inbox (P1).
+  in the gateway's sessions view. Direct `air launch` does not expose steer-listener flags;
+  use a workflow `launch.steer_port` + `launch.steer_allow`, or invoke `meshmcp agent`
+  directly, when the child needs a P1 inbox.
 - **Launch a workflow:** a declarative `examples/air-workflow.yaml` — a list of steps
   (`launch` agents, `steer` sessions, `agent_steer` a launched agent's P1 inbox, `call`
   tools), sequential or parallel — run by a small runner that reuses the orchestrator's
   dial-and-call shape (`orchestrate.go:91-145`) and, for fan-out, the router's upstream
-  pool (`router.go:198`). The workflow itself is a mesh identity; each step is an audited
-  call. A `launch` step may pass `steer_port`/`interval` to the child; a run may launch at
-  most 32 agents, and `cleanup: stop` kills the launched agents when the run ends
+  pool (`router.go:198`). Network steps use the runner's mesh identity and their normal
+  ACL/policy/audit boundary; local launch steps do not emit a control-plane audit record.
+  A `launch` step may pass `steer_port`, a required `steer_allow` identity list, and
+  `interval` to the child; each list entry becomes a separate `--steer-allow` flag. A run
+  may launch at most 32 agents, and `cleanup: stop` kills the launched agents when the run ends
   (`leave`, the default, lets them keep running).
 
 ```yaml
 # examples/air-workflow.yaml  (ships — run with: meshmcp air workflow <file>)
 name: nightly-scan
 steps:
-  - launch: { role: reader,  gateway: 100.64.0.2:9101 }
+  - launch:
+      role: reader
+      gateway: 100.64.0.2:9101
+      steer_port: 9120
+      steer_allow: ["operator-*.netbird.cloud"]
   - launch: { role: analyst, gateway: 100.64.0.2:9101 }
   - steer:  { control: 100.64.0.2:9600, backend: fs, session: "9f2a",
               params: { text: "focus on customer 42" } }
   - call:   { target: 100.64.0.2:9101, tool: summarize }
 ```
 
-Every launch is deny-by-default and audited (`air/launch`); the spawned identity is subject
-to the same firewall as any caller.
+Launch is an operator-local process action, not a remote `air/launch` control endpoint, so
+it has no network caller ACL or launch audit record. The spawned identity is independently
+subject to the gateway firewall, and any enabled steer inbox is deny-by-default.
 
 ---
 
@@ -315,7 +325,7 @@ audited mesh call, never a backdoor. (Agent-target steer and launch are CLI verb
 
 ## 7 · Governance & security (all reused)
 
-- **Deny by default — but at three different gates, not one.** Each steer transport is
+- **Deny by default — at the boundary each steer actually crosses.** Each steer transport is
   authorized where it crosses the boundary:
   - **`tasks/steer` (P3)** is a real MCP method reaching a backend through the policy filter,
     so it *is* governed by a `methods:` rule **exactly like `tasks/cancel`** (`policy/filter.go`
@@ -323,16 +333,21 @@ audited mesh call, never a backdoor. (Agent-target steer and launch are CLI verb
     `examples/live-task.yaml:21-23`).
   - **`air/steer` to an agent inbox (P1)** is gated by the drop-receiver **sender ACL**
     (`acl.go`), not a `methods:` rule.
-  - **`air/launch` and the control-plane `/v1/steer` (P2/P4)** are gated by **control-plane
-    auth** on those HTTP endpoints.
-  Three distinct, deny-by-default gates — do not conflate them under one "governed like
-  `tasks/cancel`" claim; that phrase is exact only for `tasks/steer`.
-- **Identity-attributed.** Every steer/launch resolves to the caller's WireGuard key; the
-  ledger records who steered/launched what, when — provable with the public key alone.
-- **Watchable trail.** The shared ledger every steer/launch writes to is the same one
+  - **Control-plane `/v1/steer` (P2)** is gated by that endpoint's identity ACL plus the
+    target backend ACL. **Launch (P4) is local child-process creation**, not a remote endpoint;
+    it has no network caller gate or launch receipt.
+  Do not conflate these under one "governed like `tasks/cancel`" claim; that phrase is exact
+  only for `tasks/steer`.
+- **Identity-attributed.** Network steers resolve to the caller's WireGuard key. A local
+  launch has no remote caller to attribute; the spawned agent obtains its own mesh identity.
+- **Watchable trail.** The shared ledger network steer boundaries write to is the same one
   `air stream` tails live (allow/deny/cosign-coloured) and `air bind` reacts to — fire a
   declared action when a record matches glob triggers (`decision`/`backend`/`method`/`tool`/`peer`),
   `run` deny-by-default. Steer produces the audit records those sibling watch/react verbs consume.
+- **Honest unknown outcomes.** The inbox audits authorization before enqueue and audits
+  enqueue before returning its positive application ACK. If the second audit write fails
+  after the channel send, the sender receives `audit_unavailable`: work may execute, so a
+  Handoff remains `dispatching` until its receipts are checked.
 - **Relay-attested web attribution.** The served Air page (`airserve.go`) is a mesh peer that
   proxies steers to the control endpoint. It resolves the *browser's own* mesh identity and
   forwards it as `X-Air-On-Behalf`, which the control endpoint honours **only when the proxy is
@@ -344,8 +359,8 @@ audited mesh call, never a backdoor. (Agent-target steer and launch are CLI verb
   labelled claim — never in the verified `PeerKey`). This is relay-attested, not a cryptographic
   binding: it is as strong as trusting the air-serve node the operator explicitly listed.
 - **ACL'd inbox.** An agent's steer port admits only allow-listed senders (`acl.go`,
-  `examples/drop.yaml` `allow:`), and `--steer-audit` records one hash-chained audit
-  record per delivered envelope.
+  `examples/drop.yaml` `allow:`). `--steer-audit` separates authorization from enqueue:
+  an `air/steer/enqueue` allow is delivery evidence; a deny shows why enqueue did not occur.
 - **Broadcast = N audited records** *(design rule for the proposed `group:` verb — no
   broadcast ships yet)*. A broadcast expands to one governed, audited call per resolved
   target — never a single unattributable fan-out.
@@ -363,14 +378,15 @@ audited mesh call, never a backdoor. (Agent-target steer and launch are CLI verb
 2. **P2 session List + Steer** — ✅ **done.** `SessionStore.List`, `Server.Sessions`, and the
    line-safe `Server.Steer` in `session/store.go` + `session/server.go`, with
    `TestStoreList`/`TestSteerLineFraming`/`TestSteerUnknownSession`.
-3. **P1 steerable agent** — ✅ **done.** `--steer-port` inbox on `agent.go` (`steerenvelope.go`,
-   `steerinbox.go`) + `air agent-steer` sender, with `TestRunAgentLoopSteerTask`/`TestRecvEnvelopes`.
+3. **P1 steerable agent** — ✅ **done.** `--steer-port` inbox on `agent.go`
+   (`air/steer.go`, `steerinbox.go`) + `air agent-steer` sender, with
+   `TestRunAgentLoopSteerTask`/`TestRecvEnvelopes`.
 4. **P4 launch + workflow** — ✅ **done.** `air launch` (`spawnAgent`) + the `airworkflow.go`
    runner + `examples/air-workflow.yaml`, with `airworkflow_test.go`.
 5. **Air surface** — ✅ **done.** The gateway control endpoint (`aircontrol.go`), the
    `air_sessions`/`air_steer`/`air_tasks`/`air_task_steer` tools in `mcpapp.go`, and the
    `meshmcp air` CLI (`air.go`). The Steer tab in `site/air.html` remains a visual mockup.
 
-All four primitives and the surface ship; each is independently governed. Remaining Air ideas
-(the `air_peers`/`air_push`/`air_fetch` wrapper tools, an `air_launch` tool, a served web page)
+All four primitives and the surface ship, including the opt-in `air_launch` assistant tool
+and served Air page. Remaining ideas such as group broadcast and smarter target selection
 are tracked in [AIR.md §6](AIR.md#6--whats-real-today-vs-proposed).

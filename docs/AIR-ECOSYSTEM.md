@@ -8,8 +8,9 @@ screen, steer, approve, launch, automate, inspect, and replay. The ecosystem is
 the layer that makes those verbs feel like one product instead of a toolbox.
 It gives each nearby agent or device a verified identity card, lets work appear
 as a stable Activity, resolves friendly recipients to the service they actually
-offer, and eventually moves a bounded context capsule between runtimes without
-weakening session identity.
+offer, and moves a bounded, explicitly accepted context capsule between runtimes
+without weakening session identity. Transactional checkpoint migration remains a
+separate future protocol.
 
 ## Product model
 
@@ -19,11 +20,12 @@ weakening session identity.
 | **Activity** | One privacy-safe card says what is running, blocked, or waiting for the user. | A card contains description and content references, never credentials, raw prompts, or executable action parameters. |
 | **Resolver** | “Send to analyst” replaces `100.x.y.z:9120`. | Resolution selects an advertised address; the real action still re-enters the receiver's ACL and policy. Presence is never authorization. |
 | **Air Node** | One always-on runtime represents a device or agent and hosts its enabled Air services. | One mesh identity, explicit service allowlists, bounded listeners, and one audit story. |
-| **Context Capsule** | Work can be prepared for continuation elsewhere. | Encrypted, content-addressed, size-bounded references; recipient-bound and short-lived; no secrets. |
-| **Handoff** | The destination accepts, becomes ready, then the source commits the move. | Two-phase, single-use grant bound to source key, target key, capsule hash, policy hash, expiry, and lease generation. |
+| **Context Capsule** | Work can be prepared for application-level continuation elsewhere. | Mesh-encrypted transport, content-addressed and size-bounded references, exact target binding, short expiry, and no secrets or bearer authority. |
+| **Handoff v1** | The destination receives an inert offer, explicitly accepts it, and selects a governed continuation tool. | Both network hops pin exact keys; application ACKs, atomic dispatch claims, replay tombstones, and bounded attempt receipts make uncertainty explicit. It does not move a live session. |
+| **Transactional Handoff v2** | A future checkpoint-capable runtime prepares, readies, and commits a true move. | Requires single-use grants, policy binding, lease fencing, compatible checkpoint adapters, and split-brain recovery tests. |
 | **Spaces** | A named group of agents/devices shares selected activities and automations. | Membership is separate from tool authorization; every fanned-out action is individually policy-checked and audited. |
 
-## Shipped in this slice: Nearby v1
+## Shipped: Nearby v1 and Handoff v1
 
 Nearby is the connective foundation:
 
@@ -58,7 +60,14 @@ or bypass the existing `air steer`, `air task-steer`, or approval paths.
 - Heartbeat-only refreshes do not flood the enforcement ledger; material card
   changes, leaves, reads, malformed writes, and denied attempts are auditable.
 
-## Why Handoff is not faked
+Handoff v1 is intentionally an application-continuation protocol. `air handoff
+offer` sends a target-bound capsule to a deny-by-default receiver, which stores it
+inertly. A local operator accepts or declines it; `air handoff continue` then
+claims delivery atomically and invokes a receiver-selected governed tool through
+an exact-key-pinned agent connection. It never rebinds a session owner or carries
+credentials, capabilities, or hidden model state.
+
+## Why Handoff is not live migration
 
 The existing `session` layer is Continuity for transport failure: it persists
 the server-side endpoint and rehydrates it for the **same** `CreatorKey`. The
@@ -67,7 +76,7 @@ memory are not a transferable checkpoint. Rebinding `CreatorKey` or copying a
 session file would turn an intentional identity boundary into an account-
 takeover primitive and could duplicate side effects during a split brain.
 
-A real Air Handoff therefore requires this protocol:
+A future transactional or live-migration Handoff requires a stronger protocol:
 
 ```mermaid
 sequenceDiagram
@@ -84,8 +93,8 @@ sequenceDiagram
 
 The commit consumes the grant exactly once with a fencing generation. Expiry,
 rejection, destination failure, or policy drift aborts and leaves the source
-authoritative. This is the next Continuity phase after Activity/checkpoint
-export contracts exist.
+authoritative. This is the next Continuity phase after compatible Activity/checkpoint
+export contracts exist; it is not required for v1's explicit application continuation.
 
 ## Build sequence
 
@@ -94,8 +103,8 @@ export contracts exist.
 | **1 · Nearby** | Presence registry, Activity cards, resolver, CLI/Home/web/MCP views. | Existing Air control endpoint and mesh identity. |
 | **2 · Air Node** | One command/config starts selected inbox, ring, cast, screen, approvals, and steer services; publishes them automatically. | Nearby service contracts. |
 | **3 · Universal addressing** | All Air send/control verbs accept `name`, `fqdn`, or `pubkey` plus a service kind; raw `host:port` remains compatible. | Nearby resolver. |
-| **4 · Context Capsule** | Versioned export/import interface, content-addressed artifacts, bounded encrypted manifest, policy and provenance receipts. | Agent/runtime checkpoint adapters and the Air Knowledge System. |
-| **5 · Handoff** | Prepare → accept → ready → commit/abort, single-use grants, fencing, recovery tests, Home action sheet. | Context Capsule and durable Activity identity. |
+| **4 · Context Capsule v1** | Shipped bounded work summary, content references, exact-target seal, explicit accept/decline, governed continuation, and durable delivery receipts. | Existing Air Handoff CLI, mesh identity, and destination tool policy. |
+| **5 · Transactional Handoff v2** | Prepare → accept → ready → commit/abort, checkpoint adapters, single-use grants, fencing, recovery tests, and a Home action sheet. | Context Capsule v1, durable Activity identity, and runtime checkpoint support. |
 | **6 · Spaces** | User-owned agent/device groups, shared Activity board, individually governed fan-out, focus/notification policy. | Nearby, Activities, and the pub/sub event fabric. |
 
 ## Success criteria
@@ -108,6 +117,6 @@ export contracts exist.
   terminal escape, exhaust the registry, or smuggle executable parameters.
 - The same Presence and Activity JSON is rendered by terminal, web, and MCP
   surfaces.
-- Handoff is described as unavailable until the context/checkpoint contract and
-  two-phase security tests ship; transport failover is never mislabeled as
-  cross-agent continuation.
+- Handoff v1 is described as explicit application continuation, while transactional
+  checkpoint migration remains unavailable until its adapters, grants, fencing, and
+  two-phase recovery tests ship; transport failover is never mislabeled as either.

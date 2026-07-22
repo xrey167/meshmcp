@@ -271,7 +271,7 @@ func bindPresenceFlags(fs *flag.FlagSet) *presenceFlags {
 	p.progress = fs.Int("progress", -1, "Activity progress from 0 to 100; omit for unknown")
 	p.activityTarget = fs.String("activity-target", "", "canonical governed target, for example task:9f2a")
 	p.contextRef = fs.String("context-ref", "", "content-addressed context reference (sha256:, blake3:, or kh_)")
-	p.handoff = fs.Bool("handoff-ready", false, "mark the Activity as context-ready for a future governed handoff")
+	p.handoff = fs.Bool("handoff-ready", false, "advertise that the Activity has context ready for an explicit governed handoff")
 	p.revision = fs.Uint64("revision", 0, "monotonic Activity revision")
 	return p
 }

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"time"
 
@@ -22,8 +23,8 @@ import (
 	"github.com/xrey167/meshmcp/session"
 )
 
-// cmdAir is the umbrella for Air's live-work verbs: list and steer sessions on
-// a gateway's control endpoint, and launch a new agent.
+// cmdAir is the umbrella for Air's discovery, Continuity, live-work, and
+// presentation verbs.
 //
 //	meshmcp air sessions <control-ip:port>
 //	meshmcp air steer    <control-ip:port> --backend b --session id [--param k=v]
@@ -41,6 +42,8 @@ func cmdAir(args []string) error {
 		return cmdAirAnnounce(args[1:])
 	case "node":
 		return cmdAirNode(args[1:])
+	case "handoff", "continue-on":
+		return cmdAirHandoff(args[1:])
 	case "whoami", "self":
 		return cmdAirWhoami(args[1:])
 	case "map":
@@ -100,7 +103,7 @@ func cmdAir(args []string) error {
 	case "-h", "--help", "help":
 		return airUsage()
 	default:
-		return fmt.Errorf("meshmcp air: unknown subcommand %q (want home | nearby | announce | node | whoami | map | browse | stream | vision | bind | film | play | ring | listen | cast | drive | screen | catalog | change | osint | dns | kg | sessions | steer | launch | agent-steer | tasks | task-steer | workflow | graph | rag | serve)", args[0])
+		return fmt.Errorf("meshmcp air: unknown subcommand %q (want home | nearby | announce | node | handoff | whoami | map | browse | stream | vision | bind | film | play | ring | listen | cast | drive | screen | catalog | change | osint | dns | kg | sessions | steer | launch | agent-steer | tasks | task-steer | workflow | graph | rag | serve)", args[0])
 	}
 }
 
@@ -116,6 +119,7 @@ func airUsage() error {
 	fmt.Fprintln(os.Stderr, "                  "+dim("publish one short-lived Presence + Activity card"))
 	fmt.Fprintln(os.Stderr, "  "+b("air node")+"        <control-ip:port> --name n [presence flags]")
 	fmt.Fprintln(os.Stderr, "                  "+dim("keep a Presence card alive; graceful leave, crash-safe TTL"))
+	fmt.Fprintln(os.Stderr, "  "+b("air handoff")+"     offer|receive|list|show|accept|decline|continue|rearm|archive  "+dim("Continue on… with an exact-key-bound Context Capsule"))
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, dim("DISCOVER & DRIVE"))
 	fmt.Fprintln(os.Stderr, "  "+b("air whoami")+"      "+dim("                                  the mesh identity a gateway sees you as"))
@@ -490,6 +494,7 @@ func cmdAirAgentSteer(args []string) error {
 	text := fs.String("text", "", "type=nudge: guidance text")
 	target := fs.String("target", "", "optional sub-work address, e.g. task:9f2a")
 	id := fs.String("id", "", "optional caller correlation id (audited)")
+	deliveryTimeout := fs.Duration("timeout", 2*time.Minute, "maximum time to wait for the agent inbox ACK")
 	steerArgs := argFlags{}
 	fs.Var(&steerArgs, "arg", "type=task: tool arg key=value (repeatable)")
 	if err := fs.Parse(args); err != nil {
@@ -497,6 +502,9 @@ func cmdAirAgentSteer(args []string) error {
 	}
 	if fs.NArg() != 1 {
 		return errors.New("usage: meshmcp air agent-steer [flags] <agent-ip:port>")
+	}
+	if *deliveryTimeout <= 0 {
+		return errors.New("air agent-steer: --timeout must be greater than zero")
 	}
 	agentAddr := fs.Arg(0)
 
@@ -516,7 +524,11 @@ func cmdAirAgentSteer(args []string) error {
 	}
 	defer stopMesh(client)
 
-	if err := sendSteerEnvelope(context.Background(), client, agentAddr, env); err != nil {
+	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	deliveryCtx, cancel := context.WithTimeout(signalCtx, *deliveryTimeout)
+	defer cancel()
+	if err := sendSteerEnvelope(deliveryCtx, client, agentAddr, env); err != nil {
 		return fmt.Errorf("air agent-steer: %w", err)
 	}
 	fmt.Println(okLine("%s → %s", *typ, agentAddr))
@@ -527,8 +539,32 @@ func cmdAirAgentSteer(args []string) error {
 // an existing mesh membership — the same resumable, line-framed channel as a
 // push. Shared by `air agent-steer` and the workflow runner's agent_steer step.
 func sendSteerEnvelope(ctx context.Context, client *embed.Client, addr string, env steerEnvelope) error {
-	pr, pw := io.Pipe()
-	go func() { pw.CloseWithError(air.WriteEnvelope(pw, env)) }()
 	dial := func(ctx context.Context) (net.Conn, error) { return client.Dial(ctx, "tcp", addr) }
-	return session.NewClient(dial, log.Printf).Run(ctx, sendStream{r: pr})
+	return sendSteerEnvelopeWithDial(ctx, dial, env)
+}
+
+func sendSteerEnvelopeWithDial(ctx context.Context, dial session.Dialer, env steerEnvelope) error {
+	if ctx == nil {
+		return errors.New("steer delivery requires a context")
+	}
+	var outgoing bytes.Buffer
+	if err := air.WriteEnvelope(&outgoing, env); err != nil {
+		return err
+	}
+	stream := newSteerEnvelopeStream(outgoing.Bytes())
+	defer stream.Close()
+	if err := session.NewClient(dial, log.Printf).Run(ctx, stream); err != nil {
+		return err
+	}
+	ack, err := stream.acknowledgement()
+	if err != nil {
+		return err
+	}
+	if err := ack.ValidateFor(env); err != nil {
+		return err
+	}
+	if !ack.Delivered() {
+		return fmt.Errorf("agent rejected steer (%s)", ack.Reason)
+	}
+	return nil
 }

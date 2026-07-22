@@ -68,6 +68,17 @@ first, fixed with the smallest robust change, and documented in
   `docs/ECOSYSTEM.md` for the **discover → understand → use → continue** contract and the
   Trust Library, Universal Resolver, Continuity Capsule, automation, and native-companion
   roadmap.
+- **Air Handoff / Continuity** — exact-key-bound, expiring Context Capsules for
+  moving active-work context between agent devices. The receiver stores offers
+  inertly, stamps the transport-verified source, requires an explicit local
+  accept, and continues only through a receiver-selected governed tool. Includes
+  atomic inbox persistence (private POSIX modes; inherited user-private ACLs
+  required on Windows), identity-bound offer replay handling, bounded
+  application ACK/NACK, atomic `dispatching` claims, exact-key pinning for both
+  device and destination-agent hops, bounded durable delivery-attempt receipts,
+  explicit unknown-outcome re-arm, archival replay tombstones, restart-safe
+  audit correlation, and an explicit non-goal of cross-key live session takeover.
+  See `docs/AIR-CONTINUITY.md`.
 - **Air vision arc** — new identity-gated, firewalled, audited CLI verbs:
   `air browse` (a backend's tools/resources/prompts, filtered to your identity),
   `air stream` (watch governed Air activity live by tailing the audit ledger,

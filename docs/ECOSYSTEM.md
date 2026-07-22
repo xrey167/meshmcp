@@ -18,7 +18,7 @@ model. It is independent and is not affiliated with or endorsed by Apple Inc.
 | **Discover** | “Show me what I can reach.” | A per-caller Air catalog, already filtered by backend ACL. |
 | **Understand** | “What is it, who runs it, and what can it do?” | One Component Card vocabulary shared by catalog, map, home, change, CLI, and MCP-app views. |
 | **Use** | “Open or invoke it by a durable reference.” | Stable IDs and names resolve to an address; the live transport proves identity and policy decides every action. |
-| **Continue** | “Resume or steer work without losing its security context.” | Today, identity-bound session resume and steer; later, explicitly accepted Continuity Capsules for starting related work elsewhere. |
+| **Continue** | “Resume or steer work without losing its security context.” | Identity-bound session resume and steer, plus explicitly accepted Continuity Capsules that start related work elsewhere without transferring authority or session ownership. |
 
 The important boundary is between **description** and **authority**. Discovery
 can describe a component, but it cannot grant access to it.
@@ -101,15 +101,16 @@ trust boundary.
 
 ## Ecosystem roadmap
 
-Component Cards are the first shared contract. The following phases build on
-that contract; they are not claims of shipped functionality.
+Component Cards and application-level Continuity Capsules now provide the first
+shared discovery and continuation contracts. The remaining phases build on those
+contracts; labels below distinguish the shipped v1 foundations from future work.
 
 | Phase | Outcome | Non-negotiable acceptance boundary |
 |---|---|---|
-| **1 · Component Cards** | One identity, feature, lifecycle, and resolution vocabulary across Air surfaces. | Cards stay advisory; live transport identity and policy remain authoritative. |
+| **1 · Component Cards (shipped)** | One identity, feature, lifecycle, and resolution vocabulary across Air surfaces. | Cards stay advisory; live transport identity and policy remain authoritative. |
 | **2 · Trust Card + Library** | Signed provenance, review status, publisher, content hash, and installed/available lifecycle connect the governed marketplace to a personal component library. | Installing verifies pinned publisher trust and content; it never activates code merely because it was discovered. |
 | **3 · Universal Resolver** | Resolve a stable ID, friendly name, intent, or resource reference to the best caller-visible component. | Resolution returns candidates; it never widens the caller's authority or silently chooses an ambiguous name. |
-| **4 · Continuity Capsules** | Move a bounded work summary and artifact references to another agent or device so it can start related work. | The target explicitly accepts. A capsule never swaps session ownership, transfers identity/capability/secret tokens, replays hidden model context, or auto-executes. New work runs as the target identity and is authorized anew. |
+| **4 · Continuity Capsules v1 (shipped)** | Move a bounded work summary and artifact references to another exact-key-pinned agent or device so it can start related work. | The target explicitly accepts and selects a governed continuation tool. A capsule never swaps session ownership, transfers identity/capability/secret tokens, replays hidden model context, or auto-executes. New work runs as the target identity and is authorized anew. |
 | **5 · Automations** | Turn schedules, audit events, and component lifecycle changes into governed actions. | Each trigger resolves a concrete actor and each effect passes normal policy, approval, and audit. |
 | **6 · Native companion** | Approvals, inbox, browse, and continuity on a phone using the existing mobile bindings. | Hardware-backed device identity and explicit human confirmation protect privileged actions; shipping an app remains external to this repository. |
 

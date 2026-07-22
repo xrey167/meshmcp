@@ -1,7 +1,8 @@
 # `air` — meshmcp's Air module
 
 The portable, mesh-independent core of meshmcp's Air layer: the domain types and
-pure logic for **Presence**, **Activities**, discovery, steering, Home, and declarative workflows. It has
+pure logic for **Presence**, **Activities**, discovery, steering, **Continuity
+handoffs**, Home, and declarative workflows. It has
 no dependency on the WireGuard mesh client, the policy engine, or the session
 layer — the command-line and HTTP wiring that binds these to a live mesh lives in
 the main package, which imports this one. So the Air model can be tested and
@@ -18,6 +19,7 @@ proven here.
 | `home.go` | The shared Home read model, hero summary, stable change signature, and receipt parser consumed by CLI and web |
 | `change.go` | Stable catalog snapshots and human-readable endpoint deltas |
 | `notice.go` | Bounded, terminal-safe notices used by Air's human-facing event surfaces |
+| `handoff.go` | Air Continuity's target-bound `ContextCapsule`, canonical SHA-256 sealing, bounded offer + ACK framing, destination delivery-attempt receipts, and explicit lifecycle (`offered` → `accepted` → `dispatching` → `continued`, or `declined`/`expired`) |
 | `steer.go` | `SteerEnvelope` (+ `Validate`), the `Task`/`Nudge`/`Cancel`/`TaskArgs` constructors, `String()`, and the newline-JSON framing (`ParseEnvelopes`/`WriteEnvelope`) |
 | `target.go` | The `Target` addressing grammar — `agent` / `session` / `task` / `group` — with `ParseTarget` and a round-tripping `String()` |
 | `workflow.go` | The declarative `Workflow` schema, `ParseWorkflow`, full `Validate()` (including `${var.field}` reference checking against prior `as:` captures), `Plan()`, and `${var}` expansion |
