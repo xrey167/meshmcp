@@ -57,6 +57,8 @@ type Media struct {
 type HomeSummary struct {
 	PeersOnline int `json:"peers_online"`
 	PeersTotal  int `json:"peers_total"`
+	Nearby      int `json:"nearby"`
+	Working     int `json:"working"`
 	Sessions    int `json:"sessions"`
 	Reachable   int `json:"reachable"`
 	Pending     int `json:"pending"`
@@ -68,6 +70,7 @@ type Home struct {
 	Generated string         `json:"generated"` // RFC3339, when assembled
 	You       PeerRow        `json:"you"`       // this node's own identity
 	Peers     []PeerRow      `json:"peers"`     // reachable identities — Find My
+	Nearby    []Presence     `json:"nearby"`    // identity-stamped Air nodes + Activity cards
 	Sessions  []Session      `json:"sessions"`  // live resumable sessions
 	Reachable []CatalogEntry `json:"reachable"` // backends I may reach (ARD catalog)
 	Activity  []Receipt      `json:"activity"`  // newest-first ledger tail
@@ -86,6 +89,9 @@ func (h Home) MarshalJSON() ([]byte, error) {
 	a := alias(h)
 	if a.Peers == nil {
 		a.Peers = []PeerRow{}
+	}
+	if a.Nearby == nil {
+		a.Nearby = []Presence{}
 	}
 	if a.Sessions == nil {
 		a.Sessions = []Session{}
@@ -112,9 +118,21 @@ func Summarize(h Home) HomeSummary {
 			online++
 		}
 	}
+	working := 0
+	for _, p := range h.Nearby {
+		if p.Activity == nil {
+			continue
+		}
+		switch p.Activity.State {
+		case ActivityQueued, ActivityRunning, ActivityBlocked:
+			working++
+		}
+	}
 	return HomeSummary{
 		PeersOnline: online,
 		PeersTotal:  len(h.Peers),
+		Nearby:      len(h.Nearby),
+		Working:     working,
 		Sessions:    len(h.Sessions),
 		Reachable:   len(h.Reachable),
 		Pending:     h.Pending,
@@ -179,6 +197,33 @@ func (h Home) Signature() string {
 	})
 	for _, p := range peers {
 		line("peer", p.Status, p.IP, p.FQDN, p.PubKey)
+	}
+
+	nearby := make([]Presence, len(h.Nearby))
+	for i, p := range h.Nearby {
+		nearby[i] = clonePresence(p)
+	}
+	sort.Slice(nearby, func(i, j int) bool {
+		if nearby[i].PublicKey != nearby[j].PublicKey {
+			return nearby[i].PublicKey < nearby[j].PublicKey
+		}
+		return nearby[i].Name < nearby[j].Name
+	})
+	for _, p := range nearby {
+		line("nearby", p.Version, p.Name, string(p.Kind), string(p.Status), p.FQDN, p.PublicKey, p.IP,
+			strings.Join(p.Labels, unit))
+		for _, svc := range p.Services {
+			line("service", string(svc.Kind), strconv.Itoa(svc.Port), svc.Protocol, svc.Address,
+				strings.Join(svc.Capabilities, unit))
+		}
+		if a := p.Activity; a != nil {
+			progress := ""
+			if a.Progress != nil {
+				progress = strconv.Itoa(*a.Progress)
+			}
+			line("activity", a.Schema, a.ID, string(a.Kind), a.Title, a.Summary, string(a.State), progress,
+				a.Target, a.ContextRef, strconv.FormatBool(a.Handoff), strconv.FormatUint(a.Revision, 10), a.UpdatedAt)
+		}
 	}
 
 	sess := append([]Session(nil), h.Sessions...)

@@ -166,6 +166,34 @@ func TestApproverNoInjectableHandlers(t *testing.T) {
 	if !strings.Contains(approvalsHTML, "textContent") {
 		t.Fatalf("approver should render dynamic values via textContent")
 	}
+	if !strings.Contains(approvalsHTML, "catch(function(e){lastPendingSignature='';") {
+		t.Fatalf("approver must invalidate its render signature after a polling error")
+	}
+}
+
+func TestApprovalsRejectsCrossOriginMutations(t *testing.T) {
+	ps := &policy.FilePending{Dir: t.TempDir()}
+	devs := &DeviceStore{Dir: t.TempDir()}
+	h := approvalsHandler(ps, func(*http.Request) string { return "phone.mesh" }, nil, time.Now,
+		withPushWake(devs, &captureNotifier{}))
+
+	for _, path := range []string{"/v1/approve", "/v1/deny", "/v1/request", "/v1/devices"} {
+		req := httptest.NewRequest(http.MethodPost, "http://approvals.mesh"+path, strings.NewReader(`{"peer":"agent.mesh","tool":"shell","token":"device"}`))
+		req.Header.Set("Origin", "https://evil.example")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusForbidden {
+			t.Errorf("cross-origin POST %s = %d, want 403", path, rr.Code)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "http://approvals.mesh/v1/request", strings.NewReader(`{"peer":"agent.mesh","tool":"shell"}`))
+	req.Header.Set("Origin", "http://approvals.mesh")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("same-origin request = %d: %s", rr.Code, rr.Body.String())
+	}
 }
 
 func post(t *testing.T, url, body string) {

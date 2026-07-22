@@ -37,8 +37,10 @@ and a **gateway-signed, tamper-evident audit log** of every decision.
 
 [![▶ Try the live Air experience](https://img.shields.io/badge/▶_Try_the_live_Air_experience-0071E3?style=for-the-badge)](https://xrey167.github.io/meshmcp/)
 
-**Govern a live AI agent's MCP tool-calls** — allow · co-sign · deny — run any of the 15 Air verbs,
-and watch your own data become a **tamper-evident, hash-chained proof**. Runs entirely in your
+**Govern a live AI agent's MCP tool-calls** — allow · co-sign · deny — then operate the whole
+private agent fabric through **Air**, one calm Home for nearby agents, live work, sharing, and
+human attention — and watch your own data become a **tamper-evident, hash-chained proof**. The
+interactive preview runs entirely in your
 browser (camera / screen / mic work too): **[xrey167.github.io/meshmcp](https://xrey167.github.io/meshmcp/)**
 
 </div>
@@ -277,7 +279,7 @@ Watch it live with `meshmcp dash --audit audit.jsonl`; re-run a past session wit
 | `peers` | List reachable mesh identities — the "who can I drop to" view. |
 | `fetch <peer:port> <sha256>` | Fetch a blob by content hash from a peer's content-addressed store. |
 | `push <peer:port>` | Push a stdin payload (clipboard / a task) to a peer's inbox over the resumable channel. |
-| `air <whoami·map·catalog·browse·stream·vision·bind·dns·sessions·steer·tasks·task-steer·launch·agent-steer·workflow·serve>` | **Air · Steer**: browse a backend's tools/resources filtered to your identity, tail the audit ledger live (`stream`), inventory image drops (`vision`), fire a declared reaction when a ledger record matches (`bind`), list/steer live sessions, steer a running agent, launch an agent, run a declarative workflow, or serve the live Air web page — now with the **Vision gallery** (`serve --gallery`) — all governed + audited. |
+| `air <home·nearby·announce·node·whoami·map·catalog·browse·…>` | **Air Agent OS**: see the mesh at a glance, publish identity-stamped agent/device Presence + Activity cards, resolve friendly nodes to live services, continue/steer work, share, approve, automate, and serve the responsive Air Home — all governed + audited. Run `meshmcp air help` for the complete grouped surface. |
 | `pubsub --config <f>` · `publish` · `subscribe <peer:port> <topic>` | Identity-gated, audited **event bus** on the mesh — durable + resumable; `publish`/`subscribe` a broker topic (see [docs/PUBSUB.md](docs/PUBSUB.md)). |
 | `graphrag --config <f>` | Serve `graph_search`: vector retrieval + knowledge-graph entity expansion over the mesh. |
 | `ls · call · read · prompt <peer:port>` | Drive tools / resources / prompts from the terminal. |
@@ -332,9 +334,8 @@ protocol/    granular Go models for the MCP wire protocol — one package per do
 registry/    file-based discovery registry
 embed/       local, deterministic text embedder (shared by RAG + semantic policy)
 mobile/      gomobile-bindable Mesh/Conn/Approvals surface for an iOS/Android app
+cmd/meshmcp/ the meshmcp binary: serve · router · orchestrate · control · Air · CLI + embedded web surfaces
 cmd/         mcpserver (demo) · mcpecho · mcphttp · kg (provenance knowledge graph) · vectors (zero-exposure RAG) · memory (agent-memory fabric)
-*.go         the meshmcp binary: serve · router · orchestrate · control · federate · insight · … · CLI
-             Air · Steer: air.go · airserve.go · airworkflow.go · aircontrol.go · steerinbox.go · pushwake.go
 examples/    ready-to-adapt configs        docs/  design docs + open specs
 ```
 
@@ -353,6 +354,8 @@ examples/    ready-to-adapt configs        docs/  design docs + open specs
 - **[docs/spec/](docs/spec/)** — open specs: the [audit-record format](docs/spec/AUDIT-RECORD.md) and the [policy DSL](docs/spec/POLICY-DSL.md), each with a JSON Schema.
 - **[docs/AIR.md](docs/AIR.md)** — **Air**: meshmcp's coherent human-and-agent surface — discover · drop · push · fetch · steer · launch · approve, across a phone-first web app, the assistant, and native mobile (see the [visual mockup](https://xrey167.github.io/meshmcp/air.html)).
 - **[docs/ECOSYSTEM.md](docs/ECOSYSTEM.md)** — the shared Component Card contract and the **discover → understand → use → continue** roadmap for a coherent agent ecosystem.
+- **[docs/AIR-ECOSYSTEM.md](docs/AIR-ECOSYSTEM.md)** — the Agent-OS spine: verified Presence, privacy-safe Activities, friendly service resolution, Air Node, Context Capsules, truthful Handoff, and Spaces — including what ships now versus what remains deliberately staged.
+- **[docs/UX-AGENT-OS.md](docs/UX-AGENT-OS.md)** — the whole-product UX/UI system: Home/Nearby/Activities/Share/Security architecture, shared state language and components, desktop/mobile references, accessibility contract, and migration of Approvals/Dashboard/Control Room.
 - **[docs/AIR-STEER.md](docs/AIR-STEER.md)** — Air · **Steer**: send to / cancel / nudge an agent, session, or task, and launch new agents/workflows. All four primitives ship — the agent steer inbox, session enumeration + a line-safe session steer, `tasks/steer`, and launch/workflow — plus the gateway control endpoint, the `air_*` assistant tools, and the `meshmcp air` CLI.
 - **[docs/PUBSUB.md](docs/PUBSUB.md)** — the identity-native **event bus**: an on-mesh pub/sub broker (durable event log, resumable subscribers, signed checkpoints, capability grants, cross-broker federation) and gateway hooks that publish policy decisions.
 - **[docs/MOBILE.md](docs/MOBILE.md)** — how the whole stack could reach phones (a phone is a human identity on the mesh — the natural co-sign approver).

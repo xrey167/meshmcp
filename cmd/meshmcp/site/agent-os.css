@@ -1,0 +1,107 @@
+/* MeshMCP Agent OS shared foundation.
+   Each surface keeps its workflow-specific layout; these tokens and primitives
+   make Air, Approvals, Dashboard, and Control Room feel like one product. */
+:root {
+  color-scheme: light dark;
+  --mesh-bg:#f6f8fc;
+  --mesh-surface:#ffffff;
+  --mesh-surface-raised:rgba(255,255,255,.82);
+  --mesh-line:rgba(72,86,110,.16);
+  --mesh-text:#111827;
+  --mesh-muted:#647084;
+  --mesh-faint:#8791a4;
+  --mesh-accent:#1265f5;
+  --mesh-ok:#159b62;
+  --mesh-warn:#e86f16;
+  --mesh-danger:#d63c48;
+  --mesh-shadow:0 1px 2px rgba(24,35,58,.04),0 12px 36px rgba(24,35,58,.07);
+  --mesh-radius:20px;
+  --mesh-sans:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,system-ui,sans-serif;
+  --mesh-mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+
+  /* Compatibility aliases used by the existing independent surfaces. */
+  --bg:var(--mesh-bg);
+  --panel:var(--mesh-surface);
+  --panel2:#f0f3f9;
+  --group:var(--mesh-surface);
+  --group2:#f0f3f9;
+  --line:var(--mesh-line);
+  --sep:var(--mesh-line);
+  --fg:var(--mesh-text);
+  --label:var(--mesh-text);
+  --dim:var(--mesh-muted);
+  --label2:var(--mesh-muted);
+  --faint:var(--mesh-faint);
+  --label3:var(--mesh-faint);
+  --accent:var(--mesh-accent);
+  --ok:var(--mesh-ok);
+  --green:var(--mesh-ok);
+  --warn:var(--mesh-warn);
+  --orange:var(--mesh-warn);
+  --deny:var(--mesh-danger);
+  --red:var(--mesh-danger);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --mesh-bg:#090b10;
+    --mesh-surface:#151820;
+    --mesh-surface-raised:rgba(28,31,40,.84);
+    --mesh-line:rgba(171,183,205,.18);
+    --mesh-text:#f7f8fc;
+    --mesh-muted:#a5adbd;
+    --mesh-faint:#747f92;
+    --mesh-accent:#4b8cff;
+    --mesh-ok:#36c987;
+    --mesh-warn:#ff9c54;
+    --mesh-danger:#ff6672;
+    --mesh-shadow:0 1px 2px rgba(0,0,0,.34),0 16px 42px rgba(0,0,0,.24);
+    --panel2:#1c202a;
+    --group2:#1c202a;
+  }
+}
+
+html { background:var(--mesh-bg); }
+body {
+  background:var(--mesh-bg) !important;
+  color:var(--mesh-text) !important;
+  font-family:var(--mesh-sans) !important;
+  -webkit-font-smoothing:antialiased;
+  text-rendering:optimizeLegibility;
+}
+
+button,input,textarea,select { font-family:var(--mesh-sans); }
+code,pre,kbd,.mono,#out,#in { font-family:var(--mesh-mono); }
+
+button,a,input,textarea,select,[tabindex] { -webkit-tap-highlight-color:transparent; }
+:where(button,a,input,textarea,select,[tabindex]):focus-visible {
+  outline:2px solid var(--mesh-accent) !important;
+  outline-offset:3px !important;
+}
+
+.card,.panel,.tile,.group {
+  border-color:var(--mesh-line) !important;
+  box-shadow:var(--mesh-shadow);
+}
+.card,.panel,.tile { border-radius:var(--mesh-radius) !important; }
+
+button {
+  min-height:44px;
+  border-radius:12px !important;
+  font-weight:650 !important;
+}
+
+a { color:var(--mesh-accent); }
+
+@media (prefers-reduced-motion: reduce) {
+  *,*::before,*::after {
+    scroll-behavior:auto !important;
+    animation-duration:.01ms !important;
+    animation-iteration-count:1 !important;
+    transition-duration:.01ms !important;
+  }
+}
+
+@media (forced-colors: active) {
+  :where(button,a,input,textarea,select,[tabindex]):focus-visible { outline:2px solid CanvasText !important; }
+}

@@ -39,7 +39,7 @@ func cmdMCP(args []string) error {
 	o := meshFlags(fs)
 	auditPath := fs.String("audit", "", "audit log to read for the network view / verify")
 	cosignDir := fs.String("cosign-store", "", "co-sign store directory (for approvals)")
-	control := fs.String("control", "", "gateway Air control endpoint (mesh-ip:port) for air_sessions / air_steer")
+	control := fs.String("control", "", "gateway Air control endpoint (mesh-ip:port) for air_nearby / air_sessions / air_steer")
 	allowLaunch := fs.Bool("allow-launch", false, "allow the air_launch tool to spawn agent processes (opt-in, like the Control Room's --local-shell)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -235,6 +235,12 @@ func (a *meshApp) register(s *mcp.Server) {
 			"path":   appStr("local file path to send"),
 		}, "target", "path"),
 		Handler: a.toolDropFile,
+	})
+	s.AddTool(mcp.Tool{
+		Name:        "air_nearby",
+		Description: "List identity-stamped nearby agents/devices, their availability, live services, and privacy-safe Activity cards. Requires --control. Use this before asking for a raw mesh address.",
+		InputSchema: appObj(nil),
+		Handler:     a.toolAirNearby,
 	})
 	s.AddTool(mcp.Tool{
 		Name:        "air_catalog",
@@ -465,6 +471,33 @@ func (a *meshApp) toolDropFile(ctx context.Context, args json.RawMessage) (mcp.T
 		return errTxt("drop to %s failed: %v", p.Target, err), nil
 	}
 	return txt(fmt.Sprintf("dropped %s to %s", p.Path, p.Target)), nil
+}
+
+// toolAirNearby returns the same verified Presence projection used by Air Home
+// and the CLI. It is read-only; advertised capabilities never bypass the
+// receiver's own policy when the assistant later acts on one.
+func (a *meshApp) toolAirNearby(ctx context.Context, _ json.RawMessage) (mcp.ToolResult, error) {
+	hc, err := a.controlClient()
+	if err != nil {
+		return errTxt("%v", err), nil
+	}
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://air-control/v1/presence", nil)
+	resp, err := hc.Do(req)
+	if err != nil {
+		return errTxt("air_nearby: %v", err), nil
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPresenceListBytes+1))
+	if err != nil {
+		return errTxt("air_nearby: %v", err), nil
+	}
+	if len(body) > maxPresenceListBytes {
+		return errTxt("air_nearby: response exceeds %d bytes", maxPresenceListBytes), nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return errTxt("air_nearby: %s: %s", resp.Status, string(body)), nil
+	}
+	return txt(string(body)), nil
 }
 
 // toolAirCatalog discovers the backends the caller may reach on the gateway,

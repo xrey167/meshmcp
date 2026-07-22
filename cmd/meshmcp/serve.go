@@ -265,6 +265,7 @@ func cmdServe(args []string) error {
 			servers: servers, acls: backendACLs, mu: &serversMu,
 			backends: cards,
 			gateway:  meshFQDN,
+			presence: air.NewRegistry(air.DefaultPresenceRegistryMax),
 		}
 		identify := func(r *http.Request) (string, string) { return peerIdentityStr(client, r.RemoteAddr) }
 		allow := newACL(cfg.Control.Allow)
@@ -276,7 +277,7 @@ func cmdServe(args []string) error {
 		if len(cfg.Control.OnBehalfAllow) > 0 {
 			obNote = fmt.Sprintf(" · on-behalf proxies: %v", cfg.Control.OnBehalfAllow)
 		}
-		log.Printf("Air control endpoint on mesh port %d (GET /v1/sessions · POST /v1/steer · GET %s)%s", cfg.Control.Port, airCatalogPath, obNote)
+		log.Printf("Air control endpoint on mesh port %d (GET/POST/DELETE /v1/presence · GET /v1/sessions · POST /v1/steer · GET %s)%s", cfg.Control.Port, airCatalogPath, obNote)
 		wg.Add(1)
 		// Read/header timeouts: a mesh peer must not be able to hold the control
 		// listener open with a slow/half-open request (Slowloris).

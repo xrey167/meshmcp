@@ -1,7 +1,7 @@
 # `air` — meshmcp's Air module
 
 The portable, mesh-independent core of meshmcp's Air layer: the domain types and
-pure logic for **discovery**, **steering**, and **declarative workflows**. It has
+pure logic for **Presence**, **Activities**, discovery, steering, Home, and declarative workflows. It has
 no dependency on the WireGuard mesh client, the policy engine, or the session
 layer — the command-line and HTTP wiring that binds these to a live mesh lives in
 the main package, which imports this one. So the Air model can be tested and
@@ -14,6 +14,10 @@ proven here.
 |------|----------|
 | `catalog.go` | `Catalog` / `CatalogEntry` discovery model — builder (`NewCatalog`/`Add`/`Sorted`/`Names`), lookup (`Entry`), filters (`Steerable`/`Resumable`), and `Valid()` + `Transport*` constants |
 | `discovery.go` | ARD (Agentic Resource Discovery) legs 2–3: `DNSRecords` generation (with zone-injection-safe validation), `ParseCatalogTXT`, `ResolveCatalog` (TXT then SRV) over injectable lookups, and `FetchCatalog` (transport-agnostic fetch+parse over an injected `http.Client`, bounded body) |
+| `presence.go` | Versioned, bounded `Announcement` / `Presence` / `Activity` contracts; verified identity and observed-address stamping; concurrency-safe TTL registry; exact friendly-name/FQDN/full-key service resolver |
+| `home.go` | The shared Home read model, hero summary, stable change signature, and receipt parser consumed by CLI and web |
+| `change.go` | Stable catalog snapshots and human-readable endpoint deltas |
+| `notice.go` | Bounded, terminal-safe notices used by Air's human-facing event surfaces |
 | `steer.go` | `SteerEnvelope` (+ `Validate`), the `Task`/`Nudge`/`Cancel`/`TaskArgs` constructors, `String()`, and the newline-JSON framing (`ParseEnvelopes`/`WriteEnvelope`) |
 | `target.go` | The `Target` addressing grammar — `agent` / `session` / `task` / `group` — with `ParseTarget` and a round-tripping `String()` |
 | `workflow.go` | The declarative `Workflow` schema, `ParseWorkflow`, full `Validate()` (including `${var.field}` reference checking against prior `as:` captures), `Plan()`, and `${var}` expansion |

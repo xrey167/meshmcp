@@ -1,7 +1,8 @@
 # Air — the coherent agent experience on meshmcp
 
 **Air** is one name and one product surface for meshmcp's payload + human-in-the-loop
-layer: **discover** who's on your mesh, **drop** a file, **push** a snippet or a task,
+layer: see verified agents/devices in **Nearby**, **continue** a privacy-safe Activity,
+**drop** a file, **push** a snippet or a task,
 **fetch** a blob by content hash, **steer** live work (an agent, a session, a task) or
 **launch** a fresh one, and **approve** a held call — from a phone, an assistant, or a
 laptop.
@@ -37,6 +38,7 @@ consumer-facing product of that separation.
 
 | Air action | Backed by (exists today) | One line |
 |---|---|---|
+| **Nearby** — which agents/devices are ready | `air/presence.go` · `aircontrol.go` · `airnearby.go` | The transport stamps identity and observed address; a short-lived card advertises availability, services, and optional Activity metadata. |
 | **Discover** — who's on my mesh and what can I use | `peers.go` · `air/catalog.go` · `client.Status()` | Peer identity plus per-caller Component Cards; discovery never grants access. |
 | **Drop** — send files | `drop.go` (`sendFiles`, `session` client) | Resumable, E2E-encrypted, sender-ACL gated, content-hash audited. |
 | **Push** — send clipboard / a task | `push.go` (`sendData`) | A small stdin payload to a peer's resumable inbox, by identity. |
@@ -58,6 +60,11 @@ feel like one thing.
 meshmcp peers            # connected identities — the "who can I drop to" view
 meshmcp peers --all      # include offline peers
 meshmcp air whoami       # the mesh identity a gateway's allow-list + audit see me as
+meshmcp air nearby 100.x.y.z:9600                         # verified agents/devices + live Activities
+meshmcp air nearby 100.x.y.z:9600 --resolve analyst --service steer
+meshmcp air node 100.x.y.z:9600 --name analyst --kind agent \
+  --service steer=9120,task,nudge --activity-id research \
+  --activity-title "Customer research" --progress 68      # heartbeat until Ctrl-C
 meshmcp air catalog 100.x.y.z:9600   # what backends can I reach on this gateway?
 meshmcp air map 100.x.y.z:9600       # your reachable mesh as a tree (you → gateway → backends)
 meshmcp air browse 100.x.y.z:9101    # what tools/resources/prompts a backend exposes
@@ -77,6 +84,14 @@ views one vocabulary for stable ID, kind, version, owner, features, and lifecycl
 than treating an address or display name as the component's identity (`airmap.go`).
 Peer rows come straight from the mesh (`client.Status()` in `peers.go`): status, mesh IP,
 FQDN, short public key. The identity is the transport's, so it can't be spoofed.
+
+**Nearby** turns those low-level peers into product-facing nodes. A caller authors only a
+bounded `Announcement` (friendly name, availability, labels, service ports, and optional
+Activity); `POST /v1/presence` stamps the full transport-verified key/FQDN and reconstructs
+each service address from the observed source IP. `air node` refreshes the bounded TTL and
+leaves cleanly; crashes disappear on expiry. `air nearby`, Home, the live web page, and the
+assistant's `air_nearby` tool all render the same JSON. Presence is discovery metadata, never
+authorization: every resolved action still enters the destination service's ACL and policy.
 
 **Air catalog** adds an ARD-style (Agentic Resource Discovery) well-known document —
 `GET /.well-known/ai-catalog.json`, served on the gateway's control port — so a peer can
@@ -109,8 +124,11 @@ package, tested on its own:
   `Catalog`/`CatalogEntry` model (`Resolve`, `Supports`, `Steerable`, and `Resumable`).
 - `air/discovery.go` — ARD record generation + TXT/SRV parsing & resolution, with input
   validation that refuses zone-record injection and caps the untrusted URL.
-- `air/change.go` · `air/home.go` — stable-ID-aware changes and a deterministic home
-  signature over the same component metadata.
+- `air/change.go` — stable-ID-aware component changes.
+- `air/presence.go` — versioned Presence + Activity cards, TTL registry, verified address
+  stamping, stable normalization, and exact name/FQDN/full-key service resolution.
+- `air/home.go` — the shared Home read model and deterministic change signature over
+  component and Presence metadata used by CLI and web.
 - `air/steer.go` — the steer envelope, its `Validate()`, the `Task`/`Nudge`/`Cancel`
   constructors, and the newline-JSON `ParseEnvelopes`/`WriteEnvelope` framing.
 - `air/target.go` — the `Target` addressing grammar (`agent|session|task|group`).
@@ -223,22 +241,24 @@ reach them.
 One responsive page on a **mesh port, no public port**, opened from any device already
 on the mesh — exactly the pattern `meshmcp approvals` and `meshmcp room` already use.
 Zero install: a phone joined via the NetBird app opens `http://<gateway-mesh-ip>:<port>`
-and gets Nearby / Drop / Push / Steer / Approvals / Receipts.
+and gets Nearby / Drop / Push / Steer / an identity-preserving Approvals
+link-out / Receipts.
 
-This is what [`site/air.html`](../site/air.html) mocks up — the "how it could look"
-deliverable. It reuses:
+The shipped [`cmd/meshmcp/site/air-live.html`](../cmd/meshmcp/site/air-live.html) is that
+surface: one responsive Agent-OS shell for Continue Working, Nearby, Activities, Share,
+Security, and advanced media/receipt views. It reuses:
 - the peer list shape from `peers.go`,
-- the drag-to-drop → `meshmcp drop …` interaction already in
-  [`site/knowledge-canvas.html`](../site/knowledge-canvas.html),
-- the pending → approve/deny flow from `approvals.go`,
+- explicit file selection plus the relay-backed Push/Drop delivery paths,
+- the pending summary plus a direct link to `approvals.go`, where the browser
+  keeps its own mesh identity for the actual approve/deny decision,
 - the audit-record fields from [`docs/spec/AUDIT-RECORD.md`](spec/AUDIT-RECORD.md).
 
 ```
  phone / laptop (mesh peer · own WireGuard identity)
    │  opens http://<gateway-mesh-ip>:<air-port>   (no public port)
    ▼
- meshmcp air   ── serves Nearby · Drop · Push · Steer · Approvals · Receipts
-   │  calls peers / drop / push / fetch / steer / launch / approvals internally
+ meshmcp air   ── serves Nearby · Drop · Push · Steer · Approvals link-out · Receipts
+   │  reads peers / sessions / receipts · relays Push / Drop / Steer · links Approvals
    ▼
  gateway: policy · audit · secrets  ──▶  peers / drop inboxes / CAS / agents · sessions · tasks
 ```
@@ -353,11 +373,13 @@ Honesty about the seam, so nobody mistakes the mockup for shipped product:
 | Piece | Status | Where |
 |---|---|---|
 | **Component Card v1** — stable ID · kind · version · owner · deterministic features · lifecycle; legacy catalogs remain readable | **Ships now (Labs discovery metadata)** | `air/component.go` · `air/catalog.go` · `air/change.go` · `air/home.go` · [ECOSYSTEM.md](ECOSYSTEM.md) |
+| Verified Presence + Activity cards, bounded TTL registry, friendly service resolver | **Ships now** | `air/presence.go` · `cmd/meshmcp/aircontrol.go` · `cmd/meshmcp/airnearby.go` |
+| Nearby/Home parity across terminal, responsive web, and assistant tool `air_nearby` | **Ships now** | `air/home.go` · `cmd/meshmcp/airhome.go` · `cmd/meshmcp/airserve.go` · `cmd/meshmcp/mcpapp.go` |
 | `discover` / `drop` / `push` / `fetch` / `approvals` CLI | **Ships now** | `peers.go` · `drop.go` · `push.go` · `cas.go` · `approvals.go` |
 | Resumable, E2E, sender-ACL, per-file audit on transfers | **Ships now** | `session/` · `drop.go` · `policy/` |
 | Assistant Air tools `drop_file` · `network` · `pending_approvals` · `approve`/`deny` | **Ships now** | `mcpapp.go` · [MCP-APP.md](MCP-APP.md) |
 | Phone-first web over the mesh (approver + room) | **Ships now** | `approvals.go` · `room.go` |
-| `site/air.html` unified Air mockup | **This change** (mockup only) | `site/air.html` |
+| `site/air.html` public interactive concept | **Preview** | `site/air.html` |
 | **Steer** — P3 task augment · P2 session core · P1 agent inbox | **Ships now** | `mcp/tasks.go` · `session/server.go` · `agent.go` · `steerinbox.go` (+ tests) |
 | **Steer** — gateway `/v1/sessions`+`/v1/steer` endpoint · `air_sessions`/`air_steer`/`air_tasks`/`air_task_steer` tools | **Ships now** | `config.go` · `serve.go` · `aircontrol.go` · `mcpapp.go` · `aircontrol_test.go` |
 | **Steer** — control endpoint hardening: per-backend ACL re-check · steer-method allowlist · relay-attested web attribution (`X-Air-On-Behalf`) | **Ships now** | `aircontrol.go` · `serve.go` · `airserve.go` · `aircontrol_test.go` |
@@ -377,35 +399,43 @@ the default**.
 
 ## 7 · Roadmap
 
-This section tracks delivery of the current Air surfaces. The broader ecosystem sequence—
+The useful verbs and current Air surface ship. The broader shared ecosystem sequence—
 **Trust Card + Library → Universal Resolver → explicitly accepted Continuity Capsules →
 Automations → native companion**—is specified in [ECOSYSTEM.md](ECOSYSTEM.md). In
 particular, continuity will not reassign a live session's identity or transfer bearer,
 capability, or secret tokens.
 
-The current Air surface is built. What's left in this delivery track is genuinely external —
-it needs credentials or a device this repo can't exercise:
+The Agent-OS expansion makes those verbs increasingly continuous without pretending that a
+network session is already a transferable agent mind. Its detailed product sequence and
+security boundary are in [AIR-ECOSYSTEM.md](AIR-ECOSYSTEM.md). The remaining native push and
+mobile-app delivery is genuinely external because it needs vendor credentials or a device this
+repo cannot exercise; the in-repo expansion proceeds as follows:
 
-1. **Done — the full Air surface.** `discover` / `drop` / `push` / `fetch` / `approve`, and
-   **Steer/Launch**: the P1–P4 primitives ([AIR-STEER.md](AIR-STEER.md)), the gateway control
-   endpoint, the `air_*` assistant tools, the `meshmcp air` CLI (`sessions` · `steer` ·
-   `launch` · `agent-steer` · `workflow` · `serve`), the served live web page, the push-wake
-   seam, and the `mobile/` binding package. Usable end-to-end today.
-2. **Push delivery — mostly done.** A **webhook `Notifier`** ships in-repo
+1. **Done — Nearby + Activity foundation.** Presence registry, friendly service resolver,
+   `air nearby` / `air announce` / `air node`, Home/web integration, and `air_nearby` all use
+   the same versioned contract.
+2. **Next — universal addressing and Air Node.** Every send/control verb may accept a verified
+   name/FQDN/full key plus service kind; raw `host:port` stays backward compatible. One Air Node
+   hosts selected inbox/ring/cast/screen/approval/steer services and announces them automatically.
+3. **Then — Context Capsules and truthful Handoff.** First define bounded export/import and
+   provenance contracts; then implement prepare → accept → ready → commit/abort with a
+   recipient-bound, single-use grant and fencing. Existing same-identity transport recovery is
+   never relabeled as cross-agent Handoff.
+4. **Push delivery — mostly done.** A **webhook `Notifier`** ships in-repo
    (`meshmcp approvals --devices <dir> --notify-webhook <url>`): each new pending is POSTed to
    an operator relay that fans out to APNs/FCM with its own credentials — real network delivery
    with **no vendor keys in meshmcp**. Only a *direct* in-process APNs/FCM `Notifier` (which
    would embed Apple/Google credentials) remains external ([MOBILE.md §4](MOBILE.md)).
-3. **External — the shipped mobile app.** `gomobile bind ./mobile` → an iOS `.xcframework` /
+5. **External — the shipped mobile app.** `gomobile bind ./mobile` → an iOS `.xcframework` /
    Android `.aar`, then a thin native shell (Face-ID approve, receive/share sheets). Needs the
    mobile toolchain + a device ([MOBILE.md §3](MOBILE.md)).
-4. **Proposed — `group:<name>` broadcast steer.** Resolve a registry group to its members and
+6. **Proposed — Spaces / `group:<name>`.** Resolve a user-owned group to its members and
    fan one steer out as one governed, audited call per member ("broadcast = N audited
    records"). Not implemented; nothing resolves a `group:` target today.
 
 ## Reference points
 
-- `peers.go` · `drop.go` · `push.go` · `cas.go` — discover / drop / push / fetch.
+- `cmd/meshmcp/peers.go` · `drop.go` · `push.go` · `cas.go` — discover / drop / push / fetch.
 - [AIR-STEER.md](AIR-STEER.md) — the code-ready spec for **steer** + **launch** (P1–P4),
   grounded in `agent.go`, `session/endpoint.go`, `mcp/tasks.go`, `orchestrate.go`, `router.go`.
 - `approvals.go` · `policy/pending.go` — the phone-first co-sign inbox.
@@ -414,4 +444,4 @@ it needs credentials or a device this repo can't exercise:
   gomobile binding surface.
 - [IDEAS.md](IDEAS.md) — the payload-layer thesis (F1 AirDrop, S2 "My Devices" vault).
 - `examples/drop.yaml` — a ready-to-run drop receiver.
-- [`site/air.html`](../site/air.html) — the visual mockup of surface A.
+- [`cmd/meshmcp/site/air-live.html`](../cmd/meshmcp/site/air-live.html) — the shipped responsive Agent-OS surface.

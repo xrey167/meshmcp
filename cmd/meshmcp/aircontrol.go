@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"io"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -28,6 +30,9 @@ type airController interface {
 	sessions(pubKey, fqdn string) []AirSession
 	steer(pubKey, fqdn, backend, id, method string, params any) error
 	catalog(pubKey, fqdn string) AirCatalog
+	nearby(now time.Time) []air.Presence
+	announce(pubKey, fqdn, observedIP string, a air.Announcement, now time.Time) (air.Presence, bool, error)
+	leave(pubKey string) bool
 }
 
 // airSteerMethods is the allowlist of server->client notification methods a
@@ -52,6 +57,9 @@ func airControlHandler(c airController, identify func(*http.Request) (pubkey, fq
 	// the result is filtered per-caller by each backend's own ACL, and an
 	// unidentifiable peer (no key and no FQDN) discovers nothing.
 	mux.HandleFunc(airCatalogPath, func(w http.ResponseWriter, r *http.Request) {
+		if !getOnly(w, r) {
+			return
+		}
 		pubKey, fqdn := identify(r)
 		if pubKey == "" && fqdn == "" {
 			if audit != nil {
@@ -68,6 +76,9 @@ func airControlHandler(c airController, identify func(*http.Request) (pubkey, fq
 	})
 
 	mux.HandleFunc("/v1/sessions", func(w http.ResponseWriter, r *http.Request) {
+		if !getOnly(w, r) {
+			return
+		}
 		pubKey, fqdn := identify(r)
 		if !allow.allows(pubKey, fqdn) {
 			if audit != nil {
@@ -85,6 +96,90 @@ func airControlHandler(c airController, identify func(*http.Request) (pubkey, fq
 			audit(airSteerAudit{Peer: fqdnOr(fqdn), PeerKey: pubKey, OnBehalf: ob, OnBehalfKey: obKey, Method: "air/sessions", OK: true})
 		}
 		writeJSONResp(w, http.StatusOK, map[string]any{"sessions": list, "you": fqdnOr(fqdn)})
+	})
+
+	// Presence is Air's ambient ecosystem directory. A caller authors only an
+	// Announcement; the controller stamps its verified key/FQDN and the source
+	// IP observed on this HTTP connection. On-behalf headers are deliberately
+	// ignored for POST/DELETE: a relay may help render a browser's read, but it
+	// may never create or remove another identity's card.
+	mux.HandleFunc("/v1/presence", func(w http.ResponseWriter, r *http.Request) {
+		pubKey, fqdn := identify(r)
+		if !allow.allows(pubKey, fqdn) {
+			if audit != nil {
+				audit(airSteerAudit{Peer: fqdnOr(fqdn), PeerKey: pubKey, Method: presenceMethod(r.Method), OK: false})
+			}
+			http.Error(w, "not permitted", http.StatusForbidden)
+			return
+		}
+
+		switch r.Method {
+		case http.MethodGet, http.MethodHead:
+			cards := c.nearby(time.Now())
+			if cards == nil {
+				cards = []air.Presence{}
+			}
+			if audit != nil {
+				ob, obKey := onBehalfOf(r, onBehalfAllow, pubKey, fqdn)
+				audit(airSteerAudit{Peer: fqdnOr(fqdn), PeerKey: pubKey, OnBehalf: ob, OnBehalfKey: obKey, Method: "air/presence.list", OK: true})
+			}
+			writeJSONResp(w, http.StatusOK, map[string]any{"presence": cards, "you": fqdnOr(fqdn)})
+
+		case http.MethodPost:
+			// A stable card must be owned by a cryptographic key, not merely a
+			// name that happened to resolve on the mesh.
+			if pubKey == "" {
+				if audit != nil {
+					audit(airSteerAudit{Peer: fqdnOr(fqdn), Method: "air/presence.announce", OK: false})
+				}
+				http.Error(w, "presence requires a transport-verified public key", http.StatusForbidden)
+				return
+			}
+			var body air.Announcement
+			dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32<<10))
+			if err := dec.Decode(&body); err != nil || dec.Decode(&struct{}{}) != io.EOF {
+				if audit != nil {
+					audit(airSteerAudit{Peer: fqdnOr(fqdn), PeerKey: pubKey, Method: "air/presence.announce", OK: false})
+				}
+				http.Error(w, "bad presence announcement", http.StatusBadRequest)
+				return
+			}
+			card, changed, err := c.announce(pubKey, fqdn, observedPeerIP(r.RemoteAddr), body, time.Now())
+			if err != nil {
+				if audit != nil {
+					audit(airSteerAudit{Peer: fqdnOr(fqdn), PeerKey: pubKey, Session: body.Name, Method: "air/presence.announce", OK: false})
+				}
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			// Do not append an enforcement record every few seconds for an
+			// unchanged heartbeat. Material card changes remain attributable.
+			if changed && audit != nil {
+				audit(airSteerAudit{Peer: fqdnOr(fqdn), PeerKey: pubKey, Session: card.Name, Method: "air/presence.announce", OK: true})
+			}
+			writeJSONResp(w, http.StatusOK, map[string]any{"status": "present", "changed": changed, "presence": card})
+
+		case http.MethodDelete:
+			if pubKey == "" {
+				if audit != nil {
+					audit(airSteerAudit{Peer: fqdnOr(fqdn), Method: "air/presence.leave", OK: false})
+				}
+				http.Error(w, "presence requires a transport-verified public key", http.StatusForbidden)
+				return
+			}
+			removed := c.leave(pubKey)
+			if audit != nil {
+				audit(airSteerAudit{Peer: fqdnOr(fqdn), PeerKey: pubKey, Method: "air/presence.leave", OK: true})
+			}
+			writeJSONResp(w, http.StatusOK, map[string]any{"status": "left", "removed": removed})
+
+		default:
+			if audit != nil {
+				audit(airSteerAudit{Peer: fqdnOr(fqdn), PeerKey: pubKey, Method: "air/presence", OK: false})
+			}
+			w.Header().Set("Allow", "GET, POST, DELETE")
+			http.Error(w, "GET, POST, or DELETE only", http.StatusMethodNotAllowed)
+		}
 	})
 
 	mux.HandleFunc("/v1/steer", func(w http.ResponseWriter, r *http.Request) {
@@ -203,6 +298,7 @@ type gatewayAirControl struct {
 	mu       *sync.Mutex
 	backends []AirCatalogEntry // canonical cards; live steerability is added per response
 	gateway  string            // this gateway's mesh FQDN, for the catalog
+	presence *air.Registry     // TTL directory: one identity-stamped card per peer key
 }
 
 func (g *gatewayAirControl) backendAllows(backend, pubKey, fqdn string) bool {
@@ -266,6 +362,48 @@ func (g *gatewayAirControl) steer(pubKey, fqdn, backend, id, method string, para
 		return errBackendForbidden
 	}
 	return srv.Steer(id, method, params)
+}
+
+func (g *gatewayAirControl) nearby(now time.Time) []air.Presence {
+	return g.presenceRegistry().List(now)
+}
+
+func (g *gatewayAirControl) announce(pubKey, fqdn, observedIP string, a air.Announcement, now time.Time) (air.Presence, bool, error) {
+	return g.presenceRegistry().Upsert(air.VerifiedIdentity{PublicKey: pubKey, FQDN: fqdn}, observedIP, a, now)
+}
+
+func (g *gatewayAirControl) leave(pubKey string) bool {
+	return g.presenceRegistry().Remove(pubKey)
+}
+
+func (g *gatewayAirControl) presenceRegistry() *air.Registry {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.presence == nil {
+		g.presence = air.NewRegistry(air.DefaultPresenceRegistryMax)
+	}
+	return g.presence
+}
+
+func observedPeerIP(remote string) string {
+	host, _, err := net.SplitHostPort(remote)
+	if err != nil || net.ParseIP(host) == nil {
+		return ""
+	}
+	return host
+}
+
+func presenceMethod(method string) string {
+	switch method {
+	case http.MethodGet, http.MethodHead:
+		return "air/presence.list"
+	case http.MethodPost:
+		return "air/presence.announce"
+	case http.MethodDelete:
+		return "air/presence.leave"
+	default:
+		return "air/presence"
+	}
 }
 
 // airSteerAudit is one control-endpoint action (a steer or a sessions read),
