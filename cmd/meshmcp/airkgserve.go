@@ -84,28 +84,12 @@ func kgPatternMatches(pattern, pubKey, fqdn string) bool {
 	return ok
 }
 
-// kgCaller builds the verified knowstore.Caller for a resolved identity: its
-// granted corpora as capability claims, and its mesh identity to stamp as
-// provenance. Peer prefers the human-readable FQDN and falls back to the public
-// key, so a key-only peer still stamps a non-empty asserting identity (the
-// reachability gate has already rejected the fully-unidentifiable caller).
-func kgCaller(pubKey, fqdn string, grants kgGrants) knowstore.Caller {
-	peer := fqdn
-	if peer == "" {
-		peer = pubKey
-	}
-	return knowstore.Caller{
-		Claims:  policy.CapabilityClaims{Corpora: grants.corporaFor(pubKey, fqdn)},
-		Peer:    peer,
-		PeerKey: pubKey,
-	}
-}
-
 // kgControlHandler builds the air-kg mesh-HTTP surface over the facade. identify
-// resolves the caller's (pubkey, fqdn); allow gates reachability; grants maps the
-// caller to its corpora; audit records reachability refusals on the shared chain
-// (the facade audits every governed op itself, so the two land on one ledger).
-func kgControlHandler(f *knowstore.Facade, identify func(*http.Request) (pubkey, fqdn string), allow acl, grants kgGrants, audit policy.AuditSink) http.Handler {
+// resolves the caller's (pubkey, fqdn); allow gates reachability; bridge maps the
+// caller to its corpora (static --grant map ∪ dynamic grant-on-request store);
+// audit records reachability refusals on the shared chain (the facade audits every
+// governed op itself, so the two land on one ledger).
+func kgControlHandler(f *knowstore.Facade, identify func(*http.Request) (pubkey, fqdn string), allow acl, bridge *kgGrantBridge, audit policy.AuditSink) http.Handler {
 	mux := http.NewServeMux()
 
 	// reach resolves and gates the caller. On refusal it writes the 403, audits a
@@ -144,7 +128,7 @@ func kgControlHandler(f *knowstore.Facade, identify func(*http.Request) (pubkey,
 		if !ok {
 			return
 		}
-		caller := kgCaller(pubKey, fqdn, grants)
+		caller := bridge.caller(pubKey, fqdn, body.Corpus, true)
 		receipt, err := f.Assert(caller, knowstore.AssertRequest{
 			Corpus: body.Corpus, S: body.S, P: body.P, O: body.O,
 			Source: body.Source, ValidFrom: body.ValidFrom,
@@ -170,7 +154,7 @@ func kgControlHandler(f *knowstore.Facade, identify func(*http.Request) (pubkey,
 		if !ok {
 			return
 		}
-		recs, err := f.Query(kgCaller(pubKey, fqdn, grants), corpus, q.Get("s"), q.Get("p"), q.Get("o"), kgAsOf(q.Get("as_of")))
+		recs, err := f.Query(bridge.caller(pubKey, fqdn, corpus, false), corpus, q.Get("s"), q.Get("p"), q.Get("o"), kgAsOf(q.Get("as_of")))
 		if err != nil {
 			writeKGError(w, err)
 			return
@@ -192,7 +176,7 @@ func kgControlHandler(f *knowstore.Facade, identify func(*http.Request) (pubkey,
 		if !ok {
 			return
 		}
-		recs, err := f.Neighbors(kgCaller(pubKey, fqdn, grants), corpus, node, kgAsOf(q.Get("as_of")))
+		recs, err := f.Neighbors(bridge.caller(pubKey, fqdn, corpus, false), corpus, node, kgAsOf(q.Get("as_of")))
 		if err != nil {
 			writeKGError(w, err)
 			return
@@ -217,7 +201,7 @@ func kgControlHandler(f *knowstore.Facade, identify func(*http.Request) (pubkey,
 		// One governed read of the corpus's active set (audited, deny-by-default),
 		// then a pure bounded k-hop assembly over it — so traversal fan-out is
 		// bounded in the air layer while authorization stays entirely in the facade.
-		recs, err := f.Query(kgCaller(pubKey, fqdn, grants), corpus, "", "", "", kgAsOf(q.Get("as_of")))
+		recs, err := f.Query(bridge.caller(pubKey, fqdn, corpus, false), corpus, "", "", "", kgAsOf(q.Get("as_of")))
 		if err != nil {
 			writeKGError(w, err)
 			return
@@ -328,6 +312,10 @@ func cmdAirKGServe(args []string) error {
 	fs.Var(&allow, "allow", "identity permitted to reach the endpoint (FQDN glob or pubkey:<key>); repeatable; REQUIRED")
 	grantFlags := multiFlag{}
 	fs.Var(&grantFlags, "grant", "corpus grant: <id>=<corpus>[,<corpus>...] where <id> is an FQDN glob or pubkey:<key> (repeatable)")
+	grantStorePath := fs.String("grant-store", "", "enable grant-on-request: persist dynamic grants + pending opportunities to this file (atomic, audited, revocable)")
+	pairStorePath := fs.String("pair-store", "", "recognized-peer store (air pairing); only a recognized peer's denied request records a grant opportunity")
+	operatorFlags := multiFlag{}
+	fs.Var(&operatorFlags, "operator", "identity permitted to administer grants (allow/deny/revoke/pending); FQDN glob or pubkey:<key>; repeatable; fail-closed if empty")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -342,6 +330,26 @@ func cmdAirKGServe(args []string) error {
 	grants, err := parseKGGrants(grantFlags)
 	if err != nil {
 		return fmt.Errorf("air kg serve: %w", err)
+	}
+
+	// Optional dynamic grant-on-request: a recognized peer's denied corpus request
+	// becomes a pending opportunity an operator resolves with `air grant allow`.
+	// It is consulted ALONGSIDE the static --grant map; deny-by-default is
+	// preserved when neither grants the corpus. Recognition comes from the SAME
+	// paired store the gateway's `air pair` writes (--pair-store).
+	var grantStore *air.GrantStore
+	if *grantStorePath != "" {
+		grantStore, err = air.OpenGrantStore(*grantStorePath)
+		if err != nil {
+			return fmt.Errorf("air kg serve: open grant store %s: %w", *grantStorePath, err)
+		}
+	}
+	var pairStore *air.PairedStore
+	if *pairStorePath != "" {
+		pairStore, err = air.OpenPairedStore(*pairStorePath)
+		if err != nil {
+			return fmt.Errorf("air kg serve: open paired store %s: %w", *pairStorePath, err)
+		}
 	}
 
 	st, err := kg.Open(*store, nowRFC3339)
@@ -368,7 +376,27 @@ func cmdAirKGServe(args []string) error {
 	defer stopMesh(client)
 
 	identify := func(r *http.Request) (string, string) { return peerIdentityStr(client, r.RemoteAddr) }
-	h := kgControlHandler(facade, identify, newACL(allow), grants, audit)
+	bridge := &kgGrantBridge{
+		static:  grants,
+		dyn:     grantStore,
+		paired:  pairStore,
+		limiter: newRingLimiter(grantRecordRatePerMin),
+		audit:   audit,
+	}
+	h := kgControlHandler(facade, identify, newACL(allow), bridge, audit)
+
+	// Optional grant-on-request admin surface, mounted on the SAME listener as the
+	// kg endpoint so the operator's approval and the served handler's grant
+	// consultation share ONE in-memory store. Operator-gated deny-by-default,
+	// fail-closed on an empty --operator ACL (mirrors air pair). Longest-prefix
+	// routing: /v1/grant/ → grant admin, everything else → the kg handler.
+	if grantStore != nil {
+		gh := grantControlHandler(grantStore, identify, newACL(operatorFlags), grantVerbKG, audit)
+		parent := http.NewServeMux()
+		parent.Handle("/v1/grant/", gh)
+		parent.Handle("/", h)
+		h = parent
+	}
 
 	ln, err := client.ListenTCP(fmt.Sprintf(":%d", *port))
 	if err != nil {
@@ -377,6 +405,15 @@ func cmdAirKGServe(args []string) error {
 	defer ln.Close()
 	fmt.Fprintf(os.Stderr, "air-kg on mesh port %d (POST /v1/kg/assert · GET /v1/kg/query · /v1/kg/neighbors · /v1/kg/subgraph · /v1/kg/verify)\n", *port)
 	fmt.Fprintf(os.Stderr, dim("store %s · %d grant(s) · allow %v\n"), *store, len(grants), []string(allow))
+	if grantStore != nil {
+		fmt.Fprintf(os.Stderr, dim("grant-on-request on (store %s · %d operator(s) · POST /v1/grant/allow|deny|revoke · GET /v1/grant/pending)\n"), *grantStorePath, len(operatorFlags))
+		if pairStore == nil {
+			fmt.Fprintln(os.Stderr, amber("warning:")+" --grant-store set without --pair-store; no peer is recognized, so no grant opportunities will be recorded. Point --pair-store at the gateway's pairing store.")
+		}
+		if len(operatorFlags) == 0 {
+			fmt.Fprintln(os.Stderr, amber("warning:")+" --grant-store set without --operator; the grant admin surface is fail-closed (403 to everyone) until an --operator identity is configured.")
+		}
+	}
 	// Read/header timeouts even on the mesh so an admitted peer cannot hold the
 	// listener open with a slow request (Slowloris), matching the control endpoint.
 	return newLocalHTTPServer("", h).Serve(ln)
