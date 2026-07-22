@@ -1,8 +1,12 @@
 package air
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"net/url"
 	"strings"
 )
@@ -147,6 +151,32 @@ func ResolveCatalogSRV(lookup SRVLookup, domain string) (host string, port int, 
 		return "", 0, fmt.Errorf("SRV at %s has no usable target", name)
 	}
 	return target, int(a.Port), nil
+}
+
+// maxCatalogBody bounds a catalog response the client will buffer, so a hostile
+// or misbehaving endpoint cannot force an unbounded read.
+const maxCatalogBody = 1 << 20
+
+// FetchCatalog fetches and parses a gateway's Air catalog from url using the
+// given HTTP client — the caller wires the client to the mesh (or a test
+// server), keeping this function transport-agnostic. It returns the parsed
+// catalog and the raw response bytes (for a pass-through --json view). A non-200
+// status or an unparseable body is an error; the body is length-bounded.
+func FetchCatalog(hc *http.Client, url string) (Catalog, []byte, error) {
+	resp, err := hc.Get(url)
+	if err != nil {
+		return Catalog{}, nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxCatalogBody))
+	if resp.StatusCode != http.StatusOK {
+		return Catalog{}, body, fmt.Errorf("%s: %s", resp.Status, bytes.TrimSpace(body))
+	}
+	var cat Catalog
+	if err := json.Unmarshal(body, &cat); err != nil {
+		return Catalog{}, body, fmt.Errorf("bad catalog response: %w", err)
+	}
+	return cat, body, nil
 }
 
 // ResolveCatalog performs ARD discovery from a domain: the TXT pointer (leg 2)
