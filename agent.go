@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/xrey167/meshmcp/mcpclient"
+	"github.com/xrey167/meshmcp/policy"
 	"github.com/xrey167/meshmcp/session"
 )
 
@@ -78,6 +79,7 @@ func cmdAgent(args []string) error {
 	steerPort := fs.Int("steer-port", 0, "if >0, also listen on this mesh port for steer instructions (Air · Steer, P1)")
 	steerAllow := multiFlag{}
 	fs.Var(&steerAllow, "steer-allow", "identity permitted to steer this agent (FQDN glob or pubkey:<key>); repeatable; empty = any mesh peer")
+	steerAudit := fs.String("steer-audit", "", "JSONL hash-chained audit log recording every delivered steer envelope (with --steer-port)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -100,7 +102,7 @@ func cmdAgent(args []string) error {
 	// Steer-enabled agents must also accept inbound mesh connections (the
 	// default dialMCP path is outbound-only), so they join the mesh directly.
 	if *steerPort > 0 {
-		return runSteerableAgent(o, target, steps, *count, *interval, *steerPort, steerAllow, logf)
+		return runSteerableAgent(o, target, steps, *count, *interval, *steerPort, steerAllow, *steerAudit, logf)
 	}
 
 	mc, cleanup, err := dialMCP(o, target)
@@ -114,13 +116,25 @@ func cmdAgent(args []string) error {
 // runSteerableAgent joins the mesh with inbound enabled, dials the backend, and
 // runs a steer inbox alongside the scripted loop: instructions arriving on the
 // steer port are delivered into the loop's select between steps.
-func runSteerableAgent(o *meshOptions, target string, steps []agentStep, count int, interval time.Duration, steerPort int, allow []string, logf func(string, ...any)) error {
+func runSteerableAgent(o *meshOptions, target string, steps []agentStep, count int, interval time.Duration, steerPort int, allow []string, auditPath string, logf func(string, ...any)) error {
 	o.BlockInbound = false
 	client, err := startMesh(o, os.Stderr)
 	if err != nil {
 		return err
 	}
 	defer stopMesh(client)
+
+	// One audit record per delivered steer envelope (the drop receiver's
+	// audit wiring, applied to the steer inbox).
+	var audit *policy.AuditLog
+	if auditPath != "" {
+		f, err := os.OpenFile(auditPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if err != nil {
+			return fmt.Errorf("open steer audit log %s: %w", auditPath, err)
+		}
+		defer f.Close()
+		audit = policy.NewAuditLog(f, func() string { return time.Now().UTC().Format(time.RFC3339) })
+	}
 
 	conn, err := client.Dial(context.Background(), "tcp", target)
 	if err != nil {
@@ -145,7 +159,7 @@ func runSteerableAgent(o *meshOptions, target string, steps []agentStep, count i
 	}
 	defer ln.Close()
 	checker := newACL(allow)
-	srv := session.NewServer(newSteerFactory(ctx, steer, nil), 2*time.Minute, log.Printf)
+	srv := session.NewServer(newSteerFactory(ctx, steer, audit), 2*time.Minute, log.Printf)
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -172,18 +186,26 @@ type toolCaller interface {
 	CallTool(ctx context.Context, name string, args any, task bool) (json.RawMessage, error)
 }
 
+// taskSteerer is the optional slice of mcpclient.Client applySteer uses to
+// route a steer addressed to sub-work ("task:<id>") on the agent's backend.
+type taskSteerer interface {
+	SteerTask(ctx context.Context, taskID string, payload json.RawMessage) (mcpclient.Task, error)
+	CancelTask(ctx context.Context, taskID string) (mcpclient.Task, error)
+}
+
 // runAgentLoop cycles through steps, issuing each call and logging whether it
 // was allowed (a result) or blocked/held (a JSON-RPC error from the gateway).
-// runAgentLoop cycles through steps, and — when steer is non-nil — also reacts
-// to steer instructions arriving between steps: a "task" runs an extra call, a
-// "nudge" logs guidance, and a "cancel" stops the agent. A nil steer channel
-// disables that select case (a receive on nil blocks forever), so a plain agent
-// is unaffected.
+// When steer is non-nil it also reacts to steer instructions arriving between
+// steps: a "task" runs an extra call, a "nudge" updates the guidance the
+// following scripted steps carry, and a "cancel" stops the agent. A nil steer
+// channel disables that select case (a receive on nil blocks forever), so a
+// plain agent is unaffected.
 func runAgentLoop(ctx context.Context, mc toolCaller, steps []agentStep, count int, interval time.Duration, steer <-chan steerEnvelope, logf func(string, ...any)) error {
 	made := 0
+	var guidance string
 	for i := 0; count == 0 || made < count; i++ {
 		step := steps[i%len(steps)]
-		_, err := mc.CallTool(ctx, step.tool, step.args, false)
+		_, err := mc.CallTool(ctx, step.tool, stepArgs(step, guidance), false)
 		if err != nil {
 			logf("%-16s ✗ %s", step.tool, blockedReason(err))
 		} else {
@@ -197,7 +219,7 @@ func runAgentLoop(ctx context.Context, mc toolCaller, steps []agentStep, count i
 		case <-ctx.Done():
 			return ctx.Err()
 		case env := <-steer:
-			if stop := applySteer(ctx, mc, env, logf); stop {
+			if stop := applySteer(ctx, mc, env, &guidance, logf); stop {
 				return nil
 			}
 		case <-time.After(interval):
@@ -206,15 +228,41 @@ func runAgentLoop(ctx context.Context, mc toolCaller, steps []agentStep, count i
 	return nil
 }
 
+// stepArgs returns a step's args with the current nudge guidance merged in
+// (as a "guidance" argument) — a copy, never a mutation of the shared script.
+func stepArgs(step agentStep, guidance string) map[string]any {
+	if guidance == "" {
+		return step.args
+	}
+	args := make(map[string]any, len(step.args)+1)
+	for k, v := range step.args {
+		args[k] = v
+	}
+	args["guidance"] = guidance
+	return args
+}
+
 // applySteer handles one steer instruction. It returns true when the agent
-// should stop (a "cancel").
-func applySteer(ctx context.Context, mc toolCaller, env steerEnvelope, logf func(string, ...any)) (stop bool) {
+// should stop (a "cancel"). A steer carrying a "task:<id>" target is routed to
+// that task on the agent's backend (tasks/steer / tasks/cancel) rather than
+// applied to the agent loop itself; any other target is refused loudly so a
+// mis-addressed steer is never silently acted on.
+func applySteer(ctx context.Context, mc toolCaller, env steerEnvelope, guidance *string, logf func(string, ...any)) (stop bool) {
+	if env.Target != "" {
+		steerTarget(ctx, mc, env, logf)
+		return false
+	}
 	switch env.Type {
 	case "cancel":
 		logf("steer: cancel — stopping")
 		return true
 	case "nudge":
-		logf("steer: nudge %q", env.Text)
+		*guidance = env.Text
+		if env.Text == "" {
+			logf("steer: nudge — guidance cleared")
+		} else {
+			logf("steer: nudge %q — carried on following steps", env.Text)
+		}
 	case "task":
 		var args any = map[string]any{}
 		if len(env.Args) > 0 {
@@ -229,6 +277,37 @@ func applySteer(ctx context.Context, mc toolCaller, env steerEnvelope, logf func
 		logf("steer: unknown type %q", env.Type)
 	}
 	return false
+}
+
+// steerTarget forwards a targeted steer to the sub-work it addresses. Only
+// "task:<id>" targets are supported; the forwarded call is a governed MCP
+// method on the agent's existing backend connection (tasks/cancel or
+// tasks/steer), so the gateway firewall still applies.
+func steerTarget(ctx context.Context, mc toolCaller, env steerEnvelope, logf func(string, ...any)) {
+	id, ok := strings.CutPrefix(env.Target, "task:")
+	if !ok || id == "" {
+		logf("steer: unsupported target %q — ignored (want task:<id>)", env.Target)
+		return
+	}
+	ts, ok := mc.(taskSteerer)
+	if !ok {
+		logf("steer: target %q needs a task-capable client — ignored", env.Target)
+		return
+	}
+	if env.Type == "cancel" {
+		if _, err := ts.CancelTask(ctx, id); err != nil {
+			logf("steer: cancel task %s ✗ %s", id, blockedReason(err))
+		} else {
+			logf("steer: cancel task %s ✓", id)
+		}
+		return
+	}
+	payload, _ := json.Marshal(env)
+	if _, err := ts.SteerTask(ctx, id, payload); err != nil {
+		logf("steer: %s task %s ✗ %s", env.Type, id, blockedReason(err))
+	} else {
+		logf("steer: %s task %s ✓", env.Type, id)
+	}
 }
 
 // blockedReason trims a JSON-RPC error to its human message for the log.

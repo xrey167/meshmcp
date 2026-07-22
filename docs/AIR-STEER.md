@@ -73,10 +73,16 @@ is audited with the caller's WireGuard identity.
 
 Implemented: `steerenvelope.go` (`steerEnvelope`), `steerinbox.go`
 (`newSteerFactory`/`recvEnvelopes`, reusing `dropSink`), and `agent.go` — a `--steer-port`
-(with `--steer-allow`) starts the agent inbound-enabled via `runSteerableAgent`, and
-`runAgentLoop` gained a `steer` channel + `applySteer` (task→`CallTool`, nudge→log,
-cancel→stop). The sender is `meshmcp air agent-steer` (`air.go`). Tests:
-`TestRunAgentLoopSteerTask`, `TestRecvEnvelopes`. The sketch below is what landed.
+(with `--steer-allow`, and `--steer-audit` for one hash-chained record per delivered
+envelope) starts the agent inbound-enabled via `runSteerableAgent`, and `runAgentLoop`
+gained a `steer` channel + `applySteer` (task→`CallTool`; nudge→a guidance field carried
+as a `guidance` argument on the following scripted steps; cancel→stop). An envelope
+carrying a `task:<id>` target is routed to that task on the agent's backend
+(`tasks/steer` / `tasks/cancel` — still governed by the gateway); any other target is
+refused loudly, never silently applied to the agent itself. The sender is
+`meshmcp air agent-steer` (`air.go`). Tests: `TestRunAgentLoopSteerTask`,
+`TestRunAgentLoopNudgeGuidance`, `TestApplySteerTaskTarget`, `TestRecvEnvelopes`.
+The sketch below is what landed.
 
 **Problem.** `agent.go` is a script-driven **pure client** (`runAgentLoop`,
 `agent.go:100-118`) with no way to accept an external instruction — and it is *outbound
@@ -247,10 +253,13 @@ by hand and there was no parent→children workflow object.
   `--nb-config`, so it joins as its own WireGuard key and immediately appears in `peers` and
   in the gateway's sessions view. Add `--steer-port` to the child for a steer inbox (P1).
 - **Launch a workflow:** a declarative `examples/air-workflow.yaml` — a list of steps
-  (`launch` agents, `steer` tasks, `call` tools), sequential or parallel — run by a small
-  runner that reuses the orchestrator's dial-and-call shape (`orchestrate.go:91-145`) and,
-  for fan-out, the router's upstream pool (`router.go:198`). The workflow itself is a mesh
-  identity; each step is an audited call.
+  (`launch` agents, `steer` sessions, `agent_steer` a launched agent's P1 inbox, `call`
+  tools), sequential or parallel — run by a small runner that reuses the orchestrator's
+  dial-and-call shape (`orchestrate.go:91-145`) and, for fan-out, the router's upstream
+  pool (`router.go:198`). The workflow itself is a mesh identity; each step is an audited
+  call. A `launch` step may pass `steer_port`/`interval` to the child; a run may launch at
+  most 32 agents, and `cleanup: stop` kills the launched agents when the run ends
+  (`leave`, the default, lets them keep running).
 
 ```yaml
 # examples/air-workflow.yaml  (ships — run with: meshmcp air workflow <file>)
@@ -258,7 +267,8 @@ name: nightly-scan
 steps:
   - launch: { role: reader,  gateway: 100.64.0.2:9101 }
   - launch: { role: analyst, gateway: 100.64.0.2:9101 }
-  - steer:  { target: "agent:analyst.mesh", type: task, tool: read_customer, args: { id: 42 } }
+  - steer:  { control: 100.64.0.2:9600, backend: fs, session: "9f2a",
+              params: { text: "focus on customer 42" } }
   - call:   { target: 100.64.0.2:9101, tool: summarize }
 ```
 
@@ -298,7 +308,8 @@ So an assistant can say: *"list the live sessions"* → `air_sessions`; *"steer 
 fs to re-read customer 42"* → `air_steer`; *"what tasks are running on the analyst?"* →
 `air_tasks`; *"nudge task-17 to focus on the API"* → `air_task_steer` — each a governed,
 audited mesh call, never a backdoor. (Agent-target steer and launch are CLI verbs —
-`meshmcp air agent-steer` and `air launch` — rather than assistant tools.)
+`meshmcp air agent-steer` and `air launch`; the task views have CLI parity too via
+`meshmcp air tasks` and `air task-steer`.)
 
 ---
 
@@ -325,9 +336,11 @@ audited mesh call, never a backdoor. (Agent-target steer and launch are CLI verb
   the `Reason` for chain-of-custody. This is relay-attested, not a cryptographic binding: it is
   as strong as trusting the air-serve node, which the mesh already admits.
 - **ACL'd inbox.** An agent's steer port admits only allow-listed senders (`acl.go`,
-  `examples/drop.yaml` `allow:`).
-- **Broadcast = N audited records.** A broadcast expands to one governed, audited call per
-  resolved target — never a single unattributable fan-out.
+  `examples/drop.yaml` `allow:`), and `--steer-audit` records one hash-chained audit
+  record per delivered envelope.
+- **Broadcast = N audited records** *(design rule for the proposed `group:` verb — no
+  broadcast ships yet)*. A broadcast expands to one governed, audited call per resolved
+  target — never a single unattributable fan-out.
 - **Origin propagation.** Cross-hop steers carry the origin `_meta` (`router.go:174-176`),
   so "who steered this subagent" survives the hop.
 - **No new trust.** A steered call still traverses the gateway firewall (rate, taint,

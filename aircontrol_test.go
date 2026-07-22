@@ -214,3 +214,51 @@ func TestAirControlSteerBadRequest(t *testing.T) {
 		t.Fatalf("GET /v1/steer = %d, want 405", rr.Code)
 	}
 }
+
+// TestAirControlSteerOnBehalfKey proves an attested X-Air-On-Behalf-Key is
+// carried into the audit record alongside the attested FQDN — and that the key
+// is never honoured without the FQDN header.
+func TestAirControlSteerOnBehalfKey(t *testing.T) {
+	c := &fakeAirControl{}
+	var recs []airSteerAudit
+	h := handlerWithIdentity(c, "relaykey", "air-serve.mesh", func(r airSteerAudit) { recs = append(recs, r) })
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/steer", strings.NewReader(`{"backend":"fs","id":"9f2a","method":"notifications/air/steer"}`))
+	req.Header.Set("X-Air-On-Behalf", "phone.mesh")
+	req.Header.Set("X-Air-On-Behalf-Key", "PHONEKEY")
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body)
+	}
+	if len(recs) != 1 || recs[0].OnBehalf != "phone.mesh" || recs[0].OnBehalfKey != "PHONEKEY" {
+		t.Fatalf("attested key not attributed: %+v", recs)
+	}
+
+	// Key header alone (no FQDN) attests nothing.
+	recs = nil
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/steer", strings.NewReader(`{"backend":"fs","id":"9f2a","method":"notifications/air/steer"}`))
+	req.Header.Set("X-Air-On-Behalf-Key", "PHONEKEY")
+	h.ServeHTTP(rr, req)
+	if len(recs) != 1 || recs[0].OnBehalf != "" || recs[0].OnBehalfKey != "" {
+		t.Fatalf("key without fqdn must not attest: %+v", recs)
+	}
+}
+
+// TestAirControlSessionsAudited proves a /v1/sessions read writes an audit
+// record — allowed reads and ACL-denied attempts both.
+func TestAirControlSessionsAudited(t *testing.T) {
+	c := &fakeAirControl{list: []AirSession{{Backend: "fs", ID: "9f2a", Peer: "p.mesh", AgeSec: 3}}}
+	var recs []airSteerAudit
+	h := handlerWithIdentity(c, "callerkey", "caller.mesh", func(r airSteerAudit) { recs = append(recs, r) })
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/v1/sessions", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	if len(recs) != 1 || recs[0].Method != "air/sessions" || !recs[0].OK || recs[0].Peer != "caller.mesh" {
+		t.Fatalf("sessions read not audited: %+v", recs)
+	}
+}

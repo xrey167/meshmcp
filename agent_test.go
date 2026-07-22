@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/xrey167/meshmcp/mcp"
+	"github.com/xrey167/meshmcp/mcpclient"
 )
 
 // TestRunAgentLoopDrivesRoleCalls proves an agent role issues exactly its
@@ -160,4 +161,130 @@ type countingCaller struct{ onCall func() }
 func (c *countingCaller) CallTool(_ context.Context, _ string, _ any, _ bool) (json.RawMessage, error) {
 	c.onCall()
 	return json.RawMessage(`{}`), nil
+}
+
+// argsCaller is a toolCaller that records each call's tool name and args map.
+type argsCaller struct {
+	mu    sync.Mutex
+	names []string
+	args  []map[string]any
+}
+
+func (c *argsCaller) CallTool(_ context.Context, name string, args any, _ bool) (json.RawMessage, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.names = append(c.names, name)
+	m, _ := args.(map[string]any)
+	c.args = append(c.args, m)
+	return json.RawMessage(`{}`), nil
+}
+
+// TestRunAgentLoopNudgeGuidance proves a nudge's text is carried as a
+// "guidance" argument on the following scripted steps — and that the shared
+// role script's own args map is never mutated.
+func TestRunAgentLoopNudgeGuidance(t *testing.T) {
+	caller := &argsCaller{}
+	steps := []agentStep{{tool: "noop", args: map[string]any{"path": "x"}}}
+	steer := make(chan steerEnvelope, 2)
+	done := make(chan error, 1)
+	go func() {
+		done <- runAgentLoop(context.Background(), caller, steps, 0, time.Hour, steer, func(string, ...any) {})
+	}()
+
+	steer <- steerEnvelope{Type: "nudge", Text: "focus on the API"}
+	steer <- steerEnvelope{Type: "cancel"}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancel steer did not stop the loop")
+	}
+
+	caller.mu.Lock()
+	defer caller.mu.Unlock()
+	// Call 1 runs before the nudge (no guidance); call 2 runs after it.
+	if len(caller.args) < 2 {
+		t.Fatalf("expected at least 2 calls, got %d", len(caller.args))
+	}
+	if _, has := caller.args[0]["guidance"]; has {
+		t.Fatalf("first call should carry no guidance: %v", caller.args[0])
+	}
+	if g := caller.args[1]["guidance"]; g != "focus on the API" {
+		t.Fatalf("second call guidance = %v, want the nudge text (args: %v)", g, caller.args[1])
+	}
+	if caller.args[1]["path"] != "x" {
+		t.Fatalf("original args must be preserved alongside guidance: %v", caller.args[1])
+	}
+	if _, has := steps[0].args["guidance"]; has {
+		t.Fatal("the shared step args map was mutated")
+	}
+}
+
+// steeringCaller is a toolCaller that also implements taskSteerer, recording
+// task-target routing.
+type steeringCaller struct {
+	mu        sync.Mutex
+	called    []string
+	steered   []string
+	cancelled []string
+	payloads  []json.RawMessage
+}
+
+func (s *steeringCaller) CallTool(_ context.Context, name string, _ any, _ bool) (json.RawMessage, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.called = append(s.called, name)
+	return json.RawMessage(`{}`), nil
+}
+
+func (s *steeringCaller) SteerTask(_ context.Context, id string, payload json.RawMessage) (mcpclient.Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.steered = append(s.steered, id)
+	s.payloads = append(s.payloads, payload)
+	return mcpclient.Task{TaskID: id, Status: "working"}, nil
+}
+
+func (s *steeringCaller) CancelTask(_ context.Context, id string) (mcpclient.Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cancelled = append(s.cancelled, id)
+	return mcpclient.Task{TaskID: id, Status: "cancelled"}, nil
+}
+
+// TestApplySteerTaskTarget proves a steer addressed "task:<id>" is routed to
+// that task on the backend (tasks/steer / tasks/cancel) instead of acting on
+// the agent loop, and that unsupported targets are refused without action.
+func TestApplySteerTaskTarget(t *testing.T) {
+	sc := &steeringCaller{}
+	var guidance string
+	logf := func(string, ...any) {}
+
+	// cancel with a task target routes to CancelTask — it must NOT stop the loop.
+	if stop := applySteer(context.Background(), sc, steerEnvelope{Type: "cancel", Target: "task:9f2a"}, &guidance, logf); stop {
+		t.Fatal("a task-targeted cancel must not stop the agent loop")
+	}
+	// nudge with a task target routes to SteerTask.
+	applySteer(context.Background(), sc, steerEnvelope{Type: "nudge", Text: "focus", Target: "task:7b1c"}, &guidance, logf)
+	// task with a task target routes to SteerTask, not a direct CallTool.
+	applySteer(context.Background(), sc, steerEnvelope{Type: "task", Tool: "read_customer", Target: "task:7b1c"}, &guidance, logf)
+	// An unsupported target is ignored: no call, no routing.
+	applySteer(context.Background(), sc, steerEnvelope{Type: "task", Tool: "read_customer", Target: "session:abc"}, &guidance, logf)
+
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	if len(sc.cancelled) != 1 || sc.cancelled[0] != "9f2a" {
+		t.Fatalf("cancelled = %v, want [9f2a]", sc.cancelled)
+	}
+	if len(sc.steered) != 2 || sc.steered[0] != "7b1c" {
+		t.Fatalf("steered = %v, want two 7b1c routings", sc.steered)
+	}
+	if len(sc.called) != 0 {
+		t.Fatalf("no direct CallTool should happen for targeted steers, got %v", sc.called)
+	}
+	if guidance != "" {
+		t.Fatalf("a targeted nudge must not change the agent's own guidance, got %q", guidance)
+	}
+	// A client without task support ignores the target gracefully.
+	rec := &recordingCaller{onCall: func(string) { t.Fatal("no call expected") }}
+	applySteer(context.Background(), rec, steerEnvelope{Type: "cancel", Target: "task:9f2a"}, &guidance, logf)
 }

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -162,6 +163,9 @@ func TestApprovalFilePermissions(t *testing.T) {
 	req := NewApprovalRequest("p", "b", "t", []byte(`{}`), "")
 	if _, err := s.Grant(req, "op", "", now); err != nil {
 		t.Fatal(err)
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix permission bits are not reported on Windows")
 	}
 	info, err := os.Stat(s.file(req.bindingKey()))
 	if err != nil {

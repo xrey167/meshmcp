@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -40,10 +41,13 @@ func TestVaultSetRotateDeletePersist(t *testing.T) {
 		t.Fatalf("names wrong: %v", names)
 	}
 
-	// The store file is 0600 and contains values but is never exposed via a tool.
-	fi, _ := os.Stat(path)
-	if fi.Mode().Perm() != 0o600 {
-		t.Fatalf("vault file mode = %#o, want 0600", fi.Mode().Perm())
+	// The store file is 0600 and contains values but is never exposed via a
+	// tool. Windows does not report Unix permission bits, so skip the check.
+	if runtime.GOOS != "windows" {
+		fi, _ := os.Stat(path)
+		if fi.Mode().Perm() != 0o600 {
+			t.Fatalf("vault file mode = %#o, want 0600", fi.Mode().Perm())
+		}
 	}
 
 	// Reload sees the rotated + remaining secrets.

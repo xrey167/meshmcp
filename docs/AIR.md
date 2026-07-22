@@ -93,14 +93,21 @@ on it. Three target types, one vocabulary:
 | **Session** | 16-byte session id (`session/`) | `SessionStore.List` + `Server.Sessions` + a line-safe `Server.Steer` server→client notification (**shipped**) — *not* raw `endpoint.Send` |
 | **Task / subagent** | task id (`mcp/tasks.go`) | a governed `tasks/steer` (**shipped**), symmetric with the existing `tasks/cancel` |
 
-Five actions across those targets:
+One CLI verb per target, as shipped:
 
 ```bash
-meshmcp air steer agent:analyst.mesh   --task read_customer --arg id=42   # send an instruction
-meshmcp air steer task:9f2a            --cancel                           # interrupt (tasks/cancel, today)
-meshmcp air steer task:7b1c            --nudge "focus on the API"         # augment in-flight
-meshmcp air steer group:reader         --pause                           # broadcast → N audited records
+meshmcp air sessions 100.64.0.2:9600                     # list live sessions on a gateway
+meshmcp air steer 100.64.0.2:9600 --backend fs --session 9f2a \
+    --param text="re-read customer 42"                   # steer a live session
+meshmcp air agent-steer 100.64.0.9:9120 --type task --tool read_customer --arg id=42
+meshmcp air agent-steer 100.64.0.9:9120 --type nudge --text "focus on the API"
+meshmcp air tasks 100.64.0.2:9101                        # list a backend's async tasks
+meshmcp air task-steer 100.64.0.2:9101 --task 7b1c --text "focus on the API"
+meshmcp air task-steer 100.64.0.2:9101 --task 9f2a --cancel
 ```
+
+*(A `group:<name>` broadcast — one steer fanned out as N audited records — is a
+roadmap idea, not shipped; see [§7](#7--roadmap).)*
 
 The addressing (`peers`, registry, `<name>.<tool>` namespacing, origin `_meta`) and the
 transports (bidirectional MCP `Server.Request`, MCP Tasks) **already exist**. **Shipped:** the
@@ -284,10 +291,10 @@ Honesty about the seam, so nobody mistakes the mockup for shipped product:
 | **Steer** — P3 task augment · P2 session core · P1 agent inbox | **Ships now** | `mcp/tasks.go` · `session/server.go` · `agent.go` · `steerinbox.go` (+ tests) |
 | **Steer** — gateway `/v1/sessions`+`/v1/steer` endpoint · `air_sessions`/`air_steer`/`air_tasks`/`air_task_steer` tools | **Ships now** | `config.go` · `serve.go` · `aircontrol.go` · `mcpapp.go` · `aircontrol_test.go` |
 | **Steer** — control endpoint hardening: per-backend ACL re-check · steer-method allowlist · relay-attested web attribution (`X-Air-On-Behalf`) | **Ships now** | `aircontrol.go` · `serve.go` · `airserve.go` · `aircontrol_test.go` |
-| **Steer/Launch** — the `meshmcp air` CLI (`sessions --json` · `steer` · `launch` · `agent-steer --target/--id` · `workflow`) + P4 runner | **Ships now** | `air.go` · `airworkflow.go` · `examples/air-workflow.yaml` |
+| **Steer/Launch** — the `meshmcp air` CLI (`sessions --json` · `steer` · `launch` · `agent-steer --target/--id` · `tasks` · `task-steer` · `workflow`) + P4 runner | **Ships now** | `air.go` · `airworkflow.go` · `examples/air-workflow.yaml` |
 | **Workflow** — variables between steps (`as:` + `${var.field}`) · `parallel:` blocks · `on_error` · per-step `timeout` · `--json` summary · launch-race retry | **Ships now** | `airworkflow.go` · `airworkflow_test.go` |
 | Assistant tools `air_peers` · `air_push` · `air_fetch` · `air_launch` (opt-in) | **Ships now** | `mcpapp.go` · `mcpapp_air_test.go` |
-| A served **live** Air web page over the mesh (`meshmcp air serve`) | **Ships now** | `airserve.go` · `site/air-live.html` · `airserve_test.go` |
+| A served **live** Air web page over the mesh (`meshmcp air serve`) — Nearby · Sessions/Steer · **Push/Drop** (sent over the relay's identity) · **Approvals link-out** (browser keeps its own identity) · **Receipts** (`--audit` tail) · viewer `--allow` ACL | **Ships now** | `airserve.go` · `site/air-live.html` · `airserve_test.go` |
 | Push-wake seam (device registry + notify hook) + a **webhook Notifier** delivering over the network (no vendor creds) | **Ships now** | `pushwake.go` · `webhooknotify.go` · `approvals.go` (`--notify-webhook`) · `pushwake_test.go` · `webhooknotify_test.go` — [MOBILE.md §4](MOBILE.md) |
 | Native mobile **binding package** (`mobile/`, compiles; `gomobile bind` external) | **Ships now** | `mobile/mobile.go` · `mobile/mobile_test.go` — [MOBILE.md §3](MOBILE.md) |
 | A shipped native mobile **app** (bound + built + on a device) | **External** | needs the iOS/Android toolchain + a device |
@@ -315,6 +322,9 @@ device this repo can't exercise:
 3. **External — the shipped mobile app.** `gomobile bind ./mobile` → an iOS `.xcframework` /
    Android `.aar`, then a thin native shell (Face-ID approve, receive/share sheets). Needs the
    mobile toolchain + a device ([MOBILE.md §3](MOBILE.md)).
+4. **Proposed — `group:<name>` broadcast steer.** Resolve a registry group to its members and
+   fan one steer out as one governed, audited call per member ("broadcast = N audited
+   records"). Not implemented; nothing resolves a `group:` target today.
 
 ## Reference points
 

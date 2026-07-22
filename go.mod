@@ -1,6 +1,6 @@
 module github.com/xrey167/meshmcp
 
-go 1.26
+go 1.26.0
 
 require (
 	github.com/netbirdio/netbird v0.72.2

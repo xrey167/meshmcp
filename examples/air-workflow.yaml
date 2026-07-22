@@ -6,27 +6,38 @@
 #   meshmcp air workflow examples/air-workflow.yaml --json     # machine-readable run summary
 #
 # Each step is exactly one of: launch (spawn an agent), steer (a live session
-# via a gateway control endpoint), call (a tool on a backend), or parallel (run
-# several child steps concurrently). Every action is governed by the same
-# firewall as any caller and audited.
+# via a gateway control endpoint), agent_steer (an envelope to a launched
+# agent's P1 steer inbox), call (a tool on a backend), or parallel (run several
+# child steps concurrently). Every action is governed by the same firewall as
+# any caller and audited.
 #
 # on_error: stop (default) aborts on the first failure; continue runs every step.
+# cleanup: leave (default) lets launched agents keep running after the workflow;
+# stop kills them when the run ends. A run may launch at most 32 agents.
 # A step's `as:` captures its output (a launch's identity, a call's result) for
-# later `${name.field}` references. `timeout:` bounds a network step. steer/call
-# steps retry connection failures for ~10s, so a launch→steer sequence doesn't
-# race the just-launched agent joining the mesh.
+# later `${name.field}` references. `timeout:` bounds a network step.
+# steer/agent_steer/call steps retry connection failures for ~10s, so a
+# launch→steer sequence doesn't race the just-launched agent joining the mesh.
 
 name: nightly-scan
 on_error: stop
+cleanup: leave
 
 steps:
   # 1. Spawn a reader and an analyst concurrently, each with its own WireGuard
-  #    identity. `as:` captures each agent's launch output.
+  #    identity. `as:` captures each agent's launch output. steer_port gives
+  #    the reader a P1 steer inbox so step 2 can address it.
   - parallel:
-      - launch: { role: reader, gateway: 100.64.0.2:9101 }
+      - launch: { role: reader, gateway: 100.64.0.2:9101, steer_port: 9120 }
         as: reader
       - launch: { role: analyst, gateway: 100.64.0.2:9101 }
         as: analyst
+
+  # 1b. Steer the launched reader's inbox directly (Air · Steer, P1).
+  - agent_steer:
+      target: 100.64.0.9:9120       # the reader's mesh-ip:steer_port
+      type: nudge
+      text: "prioritize the API docs"
 
   # 2. Steer a live session on the gateway's fs backend (session id comes from
   #    `meshmcp air sessions <control>`), nudging the agent driving it.
