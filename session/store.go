@@ -566,6 +566,15 @@ func restoreEndpoint(ps PersistedSession) (*endpoint, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The send-buffer semaphore holds exactly defaultMaxSendFrames tokens; a
+	// persisted buffer larger than that would drain them all and then block
+	// forever on <-e.slots — and restoreEndpoint runs under the server's
+	// global mutex (attach->rehydrate), so that would wedge the whole session
+	// server. A buffer over the cap can only come from a corrupt or hostile
+	// store file (normal operation can't exceed it), so reject it.
+	if len(ps.SendBuf) > defaultMaxSendFrames {
+		return nil, fmt.Errorf("session: persisted send buffer too large: %d frames (max %d)", len(ps.SendBuf), defaultMaxSendFrames)
+	}
 	e := newEndpointCap(id, defaultMaxSendFrames)
 	e.sendSeq = ps.SendSeq
 	e.acked = ps.Acked
