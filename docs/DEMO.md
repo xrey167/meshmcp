@@ -71,6 +71,37 @@ meshmcp audit verify demo/audit.jsonl
 meshmcp call <gateway-ip>:9101 read_file --arg path=README.md
 ```
 
+## Watch it the Air way
+
+The Control Room is the browser view; **Air** is the terminal-and-phone view of the
+same fabric. While the demo runs, point Air at the shared ledger and gateway:
+
+```bash
+# Tail the demo ledger live, decision-coloured (allow green / deny red / cosign amber):
+air stream demo/audit.jsonl                 # add --from-start to replay from the top
+
+# See the same fabric from the terminal, then filter one backend's tools to your identity:
+air map <gateway-mesh-ip>:9900
+air browse <gateway-mesh-ip>:9103           # payments, as your allow-list sees it
+
+# React to the ledger: fire a declared action when a record matches (e.g. every cosign):
+air bind examples/air-bindings.yaml --audit demo/audit.jsonl
+```
+
+If agents drop images into a mesh inbox, Air gives you an eyes-on view:
+
+```bash
+# Terminal inventory of what the mesh dropped in (name/size/age/type):
+air vision demo/drops
+
+# ...or view the pixels on your PHONE: serve the Air page with the gallery over the mesh,
+# then open http://<gateway-mesh-ip>:9800 in the phone that joined via NetBird:
+air serve --port 9800 --gallery demo/drops --audit demo/audit.jsonl
+```
+
+`air serve` is the phone-first face — Nearby, Catalog, Live Sessions, Approvals link-out,
+Receipts (the `--audit` tail), and the Vision gallery — all over the mesh, no open ports.
+
 ## Drive it from the Control Room console
 
 The Control Room the demo opens is interactive. If it joined the mesh (it will,

@@ -4,7 +4,7 @@ Air today is the AirDrop-native face of meshmcp: **discover** (peers · whoami �
 map), **drop / push / fetch** payloads, **steer** and **launch** live work, **approve** a
 held call — all between cryptographic identities on a dark mesh, firewalled and provable.
 
-This document thinks past that surface to five capabilities — **vision, stream, browse,
+This document thinks past that surface to six capabilities — **browse, stream, vision, bind,
 computer-use, phone-use** — and grounds each in the primitives meshmcp *already* has, so
 they read as a roadmap, not a wish list. The through-line is meshmcp's one fact: **the same
 WireGuard key that authorizes a tool call also stamps a shared file, a pushed frame, a
@@ -47,28 +47,6 @@ as it lands. It is the terminal-native counterpart to the served Receipts page.
 - **The meshmcp angle:** subscription is a capability; every delivery is attributable; a
   stream is deny-by-default like every other surface.
 
-## Air · Bind — *a programmable reaction layer*  ·  **buildable now**
-
-Stream *watches*; Bind *reacts*. [rebind](https://docs.rebind.gg/) is a programmable input
-layer — it intercepts an event and runs a script in response. `air bind` is the same idea
-turned onto the mesh: it watches the one universal event source meshmcp already produces — the
-hash-chained audit ledger — and fires a declared reaction when a record matches. A denial pages
-you; a drop landing nudges an on-call agent; a co-sign hold escalates.
-
-- **Shipped as the fourth step of this doc:** `air bind <bindings.yaml> --audit <ledger>` matches
-  each audit record against glob triggers (decision · backend · method · tool · peer) and fires a
-  `print` (notify) or `run` (a governed child action) reaction, templated with the record's fields
-  (`airbind.go`, `examples/air-bindings.yaml`). Built by composing the two primitives it needs:
-  the `followAudit` tailer under `air stream`, and the governed child-spawn under `air launch`.
-- **The meshmcp angle — the whole point:** the trigger is an *already-governed, already-audited*
-  action, and a reaction that *acts* is itself a governed mesh action that re-enters the firewall,
-  deny-by-default. So a `run` reaction is refused unless you pass `--allow-exec` — a bindings file
-  can never silently execute. rebind scripts arbitrary Luau on your keystrokes; Air scripts
-  *governed* reactions on your mesh, and every link in the chain is provable after the fact.
-- **Deeper:** trigger on other governed event sources (the pub/sub bus, a catalog change, a
-  schedule), and let a reaction be a full `air workflow` rather than a single child — a declarative
-  "when X, run this governed flow" that stays deny-by-default and audited end to end.
-
 ## Air · Vision — *seeing over the mesh*  ·  **buildable now**
 
 Air already moves bytes; Vision is about moving and viewing **visual context** — a
@@ -87,6 +65,28 @@ screenshot, an image, a live frame — with the same identity, ACL, and receipt 
   taints the session, so a later egress is blocked (F7/F18).
 - **External:** live camera/screen capture on a device is the device's job; Air governs the
   *transport and the seeing*, not the pixels' origin.
+
+## Air · Bind — *a programmable reaction layer*  ·  **buildable now**
+
+Stream *watches*; Bind *reacts*. [rebind](https://docs.rebind.gg/) is a programmable input
+layer — it intercepts an event and runs a script in response. `air bind` is the same idea
+turned onto the mesh: it watches the one universal event source meshmcp already produces — the
+hash-chained audit ledger — and fires a declared reaction when a record matches. A denial pages
+you; a drop landing nudges an on-call agent; a co-sign hold escalates.
+
+- **Shipped as the fourth step of this doc:** `air bind <bindings.yaml> --audit <ledger>` matches
+  each audit record against glob triggers (decision · backend · method · tool · peer · reason) and
+  fires a `print` (notify) or `run` (a governed child action) reaction, templated with the record's
+  fields (`airbind.go`, `examples/air-bindings.yaml`). Built by composing the two primitives it
+  needs: the `followAudit` tailer under `air stream`, and the governed child-spawn under `air launch`.
+- **The meshmcp angle — the whole point:** the trigger is an *already-governed, already-audited*
+  action, and a reaction that *acts* is itself a governed mesh action that re-enters the firewall,
+  deny-by-default. So a `run` reaction is refused unless you pass `--allow-exec` — a bindings file
+  can never silently execute. rebind scripts arbitrary Luau on your keystrokes; Air scripts
+  *governed* reactions on your mesh, and every link in the chain is provable after the fact.
+- **Deeper:** trigger on other governed event sources (the pub/sub bus, a catalog change, a
+  schedule), and let a reaction be a full `air workflow` rather than a single child — a declarative
+  "when X, run this governed flow" that stays deny-by-default and audited end to end.
 
 ## Air · Computer-use — *govern the agent's hands*  ·  **pattern buildable now**
 
@@ -134,7 +134,7 @@ WireGuard key that proves who, a policy that decides may, and a hash-chained rec
 it happened. Air's moat is not any one verb; it is that *all of them share one identity and one
 proof*.
 
-Build order: **browse**, **stream**, **bind**, and **vision** (shipped — CLIs, a governed reaction
-layer, and the served page's Vision gallery) → a resumable frame stream on top of vision →
+Build order: **browse**, **stream**, **vision**, and **bind** (shipped — CLIs, the served page's
+Vision gallery, and a governed reaction layer) → a resumable frame stream on top of vision →
 **computer-use** (an example + policy pattern) → the **phone actuator** (once the native binding is
 built). Discovery was the first leg; this is the rest of the walk.

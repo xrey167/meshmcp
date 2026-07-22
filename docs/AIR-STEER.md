@@ -329,6 +329,10 @@ audited mesh call, never a backdoor. (Agent-target steer and launch are CLI verb
   `tasks/cancel`" claim; that phrase is exact only for `tasks/steer`.
 - **Identity-attributed.** Every steer/launch resolves to the caller's WireGuard key; the
   ledger records who steered/launched what, when — provable with the public key alone.
+- **Watchable trail.** The shared ledger every steer/launch writes to is the same one
+  `air stream` tails live (allow/deny/cosign-coloured) and `air bind` reacts to — fire a
+  declared action when a record matches glob triggers (`decision`/`backend`/`method`/`tool`/`peer`),
+  `run` deny-by-default. Steer produces the audit records those sibling watch/react verbs consume.
 - **Relay-attested web attribution.** The served Air page (`airserve.go`) is a mesh peer that
   proxies steers to the control endpoint. It resolves the *browser's own* mesh identity and
   forwards it as `X-Air-On-Behalf`, which the control endpoint honours **only when the proxy is

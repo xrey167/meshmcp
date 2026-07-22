@@ -60,10 +60,10 @@ meshmcp air vision ./inbox           # images the mesh dropped here (view them o
 meshmcp air bind binds.yaml --audit ./audit.jsonl   # fire governed reactions when audit records match (a la rebind)
 ```
 
-Discovery has a further horizon — **vision**, **stream**, **browse**, **computer-use**, and
-**phone-use** — each grounded in the same identity + firewall + ledger. `air browse`, `air
-stream`, and `air vision` (with the served page's Vision gallery) are the first three concrete
-steps; see [AIR-VISION.md](AIR-VISION.md) for the full arc.
+Discovery has a further horizon — **vision**, **stream**, **browse**, **bind**,
+**computer-use**, and **phone-use** — each grounded in the same identity + firewall + ledger.
+`air browse`, `air stream`, `air vision` (with the served page's Vision gallery), and `air
+bind` are the first four concrete steps; see [AIR-VISION.md](AIR-VISION.md) for the full arc.
 
 `air map` composes `whoami` and the catalog into a topology view — a tree of *you → the
 gateway → the backends you may reach*, each tagged with its transport and whether it is
@@ -349,6 +349,7 @@ Honesty about the seam, so nobody mistakes the mockup for shipped product:
 | **Workflow** — variables between steps (`as:` + `${var.field}`) · `parallel:` blocks · `on_error` · per-step `timeout` · `--json` summary · launch-race retry | **Ships now** | `airworkflow.go` · `airworkflow_test.go` |
 | Assistant tools `air_peers` · `air_push` · `air_fetch` · `air_launch` (opt-in) | **Ships now** | `mcpapp.go` · `mcpapp_air_test.go` |
 | A served **live** Air web page over the mesh (`meshmcp air serve`) — Nearby · Sessions/Steer · **Push/Drop** (sent over the relay's identity) · **Approvals link-out** (browser keeps its own identity) · **Receipts** (`--audit` tail) · **Vision** gallery (`--gallery` inbox — image drops rendered inline, path-safe) · viewer `--allow` ACL. A phone-first, Apple-style UI (frosted large-title header, grouped inset cards, segmented steer sheet, light/dark), hardened as a browser surface: strict CSP, `nosniff`/frame-deny/no-referrer headers, and a same-origin guard on every state-changing POST (CSRF / DNS-rebinding). | **Ships now** | `airserve.go` · `site/air-live.html` · `airserve_test.go` |
+| **Vision arc** — `air browse` (backend tools/resources/prompts, identity-filtered) · `air stream` (live audit tail, decision-coloured, rotation-aware) · `air vision` (drop-inbox image inventory) · `air bind` (audit-triggered governed reactions, deny-by-default `run`) | **Ships now** | `airbrowse.go` · `airstream.go` · `airvision.go` · `airbind.go` (+ tests) · [AIR-VISION.md](AIR-VISION.md) · `examples/air-bindings.yaml` |
 | Push-wake seam (device registry + notify hook) + a **webhook Notifier** delivering over the network (no vendor creds) | **Ships now** | `pushwake.go` · `webhooknotify.go` · `approvals.go` (`--notify-webhook`) · `pushwake_test.go` · `webhooknotify_test.go` — [MOBILE.md §4](MOBILE.md) |
 | Native mobile **binding package** (`mobile/`, compiles; `gomobile bind` external) | **Ships now** | `mobile/mobile.go` · `mobile/mobile_test.go` — [MOBILE.md §3](MOBILE.md) |
 | A shipped native mobile **app** (bound + built + on a device) | **External** | needs the iOS/Android toolchain + a device |
