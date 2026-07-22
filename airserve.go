@@ -40,6 +40,8 @@ type airServeDeps struct {
 	receipts     func(limit int) ([]json.RawMessage, error)                        // tail of the local audit ledger (nil = receipts disabled)
 	gallery      func(limit int) ([]galleryImage, error)                           // images that landed in a drop inbox — the Vision view (nil = disabled)
 	image        func(name string) (data []byte, contentType string, err error)    // read one gallery image, path-safe (nil = disabled)
+	cast         func(limit int) ([]galleryImage, error)                           // images in the cast inbox — the "Now Showing" view (nil = disabled)
+	castImage    func(name string) (data []byte, contentType string, err error)    // read one cast image, path-safe (nil = disabled)
 	approvals    string                                                            // approvals server (mesh-ip:port) the page links out to ("" = hidden)
 	allow        acl                                                               // page-wide viewer ACL; empty = any mesh peer
 	allowedHosts []string                                                          // Host values the page may be served at (mesh ip/fqdn:port); empty = no Host check (dev)
@@ -68,6 +70,7 @@ func airServeHandler(d airServeDeps) http.Handler {
 			"push":      d.push != nil,
 			"receipts":  d.receipts != nil,
 			"vision":    d.gallery != nil,
+			"cast":      d.cast != nil,
 			"catalog":   d.controlBase != "",
 		})
 	})
@@ -201,60 +204,68 @@ func airServeHandler(d airServeDeps) http.Handler {
 		writeJSONResp(w, http.StatusOK, map[string]any{"receipts": recs})
 	})
 
-	// Air · Vision: list the images that landed in the drop inbox, and serve one
-	// by name. Both are read-only and path-safe (readGalleryImage re-validates the
-	// name against the inbox root); the page-wide viewer ACL, if set, gates them
-	// like every other endpoint.
-	mux.HandleFunc("/api/gallery", func(w http.ResponseWriter, r *http.Request) {
-		if !getOnly(w, r) {
-			return
+	// Air · Vision (a gallery of received drops) and Air · Cast (a single "Now
+	// Showing" slot a sender presents) share the same read-only, path-safe image
+	// plumbing over different inbox dirs: listHandler enumerates, imageHandler
+	// serves one by name (the reader re-validates the name against its root).
+	// Both are gated by the page-wide viewer ACL like every other endpoint.
+	listHandler := func(list func(int) ([]galleryImage, error), disabled string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if !getOnly(w, r) {
+				return
+			}
+			if list == nil {
+				http.Error(w, disabled, http.StatusServiceUnavailable)
+				return
+			}
+			limit := 60
+			if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 && n <= maxGalleryImages {
+				limit = n
+			}
+			imgs, err := list(limit)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if imgs == nil {
+				imgs = []galleryImage{}
+			}
+			writeJSONResp(w, http.StatusOK, map[string]any{"images": imgs})
 		}
-		if d.gallery == nil {
-			http.Error(w, "the Vision gallery is not enabled on this page", http.StatusServiceUnavailable)
-			return
+	}
+	imageHandler := func(read func(string) ([]byte, string, error), disabled string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if !getOnly(w, r) {
+				return
+			}
+			if read == nil {
+				http.Error(w, disabled, http.StatusServiceUnavailable)
+				return
+			}
+			name := r.URL.Query().Get("name")
+			if name == "" {
+				http.Error(w, "name is required", http.StatusBadRequest)
+				return
+			}
+			data, contentType, err := read(name)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusNotFound)
+				return
+			}
+			// Exact type, never sniffed (nosniff is set globally); rendered inline,
+			// not downloaded; cached briefly since inbox files are content-stable.
+			h := w.Header()
+			h.Set("Content-Type", contentType)
+			h.Set("Content-Disposition", "inline")
+			h.Set("Cache-Control", "private, max-age=60")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(data)
 		}
-		limit := 60
-		if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 && n <= maxGalleryImages {
-			limit = n
-		}
-		imgs, err := d.gallery(limit)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		if imgs == nil {
-			imgs = []galleryImage{}
-		}
-		writeJSONResp(w, http.StatusOK, map[string]any{"images": imgs})
-	})
-
-	mux.HandleFunc("/api/image", func(w http.ResponseWriter, r *http.Request) {
-		if !getOnly(w, r) {
-			return
-		}
-		if d.image == nil {
-			http.Error(w, "the Vision gallery is not enabled on this page", http.StatusServiceUnavailable)
-			return
-		}
-		name := r.URL.Query().Get("name")
-		if name == "" {
-			http.Error(w, "name is required", http.StatusBadRequest)
-			return
-		}
-		data, contentType, err := d.image(name)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
-			return
-		}
-		// Exact type, never sniffed (nosniff is set globally); rendered inline, not
-		// downloaded; cached briefly since inbox files are content-stable.
-		h := w.Header()
-		h.Set("Content-Type", contentType)
-		h.Set("Content-Disposition", "inline")
-		h.Set("Cache-Control", "private, max-age=60")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(data)
-	})
+	}
+	mux.HandleFunc("/api/gallery", listHandler(d.gallery, "the Vision gallery is not enabled on this page"))
+	mux.HandleFunc("/api/image", imageHandler(d.image, "the Vision gallery is not enabled on this page"))
+	mux.HandleFunc("/api/cast", listHandler(d.cast, "casting is not enabled on this page"))
+	mux.HandleFunc("/api/castimage", imageHandler(d.castImage, "casting is not enabled on this page"))
 
 	mux.HandleFunc("/api/sessions", func(w http.ResponseWriter, r *http.Request) {
 		if !getOnly(w, r) {
@@ -469,6 +480,7 @@ func cmdAirServe(args []string) error {
 	approvals := fs.String("approvals", "", "approvals server (mesh-ip:port) the Approvals view links out to — the browser talks to it directly, keeping human attribution")
 	auditPath := fs.String("audit", "", "local audit JSONL to serve as the Receipts view (read-only tail)")
 	gallery := fs.String("gallery", "", "drop-inbox directory to render as the Vision gallery (images the mesh dropped to this node)")
+	cast := fs.String("cast", "", "cast-inbox directory to render as the \"Now Showing\" slot (the newest image a peer cast here)")
 	allow := multiFlag{}
 	fs.Var(&allow, "allow", "identity permitted to open the page (FQDN glob or pubkey:<key>); repeatable; empty = any mesh peer")
 	if err := fs.Parse(args); err != nil {
@@ -485,6 +497,11 @@ func cmdAirServe(args []string) error {
 			galleryDir := *gallery
 			d.gallery = func(limit int) ([]galleryImage, error) { return listGalleryImages(galleryDir, limit) }
 			d.image = func(name string) ([]byte, string, error) { return readGalleryImage(galleryDir, name) }
+		}
+		if *cast != "" {
+			castDir := *cast
+			d.cast = func(limit int) ([]galleryImage, error) { return listGalleryImages(castDir, limit) }
+			d.castImage = func(name string) ([]byte, string, error) { return readGalleryImage(castDir, name) }
 		}
 		fmt.Fprintf(os.Stderr, "Air (live) on http://%s (LOCAL — no mesh; peers/sessions unavailable)\n", *addr)
 		return newLocalHTTPServer(*addr, airServeHandler(d)).ListenAndServe()
@@ -592,6 +609,14 @@ func cmdAirServe(args []string) error {
 		// sensitive. Without --allow any mesh peer can view them, so say so loudly.
 		if len(allow) == 0 {
 			fmt.Fprintln(os.Stderr, amber("warning:")+" --gallery exposes received images to ANY mesh peer; add --allow <id> to restrict who can view them")
+		}
+	}
+	if *cast != "" {
+		castDir := *cast
+		d.cast = func(limit int) ([]galleryImage, error) { return listGalleryImages(castDir, limit) }
+		d.castImage = func(name string) ([]byte, string, error) { return readGalleryImage(castDir, name) }
+		if len(allow) == 0 {
+			fmt.Fprintln(os.Stderr, amber("warning:")+" --cast exposes cast images to ANY mesh peer; add --allow <id> to restrict who can view them")
 		}
 	}
 

@@ -273,6 +273,46 @@ func TestValidMeshTarget(t *testing.T) {
 	}
 }
 
+// TestAirServeCast covers the Cast "Now Showing" endpoints: /api/config
+// advertises it, /api/cast lists the cast inbox, and /api/castimage serves one.
+func TestAirServeCast(t *testing.T) {
+	dir := t.TempDir()
+	writeImage(t, dir, "slide.png", 3)
+	h := airServeHandler(airServeDeps{
+		cast:      func(limit int) ([]galleryImage, error) { return listGalleryImages(dir, limit) },
+		castImage: func(name string) ([]byte, string, error) { return readGalleryImage(dir, name) },
+	})
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"cast":true`) {
+		t.Fatalf("config: %d %s", rr.Code, rr.Body)
+	}
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/cast?limit=1", nil))
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "slide.png") {
+		t.Fatalf("cast: %d %s", rr.Code, rr.Body)
+	}
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/castimage?name=slide.png", nil))
+	if rr.Code != http.StatusOK || rr.Header().Get("Content-Type") != "image/png" {
+		t.Fatalf("castimage: %d ct=%q", rr.Code, rr.Header().Get("Content-Type"))
+	}
+	// Traversal refused on the cast dir too.
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/castimage?name=../secret.png", nil))
+	if rr.Code == http.StatusOK {
+		t.Fatalf("cast traversal served: %d", rr.Code)
+	}
+	// Disabled by default.
+	off := airServeHandler(airServeDeps{})
+	rr = httptest.NewRecorder()
+	off.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/cast", nil))
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("cast off = %d, want 503", rr.Code)
+	}
+}
+
 // TestAirServeViewerACL proves a non-empty --allow list gates every route by
 // the browser's mesh identity.
 func TestAirServeViewerACL(t *testing.T) {
