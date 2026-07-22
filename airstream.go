@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -12,6 +11,8 @@ import (
 	"os/signal"
 	"strings"
 	"time"
+
+	"github.com/xrey167/meshmcp/air"
 )
 
 // cmdAirStream tails a meshmcp audit ledger and renders each governed action as
@@ -132,31 +133,15 @@ func followAudit(ctx context.Context, path string, fromStart bool, interval time
 	}
 }
 
-// streamRecord is the subset of a policy.AuditRecord the stream renders.
-type streamRecord struct {
-	Time     string `json:"time"`
-	Backend  string `json:"backend"`
-	Peer     string `json:"peer"`
-	Method   string `json:"method"`
-	Tool     string `json:"tool"`
-	Decision string `json:"decision"`
-	Reason   string `json:"reason"`
-}
+// streamRecord is the subset of a policy.AuditRecord the stream renders. It is
+// air.Receipt — the same shape the aggregated home view tails — so both faces
+// decode governed activity through one shared parser (air.ParseReceipt).
+type streamRecord = air.Receipt
 
 // parseStreamRecord decodes one audit JSONL line into the subset that air stream
 // and air bind care about, reporting false if the line is not a renderable audit
 // record (bad JSON, or no decision — the field that marks a policy record).
-func parseStreamRecord(line []byte) (streamRecord, bool) {
-	line = bytes.TrimSpace(line)
-	if len(line) == 0 {
-		return streamRecord{}, false
-	}
-	var r streamRecord
-	if json.Unmarshal(line, &r) != nil || r.Decision == "" {
-		return streamRecord{}, false
-	}
-	return r, true
-}
+func parseStreamRecord(line []byte) (streamRecord, bool) { return air.ParseReceipt(line) }
 
 // formatAuditLine renders one audit JSONL line as a coloured stream row, or
 // ("", false) if the line is not a renderable audit record or is filtered out by

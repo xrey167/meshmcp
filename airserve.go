@@ -19,6 +19,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xrey167/meshmcp/air"
+	"github.com/xrey167/meshmcp/policy"
 	"github.com/xrey167/meshmcp/session"
 )
 
@@ -45,6 +47,10 @@ type airServeDeps struct {
 	approvals    string                                                            // approvals server (mesh-ip:port) the page links out to ("" = hidden)
 	allow        acl                                                               // page-wide viewer ACL; empty = any mesh peer
 	allowedHosts []string                                                          // Host values the page may be served at (mesh ip/fqdn:port); empty = no Host check (dev)
+
+	self         func() airPeerRow                      // this node's own mesh identity for /api/home (nil = zero You)
+	pendingCount func(ctx context.Context) (int, error) // count held approvals for /api/home (nil = pending unknown, -1)
+	viewAudit    *policy.AuditLog                       // SEPARATE view-audit chain for /api/home (nil = no view record; NEVER the enforcement ledger)
 }
 
 // airServeHandler builds the live Air page + its /api surface: proxied
@@ -72,7 +78,35 @@ func airServeHandler(d airServeDeps) http.Handler {
 			"vision":    d.gallery != nil,
 			"cast":      d.cast != nil,
 			"catalog":   d.controlBase != "",
+			"home":      true,
 		})
+	})
+
+	// /api/home is the aggregated primary poll: it fuses the already-wired
+	// sources (peers, sessions, catalog, receipts tail, cast, pending) into one
+	// air.Home so the page makes one cheap fetch instead of six. GET-only, behind
+	// the same viewer ACL + web security as every other route.
+	mux.HandleFunc("/api/home", func(w http.ResponseWriter, r *http.Request) {
+		if !getOnly(w, r) {
+			return
+		}
+		home := d.assembleHome(r)
+		// View-audit lands ONLY on the dedicated separate chain, never the
+		// enforcement ledger (d.receipts). Off unless a viewAudit sink was
+		// explicitly wired, so a page poll never pollutes the gateway chain.
+		if d.viewAudit != nil {
+			var pubkey, fqdn string
+			if d.identify != nil {
+				pubkey, fqdn = d.identify(r)
+			}
+			_ = d.viewAudit.Append(policy.AuditRecord{
+				Peer: fqdn, PeerKey: pubkey, Method: "air.home",
+				Decision: "allow", Rule: -1,
+				Reason: fmt.Sprintf("view peers=%d sessions=%d pending=%d",
+					home.Summary.PeersOnline, home.Summary.Sessions, home.Summary.Pending),
+			})
+		}
+		writeJSONResp(w, http.StatusOK, home)
 	})
 
 	mux.HandleFunc("/api/catalog", func(w http.ResponseWriter, r *http.Request) {
@@ -436,6 +470,112 @@ func (d airServeDeps) attest(out, in *http.Request) {
 	}
 }
 
+// assembleHome fuses the wired sources into one air.Home as this viewer sees it.
+// Every section is best-effort: a source that errors or is not wired leaves its
+// section empty, so the home degrades section by section. Pending is -1 unless a
+// pendingCount dep is wired AND returns a count (the relay is a real approver).
+func (d airServeDeps) assembleHome(r *http.Request) air.Home {
+	h := air.Home{Generated: nowRFC3339(), Pending: -1}
+	if d.self != nil {
+		h.You = d.self()
+	}
+	if d.peers != nil {
+		if rows, err := d.peers(); err == nil {
+			h.Peers = rows
+		}
+	}
+	if d.controlBase != "" {
+		if sess := d.relaySessions(r); sess != nil {
+			h.Sessions = sess
+		}
+		if eps := d.relayCatalog(r); eps != nil {
+			h.Reachable = eps
+		}
+	}
+	if d.receipts != nil {
+		if acts, err := homeReceipts(d.receipts, 50); err == nil {
+			h.Activity = acts
+		}
+	}
+	if d.cast != nil {
+		if imgs, err := d.cast(1); err == nil && len(imgs) > 0 {
+			h.Showing = &air.Media{Name: imgs[0].Name, ModUnix: imgs[0].ModUnix}
+		}
+	}
+	if d.gallery != nil {
+		if imgs, err := d.gallery(maxGalleryImages); err == nil {
+			h.Landed = len(imgs)
+		}
+	}
+	if d.pendingCount != nil {
+		if n, err := d.pendingCount(r.Context()); err == nil {
+			h.Pending = n
+		}
+	}
+	h.Summary = air.Summarize(h)
+	return h
+}
+
+// relaySessions fetches the gateway's live sessions with browser attestation,
+// returning nil (empty section) on any failure.
+func (d airServeDeps) relaySessions(r *http.Request) []air.Session {
+	req, _ := http.NewRequest(http.MethodGet, d.controlBase+"/v1/sessions", nil)
+	d.attest(req, r)
+	resp, err := d.controlHC.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	var out struct {
+		Sessions []air.Session `json:"sessions"`
+	}
+	if json.Unmarshal(body, &out) != nil {
+		return nil
+	}
+	return out.Sessions
+}
+
+// relayCatalog fetches the gateway's per-caller ARD catalog with attestation,
+// returning nil (empty section) on any failure.
+func (d airServeDeps) relayCatalog(r *http.Request) []air.CatalogEntry {
+	req, _ := http.NewRequest(http.MethodGet, d.controlBase+airCatalogPath, nil)
+	d.attest(req, r)
+	resp, err := d.controlHC.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	var cat air.Catalog
+	if json.Unmarshal(body, &cat) != nil {
+		return nil
+	}
+	return cat.Endpoints
+}
+
+// homeReceipts tails the local ledger and returns the newest limit records as
+// Receipts, newest first (the tail func is oldest-first).
+func homeReceipts(tail func(int) ([]json.RawMessage, error), limit int) ([]air.Receipt, error) {
+	recs, err := tail(limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]air.Receipt, 0, len(recs))
+	for i := len(recs) - 1; i >= 0; i-- {
+		if rr, ok := air.ParseReceipt(recs[i]); ok {
+			out = append(out, rr)
+		}
+	}
+	return out, nil
+}
+
 // tailAuditRecords returns the last limit records of a JSONL audit ledger,
 // oldest first. Lines that are not valid JSON are skipped.
 func tailAuditRecords(path string, limit int) ([]json.RawMessage, error) {
@@ -481,6 +621,7 @@ func cmdAirServe(args []string) error {
 	auditPath := fs.String("audit", "", "local audit JSONL to serve as the Receipts view (read-only tail)")
 	gallery := fs.String("gallery", "", "drop-inbox directory to render as the Vision gallery (images the mesh dropped to this node)")
 	cast := fs.String("cast", "", "cast-inbox directory to render as the \"Now Showing\" slot (the newest image a peer cast here)")
+	auditViews := fs.String("audit-views", "", "append one 'air.home' view record per /api/home assembly to this SEPARATE audit chain (opt-in; never the enforcement --audit ledger)")
 	allow := multiFlag{}
 	fs.Var(&allow, "allow", "identity permitted to open the page (FQDN glob or pubkey:<key>); repeatable; empty = any mesh peer")
 	if err := fs.Parse(args); err != nil {
@@ -568,6 +709,19 @@ func cmdAirServe(args []string) error {
 			return rows, nil
 		},
 	}
+	// This node's own identity for the /api/home hero (Status()'s local peer).
+	d.self = func() airPeerRow {
+		st, err := client.Status()
+		if err != nil {
+			return airPeerRow{}
+		}
+		return airPeerRow{
+			Status: "connected",
+			IP:     strings.SplitN(st.LocalPeerState.IP, "/", 2)[0],
+			FQDN:   st.LocalPeerState.FQDN,
+			PubKey: shortKey(st.LocalPeerState.PubKey),
+		}
+	}
 	// Push/Drop send over THIS relay's mesh identity (the receiver's ACL and
 	// audit see the air-serve node; the browser identity is the allow-listed
 	// page viewer). Enabled only when --allow gates who may drive the relay.
@@ -618,6 +772,51 @@ func cmdAirServe(args []string) error {
 		if len(allow) == 0 {
 			fmt.Fprintln(os.Stderr, amber("warning:")+" --cast exposes cast images to ANY mesh peer; add --allow <id> to restrict who can view them")
 		}
+	}
+	// Pending-count for /api/home is disclosed ONLY when (a) --allow gates who may
+	// drive this relay (privileged) AND (b) the relay identity is actually an
+	// approver on the target — otherwise /v1/pending returns 403 and the count
+	// stays unknown (-1), so a non-approver page viewer never learns the number.
+	// air home only ever counts; approve/deny stays on the approvals page.
+	if privileged && *approvals != "" {
+		approvalsAddr := *approvals
+		approvalsHC := &http.Client{
+			Timeout: 20 * time.Second,
+			Transport: &http.Transport{
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					return client.Dial(ctx, "tcp", approvalsAddr)
+				},
+			},
+		}
+		d.pendingCount = func(ctx context.Context) (int, error) {
+			req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://air-approvals/v1/pending", nil)
+			resp, err := approvalsHC.Do(req)
+			if err != nil {
+				return 0, err
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				return 0, fmt.Errorf("pending: %s", resp.Status) // 403 => relay is not an approver
+			}
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+			var out struct {
+				Pending []json.RawMessage `json:"pending"`
+			}
+			if json.Unmarshal(body, &out) != nil {
+				return 0, fmt.Errorf("pending: bad response")
+			}
+			return len(out.Pending), nil
+		}
+	}
+	// Opt-in view-audit for /api/home: its OWN tamper-evident chain in its OWN
+	// file, never the enforcement --audit ledger.
+	if *auditViews != "" {
+		va, closeVA, err := openViewAudit(*auditViews)
+		if err != nil {
+			return fmt.Errorf("air serve: --audit-views: %w", err)
+		}
+		defer closeVA()
+		d.viewAudit = va
 	}
 
 	ln, err := client.ListenTCP(fmt.Sprintf(":%d", *port))

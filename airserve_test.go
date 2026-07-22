@@ -12,6 +12,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/xrey167/meshmcp/air"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 func TestAirServePage(t *testing.T) {
@@ -470,6 +473,154 @@ func TestAirServeCatalogProxy(t *testing.T) {
 	off.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/catalog", nil))
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Fatalf("catalog without control = %d, want 503", rr.Code)
+	}
+}
+
+// TestAPIHomeAggregates proves /api/home fuses the wired sources into one
+// payload carrying peers + sessions + reachable + receipts + cast + summary.
+func TestAPIHomeAggregates(t *testing.T) {
+	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/sessions":
+			_, _ = io.WriteString(w, `{"sessions":[{"backend":"fs","id":"9f2a","peer":"gw.mesh","age_sec":4}]}`)
+		case airCatalogPath:
+			_, _ = io.WriteString(w, `{"service":"meshmcp","version":"t","endpoints":[{"name":"fs","address":"100.64.0.2:9101","transport":"stdio","steerable":true}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer control.Close()
+
+	h := airServeHandler(airServeDeps{
+		self:        func() airPeerRow { return airPeerRow{Status: "connected", FQDN: "me.mesh", IP: "100.64.0.1"} },
+		peers:       func() ([]airPeerRow, error) { return []airPeerRow{{Status: "connected", FQDN: "gw.mesh", IP: "100.64.0.2"}}, nil },
+		controlHC:   control.Client(),
+		controlBase: control.URL,
+		receipts: func(limit int) ([]json.RawMessage, error) {
+			return []json.RawMessage{json.RawMessage(`{"decision":"allow","peer":"gw.mesh","method":"tools/call"}`)}, nil
+		},
+		cast:     func(limit int) ([]galleryImage, error) { return []galleryImage{{Name: "slide.png", ModUnix: 1700000000}}, nil },
+		identify: func(*http.Request) (string, string) { return "K", "me.mesh" },
+	})
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/home", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("home status %d: %s", rr.Code, rr.Body)
+	}
+	var home air.Home
+	if err := json.Unmarshal(rr.Body.Bytes(), &home); err != nil {
+		t.Fatalf("home payload: %v", err)
+	}
+	if home.You.FQDN != "me.mesh" {
+		t.Errorf("you = %+v, want me.mesh", home.You)
+	}
+	if len(home.Peers) != 1 || len(home.Sessions) != 1 || len(home.Reachable) != 1 || len(home.Activity) != 1 {
+		t.Fatalf("sections not all aggregated: peers=%d sessions=%d reachable=%d activity=%d",
+			len(home.Peers), len(home.Sessions), len(home.Reachable), len(home.Activity))
+	}
+	if home.Sessions[0].ID != "9f2a" || home.Showing == nil || home.Showing.Name != "slide.png" {
+		t.Errorf("session/cast wrong: %+v %+v", home.Sessions, home.Showing)
+	}
+	if home.Summary.PeersOnline != 1 || home.Summary.Sessions != 1 || home.Summary.Reachable != 1 {
+		t.Errorf("summary counts wrong: %+v", home.Summary)
+	}
+	if home.Pending != -1 {
+		t.Errorf("pending = %d, want -1 (no pendingCount wired)", home.Pending)
+	}
+}
+
+// TestAPIHomeRespectsViewerACL proves the aggregated route is behind the same
+// per-viewer ACL as every other endpoint.
+func TestAPIHomeRespectsViewerACL(t *testing.T) {
+	h := airServeHandler(airServeDeps{
+		allow:    newACL([]string{"phone.mesh"}),
+		identify: func(r *http.Request) (string, string) { return "k", r.Header.Get("X-Test-FQDN") },
+	})
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/home", nil)
+	req.Header.Set("X-Test-FQDN", "stranger.mesh")
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("stranger to /api/home = %d, want 403", rr.Code)
+	}
+}
+
+// TestAPIHomeGETOnly proves the aggregated route is read-only.
+func TestAPIHomeGETOnly(t *testing.T) {
+	h := airServeHandler(airServeDeps{})
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/home", nil))
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST /api/home = %d, want 405", rr.Code)
+	}
+}
+
+// TestAPIHomeLedgerNotPolluted proves a home view never appends to the gateway
+// enforcement ledger, and that an opt-in view-audit lands exactly one
+// method:"air.home" record on its OWN hash chain — which still verifies.
+func TestAPIHomeLedgerNotPolluted(t *testing.T) {
+	// Enforcement ledger: a real hash-chained file (one prior record).
+	ledger := filepath.Join(t.TempDir(), "audit.jsonl")
+	var lb bytes.Buffer
+	enf := policy.NewAuditLog(&lb, func() string { return "2026-07-22T12:00:00Z" })
+	if err := enf.Append(policy.AuditRecord{Method: "tools/call", Decision: "allow", Peer: "a.mesh", Rule: -1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ledger, lb.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(ledger)
+
+	// Separate view chain over its own sink.
+	var vb bytes.Buffer
+	view := policy.NewAuditLog(&vb, func() string { return "2026-07-22T12:00:01Z" })
+
+	h := airServeHandler(airServeDeps{
+		receipts:  func(limit int) ([]json.RawMessage, error) { return tailAuditRecords(ledger, limit) },
+		viewAudit: view,
+		identify:  func(*http.Request) (string, string) { return "VK", "viewer.mesh" },
+	})
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/home", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("home status %d: %s", rr.Code, rr.Body)
+	}
+
+	// The enforcement ledger is byte-for-byte unchanged.
+	after, _ := os.ReadFile(ledger)
+	if !bytes.Equal(before, after) {
+		t.Fatalf("home view mutated the enforcement ledger:\nbefore=%s\nafter=%s", before, after)
+	}
+
+	// The separate chain got exactly one air.home record, attributed to the viewer.
+	lines := strings.Split(strings.TrimSpace(vb.String()), "\n")
+	if len(lines) != 1 || !strings.Contains(vb.String(), `"method":"air.home"`) || !strings.Contains(vb.String(), "viewer.mesh") {
+		t.Fatalf("view chain wrong: %q", vb.String())
+	}
+	res, err := policy.VerifyChain(bytes.NewReader(vb.Bytes()))
+	if err != nil || !res.OK {
+		t.Fatalf("view chain does not verify: err=%v res=%+v", err, res)
+	}
+}
+
+// TestAPIHomePendingHiddenWithoutAllow proves the pending count is unknown (-1)
+// when no pendingCount dep is wired — no approvals number leaks to a viewer.
+func TestAPIHomePendingHiddenWithoutAllow(t *testing.T) {
+	h := airServeHandler(airServeDeps{
+		peers: func() ([]airPeerRow, error) { return nil, nil },
+	})
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/home", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("home status %d", rr.Code)
+	}
+	var home air.Home
+	if err := json.Unmarshal(rr.Body.Bytes(), &home); err != nil {
+		t.Fatal(err)
+	}
+	if home.Pending != -1 || home.Summary.Pending != -1 {
+		t.Fatalf("pending leaked without --allow: home=%d summary=%d", home.Pending, home.Summary.Pending)
 	}
 }
 

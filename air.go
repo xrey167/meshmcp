@@ -33,6 +33,8 @@ func cmdAir(args []string) error {
 		return airUsage()
 	}
 	switch args[0] {
+	case "home":
+		return cmdAirHome(args[1:])
 	case "whoami", "self":
 		return cmdAirWhoami(args[1:])
 	case "map":
@@ -82,13 +84,17 @@ func cmdAir(args []string) error {
 	case "-h", "--help", "help":
 		return airUsage()
 	default:
-		return fmt.Errorf("meshmcp air: unknown subcommand %q (want whoami | map | browse | stream | vision | bind | film | play | ring | listen | cast | screen | catalog | change | dns | sessions | steer | launch | agent-steer | tasks | task-steer | workflow | serve)", args[0])
+		return fmt.Errorf("meshmcp air: unknown subcommand %q (want home | whoami | map | browse | stream | vision | bind | film | play | ring | listen | cast | screen | catalog | change | dns | sessions | steer | launch | agent-steer | tasks | task-steer | workflow | serve)", args[0])
 	}
 }
 
 func airUsage() error {
 	b := func(s string) string { return bold(s) }
 	fmt.Fprintln(os.Stderr, bold("meshmcp air")+dim(" — drive live work over the mesh"))
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, dim("HOME"))
+	fmt.Fprintln(os.Stderr, "  "+b("air home")+"        <control-ip:port> [--audit f] [--approvals ip:port] [--watch] [--json]")
+	fmt.Fprintln(os.Stderr, "                  "+dim("your mesh at a glance — peers · sessions · reachable · waiting (one board; --serve for the web home)"))
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, dim("DISCOVER & DRIVE"))
 	fmt.Fprintln(os.Stderr, "  "+b("air whoami")+"      "+dim("                                  the mesh identity a gateway sees you as"))
