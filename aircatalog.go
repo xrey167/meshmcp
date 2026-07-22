@@ -72,7 +72,7 @@ func cmdAirCatalog(args []string) error {
 		if fs.NArg() != 0 {
 			return errors.New("air catalog: give either --resolve <domain> or a <control-ip:port>, not both")
 		}
-		u, err := resolveCatalogURL(net.LookupTXT, *resolve)
+		u, via, err := resolveCatalog(net.LookupTXT, net.LookupSRV, *resolve)
 		if err != nil {
 			return fmt.Errorf("air catalog: %w", err)
 		}
@@ -81,7 +81,7 @@ func cmdAirCatalog(args []string) error {
 			return fmt.Errorf("air catalog: resolved a bad catalog url %q: %w", u, err)
 		}
 		control, catalogURL = parsed.Host, u
-		fmt.Fprintln(os.Stderr, dim("resolved "+*resolve+" → "+u))
+		fmt.Fprintln(os.Stderr, dim("resolved "+*resolve+" → "+u+" (via "+via+")"))
 	case fs.NArg() == 1:
 		control = fs.Arg(0)
 	default:

@@ -89,6 +89,47 @@ func resolveCatalogURL(lookup txtLookup, domain string) (string, error) {
 	return "", fmt.Errorf("no ARD catalog TXT record at %s", name)
 }
 
+// srvLookup resolves SRV records for a service; injectable so resolveCatalogSRV
+// is testable offline. The default is net.LookupSRV (the OS/mesh resolver).
+type srvLookup func(service, proto, name string) (string, []*net.SRV, error)
+
+// resolveCatalogSRV follows ARD leg 3: resolve the domain's `_air._tcp` SRV
+// record and return the highest-priority target host:port of the control
+// endpoint. The caller constructs the well-known catalog URL from it.
+func resolveCatalogSRV(lookup srvLookup, domain string) (host string, port int, err error) {
+	name := ardSRVName(domain)
+	_, addrs, err := lookup("air", "tcp", strings.Trim(domain, "."))
+	if err != nil {
+		return "", 0, fmt.Errorf("resolve %s: %w", name, err)
+	}
+	if len(addrs) == 0 {
+		return "", 0, fmt.Errorf("no SRV records at %s", name)
+	}
+	// net.LookupSRV returns records sorted by priority then weight; take the
+	// first. A "." target is the RFC 2782 "service decidedly not available".
+	a := addrs[0]
+	target := strings.TrimSuffix(a.Target, ".")
+	if target == "" || a.Target == "." {
+		return "", 0, fmt.Errorf("SRV at %s has no usable target", name)
+	}
+	return target, int(a.Port), nil
+}
+
+// resolveCatalog performs ARD discovery from a domain: the TXT pointer (leg 2)
+// is tried first because it carries the full catalog URL; if there is no TXT
+// record it falls back to the SRV record (leg 3), building the well-known
+// catalog URL from the resolved host:port. `via` reports which leg answered.
+func resolveCatalog(txt txtLookup, srv srvLookup, domain string) (catalogURL, via string, err error) {
+	if u, e := resolveCatalogURL(txt, domain); e == nil {
+		return u, "TXT", nil
+	}
+	host, port, e := resolveCatalogSRV(srv, domain)
+	if e != nil {
+		return "", "", fmt.Errorf("no ARD discovery record for %s (TXT and SRV both failed): %w", domain, e)
+	}
+	return fmt.Sprintf("http://%s:%d%s", host, port, airCatalogPath), "SRV", nil
+}
+
 // cmdAirDNS prints the DNS records an operator publishes so a gateway's Air
 // catalog is discoverable from a domain name (ARD legs 2–3).
 func cmdAirDNS(args []string) error {
