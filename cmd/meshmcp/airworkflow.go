@@ -270,13 +270,7 @@ func (r *wfRun) execStep(ctx context.Context, s airWorkflowStep) (output string,
 	defer cancel()
 	switch {
 	case s.Launch != nil:
-		var extra []string
-		if s.Launch.SteerPort > 0 {
-			extra = append(extra, "--steer-port", fmt.Sprint(s.Launch.SteerPort))
-		}
-		if s.Launch.Interval != "" {
-			extra = append(extra, "--interval", s.Launch.Interval)
-		}
+		extra := workflowLaunchArgs(s.Launch)
 		// Reserve the launch slot BEFORE spawning, so the cap prevents the
 		// fork rather than relabelling a process that already exists.
 		if err := r.reserveLaunch(); err != nil {
@@ -322,6 +316,23 @@ func (r *wfRun) execStep(ctx context.Context, s airWorkflowStep) (output string,
 	default:
 		return "", nil, errors.New("empty step")
 	}
+}
+
+// workflowLaunchArgs converts declarative launch options to the child agent's
+// CLI. Each steer identity remains a separate repeatable flag so no escaping or
+// delimiter convention can change the ACL entry.
+func workflowLaunchArgs(launch *launchStep) []string {
+	var args []string
+	if launch.SteerPort > 0 {
+		args = append(args, "--steer-port", fmt.Sprint(launch.SteerPort))
+	}
+	for _, identity := range launch.SteerAllow {
+		args = append(args, "--steer-allow", identity)
+	}
+	if launch.Interval != "" {
+		args = append(args, "--interval", launch.Interval)
+	}
+	return args
 }
 
 func (r *wfRun) stepContext(ctx context.Context, timeout string) (context.Context, context.CancelFunc) {

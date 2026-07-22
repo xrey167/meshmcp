@@ -2,14 +2,15 @@
 # membership (Air · Steer, P4).
 #
 #   meshmcp air workflow examples/air-workflow.yaml            # run it
-#   meshmcp air workflow examples/air-workflow.yaml --dry-run  # parse + print the plan
-#   meshmcp air workflow examples/air-workflow.yaml --json     # machine-readable run summary
+#   meshmcp air workflow --dry-run examples/air-workflow.yaml  # parse + print the plan
+#   meshmcp air workflow --json examples/air-workflow.yaml     # machine-readable run summary
 #
 # Each step is exactly one of: launch (spawn an agent), steer (a live session
 # via a gateway control endpoint), agent_steer (an envelope to a launched
 # agent's P1 steer inbox), call (a tool on a backend), or parallel (run several
-# child steps concurrently). Every action is governed by the same firewall as
-# any caller and audited.
+# child steps concurrently). Network call/steer steps cross their documented
+# ACL or policy/audit boundary. A launch is a local child-process action; the
+# spawned agent's later gateway calls are governed under its own mesh identity.
 #
 # on_error: stop (default) aborts on the first failure; continue runs every step.
 # cleanup: leave (default) lets launched agents keep running after the workflow;
@@ -26,9 +27,16 @@ cleanup: leave
 steps:
   # 1. Spawn a reader and an analyst concurrently, each with its own WireGuard
   #    identity. `as:` captures each agent's launch output. steer_port gives
-  #    the reader a P1 steer inbox so step 2 can address it.
+  #    the reader a P1 steer inbox so step 2 can address it; steer_allow is the
+  #    required deny-by-default ACL of identities allowed to send envelopes.
   - parallel:
-      - launch: { role: reader, gateway: 100.64.0.2:9101, steer_port: 9120 }
+      - launch:
+          role: reader
+          gateway: 100.64.0.2:9101
+          steer_port: 9120
+          steer_allow:
+            - operator-*.netbird.cloud
+            # Or pin a WireGuard identity: pubkey:REPLACE_WITH_CONTROLLER_KEY
         as: reader
       - launch: { role: analyst, gateway: 100.64.0.2:9101 }
         as: analyst

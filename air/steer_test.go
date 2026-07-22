@@ -1,6 +1,8 @@
 package air
 
 import (
+	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -20,13 +22,37 @@ func TestSteerEnvelopeValidate(t *testing.T) {
 	}
 	bad := []SteerEnvelope{
 		{Type: SteerTask}, // task without a tool
-		{Type: "pause"},   // unknown type
-		{Type: ""},        // empty type
+		{Type: SteerTask, Tool: "read", Args: json.RawMessage(`{`)}, // malformed arguments
+		{Type: SteerNudge, Target: "task"},                          // malformed target
+		{Type: SteerNudge, Text: "focus\nnow"},                      // control-bearing guidance
+		{Type: SteerCancel, Args: json.RawMessage(`{}`)},            // cross-type field smuggling
+		{Type: SteerTask, Tool: "read", Text: "also nudge"},         // cross-type field smuggling
+		{Type: SteerCancel, Target: "worker:one"},                   // unknown target kind
+		{Type: "pause"}, // unknown type
+		{Type: ""},      // empty type
 	}
 	for _, e := range bad {
 		if err := e.Validate(); err == nil {
 			t.Fatalf("invalid envelope accepted: %+v", e)
 		}
+	}
+}
+
+func TestSteerApplicationAcknowledgement(t *testing.T) {
+	env := Task("resume", json.RawMessage(`{"step":3}`))
+	env.ID = "handoff-id"
+	ack := SteerAck{Version: HandoffVersion, ID: env.ID, Status: SteerAckDelivered}
+	var wire bytes.Buffer
+	if err := WriteSteerAck(&wire, ack); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadSteerAck(&wire)
+	if err != nil || !got.Delivered() || got.ValidateFor(env) != nil {
+		t.Fatalf("steer ACK = %+v err=%v", got, err)
+	}
+	got.ID = "different"
+	if err := got.ValidateFor(env); err == nil {
+		t.Fatal("mismatched steer ACK accepted")
 	}
 }
 
@@ -49,6 +75,12 @@ func TestParseEnvelopes(t *testing.T) {
 	}
 	if err := ParseEnvelopes(strings.NewReader("not json\n"), func(SteerEnvelope) {}); err == nil {
 		t.Fatal("expected error on malformed envelope")
+	}
+	if err := ParseEnvelopes(strings.NewReader(`{"type":"cancel","type":"task","tool":"x"}`+"\n"), func(SteerEnvelope) {}); err == nil {
+		t.Fatal("expected error on duplicate envelope fields")
+	}
+	if err := ParseEnvelopes(strings.NewReader(`{"type":"cancel","unknown":true}`+"\n"), func(SteerEnvelope) {}); err == nil {
+		t.Fatal("expected error on unknown envelope fields")
 	}
 }
 

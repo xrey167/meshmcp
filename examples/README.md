@@ -96,7 +96,7 @@ meshmcp air launch   --role reader 100.x.y.z:9101   # spawn a new agent identity
 meshmcp air workflow --dry-run examples/air-workflow.yaml   # validate a workflow
 meshmcp air serve    --port 9800 --control 100.x.y.z:9600   # the live Air web page
 
-# Steer a running agent that opted into an inbox (meshmcp agent --steer-port 9120 ...)
+# Steer an agent whose inbox names this caller (meshmcp agent --steer-port 9120 --steer-allow <identity> ...)
 meshmcp air agent-steer 100.x.y.z:9120 --type nudge --text "prioritize the API"
 ```
 

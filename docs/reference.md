@@ -123,7 +123,7 @@ resources, and prompts against a live backend.
 | `meshmcp push [flags] <peer:port>` | Push a stdin payload to a peer's inbox |
 | `meshmcp peers [flags]` | List reachable mesh identities |
 | `meshmcp fetch [flags] <peer:port> <sha256>` | Fetch a blob by content hash from a peer's store |
-| `meshmcp air <whoami\|map\|catalog\|dns\|sessions\|steer\|tasks\|task-steer\|launch\|agent-steer\|workflow\|serve\|browse\|stream\|vision\|bind>` | **Air · Steer** — list/steer live sessions, steer/launch agents, run a workflow, or serve the live web page (`serve --gallery <inbox>` renders image drops); `browse <peer:port>` lists a backend's tools/resources/prompts filtered to your identity (`--json`); `stream <audit.jsonl>` tails the ledger live, decision-coloured, with glob field filters (`--decision --backend --method --tool --peer`), `--json` passthrough, and `--from-start --interval`; `vision <inbox-dir>` inventories dropped images (`--json --limit`); `bind <bindings.yaml> --audit <ledger>` fires a declared reaction when a ledger record matches glob triggers (decision·backend·method·tool·peer·reason) — `print` notify or `run` a governed child (deny-by-default, `--allow-exec`), plus `--from-start --interval` (see [AIR.md](AIR.md)) |
+| `meshmcp air <whoami\|map\|catalog\|dns\|sessions\|steer\|tasks\|task-steer\|launch\|agent-steer\|workflow\|serve\|browse\|stream\|vision\|bind\|handoff>` | **Air · Continuity** — the discovery, live-work, workflow, and governed-transfer surface. `handoff offer/receive/list/show/accept/decline/continue/rearm/archive` transfers an inert Context Capsule over exact-key-pinned device and agent hops, requires local acceptance plus a receiver-selected continuation tool, retains bounded destination receipts, makes unknown-outcome retries explicit, and archives terminal receipts without forgetting replay IDs; see [AIR-CONTINUITY.md](AIR-CONTINUITY.md). It does not migrate a live session. |
 | `meshmcp pubsub --config <f>` · `publish` · `subscribe <peer:port> <topic>` | Identity-gated, audited **event bus** on the mesh — durable + resumable (see [PUBSUB.md](PUBSUB.md)) |
 | `meshmcp mcp [flags]` | Run meshmcp **as an MCP server** for Claude Code / Codex (see [MCP-APP.md](MCP-APP.md)) |
 | `meshmcp approvals --store <dir>` | Serve the co-sign approver (`--devices <dir>` enables push-wake; `--notify-webhook <url>` delivers pendings to a relay) |
@@ -305,4 +305,4 @@ registry, and bidirectional MCP; stdio + HTTP backends; a CLI (`ls/call/read/pro
 
 **Still open:**
 - **Replicated store backend:** Redis/etcd behind the `SessionStore` interface for multi-datacenter HA.
-- Flagships F14 (plugin marketplace), F19 (Mesh Spotlight), F25 (multi-tenant), F30 (live handoff), F31 (federated SSO mapping).
+- Flagships F14 (plugin marketplace), F19 (Mesh Spotlight), F25 (multi-tenant), F30 (future live-session handoff, distinct from shipped Context Capsule continuation), F31 (federated SSO mapping).

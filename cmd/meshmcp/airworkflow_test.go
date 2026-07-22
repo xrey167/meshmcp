@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -70,5 +71,22 @@ func TestWorkflowLaunchCap(t *testing.T) {
 	r.releaseLaunch()
 	if err := r.reserveLaunch(); err != nil {
 		t.Fatalf("a slot freed by releaseLaunch must be reusable: %v", err)
+	}
+}
+
+func TestWorkflowLaunchArgsPassesEverySteerAllow(t *testing.T) {
+	launch := &launchStep{
+		SteerPort:  9120,
+		SteerAllow: []string{"operator.example.net", "pubkey:controller-key"},
+		Interval:   "1s",
+	}
+	want := []string{
+		"--steer-port", "9120",
+		"--steer-allow", "operator.example.net",
+		"--steer-allow", "pubkey:controller-key",
+		"--interval", "1s",
+	}
+	if got := workflowLaunchArgs(launch); !reflect.DeepEqual(got, want) {
+		t.Fatalf("workflowLaunchArgs() = %#v, want %#v", got, want)
 	}
 }

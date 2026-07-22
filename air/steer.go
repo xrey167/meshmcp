@@ -1,6 +1,5 @@
-// Package air is meshmcp's Air module: the portable core of the AirDrop-native
-// payload + discovery layer — the steer envelope, the discovery catalog model,
-// and the ARD (Agentic Resource Discovery) record generation and resolution.
+// Package air is meshmcp's Air module: the portable core of the identity-native
+// payload, discovery, Continuity, and live-work layer.
 //
 // This package is deliberately mesh-independent: it holds Air's domain types
 // and pure logic (record formatting, DNS-record parsing, discovery resolution)
@@ -13,9 +12,11 @@ package air
 import (
 	"bufio"
 	"bytes"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 )
 
 // Steer envelope types. A steer is one of exactly these three actions.
@@ -39,18 +40,42 @@ type SteerEnvelope struct {
 }
 
 // Validate reports whether the envelope is a well-formed steer: the type must
-// be one of task/nudge/cancel, and a task must name a tool. Centralizing this
-// here keeps the CLI, the agent loop, and the workflow validator agreeing on
-// exactly what a valid steer is.
+// be one of task/nudge/cancel, a task must name a tool, an optional target must
+// follow the Air target grammar, and optional arguments must be valid JSON.
+// Centralizing this here keeps the CLI, the agent loop, and the workflow
+// validator agreeing on exactly what a valid steer is.
 func (e SteerEnvelope) Validate() error {
 	switch e.Type {
 	case SteerTask:
-		if e.Tool == "" {
+		if strings.TrimSpace(e.Tool) == "" || e.Tool != strings.TrimSpace(e.Tool) || len(e.Tool) > 256 || steerHasControl(e.Tool) {
 			return fmt.Errorf("steer type %q requires a tool", SteerTask)
 		}
-	case SteerNudge, SteerCancel:
+		if e.Text != "" {
+			return fmt.Errorf("steer type %q must not carry nudge text", SteerTask)
+		}
+	case SteerNudge:
+		// Empty nudge is the existing "clear guidance" operation.
+		if len(e.Text) > 64<<10 || steerHasControl(e.Text) {
+			return fmt.Errorf("steer type %q requires bounded single-line text", SteerNudge)
+		}
+		if e.Tool != "" || len(e.Args) != 0 {
+			return fmt.Errorf("steer type %q must not carry a tool or arguments", SteerNudge)
+		}
+	case SteerCancel:
+		if e.Tool != "" || len(e.Args) != 0 || e.Text != "" {
+			return fmt.Errorf("steer type %q must not carry a tool, arguments, or text", SteerCancel)
+		}
 	default:
 		return fmt.Errorf("unknown steer type %q (want %s, %s, or %s)", e.Type, SteerTask, SteerNudge, SteerCancel)
+	}
+	if _, err := ParseTarget(e.Target); err != nil {
+		return fmt.Errorf("steer target: %w", err)
+	}
+	if len(e.Args) > 0 && !json.Valid(e.Args) {
+		return fmt.Errorf("steer args must be valid JSON")
+	}
+	if len(e.ID) > 256 || steerHasControl(e.ID) {
+		return fmt.Errorf("steer id is invalid")
 	}
 	return nil
 }
@@ -101,12 +126,117 @@ func Cancel() SteerEnvelope { return SteerEnvelope{Type: SteerCancel} }
 // WriteEnvelope frames one envelope as a newline-delimited JSON record — the
 // wire form the steer inbox reads (see ParseEnvelopes).
 func WriteEnvelope(w io.Writer, e SteerEnvelope) error {
+	if err := e.Validate(); err != nil {
+		return err
+	}
 	line, err := json.Marshal(e)
 	if err != nil {
 		return err
 	}
+	if len(line) > maxEnvelopeLine {
+		return fmt.Errorf("steer envelope exceeds the %d-byte limit", maxEnvelopeLine)
+	}
 	_, err = w.Write(append(line, '\n'))
 	return err
+}
+
+// SteerMaxAckBytes bounds the agent inbox's application ACK/NACK.
+const SteerMaxAckBytes = 4 << 10
+
+const (
+	SteerAckDelivered = "delivered"
+	SteerAckRejected  = "rejected"
+)
+
+// SteerAck is the agent inbox's application-level answer. A delivered ACK is
+// emitted only after strict validation, receipt audit, and enqueue to the
+// agent's steer channel; transport frame acknowledgement is not enough.
+type SteerAck struct {
+	Version int    `json:"version"`
+	ID      string `json:"id,omitempty"`
+	Status  string `json:"status"`
+	Reason  string `json:"reason,omitempty"`
+}
+
+func (a SteerAck) ValidateFor(env SteerEnvelope) error {
+	if err := validateSteerAck(a); err != nil {
+		return err
+	}
+	if subtle.ConstantTimeCompare([]byte(a.ID), []byte(env.ID)) != 1 {
+		return fmt.Errorf("steer acknowledgement id mismatch")
+	}
+	return nil
+}
+
+func (a SteerAck) Delivered() bool { return a.Status == SteerAckDelivered }
+
+func validateSteerAck(a SteerAck) error {
+	if a.Version != HandoffVersion {
+		return fmt.Errorf("unsupported steer acknowledgement version %d", a.Version)
+	}
+	if len(a.ID) > 256 || steerHasControl(a.ID) {
+		return fmt.Errorf("steer acknowledgement id is invalid")
+	}
+	switch a.Status {
+	case SteerAckDelivered:
+		if a.Reason != "" {
+			return fmt.Errorf("delivered steer acknowledgement must not carry a rejection reason")
+		}
+	case SteerAckRejected:
+		if strings.TrimSpace(a.Reason) == "" || a.Reason != strings.TrimSpace(a.Reason) || len(a.Reason) > 128 || steerHasControl(a.Reason) {
+			return fmt.Errorf("steer rejection reason is invalid")
+		}
+	default:
+		return fmt.Errorf("unknown steer acknowledgement status %q", a.Status)
+	}
+	return nil
+}
+
+func WriteSteerAck(w io.Writer, ack SteerAck) error {
+	if err := validateSteerAck(ack); err != nil {
+		return err
+	}
+	b, err := json.Marshal(ack)
+	if err != nil {
+		return err
+	}
+	if len(b) > SteerMaxAckBytes {
+		return fmt.Errorf("steer acknowledgement exceeds the %d-byte limit", SteerMaxAckBytes)
+	}
+	_, err = w.Write(append(b, '\n'))
+	return err
+}
+
+func ReadSteerAck(r io.Reader) (SteerAck, error) {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 1024), SteerMaxAckBytes)
+	if !sc.Scan() {
+		if err := sc.Err(); err != nil {
+			return SteerAck{}, err
+		}
+		return SteerAck{}, fmt.Errorf("missing steer acknowledgement")
+	}
+	line := bytes.TrimSpace(sc.Bytes())
+	var ack SteerAck
+	if len(line) == 0 {
+		return ack, fmt.Errorf("empty steer acknowledgement")
+	}
+	if err := decodeStrictAirJSON(line, &ack); err != nil {
+		return SteerAck{}, fmt.Errorf("bad steer acknowledgement: %w", err)
+	}
+	if err := validateSteerAck(ack); err != nil {
+		return SteerAck{}, err
+	}
+	return ack, nil
+}
+
+func steerHasControl(s string) bool {
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
 }
 
 // maxEnvelopeLine bounds one newline-delimited envelope, so a peer on an
@@ -115,11 +245,47 @@ const maxEnvelopeLine = 1 << 20
 
 // ParseEnvelope decodes one steer envelope from a JSON line.
 func ParseEnvelope(line []byte) (SteerEnvelope, error) {
+	if err := rejectDuplicateTopLevelKeys(line); err != nil {
+		return SteerEnvelope{}, fmt.Errorf("bad steer envelope: %w", err)
+	}
 	var env SteerEnvelope
-	if err := json.Unmarshal(line, &env); err != nil {
+	if err := decodeStrictAirJSON(line, &env); err != nil {
 		return SteerEnvelope{}, fmt.Errorf("bad steer envelope: %w", err)
 	}
 	return env, nil
+}
+
+func rejectDuplicateTopLevelKeys(data []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok || delim != '{' {
+		return fmt.Errorf("steer envelope must be a JSON object")
+	}
+	seen := map[string]struct{}{}
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		key, ok := tok.(string)
+		if !ok {
+			return fmt.Errorf("steer envelope has a non-string field name")
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return fmt.Errorf("steer envelope repeats field %q", key)
+		}
+		seen[key] = struct{}{}
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			return err
+		}
+	}
+	_, err = dec.Token()
+	return err
 }
 
 // ParseEnvelopes decodes newline-delimited JSON steer envelopes from r and

@@ -199,12 +199,16 @@ func (e *endpoint) pumpReader(conn net.Conn, r *bufio.Reader, gen uint64) error 
 				e.recvSeq = f.seq
 				seqNow := e.recvSeq
 				e.mu.Unlock()
+				// Acknowledge endpoint receipt before handing the payload to the
+				// application. The application may immediately emit reverse DATA;
+				// delivering first can make both transport readers synchronously
+				// write ACKs at each other and deadlock on an unbuffered/full link.
+				e.sendAck(seqNow)
 				select {
 				case e.inbound <- f.payload:
 				case <-e.closeC:
 					return e.closeErr
 				}
-				e.sendAck(seqNow)
 			} else {
 				// Duplicate from a replay (seq <= recvSeq) or an
 				// impossible gap on an ordered transport: re-ack our

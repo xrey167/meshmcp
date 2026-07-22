@@ -2,10 +2,10 @@
 
 **Air** is one name and one product surface for meshmcp's payload + human-in-the-loop
 layer: see verified agents/devices in **Nearby**, **continue** a privacy-safe Activity,
-**drop** a file, **push** a snippet or a task,
-**fetch** a blob by content hash, **steer** live work (an agent, a session, a task) or
-**launch** a fresh one, and **approve** a held call — from a phone, an assistant, or a
-laptop.
+**drop** a file, **push** a snippet or task, **fetch** a blob by content hash,
+**steer** live work (an agent, session, or task), **handoff** bounded active-work context
+to another device, **launch** a fresh agent, and **approve** a held call — from a phone,
+an assistant, or a laptop.
 
 Air aims for the coherence of an integrated consumer platform: one identity, a small
 shared vocabulary, predictable continuity, and privacy by default. It uses meshmcp's
@@ -22,8 +22,9 @@ transport prove?” and “may that identity do this?”
 > Air is a coherent face over primitives meshmcp already ships (`peers`, `drop`, `push`,
 > `fetch`, `approvals`) plus the **steer** and **launch** primitives built on top — the agent
 > steer inbox, session enumeration + a line-safe session steer, `tasks/steer`, the gateway
-> control endpoint, and the `meshmcp air` CLI. All seven verbs ship today; see
+> control endpoint, and the `meshmcp air` CLI. See
 > [docs/AIR-STEER.md](AIR-STEER.md) for how steer/launch are built and
+> [docs/AIR-CONTINUITY.md](AIR-CONTINUITY.md) for Handoff's trust boundaries, then
 > [§6](#6--whats-real-today-vs-proposed) for the full real-vs-proposed table.
 
 ---
@@ -44,9 +45,10 @@ consumer-facing product of that separation.
 | **Push** — send clipboard / a task | `push.go` (`sendData`) | A small stdin payload to a peer's resumable inbox, by identity. |
 | **Fetch** — pull by content hash | `cas.go` · `fetch` | Zero-exposure content-addressed retrieval from a peer's store. |
 | **Steer** — drive live work | `agent.go` · `session/server.go` · `mcp/tasks.go` · `aircontrol.go` | Send/cancel/nudge to an agent (steer inbox), a session (line-safe server→client notify), or a task (`tasks/steer`). |
+| **Handoff** — continue elsewhere | `air/handoff.go` · `airhandoff.go` · `airhandoff_store.go` | Offer an inert, exact-key-bound Context Capsule; the destination explicitly accepts and chooses the governed continuation tool. |
 | **Launch** — spawn agent / workflow | `air.go` · `airworkflow.go` | Start a new agent (`roleScripts`) or run a declarative workflow as its own mesh identity. |
 | **Approve** — co-sign a held call | `approvals.go` · `policy.FilePending` | The phone is the human identity the firewall was waiting for. |
-| **Prove** — receipts | `audit.go` · `policy/` | Every Air action lands in the hash-chained (optionally signed) ledger. |
+| **Prove** — receipts | `audit.go` · `policy/` | Governed network decisions produce hash-chained (optionally signed) records; local-only state and separately configured sinks are described per verb. |
 
 ---
 
@@ -204,6 +206,44 @@ the **session core** (`SessionStore.List`, `Server.Sessions`, line-safe `Server.
 All of this ships today. Every steer is deny-by-default, identity-attributed, and audited —
 it cannot bypass the firewall. See [AIR-STEER.md](AIR-STEER.md) for the spec.
 
+### Handoff — continue active work on another agent device
+
+```bash
+# Destination: receive inert offers from an allowed source identity.
+meshmcp air handoff receive --inbox ~/.meshmcp/handoffs \
+  --nb-config ~/.meshmcp/handoff-destination.json --port 9140 \
+  --allow 'pubkey:<source-key>'
+
+# Source: bind the capsule to the destination's exact WireGuard key.
+meshmcp air handoff offer --nb-config ~/.meshmcp/handoff-source.json \
+  --target-key '<destination-key>' \
+  --work task:task-17 --goal 'Continue the outage analysis' 100.64.0.22:9140
+
+# Destination: consent first, then choose the importing tool locally.
+meshmcp air handoff accept --inbox ~/.meshmcp/handoffs <handoff-id>
+meshmcp air handoff continue --inbox ~/.meshmcp/handoffs \
+  --nb-config ~/.meshmcp/handoff-controller.json \
+  --agent-key '<destination-agent-key>' --tool resume_analysis \
+  <handoff-id> 100.64.0.31:9120
+
+# Only after checking an unknown dispatch downstream:
+meshmcp air handoff rearm --inbox ~/.meshmcp/handoffs \
+  --note 'no matching agent receipt' <handoff-id>
+```
+
+Handoff moves bounded context and content-addressed references, not authority:
+the receiver derives the source from the mesh transport, never auto-executes an
+offer, pins the receiver-selected agent IP to `--agent-key`, claims a durable
+`dispatching` state, and sends the accepted capsule back through the ordinary
+steer path. Advisory `handoff`/`untrusted-context` handling hints are tool
+arguments, not `policy.Filter` taint labels. Gateway policy applies when that
+agent uses a governed meshmcp gateway. Secret references may travel; the sender
+must not place secret values or source-bound grants in free-form fields.
+
+This is application-level continuation in a fresh agent/session. It deliberately
+does not weaken `session.Server`'s same-`CreatorKey` reattachment rule or claim
+cross-device live session migration. See [AIR-CONTINUITY.md](AIR-CONTINUITY.md).
+
 ### Launch — spawn an agent or a workflow
 
 ```bash
@@ -215,8 +255,11 @@ An agent launch child-execs `meshmcp agent` (reusing `roleScripts`) with a fresh
 `--nb-config`, so the new worker joins as its own WireGuard key and immediately shows up in
 `discover` and the sessions view. A **workflow** is a small declarative file (launch these
 agents, steer these sessions, call these tools — run in order), run by `airworkflow.go` which
-reuses the orchestrator's dial→`CallTool` shape. Each launch is audited; the spawned identity
-is subject to the same firewall as any caller.
+reuses the orchestrator's dial→`CallTool` shape. A launch with `steer_port` must also name at
+least one allowed controller in its `steer_allow` list; those identities are passed to the
+child as repeatable `--steer-allow` flags. Launch itself is a local child-process action,
+not a remote control-plane call, so it has no caller ACL or launch audit record. The spawned
+identity's later gateway calls are subject to the same firewall as any caller.
 
 ### Approve
 ```bash
@@ -358,9 +401,9 @@ Air inherits meshmcp's invariants and the phone-approver model from
 - **The device never holds a secret.** Air moves files, payloads, and *references* to
   actions; credential injection stays server-side (see [docs/SECRETS.md](SECRETS.md)).
   Losing the device loses an approver/endpoint, not a credential.
-- **Non-repudiable receipts.** Every Air action is a hash-chained record — a drop's
-  content hash, a push, an attributed co-sign — provable complete-and-unedited with the
-  public key alone.
+- **Tamper-evident governed receipts.** Network decisions such as drops and attributed
+  co-signs can be recorded in a hash-chained ledger. Completeness still depends on the
+  configured fail-closed audit boundary; local UI/inbox state is not itself a signed receipt.
 - **Instant revocation.** Remove the device's key from NetBird and it's off the mesh: it
   can no longer discover, drop, push, fetch, or approve.
 
@@ -385,6 +428,7 @@ Honesty about the seam, so nobody mistakes the mockup for shipped product:
 | **Steer** — control endpoint hardening: per-backend ACL re-check · steer-method allowlist · relay-attested web attribution (`X-Air-On-Behalf`) | **Ships now** | `aircontrol.go` · `serve.go` · `airserve.go` · `aircontrol_test.go` |
 | **Steer/Launch** — the `meshmcp air` CLI (`sessions --json` · `steer` · `launch` · `agent-steer --target/--id` · `tasks` · `task-steer` · `workflow`) + P4 runner | **Ships now** | `air.go` · `airworkflow.go` · `examples/air-workflow.yaml` |
 | **Workflow** — variables between steps (`as:` + `${var.field}`) · `parallel:` blocks · `on_error` · per-step `timeout` · `--json` summary · launch-race retry | **Ships now** | `airworkflow.go` · `airworkflow_test.go` |
+| **Handoff / Continuity v1** — exact-key-pinned device + agent hops · target-bound Context Capsule · deny-by-default receiver ACL · bounded application ACK/NACK · durable inbox · explicit accept/decline · atomic dispatch claim · destination-selected continuation · durable attempt receipts | **Ships now** | `air/handoff.go` · `airhandoff.go` · `airhandoff_store.go` · [AIR-CONTINUITY.md](AIR-CONTINUITY.md) |
 | Assistant tools `air_peers` · `air_push` · `air_fetch` · `air_launch` (opt-in) | **Ships now** | `mcpapp.go` · `mcpapp_air_test.go` |
 | A served **live** Air web page over the mesh (`meshmcp air serve`) — Nearby · Sessions/Steer · **Push/Drop** (sent over the relay's identity) · **Approvals link-out** (browser keeps its own identity) · **Receipts** (`--audit` tail) · **Vision** gallery (`--gallery` inbox — image drops rendered inline, path-safe) · viewer `--allow` ACL. A phone-first, polished consumer UI (large-title header, grouped cards, segmented steer sheet, light/dark), hardened as a browser surface: strict CSP, `nosniff`/frame-deny/no-referrer headers, and a same-origin guard on every state-changing POST (CSRF / DNS-rebinding). | **Ships now** | `airserve.go` · `cmd/meshmcp/site/air-live.html` · `airserve_test.go` |
 | **Vision arc** — `air browse` (backend tools/resources/prompts, identity-filtered) · `air stream` (live audit tail, decision-coloured, rotation-aware) · `air vision` (drop-inbox image inventory) · `air bind` (audit-triggered governed reactions, deny-by-default `run`) | **Ships now** | `airbrowse.go` · `airstream.go` · `airvision.go` · `airbind.go` (+ tests) · [AIR-VISION.md](AIR-VISION.md) · `examples/air-bindings.yaml` |
@@ -407,20 +451,21 @@ capability, or secret tokens.
 
 The Agent-OS expansion makes those verbs increasingly continuous without pretending that a
 network session is already a transferable agent mind. Its detailed product sequence and
-security boundary are in [AIR-ECOSYSTEM.md](AIR-ECOSYSTEM.md). The remaining native push and
-mobile-app delivery is genuinely external because it needs vendor credentials or a device this
-repo cannot exercise; the in-repo expansion proceeds as follows:
+security boundaries are in [AIR-ECOSYSTEM.md](AIR-ECOSYSTEM.md) and
+[AIR-CONTINUITY.md](AIR-CONTINUITY.md). Native push and mobile-app delivery remain external
+where they require vendor credentials or a physical device the repository cannot exercise.
 
-1. **Done — Nearby + Activity foundation.** Presence registry, friendly service resolver,
-   `air nearby` / `air announce` / `air node`, Home/web integration, and `air_nearby` all use
-   the same versioned contract.
-2. **Next — universal addressing and Air Node.** Every send/control verb may accept a verified
-   name/FQDN/full key plus service kind; raw `host:port` stays backward compatible. One Air Node
-   hosts selected inbox/ring/cast/screen/approval/steer services and announces them automatically.
-3. **Then — Context Capsules and truthful Handoff.** First define bounded export/import and
-   provenance contracts; then implement prepare → accept → ready → commit/abort with a
-   recipient-bound, single-use grant and fencing. Existing same-identity transport recovery is
-   never relabeled as cross-agent Handoff.
+1. **Done — Nearby + Activity foundation.** Component Cards, the Presence registry, friendly
+   service resolver, `air nearby` / `air announce` / `air node`, Home/web integration, and
+   `air_nearby` use the same versioned contracts.
+2. **Done — truthful Handoff v1.** Bounded, exact-key-bound Context Capsules follow an explicit
+   offer → accept → dispatch → continue lifecycle with application ACKs and durable attempt
+   receipts. They move inert context and references; they do not move bearer tokens, secrets,
+   capabilities, or a live session identity.
+3. **Next — universal addressing and a consolidated Air Node.** Every send/control verb should
+   accept a verified name/FQDN/full key plus service kind while preserving raw `host:port`.
+   One node runtime should host selected inbox/ring/cast/screen/approval/steer services and
+   announce them automatically.
 4. **Push delivery — mostly done.** A **webhook `Notifier`** ships in-repo
    (`meshmcp approvals --devices <dir> --notify-webhook <url>`): each new pending is POSTed to
    an operator relay that fans out to APNs/FCM with its own credentials — real network delivery
@@ -432,12 +477,19 @@ repo cannot exercise; the in-repo expansion proceeds as follows:
 6. **Proposed — Spaces / `group:<name>`.** Resolve a user-owned group to its members and
    fan one steer out as one governed, audited call per member ("broadcast = N audited
    records"). Not implemented; nothing resolves a `group:` target today.
+7. **Proposed — the wider Continuity ecosystem.** Add signed availability manifests,
+   short-lived presence, exact-key smart targeting, scoped Spaces, unified Shortcuts,
+   destination-bound grant re-issuance, and Find Work. True live migration remains a
+   separate session-v2 protocol with fencing and client/backend snapshot support; see
+   [AIR-CONTINUITY.md](AIR-CONTINUITY.md).
 
 ## Reference points
 
 - `cmd/meshmcp/peers.go` · `drop.go` · `push.go` · `cas.go` — discover / drop / push / fetch.
 - [AIR-STEER.md](AIR-STEER.md) — the code-ready spec for **steer** + **launch** (P1–P4),
   grounded in `agent.go`, `session/endpoint.go`, `mcp/tasks.go`, `orchestrate.go`, `router.go`.
+- [AIR-CONTINUITY.md](AIR-CONTINUITY.md) — Handoff's Context Capsule, receive/accept/continue
+  lifecycle, trust boundaries, and the ecosystem roadmap around it.
 - `approvals.go` · `policy/pending.go` — the phone-first co-sign inbox.
 - `mcpapp.go` · [MCP-APP.md](MCP-APP.md) — Air from an assistant, governed + audited.
 - [MOBILE.md](MOBILE.md) — phone = a hardware-backed human identity; the push seam; the

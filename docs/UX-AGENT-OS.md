@@ -135,7 +135,7 @@ or fabricate a capability.
 | **2 · Governance** | Approvals uses the same tokens/components while retaining direct browser-to-approver identity. | `approvals.go`, Security area |
 | **3 · Observation** | Dashboard and Control Room become Activity/Operator views in the shared shell; raw shell stays explicit developer mode. | `dash.go`, `room.go` |
 | **4 · Logical actions** | Select a verified agent/service everywhere; raw `host:port` remains an advanced compatible input. | Share, Steer, Ring, Cast, CLI |
-| **5 · Continuity** | Context Capsule details and a real prepare/accept/commit Handoff flow. | Activities, Home action sheet |
+| **5 · Continuity** | Handoff v1 ships explicit offer/accept/governed continuation in the CLI; next, surface its inbox and receipts in Activities/Home, then add checkpoint-capable prepare/ready/commit as a separate transactional v2. | `air handoff`, Activities, Home action sheet |
 | **6 · Native shells** | The same objects, states, and navigation map to iOS/macOS/Android without redefining behavior. | `mobile/`, native apps |
 
 ## New experience features
