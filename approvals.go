@@ -29,6 +29,8 @@ func cmdApprovals(args []string) error {
 	ttlSec := fs.Int("ttl", 0, "drop pending requests older than this many seconds (0 = never)")
 	var approvers stringList
 	fs.Var(&approvers, "approver", "identity allowed to approve (FQDN glob or 'pubkey:<key>'); repeatable; REQUIRED in mesh mode")
+	var requesters stringList
+	fs.Var(&requesters, "requester", "identity allowed to register a pending request via POST /v1/request (FQDN glob or 'pubkey:<key>'); repeatable; empty = any mesh peer (a warning is logged)")
 	devices := fs.String("devices", "", "directory to persist push-wake device tokens (enables /v1/devices + notify on new pendings)")
 	notifyWebhook := fs.String("notify-webhook", "", "POST push-wake notifications to this URL instead of logging them (needs --devices; the endpoint fans out to APNs/FCM with its own credentials)")
 	approvalKey := fs.String("approval-key", "", "Ed25519 key file shared with the gateway; when set, /v1/approve mints signed, single-use, argument-bound approvals (must match the backend's approval_signing_key)")
@@ -108,6 +110,22 @@ func cmdApprovals(args []string) error {
 		}
 		log.Printf("approvals: operator allowlist active (%v)", []string(approvers))
 	}
+	// Requester allowlist: when --requester entries are given, only those
+	// identities may register a pending request. Empty = any mesh peer, which
+	// lets any peer spoof a request's Peer and buzz the approver's device — so
+	// warn when it is left open.
+	var mayRequest func(*http.Request) bool
+	if len(requesters) > 0 {
+		reqAllow := newACL(requesters)
+		mayRequest = func(r *http.Request) bool {
+			pub, fqdn := peerIdentityStr(client, r.RemoteAddr)
+			return reqAllow.allows(pub, fqdn)
+		}
+		log.Printf("approvals: requester allowlist active for /v1/request (%v)", []string(requesters))
+	} else {
+		log.Printf("approvals: WARNING /v1/request is open to any mesh peer (no --requester); a peer can register a spoofed-Peer request and buzz the approver — pass --requester to restrict it")
+	}
+	opts = append(opts, withRequesterACL(mayRequest))
 	ln, err := client.ListenTCP(fmt.Sprintf(":%d", *port))
 	if err != nil {
 		return fmt.Errorf("listen on mesh port %d: %w", *port, err)
@@ -120,9 +138,10 @@ func cmdApprovals(args []string) error {
 
 // approvalsOpts are optional add-ons for approvalsHandler (push-wake).
 type approvalsOpts struct {
-	devices  *DeviceStore
-	notifier Notifier
-	reqStore *policy.FileApprovalStore // set: /v1/approve also mints a request-bound token
+	devices    *DeviceStore
+	notifier   Notifier
+	reqStore   *policy.FileApprovalStore // set: /v1/approve also mints a request-bound token
+	mayRequest func(*http.Request) bool  // gates POST /v1/request; nil = any caller
 }
 
 // approvalsOption configures approvalsHandler without breaking its callers.
@@ -139,6 +158,13 @@ func withPushWake(d *DeviceStore, n Notifier) approvalsOption {
 // the exact held call — the request-bound half of the co-sign flow.
 func withRequestBound(store *policy.FileApprovalStore) approvalsOption {
 	return func(o *approvalsOpts) { o.reqStore = store }
+}
+
+// withRequesterACL gates POST /v1/request on the given predicate (nil = any
+// caller), so only permitted identities may register a pending request and
+// buzz the approver's device.
+func withRequesterACL(mayRequest func(*http.Request) bool) approvalsOption {
+	return func(o *approvalsOpts) { o.mayRequest = mayRequest }
 }
 
 // approvalsHandler builds the approver HTTP surface. approver resolves the
@@ -256,6 +282,13 @@ func approvalsHandler(ps *policy.FilePending, approver func(*http.Request) strin
 	mux.HandleFunc("/v1/request", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		// Requester allowlist: only permitted identities may register a pending
+		// request (and thereby buzz the approver's device). When unset, any
+		// caller may — the open, framework-facing default.
+		if opt.mayRequest != nil && !opt.mayRequest(r) {
+			http.Error(w, "forbidden: not an authorized requester", http.StatusForbidden)
 			return
 		}
 		var body struct{ Peer, Tool, Backend string }
