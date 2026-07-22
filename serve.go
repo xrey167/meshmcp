@@ -178,21 +178,40 @@ func cmdServe(args []string) error {
 			}
 		}
 
-		// stdio backends run through the byte-stream Filter; HTTP backends with
-		// a policy run through the request-level httpEnforcer (F16).
+		// stdio backends run through the byte-stream Filter; HTTP and remote
+		// backends with a policy run through the request-level httpEnforcer (F16).
 		var factory session.BackendFactory
 		var httpEnf *httpEnforcer
-		if b.HTTP == "" {
+		if len(b.Stdio) > 0 {
 			factory = backendFactory(b, audit, tracer, hookSink)
 		} else if b.Policy != nil {
 			httpEnf = newHTTPEnforcer(b, audit)
 			log.Printf("backend %q: HTTP policy enforcement on (%d rules)", b.Name, len(b.Policy.Rules))
 		}
 
+		// A remote backend's OAuth/DPoP client is built once at startup; a
+		// missing or unloadable DPoP key file is fatal (S13 precedent), never
+		// silently regenerated.
+		var rc *remoteClient
+		if b.Remote != nil {
+			var rcErr error
+			rc, rcErr = buildRemoteClient(b)
+			if rcErr != nil {
+				close(shutdown)
+				for _, l := range listeners {
+					l.Close()
+				}
+				wg.Wait()
+				return rcErr
+			}
+		}
+
 		wg.Add(1)
-		go func(b *Backend, ln net.Listener, factory session.BackendFactory, httpEnf *httpEnforcer) {
+		go func(b *Backend, ln net.Listener, factory session.BackendFactory, httpEnf *httpEnforcer, rc *remoteClient) {
 			defer wg.Done()
 			switch {
+			case b.Remote != nil:
+				serveRemote(client, b, ln, httpEnf, rc)
 			case b.HTTP != "":
 				serveHTTP(client, b, ln, httpEnf)
 			case b.Resumable:
@@ -204,7 +223,7 @@ func cmdServe(args []string) error {
 			default:
 				serveStdio(client, b, ln, shutdown, factory)
 			}
-		}(b, ln, factory, httpEnf)
+		}(b, ln, factory, httpEnf, rc)
 	}
 
 	// Optionally serve the Air control endpoint: list and steer live sessions
@@ -233,7 +252,9 @@ func cmdServe(args []string) error {
 		h := airControlHandler(ctl, identify, allow, airAuditFunc(sharedAudit))
 		log.Printf("Air control endpoint on mesh port %d (GET /v1/sessions · POST /v1/steer)", cfg.Control.Port)
 		wg.Add(1)
-		go func() { defer wg.Done(); _ = http.Serve(ln, h) }()
+		// Read/header timeouts: a mesh peer must not be able to hold the control
+		// listener open with a slow/half-open request (Slowloris).
+		go func() { defer wg.Done(); _ = newLocalHTTPServer("", h).Serve(ln) }()
 	}
 
 	sig := make(chan os.Signal, 1)
@@ -740,7 +761,10 @@ func serveHTTP(client *embed.Client, b *Backend, ln net.Listener, enf *httpEnfor
 		proxy.ServeHTTP(w, r)
 	})
 
-	srv := &http.Server{Handler: handler}
+	// ReadHeaderTimeout bounds a slow/half-open header dribble (Slowloris)
+	// without a Read/Write timeout that would sever legitimate long-lived SSE
+	// streams or large uploads this reverse proxy must pass through.
+	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 	if err := srv.Serve(ln); err != nil &&
 		!errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
 		log.Printf("backend %q: serve: %v", b.Name, err)
