@@ -27,6 +27,11 @@ const (
 	scaffoldControlPort = 9600
 	// scaffoldAuditLog is the default gateway-wide audit ledger path.
 	scaffoldAuditLog = "./audit.jsonl"
+	// scaffoldPairStore is the default paired-peer store path. Its presence
+	// turns pairing on, so `air join` / `air pair` work out of the box: peers
+	// request access and the operator approves, without hand-editing the allow
+	// list. Recognition is identity-only — never an auto-granted tool/control ACL.
+	scaffoldPairStore = "./paired.json"
 	// scaffoldSetupKeyEnv is the env var the generated config reads the mesh
 	// setup key from — the one secret, kept out of the file.
 	scaffoldSetupKeyEnv = "NB_SETUP_KEY"
@@ -102,6 +107,10 @@ func buildScaffoldConfig(opts scaffoldOptions) (*Config, air.ScaffoldSummary, er
 		Control: &ControlConfig{
 			Port:  scaffoldControlPort,
 			Allow: []string{air.DeviceFQDN(device)}, // only this device until you pair peers
+			// Pairing on by default: peers request with `air join`, this device's
+			// operator approves with `air pair approve`. Approval recognizes an
+			// identity; it never widens Allow above or grants a tool ACL.
+			PairStore: scaffoldPairStore,
 		},
 		Backends: backends,
 	}
@@ -237,7 +246,7 @@ func printScaffoldSummary(s air.ScaffoldSummary, created bool) {
 	for _, b := range s.Backends {
 		fmt.Printf("    backend  %s %s\n", b.Name, dim(fmt.Sprintf("(%s, port %d)", b.Transport, b.Port)))
 	}
-	fmt.Println("    pair at  " + cyan(s.PairAddress) + dim("  — peers can request access with `air join` (coming)"))
+	fmt.Println("    pair at  " + cyan(s.PairAddress) + dim("  — peers request access with `air join`; you approve with `air pair approve`"))
 	fmt.Println()
 	if s.SetupKeyFound {
 		fmt.Println("  " + green("✓") + " mesh key detected " + dim("($"+s.SetupKeyEnv+")"))

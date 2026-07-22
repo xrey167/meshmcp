@@ -68,6 +68,14 @@ type ControlConfig struct {
 	// forge attribution, and it fails closed: empty ⇒ no peer may attest, so
 	// receipts stay attributed to the verified connecting peer.
 	OnBehalfAllow []string `yaml:"on_behalf_allow"`
+	// PairStore, when set, enables pairing: peers can request access with
+	// `air join` and an operator approves with `air pair approve`, adding them
+	// to a durable RECOGNIZED-peer store at this path (atomic, audited) WITHOUT
+	// editing the allow list above. Recognition is NOT authorization — a paired
+	// peer is a known identity, never auto-granted the privileged control-steer
+	// allow or any tool ACL (that is grant-on-request, a separate explicit
+	// step). Empty ⇒ pairing off. Approve/deny/revoke are gated on Allow above.
+	PairStore string `yaml:"pair_store"`
 }
 
 // TraceConfig turns on a gateway-wide trace of every MCP message (both
