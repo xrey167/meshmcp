@@ -8,8 +8,15 @@ import (
 	"io"
 	"math/rand"
 	"net"
+	"strings"
 	"time"
 )
+
+// finalizedResumeGrace bounds how long a drained client waits for its local
+// side to finish after discovering the server already finalized the session
+// (see the clean-finalization race in reconnectLoop). It is a ceiling, not a
+// sleep: the wait ends the moment the local close lands.
+const finalizedResumeGrace = 2 * time.Second
 
 // Dialer opens a fresh transport connection to the backend session server.
 // In production this dials over the mesh; in tests it dials loopback.
@@ -159,6 +166,24 @@ func (c *Client) reconnectLoop(ctx context.Context) error {
 		conn, recv, r, err := c.handshake(attemptCtx)
 		if err != nil {
 			if errors.Is(err, errAttachRejected) || errors.Is(err, errInvalidSessionID) || errors.Is(err, errSessionChanged) {
+				// Clean-finalization race, not a lost session: the server may
+				// finalize a completed session (its backend exited after the last
+				// reply) and drop the transport before its best-effort CLOSE frame
+				// reaches us. Our redial then finds the session gone. When
+				// everything we sent was acknowledged (drained) there is nothing a
+				// resume could recover — the only open question is whether our
+				// LOCAL side is also done. Give it a short grace: if the local
+				// close arrives (it ends the endpoint via sendClose), the session
+				// ended cleanly on both sides; only a local side that still wanted
+				// the session gets the hard error, exactly as before.
+				if strings.Contains(err.Error(), errSessionNotFound.Error()) && c.ep.drained() {
+					select {
+					case <-c.ep.Done():
+						return c.ep.closeError()
+					case <-time.After(finalizedResumeGrace):
+					case <-ctx.Done():
+					}
+				}
 				c.ep.closeWith(err)
 				return err
 			}
