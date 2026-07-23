@@ -44,6 +44,23 @@ type Record struct {
 	Peer string `json:"peer,omitempty"` // asserting WireGuard identity
 	Time string `json:"time,omitempty"`
 
+	// Record-level provenance and scoping (Air Knowledge System, Phase 1). All
+	// three are additive and omitempty: a record written without them marshals
+	// byte-identically to the pre-extension format, so old logs still hash and
+	// Verify unchanged, while new records fold these fields into ChainHash.
+	//
+	//   - Corpus is the subgraph/corpus the fact belongs to. Visibility is scoped
+	//     per record: readers granted a corpus see only records labeled with it (a
+	//     corpus-less record stays private to its asserting Peer's default
+	//     subgraph — enforcement lives in air/knowstore, deny-by-default).
+	//   - Source is the doc/URI the fact was extracted from (distinct from Peer).
+	//   - ValidFrom is the bi-temporal valid-from. Both are part of the stable
+	//     KnowHash preimage (S2), so persisting them makes an assert receipt
+	//     recomputable from the stored record.
+	Corpus    string `json:"corpus,omitempty"`
+	Source    string `json:"source,omitempty"`
+	ValidFrom string `json:"valid_from,omitempty"`
+
 	PrevHash string `json:"prev_hash"`
 	Hash     string `json:"hash,omitempty"`
 }
@@ -106,7 +123,8 @@ func newID() string {
 }
 
 // appendRecord links a record into the chain and persists it. It is unexported:
-// the only entry points that extend the chain are Assert and Delete, so the
+// the only entry points that extend the chain are Assert/AssertProv, Delete, and
+// ApplyDelta (which re-appends replica records through this same path), so the
 // hash chain can never be advanced out from under those invariants.
 func (s *Store) appendRecord(r Record) (Record, error) {
 	s.seq++
@@ -137,14 +155,26 @@ func (s *Store) appendRecord(r Record) (Record, error) {
 	return r, nil
 }
 
-// Assert records a new triple stamped with peer, returning it.
+// Assert records a new triple stamped with peer, returning it. It is the
+// legacy entry point (no corpus/provenance fields) and delegates to AssertProv
+// with empties, so existing callers keep their exact record shape.
 func (s *Store) Assert(sub, pred, obj, peer string) (Record, error) {
+	return s.AssertProv(sub, pred, obj, peer, "", "", "")
+}
+
+// AssertProv records a new triple stamped with peer plus record-level corpus
+// scoping and provenance (Source, ValidFrom). Empty extras produce a record
+// byte-identical to Assert's, so the two share one chain format.
+func (s *Store) AssertProv(sub, pred, obj, peer, corpus, source, validFrom string) (Record, error) {
 	if sub == "" || pred == "" || obj == "" {
 		return Record{}, fmt.Errorf("subject, predicate, and object are all required")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.appendRecord(Record{Op: "assert", ID: newID(), S: sub, P: pred, O: obj, Peer: peer})
+	return s.appendRecord(Record{
+		Op: "assert", ID: newID(), S: sub, P: pred, O: obj, Peer: peer,
+		Corpus: corpus, Source: source, ValidFrom: validFrom,
+	})
 }
 
 // Delete tombstones the triple with the given id.
@@ -267,4 +297,63 @@ func Merge(logs ...[]Record) []Record {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
+}
+
+// DeltaSince returns a snapshot of every record with Seq > since — the delta a
+// replica sends a peer that last synced at that watermark. since <= 0 returns
+// the whole log. The returned slice is a copy in sequence order; mutating it
+// cannot touch the store.
+func (s *Store) DeltaSince(since int) []Record {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []Record
+	for _, r := range s.recs {
+		if r.Seq > since {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// ApplyDelta reconciles replica records into this store, wiring the Merge CRDT
+// to real logs: each incoming (ID, Op) pair the local log lacks is RE-APPENDED
+// through the normal chain path, preserving the record's content
+// (S/P/O/Peer/Corpus/Source/ValidFrom) and — critically — its Op, so TOMBSTONES
+// survive a sync round-trip (a delete record is re-appended as a delete, and the
+// local Active fold then hides the fact exactly as it does on the origin).
+//
+// Seq, Time, PrevHash, and Hash are recomputed locally: every replica keeps its
+// OWN verifiable hash chain (Verify passes after every apply), and cross-replica
+// identity rides the stable KnowHash content address (S2), never the chain hash.
+//
+// Idempotent and order-insensitive: re-applying a delta appends nothing, and two
+// replicas that apply each other's deltas in any order converge to the same
+// Active set (the OR-set-with-tombstones semantics Merge proves). It returns how
+// many records were appended.
+func (s *Store) ApplyDelta(recs []Record) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	have := make(map[string]bool, len(s.recs))
+	for _, r := range s.recs {
+		have[r.Op+"\x00"+r.ID] = true
+	}
+	applied := 0
+	for _, r := range recs {
+		if r.ID == "" || (r.Op != "assert" && r.Op != "delete") {
+			continue // refuse malformed replica records rather than chain them
+		}
+		key := r.Op + "\x00" + r.ID
+		if have[key] {
+			continue
+		}
+		if _, err := s.appendRecord(Record{
+			Op: r.Op, ID: r.ID, S: r.S, P: r.P, O: r.O, Peer: r.Peer,
+			Corpus: r.Corpus, Source: r.Source, ValidFrom: r.ValidFrom,
+		}); err != nil {
+			return applied, err
+		}
+		have[key] = true
+		applied++
+	}
+	return applied, nil
 }

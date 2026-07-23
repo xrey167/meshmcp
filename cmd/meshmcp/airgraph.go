@@ -8,10 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/xrey167/meshmcp/air/checkpoint"
 	"github.com/xrey167/meshmcp/air/egress"
 	"github.com/xrey167/meshmcp/air/graph"
+	"github.com/xrey167/meshmcp/air/know"
 	"github.com/xrey167/meshmcp/policy"
 )
 
@@ -35,6 +37,66 @@ type graphRunner struct {
 	exec   toolExecutor
 	caller egress.Caller
 	runID  string
+
+	// audit is the shared hash-chained ledger the runner emits its OWN records
+	// to (graph.cosign park/release, wall-clock stops); the gateway and the
+	// checkpoint store audit through their own handles to the same sink. nil =
+	// those runner events go unrecorded (tests may pass nil).
+	audit policy.AuditSink
+	// approvals is the request-bound approval store consulted when a call comes
+	// back cosign: a signed, single-use approval bound to the EXACT
+	// (peer, backend, tool, args) — run-scoped first, then the approver's
+	// session-less form — releases the parked call. nil = park-only (no store,
+	// nothing ever releases).
+	approvals policy.RequestApprovalStore
+	// now supplies approval-expiry time; nil = time.Now.
+	now func() time.Time
+}
+
+func (r *graphRunner) nowT() time.Time {
+	if r.now != nil {
+		return r.now()
+	}
+	return time.Now()
+}
+
+// auditEvent appends one runner-level knowledge-op record (best-effort; the
+// governance outcome never depends on the sink).
+func (r *graphRunner) auditEvent(mk func(know.Event) policy.AuditRecord, decision, reason, corpus string, provenance []string) {
+	if r.audit == nil {
+		return
+	}
+	_ = r.audit.Append(mk(know.Event{
+		Peer:       r.caller.PeerFQDN,
+		PeerKey:    r.caller.PeerKey,
+		Corpus:     corpus,
+		Decision:   decision,
+		Reason:     reason,
+		Provenance: provenance,
+	}))
+}
+
+// consumeApproval atomically consumes a request-bound approval for this exact
+// node call, if one exists. It tries the RUN-BOUND binding first (session =
+// runID — an approval scoped to this specific run), then the SESSION-LESS
+// binding the standard approver mints (policy.Pending.ApprovalRequest leaves
+// Session unset). Both are exact-argument-bound: a changed argument, backend,
+// tool, or peer is a different binding and matches nothing. Single-use is the
+// store's guarantee — a consumed approval is spent.
+func (r *graphRunner) consumeApproval(n graph.NodeDef, args []byte) (bool, string) {
+	if r.approvals == nil {
+		return false, "no approval store configured"
+	}
+	now := r.nowT()
+	runBound := policy.NewApprovalRequest(r.caller.PeerKey, n.Backend, n.Tool, args, r.runID)
+	if ok, _ := r.approvals.ConsumeApproval(runBound, now); ok {
+		return true, "run-bound approval consumed"
+	}
+	sessionless := policy.NewApprovalRequest(r.caller.PeerKey, n.Backend, n.Tool, args, "")
+	if ok, _ := r.approvals.ConsumeApproval(sessionless, now); ok {
+		return true, "request-bound approval consumed"
+	}
+	return false, "no matching approval"
 }
 
 // toolExecutor performs the raw tool call a node makes. The Gateway decides
@@ -86,6 +148,30 @@ func (r *graphRunner) resume(ctx context.Context) (runOutcome, error) {
 	}
 	state := pr.State
 
+	// Re-seed the fresh per-run gateway with the persisted taint labels, so the
+	// monotonic taint lattice holds ACROSS the resume: a label emitted before
+	// the park/crash still blocks a later egress decision in this process.
+	r.gw.Taint(labelList(state.Labels)...)
+
+	// A parked cosign run must resume as EXACTLY the parked call: rebuild the
+	// binding key from the persisted definition at the cursor and require it to
+	// match the persisted Pending key. A mismatch means the definition or
+	// arguments drifted since the park — refuse rather than silently re-decide
+	// (and possibly release an approval against) a different call.
+	if pr.Pending != "" {
+		nodeDef, ok := r.def.Node(state.Cursor)
+		if !ok {
+			return runOutcome{}, fmt.Errorf("air graph resume: parked cursor at unknown node %q", state.Cursor)
+		}
+		args, err := json.Marshal(orEmpty(nodeDef.Args))
+		if err != nil {
+			return runOutcome{}, fmt.Errorf("air graph resume: marshal parked args: %w", err)
+		}
+		if idemKey(r.caller, nodeDef.Backend, nodeDef.Tool, args) != pr.Pending {
+			return runOutcome{}, fmt.Errorf("air graph resume: parked cosign binding mismatch at node %q — the definition or arguments no longer match the parked call; refusing to re-decide", state.Cursor)
+		}
+	}
+
 	if cp.Intent != nil && cp.Intent.NodeID == state.Cursor {
 		// The side-effecting node was in-flight when the run stopped. Do not
 		// re-fire it (at-most-once): record it as resumed-and-skipped, advance.
@@ -113,12 +199,26 @@ func (r *graphRunner) resume(ctx context.Context) (runOutcome, error) {
 // pre-execution intent, makes the node's tool call through the Gateway, and acts
 // on the real policy Decision: a deny (including a budget halt) TERMINATES the
 // bounded loop; a cosign PARKS the run (checkpoint written, loop stops) for a
-// human co-sign; an allow reduces the output into new state, checkpoints it, and
-// lets the pure Step choose the next node. The loop cannot run away: Step enforces
-// convergence, the hard max-iteration cap, and the cost mirror, and the Gateway
-// halts on budget.
+// human co-sign — unless a signed, single-use, argument-bound approval for this
+// exact call is consumed, which RELEASES it (executed once, audited as a
+// graph.cosign allow); an allow reduces the output into new state, checkpoints
+// it, and lets the pure Step choose the next node. The loop cannot run away:
+// Step enforces convergence, the hard max-iteration cap, and the cost mirror,
+// the Gateway halts on budget, and the context deadline is the wall-clock bound
+// — checked every hop, checkpointing a resumable "timeout" stop.
 func (r *graphRunner) loop(ctx context.Context, state graph.GraphState) (runOutcome, error) {
 	for {
+		// Wall-clock bound (the fourth termination criterion): an expired or
+		// cancelled context stops the run BEFORE the next governed call, with
+		// the state checkpointed so the run is resumable.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			if err := r.save(state, nil, ""); err != nil {
+				return runOutcome{}, err
+			}
+			r.auditEvent(know.NodeEnter, "deny", "wall_clock: "+ctxErr.Error(), state.Cursor, nil)
+			return runOutcome{State: state, Reason: "timeout", Node: state.Cursor}, nil
+		}
+
 		nodeDef, ok := r.def.Node(state.Cursor)
 		if !ok {
 			return runOutcome{}, fmt.Errorf("air graph: cursor at unknown node %q", state.Cursor)
@@ -162,12 +262,47 @@ func (r *graphRunner) loop(ctx context.Context, state graph.GraphState) (runOutc
 			return runOutcome{State: state, Reason: reason, Node: nodeDef.ID}, nil
 
 		case policy.OutcomeCosign:
-			// Not-yet-allowed: nothing executed. Clear the intent (the effect did
-			// NOT fire) and PARK the run bound to this exact call, then stop.
+			pending := idemKey(r.caller, nodeDef.Backend, nodeDef.Tool, args)
+			released, why := r.consumeApproval(nodeDef, args)
+			if released {
+				// RELEASE: a signed, single-use approval bound to this exact
+				// call was consumed. Policy is not bypassed — the engine still
+				// said cosign; the human's argument-bound approval IS the
+				// authorization to execute this one call, once. Audit the
+				// consumption as graph.cosign allow, then execute THROUGH the
+				// gateway's Release so the matched rule's effects still bind:
+				// its cost is budget-checked and spent, its emit-labels taint
+				// the run (a released taint_source still blocks later guarded
+				// egress), and the returned decision carries both for the
+				// state fold below. The intent bracket stays pending through
+				// the effect, exactly like an allowed call.
+				r.auditEvent(know.Cosign, "allow", why+" — human release of parked call at node "+nodeDef.ID, nodeDef.Tool, []string{pending})
+				dec, result, callErr = r.gw.Release(r.caller, nodeDef.Tool, dec, func() ([]byte, error) {
+					return r.exec.Do(ctx, nodeDef.Backend, nodeDef.Tool, args)
+				})
+				if dec.Outcome == policy.OutcomeDeny {
+					// The released call's own cost would breach the run cap:
+					// the bounds outrank the human release. Nothing executed —
+					// clear the intent, persist, and halt like any budget stop
+					// (the consumed approval stays spent; deny-by-default).
+					if nodeDef.SideEffecting {
+						_ = r.store.CommitIntent(r.runID, r.caller.PeerKey)
+					}
+					if err := r.save(state, nil, ""); err != nil {
+						return runOutcome{}, err
+					}
+					return runOutcome{State: state, Reason: "budget", Node: nodeDef.ID}, nil
+				}
+				break
+			}
+			// PARK: not-yet-allowed and no approval. Nothing executed — clear
+			// the intent (the effect did NOT fire), audit the park as a
+			// graph.cosign record, persist the run bound to this exact call,
+			// and stop.
 			if nodeDef.SideEffecting {
 				_ = r.store.CommitIntent(r.runID, r.caller.PeerKey)
 			}
-			pending := idemKey(r.caller, nodeDef.Backend, nodeDef.Tool, args)
+			r.auditEvent(know.Cosign, "cosign", "parked for human co-sign at node "+nodeDef.ID+" ("+why+")", nodeDef.Tool, []string{pending})
 			if err := r.save(state, nil, pending); err != nil {
 				return runOutcome{}, err
 			}

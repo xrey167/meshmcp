@@ -47,10 +47,12 @@ func cmdAirRag(args []string) error {
 		return cmdAirRagIngest(args[1:])
 	case "search":
 		return cmdAirRagSearch(args[1:])
+	case "eval":
+		return cmdAirRagEval(args[1:])
 	case "-h", "--help", "help":
 		return ragUsage()
 	default:
-		return fmt.Errorf("meshmcp air rag: unknown subcommand %q (want serve | ingest | search)", args[0])
+		return fmt.Errorf("meshmcp air rag: unknown subcommand %q (want serve | ingest | search | eval)", args[0])
 	}
 }
 
@@ -59,6 +61,8 @@ func ragUsage() error {
 	fmt.Fprintln(os.Stderr, "  "+bold("air rag serve")+"   --port N --index f [--allow id] [--grant id=c,c] [--audit f] [--embed-url u --embed-model m [--embed-key-env E]]")
 	fmt.Fprintln(os.Stderr, "  "+bold("air rag ingest")+"  <backend-ip:port> --corpus c [PATH ...]   "+dim("chunk + index documents (stdin if no PATH)"))
 	fmt.Fprintln(os.Stderr, "  "+bold("air rag search")+"  <backend-ip:port> --corpus c [--k N] [--json] \"query\"")
+	fmt.Fprintln(os.Stderr, "  "+bold("air rag eval")+"    <backend-ip:port> --corpus c --gold gold.jsonl [--k N] [--min-precision F] [--min-recall F] [--json]")
+	fmt.Fprintln(os.Stderr, dim("                  deterministic context precision/recall vs a gold set — the CI gate (no LLM)"))
 	fmt.Fprintln(os.Stderr, dim("  v1 = governed hybrid RETRIEVAL (dense + BM25 + RRF). Answer generation is deferred (requires an LLM backend)."))
 	return nil
 }

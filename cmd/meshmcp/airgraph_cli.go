@@ -54,7 +54,8 @@ func airGraphUsage() error {
 	fmt.Fprintln(os.Stderr, "  "+bold("air graph inspect")+" --state-dir <d> --run-id <id> [--verify] "+dim("replay a run's state/step and audit tail"))
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, dim("Every node's tool call is firewalled + budget-counted through the egress gateway,"))
-	fmt.Fprintln(os.Stderr, dim("every step is checkpointed, and the loop is bounded (max-iter · budget · goal)."))
+	fmt.Fprintln(os.Stderr, dim("every step is checkpointed, and the loop is bounded (max-iter · budget · wall-clock · goal)."))
+	fmt.Fprintln(os.Stderr, dim("A parked cosign node releases only via a signed, single-use, argument-bound approval (--approvals + --approval-key)."))
 	return nil
 }
 
@@ -68,6 +69,9 @@ func cmdAirGraphRun(args []string) error {
 	runID := fs.String("run-id", "", "run id / checkpoint key (default: a fresh time-based id)")
 	budget := fs.Int("budget", 500000, "cumulative cost ceiling; the gateway halts the loop when a call would breach it")
 	maxIters := fs.Int("max-iters", 0, "override the graph's max_iterations (0 = use the graph's, else the safe default)")
+	timeout := fs.Duration("timeout", defaultGraphTimeout, "wall-clock bound for the whole run; on expiry the run checkpoints and stops resumable (zero/negative coerced to the default, never unbounded)")
+	approvalsDir := fs.String("approvals", "", "request-bound approval store directory; a parked cosign node is released only by consuming a signed single-use approval from it")
+	approvalKey := fs.String("approval-key", "", "Ed25519 key file pinning the approval signer (shared with the approver); required with --approvals")
 	dryRun := fs.Bool("dry-run", false, "parse, compile, and print the node/edge plan without joining the mesh or running")
 	jsonOut := fs.Bool("json", false, "print a machine-readable run summary")
 	if err := fs.Parse(args); err != nil {
@@ -93,6 +97,10 @@ func cmdAirGraphRun(args []string) error {
 	}
 	if warn != "" {
 		fmt.Fprintln(os.Stderr, amber("warning: ")+dim(warn))
+	}
+	approvals, err := openGraphApprovals(*approvalsDir, *approvalKey)
+	if err != nil {
+		return err
 	}
 
 	o.BlockInbound = true
@@ -122,16 +130,20 @@ func cmdAirGraphRun(args []string) error {
 		return fmt.Errorf("air graph run: checkpoint store: %w", err)
 	}
 	r := &graphRunner{
-		def:    def,
-		graph:  g,
-		gw:     egress.NewGateway(engine, audit, *budget),
-		store:  store,
-		exec:   &meshExecutor{client: client},
-		caller: caller,
-		runID:  id,
+		def:       def,
+		graph:     g,
+		gw:        egress.NewGateway(engine, audit, *budget),
+		store:     store,
+		exec:      &meshExecutor{client: client},
+		caller:    caller,
+		runID:     id,
+		audit:     audit,
+		approvals: approvals,
 	}
-	log.Printf("graph %q run %s: entry=%s max_iters=%d budget=%d", def.Name, id, g.Entry, g.Bounds.MaxIterations, *budget)
-	out, err := r.start(context.Background())
+	log.Printf("graph %q run %s: entry=%s max_iters=%d budget=%d timeout=%s", def.Name, id, g.Entry, g.Bounds.MaxIterations, *budget, graphTimeout(*timeout))
+	ctx, cancel := context.WithTimeout(context.Background(), graphTimeout(*timeout))
+	defer cancel()
+	out, err := r.start(ctx)
 	if err != nil {
 		return err
 	}
@@ -146,6 +158,9 @@ func cmdAirGraphResume(args []string) error {
 	auditPath := fs.String("audit", "", "append the run's audit records to this file")
 	stateDir := fs.String("state-dir", "", "directory holding the run checkpoint (required)")
 	runID := fs.String("run-id", "", "run id to resume (required)")
+	timeout := fs.Duration("timeout", defaultGraphTimeout, "wall-clock bound for the resumed run (zero/negative coerced to the default, never unbounded)")
+	approvalsDir := fs.String("approvals", "", "request-bound approval store directory; a parked cosign node is released only by consuming a signed single-use approval from it")
+	approvalKey := fs.String("approval-key", "", "Ed25519 key file pinning the approval signer (shared with the approver); required with --approvals")
 	jsonOut := fs.Bool("json", false, "print a machine-readable run summary")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -162,6 +177,10 @@ func cmdAirGraphResume(args []string) error {
 	}
 	if warn != "" {
 		fmt.Fprintln(os.Stderr, amber("warning: ")+dim(warn))
+	}
+	approvals, err := openGraphApprovals(*approvalsDir, *approvalKey)
+	if err != nil {
+		return err
 	}
 
 	o.BlockInbound = true
@@ -190,15 +209,19 @@ func cmdAirGraphResume(args []string) error {
 		return err
 	}
 	r := &graphRunner{
-		def:    def,
-		graph:  g,
-		gw:     egress.NewGateway(engine, audit, budget),
-		store:  store,
-		exec:   &meshExecutor{client: client},
-		caller: caller,
-		runID:  *runID,
+		def:       def,
+		graph:     g,
+		gw:        egress.NewGateway(engine, audit, budget),
+		store:     store,
+		exec:      &meshExecutor{client: client},
+		caller:    caller,
+		runID:     *runID,
+		audit:     audit,
+		approvals: approvals,
 	}
-	out, err := r.resume(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), graphTimeout(*timeout))
+	defer cancel()
+	out, err := r.resume(ctx)
 	if err != nil {
 		return err
 	}
@@ -224,6 +247,41 @@ func cmdAirGraphInspect(args []string) error {
 		return errors.New("air graph inspect: --run-id is required")
 	}
 	return inspectRun(*stateDir, *runID, *auditPath, *verify, *jsonOut)
+}
+
+// defaultGraphTimeout is the wall-clock bound applied when none (or a
+// non-positive one) is configured — fail-closed: a run can never be configured
+// unbounded in time, mirroring graph.DefaultMaxIterations for iterations.
+const defaultGraphTimeout = 10 * time.Minute
+
+// graphTimeout coerces a zero/negative configured timeout to the safe default.
+func graphTimeout(d time.Duration) time.Duration {
+	if d <= 0 {
+		return defaultGraphTimeout
+	}
+	return d
+}
+
+// openGraphApprovals opens the request-bound approval store that can release a
+// parked cosign node. Fail-closed pairing: --approvals without --approval-key
+// is refused outright — with no pinned signer every consume would fail
+// verification yet still SPEND the claimed approval file, silently burning
+// grants. No dir = nil store = park-only.
+func openGraphApprovals(dir, keyPath string) (policy.RequestApprovalStore, error) {
+	if dir == "" {
+		if keyPath != "" {
+			return nil, errors.New("air graph: --approval-key requires --approvals")
+		}
+		return nil, nil
+	}
+	if keyPath == "" {
+		return nil, errors.New("air graph: --approvals requires --approval-key (the pinned approval signer); refusing a store that would burn approvals it cannot verify")
+	}
+	signer, err := policy.LoadSigner(keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("air graph: --approval-key %s: %w", keyPath, err)
+	}
+	return policy.NewFileApprovalStore(dir, 0, signer), nil
 }
 
 // loadGraphDef reads, parses, compiles, and validates a graph definition. A
