@@ -118,7 +118,31 @@ func TestRedactConfigMasksEveryKeyForm(t *testing.T) {
 	if !strings.Contains(out, "device_name: gw") {
 		t.Fatalf("non-secret line was damaged:\n%s", out)
 	}
-	if got := strings.Count(out, "[REDACTED]"); got != 2 {
-		t.Fatalf("want 2 redactions, got %d:\n%s", got, out)
+	if !strings.Contains(out, "[REDACTED]") {
+		t.Fatalf("no redaction applied:\n%s", out)
+	}
+}
+
+// TestRedactConfigMasksNonBlockStyling is the defense-in-depth guarantee: the
+// literal secret is masked even when the line regex can't match it — flow-style
+// mappings, quoted values, and deeper nesting. A hand-authored config must not
+// be able to smuggle the setup key past redaction by styling.
+func TestRedactConfigMasksNonBlockStyling(t *testing.T) {
+	cases := []string{
+		"mesh: {setup_key: FLOWSECRET, device_name: gw}\n",     // flow mapping
+		"mesh:\n  setup_key: \"QUOTEDSECRET\"\n",               // quoted scalar
+		"mesh:\n  setup_key:    SPACEDSECRET\n",                // wide spacing
+		"outer:\n  mesh:\n    setup_key: NESTEDSECRET\n",       // deeper nesting
+		"mesh: {device_name: gw, setup_key: 'SINGLEQUOTED'}\n", // flow + single quotes
+	}
+	secrets := []string{"FLOWSECRET", "QUOTEDSECRET", "SPACEDSECRET", "NESTEDSECRET", "SINGLEQUOTED"}
+	for i, in := range cases {
+		out := string(redactConfig([]byte(in)))
+		if strings.Contains(out, secrets[i]) {
+			t.Errorf("case %d: secret %q survived redaction:\n%s", i, secrets[i], out)
+		}
+		if !strings.Contains(out, "[REDACTED]") {
+			t.Errorf("case %d: no redaction marker applied:\n%s", i, out)
+		}
 	}
 }

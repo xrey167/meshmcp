@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/xrey167/meshmcp/policy"
 )
 
@@ -177,12 +179,58 @@ func collectDiag(cfgPath string) []diagFile {
 	return files
 }
 
-// redactSetupKey masks the value of any `setup_key:` line while keeping the key
-// name visible, so a shared config never leaks the one irreducible secret.
+// redactSetupKey masks the value of any block-style `setup_key:` line while
+// keeping the key name visible, so the common config stays readable in a bundle
+// with only the one irreducible secret hidden.
 var redactSetupKey = regexp.MustCompile(`(?m)^(\s*setup_key\s*:).*$`)
 
+// redactConfig masks the mesh setup key — the only inline secret a gateway
+// config can hold — before the config ships in a support bundle. Defense in
+// depth: the line regex handles the common block-style form readably, and a
+// structural pass then masks the ACTUAL secret value wherever it appears (any
+// depth, flow-style `{setup_key: X}`, quoted, etc.), so no YAML styling can slip
+// the secret past the line matcher. Every other credential-shaped config field
+// is a path or a store-name reference, never an inline value, so nothing else
+// needs masking.
 func redactConfig(raw []byte) []byte {
-	return redactSetupKey.ReplaceAll(raw, []byte("$1 '[REDACTED]'"))
+	out := redactSetupKey.ReplaceAll(raw, []byte("$1 '[REDACTED]'"))
+	for _, secret := range setupKeyValues(raw) {
+		if secret != "" {
+			out = bytes.ReplaceAll(out, []byte(secret), []byte("[REDACTED]"))
+		}
+	}
+	return out
+}
+
+// setupKeyValues extracts every setup_key scalar value from the config at any
+// nesting/style by parsing it, so redactConfig can mask the literal secret
+// bytes. Parse failures yield nothing (the line regex still applied).
+func setupKeyValues(raw []byte) []string {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return nil
+	}
+	var out []string
+	var walk func(n *yaml.Node)
+	walk = func(n *yaml.Node) {
+		if n == nil {
+			return
+		}
+		if n.Kind == yaml.MappingNode {
+			for i := 0; i+1 < len(n.Content); i += 2 {
+				if n.Content[i].Value == "setup_key" && n.Content[i+1].Kind == yaml.ScalarNode {
+					if v := strings.TrimSpace(n.Content[i+1].Value); v != "" {
+						out = append(out, v)
+					}
+				}
+			}
+		}
+		for _, c := range n.Content {
+			walk(c)
+		}
+	}
+	walk(&doc)
+	return out
 }
 
 // captureDoctor runs the doctor checks with stdout captured, so the bundle
