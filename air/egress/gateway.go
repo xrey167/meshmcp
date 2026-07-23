@@ -148,6 +148,88 @@ func (g *Gateway) Call(caller Caller, backend, tool string, args []byte, execute
 	return dec, result, auditErr
 }
 
+// Release executes a call the engine held as OutcomeCosign after the caller
+// consumed a signed, single-use, argument-bound human approval for it. Policy
+// is NOT re-decided — dec must be this gateway's own fresh cosign verdict for
+// the exact call, and the consumed approval is the authorization — but the
+// run's bounds still hold exactly as for an allowed call: the matched rule's
+// effects (emit-labels + cost) are recovered from the engine
+// (policy.Engine.RuleEffects), the cost is budget-checked BEFORE executing (a
+// breach halts the call unexecuted, audited as a deny), spend is reserved and
+// refunded if execute fails, and on success the labels merge monotonically
+// into the run taint set and an allow record lands on the chain. Without this,
+// a human-released call would be the one governed call whose taint and cost
+// escape the loop's lattice and budget — a rule that is both require_cosign
+// and taint_source would let its release bypass every downstream taint guard.
+//
+// The returned Decision is the release verdict: on success an OutcomeAllow
+// carrying the folded AddLabels+Cost (so a runner mirrors the same truth into
+// its state), on a budget breach an OutcomeDeny halt. Fail-closed guards: a
+// non-cosign dec, or a dec whose RuleID no longer names a rule in the active
+// policy (effects unknowable), refuses without executing.
+func (g *Gateway) Release(caller Caller, tool string, dec policy.Decision, execute func() ([]byte, error)) (policy.Decision, []byte, error) {
+	if dec.Outcome != policy.OutcomeCosign {
+		return dec, nil, fmt.Errorf("egress: release %q: decision is %s, not cosign — refusing to execute", tool, dec.Outcome)
+	}
+	labels, cost, ok := g.engine.RuleEffects(dec.RuleID)
+	if !ok {
+		return dec, nil, fmt.Errorf("egress: release %q: rule %d is not in the active policy; cannot determine the call's taint/cost effects — refusing to execute", tool, dec.RuleID)
+	}
+	rel := policy.Decision{Allow: true, RuleID: dec.RuleID, Outcome: policy.OutcomeAllow,
+		Reason: "human co-sign released", AddLabels: labels, Cost: cost}
+
+	// Budget pre-check + reservation under the lock, exactly as Call's allow
+	// path: a released call is still bounded by the run cap.
+	g.mu.Lock()
+	if g.spent+cost > g.budget {
+		reason := fmt.Sprintf("budget exceeded: released call cost %d + spent %d exceeds cap %d", cost, g.spent, g.budget)
+		g.mu.Unlock()
+		halt := policy.Decision{RuleID: dec.RuleID, Outcome: policy.OutcomeDeny, Reason: reason, Cost: cost}
+		auditErr := g.audit(caller, tool, "deny", reason, 0)
+		return halt, nil, joinErr(fmt.Errorf("egress: %s", reason), auditErr)
+	}
+	g.spent += cost
+	g.mu.Unlock()
+
+	result, err := execute()
+	if err != nil {
+		// Refund and add no taint: a failed release neither spent nor touched.
+		g.mu.Lock()
+		g.spent -= cost
+		g.mu.Unlock()
+		return rel, nil, fmt.Errorf("egress: execute released %q: %w", tool, err)
+	}
+
+	g.mu.Lock()
+	for _, l := range labels {
+		g.labels[l] = true
+	}
+	g.mu.Unlock()
+
+	auditErr := g.audit(caller, tool, "allow", rel.Reason, cost)
+	return rel, result, auditErr
+}
+
+// Taint merges labels into the run's accumulated taint set, exactly as a
+// successful governed call's Decision.AddLabels would. It exists for the one
+// place taint legitimately enters OUTSIDE Call: the graph runner re-seeding a
+// fresh per-run gateway from a checkpoint's persisted labels on resume (so the
+// monotonic lattice holds ACROSS process restarts, not only within one). A
+// human-released cosign call taints through Release, not here. Monotonic by
+// construction — labels are only ever added, never cleared.
+func (g *Gateway) Taint(labels ...string) {
+	if len(labels) == 0 {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, l := range labels {
+		if l != "" {
+			g.labels[l] = true
+		}
+	}
+}
+
 // Labels returns a copy of the run's accumulated taint/data-flow label set. The
 // internal map is never exposed, so callers cannot mutate the taint state.
 func (g *Gateway) Labels() map[string]bool {

@@ -15,13 +15,13 @@ content lands in BACKLOG.md.
 | 3 | Approvals hosting decision | **done** | Decided: gateway-colocated; rationale in AIR-ECOSYSTEM.md |
 | 4 | Steer hosting decision | **done** | Decided (a): agent-runtime concern; rationale in AIR-ECOSYSTEM.md (shipped with task 3) |
 | 5 | Transactional Handoff v2 | **done** | prepare/ready/commit live move; commit = one TakeoverLease CAS gated on a single-use grant; source serves until swap; crash matrix + concurrency ×20; critical concurrent-commit finding fixed |
-| 6 | Spaces / `group:` fan-out | todo | |
+| 6 | Spaces / `group:` fan-out | **done** | group: resolves to members via /v1/groups; per-member independently governed steer/ring fan-out; group never authority |
 | 7 | Idempotency-key enforcement | **done** | mcp.Idempotency middleware + Mem/PG claim stores; review fixed (tool,key) scoping |
 | 8 | Lease renewal + standby sweep | **done** | Always-on renewal, release-on-shutdown, opt-in standby adoption at 2xTTL margin; 5 review findings fixed |
 | 9 | HTTP per-session policy parity | **done** | Taint + secrets + capabilities on Streamable HTTP; per-session state, SSE redaction; refused features still refused |
-| 10 | AKS pillars 1–3 | todo | Phase 4 stays deferred by design |
-| 11 | F25 multi-tenant control plane | todo | |
-| 12 | F31 SSO/OIDC mapping | todo | |
+| 10 | AKS pillars 1–3 | **done** | Record-level subgraph scoping + provenance, supersede/alias, RAG entity-linking, governed graph loop; Phase 4 deferred |
+| 11 | F25 multi-tenant control plane | **v1 done** | Per-tenant policy/registry/enrollment/audit keyed on transport identity in the authorize chokepoint; per-tenant RBAC (no cross-tenant super-role); one hash chain per tenant; deny-by-default; single-tenant byte-identical. Full isolation matrix in control/tenant_test.go. Honest boundary: shared NetBird PAT (groups+attribution, not account isolation), shared anchor witness. See MULTI-TENANT.md |
+| 12 | F31 SSO/OIDC mapping | **done** | Verified OIDC claim -> transport-key-bound additive attribution; SSO groups drive policy group: rules; transport stays root; 0 review findings |
 | 13 | F30 drag-to-handoff | todo | Blocked on 5 until 5 ships |
 | 14 | Native mobile shell + APNs/FCM | **blocked** | Needs mobile toolchain + physical device |
 | 15 | S33 govulncheck in CI | **blocked-CI** | Workflow YAML can be pre-staged; unverifiable until 1 |
@@ -29,7 +29,7 @@ content lands in BACKLOG.md.
 | 17 | Backend secret-egress restriction | todo | Containment scope per threat model |
 | 18 | OTel/OTLP exporter | **done** | Zero-dep OTLP/HTTP logs sink; drop-not-block proven; bounded shutdown drain |
 | 19 | Wave-2 minors | in-progress | Batch A done (S19 jti replay, S21 bounded dash tail, S51 audit rotation, S49 config lint); batch B queued |
-| 20 | Placeholder modules | todo | Doctor implementable; sibling modules have no git remote — local + documented |
+| 20 | Placeholder modules | **done (scoped)** | meshmcp-app: decided no purpose (WORKSPACE-MODULES.md); cross-store doctor scoped, blocked-external (meshmcp-service has no git remote to ship to) |
 | 21 | Router delegation wiring | **done** | Minted per-call, verified when pinned, caller from token; review fixed side-effecting caller-leg |
 | 22 | Postgres CAS in CI | **blocked-CI** | Workflow YAML can be pre-staged; unverifiable until 1 |
 | 23 | Fenced-dispatch regression test | **done** | Bound proven in handshake + backend modes |

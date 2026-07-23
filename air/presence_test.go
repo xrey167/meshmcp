@@ -1001,3 +1001,39 @@ func TestResolvePresenceBoundsAndDoesNotReflectSelectors(t *testing.T) {
 		})
 	}
 }
+
+// TestGroupSelectorPrefixReserved proves no single-target resolver can ever
+// resolve a `group:`-prefixed selector — even when a presence card literally
+// names itself "group:x" — so the group fan-out grammar cannot be shadowed by
+// client-authored presentation metadata. Fail closed, like the pubkey: carve-out.
+func TestGroupSelectorPrefixReserved(t *testing.T) {
+	shadow := Presence{
+		Name:      "group:oncall",
+		FQDN:      "shadow.mesh.example",
+		PublicKey: "shadow-key",
+		Services:  []Service{{Kind: ServiceRing, Port: 9120, Address: "192.0.2.9:9120"}},
+	}
+
+	for _, selector := range []string{"group:oncall", "group:", "  group:oncall  "} {
+		t.Run("selector "+strings.TrimSpace(selector), func(t *testing.T) {
+			if err := ValidatePresenceSelector(selector); err == nil || !strings.Contains(err.Error(), "reserved for group fan-out") {
+				t.Fatalf("ValidatePresenceSelector(%q) = %v, want reserved-prefix error", selector, err)
+			}
+			if _, err := ResolvePresence([]Presence{shadow}, selector, ServiceRing); err == nil || !strings.Contains(err.Error(), "reserved for group fan-out") {
+				t.Fatalf("ResolvePresence(%q) = %v, want reserved-prefix error", selector, err)
+			}
+			if _, err := ResolvePresenceIdentity([]Presence{shadow}, selector); err == nil || !strings.Contains(err.Error(), "reserved for group fan-out") {
+				t.Fatalf("ResolvePresenceIdentity(%q) = %v, want reserved-prefix error", selector, err)
+			}
+		})
+	}
+
+	// The registry resolver shares the same validation, so the reservation
+	// holds even for a card the registry accepted under that name.
+	r := NewRegistry(4)
+	a := validAnnouncement("group:oncall")
+	mustUpsert(t, r, VerifiedIdentity{PublicKey: "shadow-key", FQDN: "shadow.mesh.example"}, "192.0.2.9", a, presenceTestNow)
+	if _, err := r.Resolve("group:oncall", ServiceSteer, presenceTestNow); err == nil || !strings.Contains(err.Error(), "reserved for group fan-out") {
+		t.Fatalf("Registry.Resolve(group:oncall) = %v, want reserved-prefix error", err)
+	}
+}

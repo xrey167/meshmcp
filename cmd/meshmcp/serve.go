@@ -169,6 +169,27 @@ func cmdServe(args []string) error {
 		log.Printf("gateway hooks enabled (%s)", strings.Join(note, ", "))
 	}
 
+	// SSO-mapped attribution (F31): one shared OIDC verifier + one shared
+	// in-memory attribution store for the whole gateway, built once from the
+	// issuer keys pinned at config load. Both stay nil when oidc is not
+	// configured, so every resolver-wiring site below is byte-identical to today.
+	// The store is startup-captured and PERSISTS across SIGHUP reloads (live
+	// bindings must not be dropped by a config reload); the verifier's pinned keys
+	// are startup-captured like the capability trust roots.
+	var oidcVerifier *policy.OIDCVerifier
+	var ssoStore *policy.SSOGroups
+	if cfg.OIDC != nil {
+		oidcVerifier = &policy.OIDCVerifier{
+			Issuers:     cfg.OIDC.resolved,
+			Audience:    cfg.OIDC.Audience,
+			GroupsClaim: cfg.OIDC.GroupsClaim,
+			EmailClaim:  cfg.OIDC.EmailClaim,
+		}
+		ssoStore = policy.NewSSOGroups(time.Now)
+		log.Printf("SSO/OIDC attribution enabled: %d pinned issuer(s), audience %q, bind TTL cap %s (present a token with POST /v1/sso/attest on the control endpoint)",
+			len(cfg.OIDC.resolved), cfg.OIDC.Audience, cfg.OIDC.bindTTL)
+	}
+
 	// engines holds each policy-bearing backend's running Engine, keyed by name,
 	// so a SIGHUP can hot-swap its policy rules in place without a restart.
 	engines := map[string]*policy.Engine{}
@@ -225,13 +246,13 @@ func cmdServe(args []string) error {
 		var httpEnf *httpEnforcer
 		if len(b.Stdio) > 0 {
 			var eng *policy.Engine
-			factory, eng = backendFactory(b, audit, tracer, hookSink, meshPubKey)
+			factory, eng = backendFactory(b, audit, tracer, hookSink, meshPubKey, ssoStore)
 			if eng != nil {
 				engines[b.Name] = eng
 			}
 		} else if b.Policy != nil || b.Capabilities != nil {
 			var enfErr error
-			httpEnf, enfErr = newHTTPEnforcer(b, audit)
+			httpEnf, enfErr = newHTTPEnforcer(b, audit, ssoStore)
 			if enfErr != nil {
 				close(shutdown)
 				for _, l := range listeners {
@@ -326,6 +347,9 @@ func cmdServe(args []string) error {
 			backends: cards,
 			gateway:  meshFQDN,
 			presence: air.NewRegistry(air.DefaultPresenceRegistryMax),
+			// The same startup groups map policy F17 resolves against, served
+			// to group fan-out via GET /v1/groups (see gatewayAirControl).
+			groupPatterns: cfg.Groups,
 		}
 		identify := func(r *http.Request) (string, string) { return peerIdentityStr(client, r.RemoteAddr) }
 		// Configured operators are recognized on the control/steer AND pairing
@@ -365,11 +389,24 @@ func cmdServe(args []string) error {
 			h = parent
 			log.Printf("Air pairing enabled (store %s): POST /v1/pair/request · GET /v1/pair/status · GET /v1/pair/pending · POST /v1/pair/approve|deny|revoke", cfg.Control.PairStore)
 		}
+		// SSO attestation surface (F31), mounted on the SAME control listener so it
+		// shares the transport-identity resolution (peerIdentityStr) that resolves
+		// the root WireGuard key, and the shared audit chain. It binds a verified
+		// token's groups to the caller's transport key; the attest gate is simply an
+		// authenticated mesh peer (an empty transport is denied in the handler).
+		if oidcVerifier != nil {
+			ssoH := ssoAttestHandler(oidcVerifier, ssoStore, identify, cfg.OIDC.bindTTL, time.Now, ssoAuditFunc(sharedAudit))
+			parent := http.NewServeMux()
+			parent.Handle("/v1/sso/attest", ssoH)
+			parent.Handle("/", h)
+			h = parent
+			log.Printf("SSO attestation surface on the control endpoint: POST /v1/sso/attest (verified OIDC groups bind to the caller's WireGuard key)")
+		}
 		obNote := ""
 		if len(cfg.Control.OnBehalfAllow) > 0 {
 			obNote = fmt.Sprintf(" · on-behalf proxies: %v", cfg.Control.OnBehalfAllow)
 		}
-		log.Printf("Air control endpoint on mesh port %d (GET/POST/DELETE /v1/presence · GET /v1/sessions · POST /v1/steer · GET %s)%s", cfg.Control.Port, airCatalogPath, obNote)
+		log.Printf("Air control endpoint on mesh port %d (GET/POST/DELETE /v1/presence · GET /v1/sessions · GET /v1/groups · POST /v1/steer · GET %s)%s", cfg.Control.Port, airCatalogPath, obNote)
 		wg.Add(1)
 		// Read/header timeouts: a mesh peer must not be able to hold the control
 		// listener open with a slow/half-open request (Slowloris).
@@ -619,7 +656,9 @@ func reloadPolicies(cfgPath string, engines map[string]*policy.Engine, backends 
 // router-delegation token must name (empty is fatal when router_delegation is
 // configured: every verify would fail closed at the first call, so fail at
 // startup with a clear error instead).
-func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer, hook policy.EventHook, meshPubKey string) (session.BackendFactory, *policy.Engine) {
+// ssoStore, when non-nil, is the gateway-wide SSO attribution store (F31): its
+// bindings feed group:<name> matching alongside the static config groups.
+func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer, hook policy.EventHook, meshPubKey string, ssoStore *policy.SSOGroups) (session.BackendFactory, *policy.Engine) {
 	exec := session.ExecBackendFactory(b.Stdio[0], b.Stdio[1:], os.Environ())
 	if b.Policy == nil && tracer == nil && b.Capabilities == nil {
 		return exec, nil
@@ -641,9 +680,16 @@ func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer, h
 	} else if b.Capabilities != nil {
 		eng = policy.NewEngine(&policy.Policy{DefaultAllow: false}, func() time.Time { return time.Now() }, nil)
 	}
-	// Attach the group resolver (F17) so rules can match group:<name> peers.
-	if eng != nil && len(b.groups) > 0 {
-		eng.SetGroupResolver(policy.StaticGroups(b.groups))
+	// Attach the group resolver (F17) so rules can match group:<name> peers. When
+	// SSO is active (F31), compose the static (config) groups with the
+	// SSO-attributed groups so `group:<name>` matches either source; otherwise
+	// keep the exact current call so the no-OIDC path is byte-identical.
+	if eng != nil {
+		if ssoStore != nil {
+			eng.SetGroupResolver(policy.CombinedGroups{policy.StaticGroups(b.groups), ssoStore})
+		} else if len(b.groups) > 0 {
+			eng.SetGroupResolver(policy.StaticGroups(b.groups))
+		}
 	}
 	// Capability verifier: pins the backend's trusted authority keys.
 	var capVerifier *policy.CapabilityVerifier

@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -47,83 +48,151 @@ func cmdControl(args []string) error {
 
 	// Load the operator ACL. The control plane is default-deny: privileged
 	// routes (enroll/registry/policy) require an ACL, so a missing or malformed
-	// ACL is a startup error, never a silent fall-back to "any mesh peer".
+	// ACL is a startup error, never a silent fall-back to "any mesh peer". The
+	// ACL also selects single- vs multi-tenant: a top-level grants: map is
+	// single-tenant (today's behaviour, unchanged); a tenants: map partitions the
+	// control plane, with each tenant defined ONLY by the keys it grants.
+	var tenants *control.TenantSet
 	if *aclPath != "" {
 		raw, err := os.ReadFile(*aclPath)
 		if err != nil {
 			return fmt.Errorf("read control ACL %s: %w", *aclPath, err)
 		}
-		auth, err := control.LoadAuthorizer(raw)
+		acl, err := control.LoadControlACL(raw)
 		if err != nil {
 			return fmt.Errorf("control ACL %s: %w", *aclPath, err)
 		}
-		srv.Auth = auth
-		log.Printf("control ACL loaded from %s (admins: %v)", *aclPath, auth.KeysWithRole(control.RoleAdmin))
-	}
-	// Privileged control-plane audit sink.
-	srv.Audit = newControlAuditSink(*controlAudit)
-	if *regDir != "" {
-		reg, err := registry.NewFileRegistry(*regDir)
-		if err != nil {
-			return fmt.Errorf("registry %s: %w", *regDir, err)
+		if acl.Tenants != nil {
+			tenants = acl.Tenants
+			srv.Tenants = tenants
+			log.Printf("control ACL loaded from %s: MULTI-TENANT, %d tenants %v", *aclPath, len(tenants.TenantIDs()), tenants.TenantIDs())
+		} else {
+			srv.Auth = acl.Flat
+			log.Printf("control ACL loaded from %s (admins: %v)", *aclPath, acl.Flat.KeysWithRole(control.RoleAdmin))
 		}
-		srv.Reg = reg
 	}
-	if *polDir != "" {
-		ps, err := control.NewFilePolicyStore(*polDir)
-		if err != nil {
-			return fmt.Errorf("policies %s: %w", *polDir, err)
-		}
-		srv.Policies = ps
-	}
-	// Enrollment: prefer real NetBird key issuance (per-node one-off keys) when
-	// a PAT is available; fall back to a static key otherwise.
+
+	// Enrollment backend selection is shared by both modes: prefer real NetBird
+	// key issuance (per-node one-off keys) when a PAT is available; fall back to a
+	// static key otherwise. NOTE (honest scope): the PAT names ONE NetBird
+	// account, so multi-tenant enrollment isolates per-tenant auto_groups and
+	// audit attribution, NOT the management-plane account — a shared PAT is not
+	// cryptographically isolated per tenant.
 	token := *nbToken
 	if token == "" {
 		token = os.Getenv("NB_API_TOKEN")
 	}
-	var enrollLog *policy.AuditLog
-	if token != "" {
-		if *enrollAudit != "" {
-			f, err := os.OpenFile(*enrollAudit, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-			if err != nil {
-				return fmt.Errorf("open enroll audit %s: %w", *enrollAudit, err)
+	staticKey := *enrollKey
+	if staticKey == "" {
+		staticKey = os.Getenv("NB_ENROLL_KEY")
+	}
+	mgmt := *enrollMgmt
+	if mgmt == "" {
+		mgmt = o.ManagementURL
+	}
+	var defaultGroups []string
+	if *nbGroups != "" {
+		defaultGroups = strings.Split(*nbGroups, ",")
+	}
+
+	var enrollLog *policy.AuditLog         // single-tenant enrollment chain
+	var tenantStores *control.TenantStores // multi-tenant store provider (closed on shutdown)
+
+	if tenants != nil {
+		// Multi-tenant: --policies / --registry / --control-audit become ROOTS
+		// under which each tenant gets its own subdir (policy, registry) or
+		// <tenant>.jsonl hash chain (control+enroll audit). A handler never sees a
+		// root; authorize hands it only the tenantID derived from the caller's key.
+		regRoot := *regDir
+		var newEnroll func(string, []string, *policy.AuditLog) (control.EnrollFunc, error)
+		switch {
+		case token != "":
+			newEnroll = func(tid string, groups []string, audit *policy.AuditLog) (control.EnrollFunc, error) {
+				if len(groups) == 0 {
+					groups = defaultGroups
+				}
+				return (&control.NetBirdIssuer{
+					APIURL:        *nbAPI,
+					ManagementURL: mgmt,
+					Token:         token,
+					Groups:        groups,
+					TTL:           *nbTTL,
+					RegistryDir:   tenantRegistryEcho(regRoot, tid),
+					ControlNode:   o.DeviceName,
+					Audit:         audit, // shared per-tenant chain (control + enroll interleave)
+				}).Enroll, nil
 			}
-			defer f.Close()
-			enrollLog = policy.NewAuditLog(f, func() string { return time.Now().UTC().Format(time.RFC3339) })
+			log.Printf("enrollment: NetBird key issuance via %s (per-tenant auto_groups; SHARED PAT — management-plane accounts are NOT per-tenant isolated)", *nbAPI)
+		case staticKey != "":
+			newEnroll = func(tid string, _ []string, _ *policy.AuditLog) (control.EnrollFunc, error) {
+				return control.StaticEnroll(mgmt, staticKey, tenantRegistryEcho(regRoot, tid), o.DeviceName), nil
+			}
+			log.Printf("enrollment: static key (per-tenant registry subdir)")
 		}
-		var groups []string
-		if *nbGroups != "" {
-			groups = strings.Split(*nbGroups, ",")
+
+		stores := control.NewTenantStores(control.TenantStoresConfig{
+			PolicyRoot:   *polDir,
+			RegistryRoot: *regDir,
+			AuditRoot:    *controlAudit, // directory of per-tenant <tenant>.jsonl chains
+			Now:          func() string { return time.Now().UTC().Format(time.RFC3339) },
+			// No-tenant denials (a caller in no tenant) cannot enter any tenant's
+			// chain, so they log to stderr — never a tenant file.
+			Fallback:  newControlAuditSink(""),
+			NewEnroll: newEnroll,
+			Groups:    tenants.EnrollGroups,
+		})
+		srv.Stores = stores
+		srv.Audit = stores // per-tenant control-audit router
+		tenantStores = stores
+		if *controlAudit != "" {
+			log.Printf("control audit: per-tenant hash chains under %s/<tenant>.jsonl", *controlAudit)
+		} else {
+			log.Printf("control audit: stderr (set --control-audit <dir> for per-tenant hash chains)")
 		}
-		mgmt := *enrollMgmt
-		if mgmt == "" {
-			mgmt = o.ManagementURL
-		}
-		srv.Enroll = (&control.NetBirdIssuer{
-			APIURL:        *nbAPI,
-			ManagementURL: mgmt,
-			Token:         token,
-			Groups:        groups,
-			TTL:           *nbTTL,
-			RegistryDir:   *regDir,
-			ControlNode:   o.DeviceName,
-			Audit:         enrollLog,
-		}).Enroll
-		log.Printf("enrollment: NetBird key issuance via %s (per-node one-off keys)", *nbAPI)
 	} else {
-		key := *enrollKey
-		if key == "" {
-			key = os.Getenv("NB_ENROLL_KEY")
-		}
-		if key != "" {
-			mgmt := *enrollMgmt
-			if mgmt == "" {
-				mgmt = o.ManagementURL
+		// Single-tenant: unchanged from before tenancy existed.
+		srv.Audit = newControlAuditSink(*controlAudit)
+		if *regDir != "" {
+			reg, err := registry.NewFileRegistry(*regDir)
+			if err != nil {
+				return fmt.Errorf("registry %s: %w", *regDir, err)
 			}
-			srv.Enroll = control.StaticEnroll(mgmt, key, *regDir, o.DeviceName)
+			srv.Reg = reg
+		}
+		if *polDir != "" {
+			ps, err := control.NewFilePolicyStore(*polDir)
+			if err != nil {
+				return fmt.Errorf("policies %s: %w", *polDir, err)
+			}
+			srv.Policies = ps
+		}
+		if token != "" {
+			if *enrollAudit != "" {
+				f, err := os.OpenFile(*enrollAudit, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+				if err != nil {
+					return fmt.Errorf("open enroll audit %s: %w", *enrollAudit, err)
+				}
+				defer f.Close()
+				enrollLog = policy.NewAuditLog(f, func() string { return time.Now().UTC().Format(time.RFC3339) })
+			}
+			srv.Enroll = (&control.NetBirdIssuer{
+				APIURL:        *nbAPI,
+				ManagementURL: mgmt,
+				Token:         token,
+				Groups:        defaultGroups,
+				TTL:           *nbTTL,
+				RegistryDir:   *regDir,
+				ControlNode:   o.DeviceName,
+				Audit:         enrollLog,
+			}).Enroll
+			log.Printf("enrollment: NetBird key issuance via %s (per-node one-off keys)", *nbAPI)
+		} else if staticKey != "" {
+			srv.Enroll = control.StaticEnroll(mgmt, staticKey, *regDir, o.DeviceName)
 			log.Printf("enrollment: static key (set --netbird-token for per-node key issuance)")
 		}
+	}
+	if tenantStores != nil {
+		defer tenantStores.Close()
 	}
 
 	// Anchor witness: record peer gateways' signed audit checkpoints in an
@@ -150,9 +219,11 @@ func cmdControl(args []string) error {
 	}
 
 	// Fail closed at startup: if any privileged capability is exposed, an ACL is
-	// mandatory. A control plane that serves enrollment/registry/policy without
-	// an authorizer would authorize every reachable mesh peer.
-	if (srv.Reg != nil || srv.Policies != nil || srv.Enroll != nil || srv.Witness != nil) && srv.Auth == nil {
+	// mandatory. A control plane that serves enrollment/registry/policy without an
+	// authorizer (flat Auth or a tenant resolver) would authorize every reachable
+	// mesh peer.
+	exposed := srv.Reg != nil || srv.Policies != nil || srv.Enroll != nil || srv.Witness != nil || srv.Stores != nil
+	if exposed && srv.Auth == nil && srv.Tenants == nil {
 		return fmt.Errorf("control plane exposes privileged routes but no --acl was provided: refusing to start (WireGuard membership is not authorization). Provide --acl <file> granting roles per WireGuard public key")
 	}
 
@@ -198,6 +269,17 @@ func cmdControl(args []string) error {
 	}
 	defer ln.Close()
 	return serveGracefully(&http.Server{Handler: handler}, ln, flushEnroll)
+}
+
+// tenantRegistryEcho is the registry directory a multi-tenant enroller echoes
+// back to a joining node: the tenant's OWN subdir under the registry root, so an
+// enrolled node registers into its tenant's partition (not the shared root). An
+// empty root echoes empty (no centralized registry), never a bare relative id.
+func tenantRegistryEcho(regRoot, tenantID string) string {
+	if regRoot == "" {
+		return ""
+	}
+	return filepath.Join(regRoot, tenantID)
 }
 
 // controlAuditSink writes privileged control-plane decisions as JSON lines to a

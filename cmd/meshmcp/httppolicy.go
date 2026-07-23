@@ -57,7 +57,10 @@ type httpEnforcer struct {
 // per-backend sink. Security wiring failures (unloadable approval key,
 // uncreatable revocation store, unusable secrets store) are returned as an
 // error at startup, matching the stdio path — never a silent downgrade.
-func newHTTPEnforcer(b *Backend, audit *policy.AuditLog) (*httpEnforcer, error) {
+// ssoStore, when non-nil, is the gateway-wide SSO attribution store (F31),
+// composed with the backend's static groups so group:<name> rules match either
+// source — at parity with the stdio backendFactory path.
+func newHTTPEnforcer(b *Backend, audit *policy.AuditLog, ssoStore *policy.SSOGroups) (*httpEnforcer, error) {
 	var cosign policy.CosignStore
 	var pending *policy.FilePending
 	ttl := time.Duration(b.CosignTTLSeconds) * time.Second
@@ -73,7 +76,9 @@ func newHTTPEnforcer(b *Backend, audit *policy.AuditLog) (*httpEnforcer, error) 
 		pol = &policy.Policy{DefaultAllow: false}
 	}
 	eng := policy.NewEngine(pol, func() time.Time { return time.Now() }, cosign)
-	if len(b.groups) > 0 {
+	if ssoStore != nil {
+		eng.SetGroupResolver(policy.CombinedGroups{policy.StaticGroups(b.groups), ssoStore})
+	} else if len(b.groups) > 0 {
 		eng.SetGroupResolver(policy.StaticGroups(b.groups))
 	}
 	// Request-bound approvals (Phase 3), at parity with the stdio path

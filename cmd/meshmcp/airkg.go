@@ -34,12 +34,16 @@ func cmdAirKG(args []string) error {
 	switch args[0] {
 	case "assert", "add":
 		return cmdAirKGAssert(args[1:])
+	case "supersede":
+		return cmdAirKGSupersede(args[1:])
 	case "query":
 		return cmdAirKGQuery(args[1:])
 	case "neighbors":
 		return cmdAirKGNeighbors(args[1:])
 	case "subgraph":
 		return cmdAirKGSubgraph(args[1:])
+	case "sync":
+		return cmdAirKGSync(args[1:])
 	case "verify":
 		return cmdAirKGVerify(args[1:])
 	case "serve":
@@ -47,7 +51,7 @@ func cmdAirKG(args []string) error {
 	case "-h", "--help", "help":
 		return kgUsage()
 	default:
-		return fmt.Errorf("meshmcp air kg: unknown subcommand %q (want assert | query | neighbors | subgraph | verify | serve)", args[0])
+		return fmt.Errorf("meshmcp air kg: unknown subcommand %q (want assert | supersede | query | neighbors | subgraph | sync | verify | serve)", args[0])
 	}
 }
 
@@ -57,12 +61,16 @@ func kgUsage() error {
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "  "+b("air kg assert")+"    <kg-ip:port> --corpus c --s x --p y --o z [--source u] [--valid-from t] [--json]")
 	fmt.Fprintln(os.Stderr, "                   "+dim("write a provenance-stamped fact (needs an exact-literal corpus grant)"))
+	fmt.Fprintln(os.Stderr, "  "+b("air kg supersede")+" <kg-ip:port> --corpus c --old-id t_x --s x --p y --o z [--source u] [--valid-from t] [--json]")
+	fmt.Fprintln(os.Stderr, "                   "+dim("replace a fact bi-temporally: assert-new + tombstone-old, atomically, history preserved"))
 	fmt.Fprintln(os.Stderr, "  "+b("air kg query")+"     <kg-ip:port> --corpus c [--s x] [--p y] [--o z] [--as-of n] [--json]")
 	fmt.Fprintln(os.Stderr, "                   "+dim("pattern read (empty field = wildcard; --as-of time-travels)"))
 	fmt.Fprintln(os.Stderr, "  "+b("air kg neighbors")+" <kg-ip:port> --corpus c --node e [--as-of n] [--json]")
 	fmt.Fprintln(os.Stderr, "                   "+dim("active triples touching an entity (the k-hop seed)"))
 	fmt.Fprintln(os.Stderr, "  "+b("air kg subgraph")+"  <kg-ip:port> --corpus c --seed e [--hops 2] [--max 200] [--as-of n] [--json]")
 	fmt.Fprintln(os.Stderr, "                   "+dim("a bounded k-hop neighborhood around a seed entity"))
+	fmt.Fprintln(os.Stderr, "  "+b("air kg sync")+"      <kg-ip:port> --corpus c --into local.jsonl [--since n] [--org o] [--json]")
+	fmt.Fprintln(os.Stderr, "                   "+dim("pull the corpus delta into a LOCAL store (CRDT re-append; tombstones survive; chain re-verified)"))
 	fmt.Fprintln(os.Stderr, "  "+b("air kg verify")+"    <kg-ip:port> [--json]")
 	fmt.Fprintln(os.Stderr, "                   "+dim("prove the chain is intact — no fact edited, reordered, or truncated"))
 	fmt.Fprintln(os.Stderr, "  "+b("air kg serve")+"     --allow <id> [--grant <id>=<corpus>...] [--store f] [--audit f] [--port N]")
@@ -88,7 +96,14 @@ type kgAssertBody struct {
 	ValidFrom string `json:"valid_from,omitempty"`
 }
 
-// kgRecordsResp wraps the records a query/neighbors read returns.
+// kgSupersedeBody is the JSON a client POSTs to /v1/kg/supersede: the assert
+// body plus the id of the active fact the new one replaces.
+type kgSupersedeBody struct {
+	kgAssertBody
+	OldID string `json:"old_id"`
+}
+
+// kgRecordsResp wraps the records a query/neighbors/delta read returns.
 type kgRecordsResp struct {
 	Records []kg.Record `json:"records"`
 }
@@ -151,6 +166,118 @@ func cmdAirKGAssert(args []string) error {
 	}
 	line := okLine("asserted %s %s %s", *subj, *pred, *obj)
 	fmt.Println(line + dim(" · "+rcpt.KnowHash))
+	return nil
+}
+
+// cmdAirKGSupersede replaces one governed fact bi-temporally (assert-new +
+// tombstone-old under the facade's single writer).
+func cmdAirKGSupersede(args []string) error {
+	fs := flag.NewFlagSet("air kg supersede", flag.ExitOnError)
+	o := meshFlags(fs)
+	corpus := fs.String("corpus", "", "corpus/subgraph the write targets (needs an exact-literal grant)")
+	oldID := fs.String("old-id", "", "id of the active fact to supersede")
+	subj := fs.String("s", "", "new subject")
+	pred := fs.String("p", "", "new predicate")
+	obj := fs.String("o", "", "new object")
+	source := fs.String("source", "", "optional doc/URI the new fact was extracted from")
+	validFrom := fs.String("valid-from", "", "optional bi-temporal valid-from (rfc3339)")
+	asJSON := fs.Bool("json", false, "print the raw JSON receipt")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: meshmcp air kg supersede [flags] <kg-ip:port> --corpus c --old-id t_x --s x --p y --o z")
+	}
+	if *corpus == "" || *oldID == "" || *subj == "" || *pred == "" || *obj == "" {
+		return errors.New("air kg supersede: --corpus, --old-id, --s, --p and --o are required")
+	}
+	hc, cleanup, err := airControlHTTP(o, fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	body, _ := json.Marshal(kgSupersedeBody{
+		kgAssertBody: kgAssertBody{Corpus: *corpus, S: *subj, P: *pred, O: *obj, Source: *source, ValidFrom: *validFrom},
+		OldID:        *oldID,
+	})
+	raw, err := kgDo(hc, http.MethodPost, "/v1/kg/supersede", nil, body)
+	if err != nil {
+		return fmt.Errorf("air kg supersede: %w", err)
+	}
+	if *asJSON {
+		fmt.Println(string(bytes.TrimSpace(raw)))
+		return nil
+	}
+	var rcpt kgReceiptView
+	if err := json.Unmarshal(raw, &rcpt); err != nil {
+		return fmt.Errorf("air kg supersede: bad response: %w", err)
+	}
+	fmt.Println(okLine("superseded %s → %s %s %s", *oldID, *subj, *pred, *obj) + dim(" · "+rcpt.KnowHash))
+	return nil
+}
+
+// cmdAirKGSync pulls a corpus delta from a served KG into a LOCAL store the
+// caller owns, re-appending each missing record through the CRDT path and
+// re-verifying the local chain. Pull-only v1: the target store must NOT be a
+// file a running `air kg serve` owns — that would put a second writer on the
+// serve's kg.jsonl and break the single-writer invariant the whole system
+// rests on.
+func cmdAirKGSync(args []string) error {
+	fs := flag.NewFlagSet("air kg sync", flag.ExitOnError)
+	o := meshFlags(fs)
+	corpus := fs.String("corpus", "", "corpus/subgraph to sync (needs a covering grant on the remote)")
+	since := fs.Int("since", 0, "remote sequence watermark to pull deltas above (0 = whole log)")
+	into := fs.String("into", "", "LOCAL kg store to apply the delta into (created if absent; must not be owned by a running serve)")
+	org := fs.String("org", "", "optional org id for a cross-boundary pull (the remote additionally checks its federation corpus grant)")
+	asJSON := fs.Bool("json", false, "print a machine-readable sync report")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: meshmcp air kg sync [flags] <kg-ip:port> --corpus c --into local.jsonl")
+	}
+	if *corpus == "" || *into == "" {
+		return errors.New("air kg sync: --corpus and --into are required")
+	}
+	hc, cleanup, err := airControlHTTP(o, fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	q := url.Values{}
+	q.Set("corpus", *corpus)
+	if *since > 0 {
+		q.Set("since", strconv.Itoa(*since))
+	}
+	setIfNonEmpty(q, "org", *org)
+	raw, err := kgDo(hc, http.MethodGet, "/v1/kg/delta", q, nil)
+	if err != nil {
+		return fmt.Errorf("air kg sync: %w", err)
+	}
+	var out kgRecordsResp
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return fmt.Errorf("air kg sync: bad response: %w", err)
+	}
+
+	st, err := kg.Open(*into, nowRFC3339)
+	if err != nil {
+		return fmt.Errorf("air kg sync: open local store %s: %w", *into, err)
+	}
+	applied, err := st.ApplyDelta(out.Records)
+	if err != nil {
+		return fmt.Errorf("air kg sync: apply delta: %w", err)
+	}
+	if err := st.Verify(); err != nil {
+		return fmt.Errorf("air kg sync: local chain broken after apply: %w", err)
+	}
+	if *asJSON {
+		b, _ := json.Marshal(map[string]any{"pulled": len(out.Records), "applied": applied, "head": st.Head(), "verified": true})
+		fmt.Println(string(b))
+		return nil
+	}
+	fmt.Println(okLine("pulled %d delta record(s), applied %d", len(out.Records), applied) + dim(fmt.Sprintf(" · local head %d · chain re-verified", st.Head())))
 	return nil
 }
 

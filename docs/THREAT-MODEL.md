@@ -272,10 +272,13 @@ An adversary who can write the audit file (but lacks the signing key).
 ### 11. Compromised control-plane operator
 
 - **Defended (partial):** Every privileged control action is authorized by role
-  and audited with actor key, action, target, result, and correlation id.
-- **Limit:** An operator with `control.admin` can, by definition, administer.
-  Separation of duties beyond the role set, and optimistic-concurrency
-  protection on policy replacement, are follow-ups.
+  and audited with actor key, action, target, result, and correlation id. On a
+  multi-tenant control plane the operator's authority is **scoped to their
+  tenant** — `control.admin` is per-tenant, with no cross-tenant super-role
+  (adversary 14).
+- **Limit:** An operator with `control.admin` can, by definition, administer
+  their tenant. Separation of duties beyond the role set, and
+  optimistic-concurrency protection on policy replacement, are follow-ups.
 
 ### 12. External OAuth registrant / hosted MCP client (edge only)
 
@@ -321,6 +324,73 @@ from the client's own infrastructure).
   (recorded as deviation D-C in the exposure-model decision). Short TTLs and
   the audit trail bound the window and make abuse attributable, not
   impossible.
+
+### 14. Cross-tenant caller (multi-tenant control plane)
+
+A legitimate mesh peer and control-plane user of tenant A, on a control node
+that also serves tenant B, attempting to read or write B's control storage
+(policy, registry, enrollment, audit). This adversary exists only when the
+operator configures a multi-tenant ACL (`tenants:`); a single-tenant deployment
+has one tenant and this class does not arise. See
+[docs/MULTI-TENANT.md](MULTI-TENANT.md).
+
+- **Defended (by construction).** A caller's tenant is a **pure function of the
+  transport-proven WireGuard key**, resolved inside the single authorization
+  chokepoint at the same instant as identity — never named by the request
+  (body, header, param, or URL; a body field naming a tenant is rejected by
+  `DisallowUnknownFields`, same as the confused-deputy identity case). A handler
+  receives only the resolved `tenantID` and addresses every store through it, so
+  there is no request that operates on another tenant. RBAC is per-tenant with
+  **no cross-tenant super-role**: an admin-of-A's key is absent from B's
+  authorizer, so it holds nothing in B (structural, not a tenant-equality check).
+  Policy and registry live in per-tenant directories; each tenant's audit is its
+  **own tamper-evident hash chain** (`<tenant>.jsonl`), verifiable in isolation
+  with independent sequence cursors. A caller in **no** tenant is refused on every
+  privileged route (deny-by-default), deny-audited with an empty tenant that
+  never enters any tenant's chain.
+- **Limit (v1 boundary, explicit).** Enrollment shares **one NetBird PAT/account**
+  across tenants: v1 isolates per-tenant auto_groups and audit attribution, **not**
+  the management-plane account — a shared PAT is not cryptographically isolated
+  per tenant. The `--anchor-witness` file is this host's own external-anchoring
+  log, not per-tenant control storage, and is shared in v1 (authorization still
+  funnels through the tenant chokepoint). Per-tenant control audit is best-effort
+  (observability layered on the 403) and tail-seeded but not re-verified at open.
+  Separate NetBird accounts per tenant, and fail-closed per-tenant control audit,
+  are named non-goals. As always, isolation is only as correct as the deployed
+  ACL — a key granted under a tenant holds that tenant's roles.
+
+### 15. Presenter of a forged or misissued SSO/OIDC token (F31)
+
+An adversary who presents a fabricated, tampered, expired, or wrong-audience
+OIDC token to the SSO attestation surface (`POST /v1/sso/attest`), hoping to
+attribute a privileged `group:<name>` to themselves.
+
+- **Defended:** SSO group attribution is **additive over the transport root,
+  never a replacement for it.** The caller's WireGuard transport key is resolved
+  from the connection **first** (never from the token) and remains the only thing
+  policy enforcement keys on. A presented token is verified against **statically
+  pinned** issuer keys in strict, fail-closed order — accepted-algorithm gate
+  (rejecting `alg:none` and HS256 alg-confusion outright), pinned-issuer lookup
+  (exact `iss`, no glob/wildcard), header `alg` equal to the issuer's **pinned**
+  algorithm (never selected from the token), signature (ES256 r‖s or RS256
+  PKCS#1 v1.5), `aud` contains meshmcp's identity, then `exp`/`nbf`. Any failure
+  binds **nothing**: `InGroup` stays false, the `group:<name>` rule does not
+  match, and the caller falls to the default-deny behavior it had before. A valid
+  binding is bounded to `min(token exp, bind_ttl_max)` and evicted on expiry, and
+  is keyed strictly to the presenter's transport key — one peer can never
+  attribute a group to another peer's key. Every attest attempt (bind or reject)
+  is audited under the transport-verified key. With no `oidc:` configured the
+  surface does not exist and behavior is byte-identical to a build without the
+  feature.
+- **Limit:** meshmcp trusts the **pinned IdP** for group *membership*: a
+  legitimately-issued, currently-valid token that genuinely carries `group X`
+  does attribute `X` — meshmcp verifies the token is authentic and current, not
+  whether the IdP's assignment is "correct." Keys are pinned statically (JWKS
+  file or PEM); v1 does not fetch a `jwks_uri`, so key **rotation** is an operator
+  config update (a cached-fetch is the documented v2 extension). Bindings are
+  in-memory and per-gateway-process. As always, authorization is only as correct
+  as the deployed policy: an attributed group grants nothing unless a rule
+  references it.
 
 ---
 
