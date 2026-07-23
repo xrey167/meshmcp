@@ -67,14 +67,26 @@ The model or agent process is adversarial but sits behind the gateway.
 
 An aggregating router forwards a caller's request upstream.
 
-- **Status: experimental.** Today the router forwards using its own WireGuard
-  identity and conveys the downstream caller only as unsigned `_meta`, which is
-  informational and must never be trusted as identity. A signed short-lived
+- **Defended (when pinned).** With `delegation_key` on the router and
+  `router_delegation.trusted_public_keys` pinned on the upstream backend, every
+  forwarded `tools/call` carries a signed, short-lived (≤5 min), single-use
   delegation token bound to (caller, router, audience, backend, tool, request
-  hash, expiry, nonce), with upstream policy computing the intersection of
-  caller ∩ router ∩ delegation scope, is the intended design (Phase 4, not yet
-  implemented). Until then, treat router aggregation as **Labs**: put a
-  default-deny caller ACL on the router and do not rely on delegated identity.
+  hash, expiry, nonce), and the upstream authorizes the **intersection** of
+  caller ∩ router ∩ delegation scope — a compromised router cannot widen a
+  caller's authority, and a caller cannot exceed what the router itself may do.
+  `required: true` refuses any token-less `tools/call` (it gates `tools/call`
+  only — other JSON-RPC methods such as `resources/read` stay governed by the
+  backend policy's `methods` rules); a mint failure denies at the router rather
+  than forwarding unsigned; both identities + the nonce land in the audit
+  record. Unsigned origin `_meta` remains informational and is never trusted as
+  identity. See `docs/spec/ROUTER-DELEGATION.md`.
+- **No-authority fallback:** without the key/pin pair there is NO delegated
+  identity — the router forwards under its own WireGuard identity exactly as
+  before, defended only by its default-deny caller ACL and (optional) router
+  policy. Registry-discovered upstreams have no audience pin and always take
+  this unsigned path. Limits when pinned: `tools/call` on stdio backends only,
+  and replay protection is a **per-gateway-process** nonce store (per-gateway
+  replay windows in a multi-gateway HA deployment).
 
 ### 4. Compromised gateway
 
@@ -258,8 +270,29 @@ against a pinned public key for the sealed portion. It does **not** prove that
 every real-world action was observed, and gateway signatures are **not** caller
 non-repudiation (the gateway signs, not the caller). A key-holding insider who
 controls both the log and its local checkpoints can roll both back together;
-defense against that requires **external anchoring** (the `Anchor` /
-`FileAnchor` interface exists; a witnessed external anchor is Labs).
+defense against that requires **external anchoring**, which is now implemented:
+every signed checkpoint can be witnessed outside the gateway — appended to a
+self-linked local anchor file (`audit_anchor`) and/or POSTed to a peer
+gateway's witness endpoint (`audit_anchor_url` → `meshmcp control
+--anchor-witness`, which pins the signer key, verifies the signature, and
+records checkpoints append-only with per-signer dedup). `meshmcp audit verify
+--anchors` cross-checks the checkpoints against the witness and exits non-zero
+on disagreement **even when the chain verifies sealed internally** — the
+rollback case signatures alone cannot catch. The four verification states are
+unchanged; the anchor verdict (`anchored` / `anchor_partial` /
+`anchor_mismatch`) is orthogonal, added evidence.
+
+**Witness-trust assumption, stated plainly:** anchoring converts "trust the
+gateway host" into "trust that the gateway host and the witness do not collude
+(or are not controlled by the same insider)." A witness on the same host, or
+writable by the same insider, adds nothing — run it on an independently
+administered peer. Peer delivery is asynchronous and best-effort — a slow or
+unreachable witness delays witnessing but never blocks a checkpoint or an
+audited call — so checkpoints not yet witnessed (`anchor_partial`, e.g. during
+a witness outage or in the short delivery window) remain rollable until the
+witness records them or `meshmcp audit anchor` replays them; the verifier
+reports that window honestly rather than hiding it. RFC 3161 timestamping
+remains future work behind the same `Anchor` interface.
 
 ## Delivery vs. execution guarantees (summary)
 

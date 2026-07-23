@@ -46,9 +46,15 @@ type Filter struct {
 	pending     PendingStore
 	capVerifier *CapabilityVerifier
 	capRequired bool
-	hooks       []DecisionHook
-	caller      Caller
-	hook        EventHook
+
+	// Router-delegation enforcement (Phase 4): verifies a signed per-call
+	// DelegationToken from a pinned router authority and authorizes the
+	// intersection of the original caller's and the router's permissions.
+	delegVerifier *DelegationVerifier
+	delegRequired bool
+	hooks         []DecisionHook
+	caller        Caller
+	hook          EventHook
 
 	redactor *Redactor // scrubs injected secret values from responses (Phase 8)
 
@@ -251,6 +257,17 @@ func (f *Filter) handleLine(line []byte) error {
 		}
 	}
 
+	// Strip any presented delegation token the same way: honored only on
+	// tools/call, removed from every governed line so it never reaches the
+	// backend, trace, audit, or secret injection.
+	var delegToken string
+	if f.delegVerifier != nil {
+		switch class.Kind {
+		case RPCToolCall, RPCNotification, RPCMethod:
+			delegToken, line = stripMetaToken(line, DelegationMetaKey)
+		}
+	}
+
 	switch class.Kind {
 	case RPCEmpty:
 		return nil
@@ -269,7 +286,7 @@ func (f *Filter) handleLine(line []byte) error {
 		f.writeDenial(class.ID, class.Reason)
 		return nil
 	case RPCToolCall:
-		return f.handleToolCall(line, class.Tool, class.ID, class.Args, capToken)
+		return f.handleToolCall(line, class.Tool, class.ID, class.Args, capToken, delegToken)
 	case RPCNotification:
 		return f.handleNotification(line, class.Method)
 	default: // RPCMethod
@@ -349,11 +366,11 @@ func scanNoDupKeys(dec *json.Decoder) error {
 	return nil
 }
 
-// handleToolCall authorizes a tools/call. The capability (if any) has already
-// been stripped from line by handleLine and passed in as capToken, so every
-// downstream step (audit, trace, secret injection, backend write) uses the
-// token-free line.
-func (f *Filter) handleToolCall(line []byte, tool string, id, args json.RawMessage, capToken string) error {
+// handleToolCall authorizes a tools/call. The capability and delegation
+// tokens (if any) have already been stripped from line by handleLine and
+// passed in as capToken/delegToken, so every downstream step (audit, trace,
+// secret injection, backend write) uses the token-free line.
+func (f *Filter) handleToolCall(line []byte, tool string, id, args json.RawMessage, capToken, delegToken string) error {
 	// id validity and a non-empty tool name are guaranteed by ClassifyRPC (an
 	// id-less / null-id / empty-name tools/call is rejected there as
 	// protocol-invalid before reaching this handler).
@@ -362,8 +379,17 @@ func (f *Filter) handleToolCall(line []byte, tool string, id, args json.RawMessa
 	// require_cosign rule is satisfied only by a signed, single-use approval for
 	// precisely these arguments, which DecideToolCallBound consumes atomically.
 	dec := f.eng.DecideToolCallBound(f.caller.Peer, f.caller.PeerKey, f.caller.Backend, tool, args, f.labelSnapshot())
+	var pendingCap *CapabilityClaims
 	if f.capVerifier != nil {
-		dec = f.applyCapability(dec, capToken, tool)
+		dec, pendingCap = f.applyCapability(dec, capToken, tool)
+	}
+	// Router delegation runs AFTER the capability fold, so a capability held by
+	// the connecting router can never upgrade a delegation deny (a delegation
+	// deny always carries outcome deny out of applyDelegation) and the router
+	// leg of the intersection reflects everything the router itself may do.
+	var da delegationAudit
+	if f.delegVerifier != nil {
+		dec, da = f.applyDelegation(dec, delegToken, tool, args)
 	}
 	// Plugin decision hooks run last and may only tighten the outcome (deny /
 	// co-sign) or add labels — never widen a deny into an allow.
@@ -372,7 +398,24 @@ func (f *Filter) handleToolCall(line []byte, tool string, id, args json.RawMessa
 			Caller: f.caller, Tool: tool, Arguments: args, Labels: f.labelSnapshot(),
 		}, dec)
 	}
+	// Consume a load-bearing single-use grant only now that the final outcome
+	// is known: a cosign hold or a delegation/hook deny must not burn it. A
+	// replayed jti surfaces here and turns the allow into a deny, so the audit
+	// record below reflects the true verdict.
+	if pendingCap != nil && dec.Outcome == OutcomeAllow {
+		if err := f.capVerifier.Consume(*pendingCap); err != nil {
+			dec = Decision{Outcome: OutcomeDeny, RuleID: dec.RuleID, Reason: "invalid capability: " + err.Error()}
+		}
+	}
 	rec := f.record("tools/call", tool, string(id), dec)
+	if da.relevant {
+		// Preserve BOTH identities + the nonce for a delegated (or
+		// delegation-required) call, so it is attributable end to end — on
+		// allows and denials alike (spec ROUTER-DELEGATION.md).
+		rec.DelegatedCaller = da.caller
+		rec.DelegationRouter = f.caller.PeerKey
+		rec.DelegationNonce = da.nonce
+	}
 	if err := f.audited(rec); err != nil && f.audit.FailClosed() {
 		// Audit is a control: if the tamper-evident record cannot be written
 		// and the log is fail-closed, deny the call rather than let it reach

@@ -140,12 +140,15 @@ func (w *failSecondSteerAuditWriter) Write(p []byte) (int, error) {
 }
 
 // Formerly quarantined in CI as timing-flaky under -race: the one-shot steer
-// client could race its own graceful close against a net.Pipe EOF and try to
-// resume a just-finalized session. Fixed at the root in session/client.go's
-// reconnectLoop (the clean-finalization race: a drained client whose redial
-// finds the session gone now waits briefly for its own local close instead of
-// hard-failing). Kept exercising 20 back-to-back one-shot sessions precisely
-// because that loop is what reproduced the race.
+// client could race its own graceful close against the server finalizing the
+// session and try to resume the just-closed id. Fixed twice, independently and
+// compatibly: structurally, by committing the close atomically with the CLOSE
+// write in session/endpoint.go (sendClose) — the redial can no longer fire at
+// all (deterministic regression: TestGracefulDrainCloseNeverReattaches in
+// session/close_race_test.go) — and defensively, by reconnectLoop's
+// drain-phase wait for the local close (session/client.go). Kept exercising
+// 20 back-to-back one-shot sessions precisely because that loop is what
+// reproduced the race.
 func TestSteerDeliveryRequiresApplicationAck(t *testing.T) {
 	agentCtx, stopAgent := context.WithCancel(context.Background())
 	defer stopAgent()

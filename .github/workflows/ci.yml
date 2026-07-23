@@ -37,10 +37,11 @@ jobs:
         run: go vet ./...
       # No quarantined tests. The formerly-flaky steer tests
       # (TestSteerDeliveryRequiresApplicationAck, TestTaskSteer) were fixed at
-      # the root: the session client no longer hard-fails when a redial finds a
-      # cleanly finalized session with nothing left to deliver (the
-      # clean-finalization race in session/client.go's reconnectLoop) — verified
-      # green under -race -count=25.
+      # the root, twice over: session/endpoint.go's sendClose commits the close
+      # atomically with the CLOSE write (the redial can no longer fire —
+      # regression: TestGracefulDrainCloseNeverReattaches), and
+      # session/client.go's reconnectLoop additionally tolerates a redial that
+      # finds a cleanly finalized session — verified green under -race -count=25.
       - name: go test
         run: go test ./...
       - name: go test -race

@@ -119,11 +119,16 @@ func (m *MemNonceStore) Use(nonce string, expiry time.Time, now time.Time) bool 
 
 // VerifyDelegation checks a token for a specific upstream hop. expectAuthority is
 // the pinned trusted router-authority public key (required — an empty pin never
-// verifies). It rejects a forged/other signer, a token minted for a different
-// audience/backend/tool/router, changed arguments, an expired token, and a
-// replayed nonce. A nil nonces store skips replay protection (single-use is then
-// the caller's responsibility) — production must supply one.
+// verifies). It rejects an unsupported token version, a forged/other signer, a
+// token minted for a different audience/backend/tool/router, changed arguments,
+// an expired token, an over-long lifetime (the verifier re-enforces the issuer's
+// 5-minute ceiling as defense in depth, like CapabilityVerifier), and a replayed
+// nonce. A nil nonces store skips replay protection (single-use is then the
+// caller's responsibility) — production must supply one.
 func VerifyDelegation(tok DelegationToken, expectAuthority string, req DelegationRequest, now time.Time, nonces NonceStore) error {
+	if tok.Version != 1 {
+		return fmt.Errorf("delegation: unsupported token version %d", tok.Version)
+	}
 	if expectAuthority == "" || tok.PubKey != expectAuthority {
 		return fmt.Errorf("delegation: signer is not the pinned router authority")
 	}
@@ -149,6 +154,12 @@ func VerifyDelegation(tok DelegationToken, expectAuthority string, req Delegatio
 	if tok.ReqHash != canonicalArgsHash(req.Args) {
 		return fmt.Errorf("delegation: request arguments do not match the approved delegation")
 	}
+	// Time window. The verifier re-enforces the mint-time lifetime ceiling as
+	// defense in depth (mirrors CapabilityVerifier): even a token signed by the
+	// pinned authority never authorizes longer than maxDelegationLifetime.
+	if tok.ExpiresAt-tok.IssuedAt > int64(maxDelegationLifetime/time.Second) {
+		return fmt.Errorf("delegation: token lifetime exceeds the %s maximum", maxDelegationLifetime)
+	}
 	if now.Unix() > tok.ExpiresAt {
 		return fmt.Errorf("delegation: token expired")
 	}
@@ -164,16 +175,14 @@ func VerifyDelegation(tok DelegationToken, expectAuthority string, req Delegatio
 // and the router are independently allowed the tool by the upstream's own
 // policy. This makes a router unable to widen a caller's authority, and a caller
 // unable to exceed what the router itself may do.
+//
+// The router leg is checked BEFORE the caller leg: the filter evaluates the
+// side-effecting caller leg (single-use approval / rate-token consumption)
+// only when the router leg already allows, so on a router deny the untouched
+// zero-value caller leg must never be the reported cause (delegation_wire.go).
 func AuthorizeDelegated(callerDec, routerDec Decision, delegationErr error) Decision {
 	if delegationErr != nil {
 		return Decision{Outcome: OutcomeDeny, RuleID: -1, Reason: "delegation invalid: " + delegationErr.Error()}
-	}
-	if callerDec.Outcome != OutcomeAllow {
-		reason := callerDec.Reason
-		if reason == "" {
-			reason = "original caller is not permitted this tool"
-		}
-		return Decision{Outcome: OutcomeDeny, RuleID: callerDec.RuleID, Reason: "denied by caller policy: " + reason}
 	}
 	if routerDec.Outcome != OutcomeAllow {
 		reason := routerDec.Reason
@@ -181,6 +190,13 @@ func AuthorizeDelegated(callerDec, routerDec Decision, delegationErr error) Deci
 			reason = "router service is not permitted this tool"
 		}
 		return Decision{Outcome: OutcomeDeny, RuleID: routerDec.RuleID, Reason: "denied by router policy: " + reason}
+	}
+	if callerDec.Outcome != OutcomeAllow {
+		reason := callerDec.Reason
+		if reason == "" {
+			reason = "original caller is not permitted this tool"
+		}
+		return Decision{Outcome: OutcomeDeny, RuleID: callerDec.RuleID, Reason: "denied by caller policy: " + reason}
 	}
 	// Intersection allows: the most restrictive cost applies.
 	cost := callerDec.Cost

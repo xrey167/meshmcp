@@ -48,12 +48,14 @@ Raw `_meta` remains informational only and is never trusted as identity.
 
 ## What the token verification rejects
 
-`VerifyDelegation` fails closed on: a signer that is not the pinned authority
-(and an empty pin never verifies); a token minted for a different
-audience/backend/tool; a token presented by a different router than it names;
-changed arguments (`req_hash` mismatch); an expired token; and a replayed nonce
-(`NonceStore`). A second (nested) hop needs its own token bound to the second
-audience — a first-hop token does not carry over.
+`VerifyDelegation` fails closed on: a token version other than 1; a signer that
+is not the pinned authority (and an empty pin never verifies); a token minted
+for a different audience/backend/tool; a token presented by a different router
+than it names; changed arguments (`req_hash` mismatch); an expired token; a
+lifetime beyond the 5-minute ceiling (re-enforced at verify time, not just at
+mint time — same belt-and-suspenders as the capability verifier); and a
+replayed nonce (`NonceStore`). A second (nested) hop needs its own token bound
+to the second audience — a first-hop token does not carry over.
 
 ## Status
 
@@ -72,19 +74,57 @@ audience — a first-hop token does not carry over.
   `examples/router-policy.yaml`). This reduces the confused-deputy blast radius
   from "any upstream tool" to exactly what the router policy permits — enforcement
   the router owns locally, with no wire-protocol change.
-- **Signed-delegation upstream verification — still Labs (follow-up):** the router
-  does not yet mint per-hop `DelegationToken`s, and upstreams do not yet call
-  `VerifyDelegation` + `AuthorizeDelegated` in the proxy path. That step still
-  needs three decisions the primitive does not settle: (a) how the router learns
-  each upstream's **audience** identity, (b) where the trusted **authority signing
-  key** lives and how it is distributed, and (c) the **wire transport** for the
-  token (a signed `_meta` field, never trusted as identity). Until it lands,
-  cross-identity federation to upstreams remains **experimental / Labs** (see the
-  capability matrix); the router-side policy above is the enforced guarantee
-  today.
+- **Signed-delegation upstream verification — WIRED (v1):** the router mints a
+  per-call `DelegationToken` for every forwarded `tools/call` to an
+  audience-pinned upstream, and a pinned gateway backend strips + verifies it
+  (`VerifyDelegation`) and authorizes `AuthorizeDelegated(caller ∩ router)`.
+  The three open decisions are settled:
+  - **(a) Audience:** operator pin. Each static router upstream carries
+    `audience: <upstream gateway mesh public key>`; the token's `aud` claim is
+    that pin, and the gateway verifies against its own mesh key. With
+    `delegation_key` set, a static upstream WITHOUT a pin is a startup error
+    (it would otherwise be called unsigned); registry-discovered upstreams have
+    no pin and take the legacy unsigned path (logged at startup).
+  - **(b) Authority key:** lives at the router — `delegation_key:` names a
+    `policy.Signer` key file created by `meshmcp router keygen`. A configured
+    but missing/unreadable key is FATAL at startup (S13 pattern), never a
+    silent downgrade. Gateways pin the authority's public key per backend:
+    `router_delegation: {trusted_public_keys: [<hex>...], required: bool}`.
+  - **(c) Wire transport:** `tools/call` `params._meta["com.meshmcp/delegation"]`
+    = base64url(JSON(token)), minted once per logical call (one nonce; every
+    replica dispatch attempt of that call presents the same token). The filter
+    strips it from every governed line before the backend, trace, audit, or
+    secret injection — and never trusts it (or `meshmcpOriginPeer/Key`, which
+    stays informational) as identity: the token is verified against the pinned
+    authority, and the presenting router is the transport-proven peer.
+
+  Enforcement semantics: `required: true` denies any `tools/call` without a
+  valid token; `required: false` verifies and
+  intersects a call WITH a token and lets a token-less call fall through to the
+  ordinary single-hop policy (mixed direct+routed backends). A mint failure at
+  the router DENIES the call — it is never forwarded unsigned. A co-sign
+  outcome on either leg of the intersection is not-allow and therefore denies
+  (a delegated hop is not a co-sign enforcement point in v1). The caller leg is
+  evaluated only after the router leg allows: a router-denied call has no side
+  effects on the original caller's budgets (its single-use co-sign approvals
+  and rate tokens are consumed only on the path that can allow), so a denial
+  cannot be used to drain a caller's pending approvals.
+
+  **Honest v1 limits:** `tools/call` only (other methods have no per-method
+  verify hook upstream — `required: true` does NOT gate `resources/read`,
+  `prompts/get`, or `tools/list`; restrict those surfaces with the backend
+  policy's `methods` rules); stdio backends only (the HTTP enforcer has no
+  body-rewrite strip yet — `router_delegation` on an HTTP backend is a config
+  error, not a silent no-op); the replay `NonceStore` is **per-gateway-process
+  in-memory** — a multi-gateway HA deployment has per-gateway replay windows,
+  and a future shared (pg) store would fail closed on a cross-gateway replica
+  failover re-presenting one token.
 
 ## Audit
 
-When wired, both identities must be preserved in the audit record: the original
-caller AND the router (delegate), plus the delegation nonce, so a forwarded call
-is attributable end to end.
+Wired as specified: every call where a token was presented or required —
+allow, verify-fail deny, and missing-token deny alike — records BOTH
+identities and the nonce (`delegated_caller`, `delegation_router`,
+`delegation_nonce`; see AUDIT-RECORD.md), so a forwarded call is attributable
+end to end. `reason` carries the precise cause (`delegation invalid: ...`,
+`denied by caller policy: ...`, `denied by router policy: ...`).

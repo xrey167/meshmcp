@@ -45,6 +45,12 @@ type Config struct {
 	// means true; set `audit_fsync: false` to opt out on throughput-sensitive
 	// deployments (one fsync per audited decision has a real hot-path cost).
 	AuditFsync *bool `yaml:"audit_fsync"`
+	// AuditRotateBytes, when > 0, rotates the shared ledger when the active
+	// file would exceed this size: the segment is sealed (fsync+close), renamed
+	// to <audit_log>.<UTC timestamp>, and a fresh file continues the SAME hash
+	// chain (next seq, prev_hash into the archive). Verify the full history by
+	// concatenating segments in name order. 0 (default) = no rotation.
+	AuditRotateBytes int64 `yaml:"audit_rotate_bytes"`
 	// AuditWebhook POSTs audit records to an external URL (SIEM / Slack /
 	// PagerDuty) via a best-effort observer sink. AuditWebhookAll forwards every
 	// record; by default only deny/cosign records are sent.
@@ -215,6 +221,10 @@ type Backend struct {
 	// AuditFsync fsyncs each committed record (power-loss durability). On by
 	// default (nil = true); set audit_fsync: false to opt out.
 	AuditFsync *bool `yaml:"audit_fsync"`
+	// AuditRotateBytes, when > 0, size-rotates this backend's audit_log (see
+	// Config.AuditRotateBytes for the sealing/verification contract). Requires
+	// audit_log (the stderr fallback cannot rotate). 0 = no rotation.
+	AuditRotateBytes int64 `yaml:"audit_rotate_bytes"`
 	// AuditCheckpoints is a file for signed Merkle checkpoints over the audit
 	// log, making it non-repudiable and externally verifiable. Requires a
 	// signing key (audit_signing_key). Verify with
@@ -227,8 +237,15 @@ type Backend struct {
 	// AuditCheckpointEvery is how many records per checkpoint (default 128).
 	AuditCheckpointEvery int `yaml:"audit_checkpoint_every"`
 	// AuditAnchor is an append-only file where each checkpoint is also written
-	// as an external witness (the transparency-log seam).
+	// as an external witness (the transparency-log seam). Records are
+	// self-linked (prev_anchor), so the anchor file is itself tamper-evident.
 	AuditAnchor string `yaml:"audit_anchor"`
+	// AuditAnchorURL POSTs each checkpoint to a peer gateway's witness endpoint
+	// (the control plane's /v1/anchor, run with --anchor-witness). Best-effort
+	// with a bounded retry queue: a witness outage never blocks a checkpoint,
+	// and `meshmcp audit anchor` replays the checkpoints file idempotently
+	// after an outage. May be combined with audit_anchor (both fire).
+	AuditAnchorURL string `yaml:"audit_anchor_url"`
 	// AuditFailClosed makes this backend's audit sink a hard control: when a
 	// record cannot be written (full disk, I/O error), the call is denied
 	// rather than proceeding unrecorded. Off by default (best-effort).
@@ -261,6 +278,16 @@ type Backend struct {
 	// capability upgrades a policy-default-deny call to allow; required:true
 	// makes the backend a capability-only surface. Only valid for stdio.
 	Capabilities *CapabilitiesConfig `yaml:"capabilities"`
+	// RouterDelegation pins router delegation-authority keys ("meshmcp router
+	// keygen"): a tools/call presenting a valid signed DelegationToken is
+	// authorized as the INTERSECTION of the original caller's and the router's
+	// permissions under this backend's policy; required:true makes every
+	// tools/call carry a valid token. Delegation gates tools/call ONLY (v1):
+	// other JSON-RPC methods (resources/read, prompts/get, tools/list, ...)
+	// bypass it and stay governed by the policy's methods rules — add methods
+	// rules to restrict those surfaces. Only valid for stdio backends with a
+	// policy. Replay protection is per-gateway-process (in-memory nonce store).
+	RouterDelegation *RouterDelegationConfig `yaml:"router_delegation"`
 	// DLP declares content rules scanned against every tools/call's arguments:
 	// a match can deny the call or emit a data-flow label (F18). Implemented as
 	// a plugin decision hook; only valid for stdio backends with a policy.
@@ -315,6 +342,23 @@ type RemoteBackendConfig struct {
 	// RefreshTokenName is the secret holding the current refresh token
 	// (default "oauth_refresh_token"); rotated tokens are persisted back.
 	RefreshTokenName string `yaml:"refresh_token_name"`
+}
+
+// RouterDelegationConfig configures signed router-delegation verification for
+// a backend (docs/spec/ROUTER-DELEGATION.md). Deny-by-default: a token signed
+// by an unpinned authority never verifies, and required:true refuses any
+// tools/call without a valid token.
+type RouterDelegationConfig struct {
+	// Required makes every tools/call present a valid delegation token.
+	// false verifies+intersects a call WITH a token and lets a token-less call
+	// fall through to the ordinary single-hop policy path (mixed direct+routed
+	// backends). NOTE: required gates tools/call only — it does NOT make the
+	// whole backend router-only; non-tools/call methods bypass delegation and
+	// need their own methods rules (see the RouterDelegation field doc).
+	Required bool `yaml:"required"`
+	// TrustedPublicKeys are the hex Ed25519 router-authority keys this gateway
+	// pins; a token never supplies its own trust root.
+	TrustedPublicKeys []string `yaml:"trusted_public_keys"`
 }
 
 // CapabilitiesConfig configures signed-capability admission for a backend.
@@ -374,6 +418,12 @@ func loadConfig(path string) (*Config, error) {
 
 	if len(cfg.Backends) == 0 {
 		return nil, fmt.Errorf("config %s: no backends defined", path)
+	}
+	if cfg.AuditRotateBytes < 0 {
+		return nil, fmt.Errorf("config %s: audit_rotate_bytes must be >= 0", path)
+	}
+	if cfg.AuditRotateBytes > 0 && cfg.AuditLog == "" {
+		return nil, fmt.Errorf("config %s: audit_rotate_bytes requires audit_log", path)
 	}
 	// Validate the SPIFFE trust domain up front (Feature A, mirroring
 	// federate.go): a malformed domain is a config error, not something to
@@ -491,11 +541,26 @@ func loadConfig(path string) (*Config, error) {
 		if b.ApprovalSigningKey != "" && b.CosignStore == "" {
 			return nil, fmt.Errorf("backend %q: approval_signing_key requires cosign_store (the shared approval directory)", b.Name)
 		}
+		if b.AuditRotateBytes < 0 {
+			return nil, fmt.Errorf("backend %q: audit_rotate_bytes must be >= 0", b.Name)
+		}
+		if b.AuditRotateBytes > 0 && b.AuditLog == "" {
+			return nil, fmt.Errorf("backend %q: audit_rotate_bytes requires audit_log (the stderr fallback cannot rotate)", b.Name)
+		}
 		if b.AuditCheckpoints != "" && b.AuditSigningKey == "" {
 			return nil, fmt.Errorf("backend %q: audit_checkpoints requires audit_signing_key", b.Name)
 		}
 		if b.AuditCheckpoints != "" && b.Policy == nil {
 			return nil, fmt.Errorf("backend %q: audit_checkpoints requires a policy (nothing to audit otherwise)", b.Name)
+		}
+		if (b.AuditAnchor != "" || b.AuditAnchorURL != "") && b.AuditCheckpoints == "" {
+			return nil, fmt.Errorf("backend %q: audit_anchor/audit_anchor_url require audit_checkpoints (anchoring witnesses signed checkpoints)", b.Name)
+		}
+		if b.AuditAnchorURL != "" {
+			u, err := url.Parse(b.AuditAnchorURL)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+				return nil, fmt.Errorf("backend %q: invalid audit_anchor_url %q (want http(s)://host[:port]/v1/anchor)", b.Name, b.AuditAnchorURL)
+			}
 		}
 		if b.Capabilities != nil {
 			if !hasStdio {
@@ -515,6 +580,28 @@ func loadConfig(path string) (*Config, error) {
 			// policy would make it a silent no-op.
 			if !b.Capabilities.Required && (b.Policy == nil || b.Policy.DefaultAllow) {
 				return nil, fmt.Errorf("backend %q: capabilities with required:false need a deny-by-default policy (a capability only upgrades a policy-default call)", b.Name)
+			}
+		}
+		if b.RouterDelegation != nil {
+			// v1 scope: stdio only (the HTTP enforcer has no body-rewrite strip
+			// yet) — reject rather than silently not enforce.
+			if !hasStdio {
+				return nil, fmt.Errorf("backend %q: router_delegation is only valid for stdio backends (HTTP parity is a follow-up)", b.Name)
+			}
+			// The delegated decision is the intersection of caller AND router
+			// under this backend's OWN policy — without one there is nothing to
+			// intersect and no call could ever be allowed.
+			if b.Policy == nil {
+				return nil, fmt.Errorf("backend %q: router_delegation requires a policy (the upstream authorizes caller ∩ router under its own rules)", b.Name)
+			}
+			if len(b.RouterDelegation.TrustedPublicKeys) == 0 {
+				return nil, fmt.Errorf("backend %q: router_delegation needs at least one trusted_public_keys entry (an empty pin never verifies)", b.Name)
+			}
+			for _, k := range b.RouterDelegation.TrustedPublicKeys {
+				raw, err := hex.DecodeString(k)
+				if err != nil || len(raw) != ed25519.PublicKeySize {
+					return nil, fmt.Errorf("backend %q: router_delegation trusted_public_keys entry %q is not a %d-byte hex Ed25519 key", b.Name, k, ed25519.PublicKeySize)
+				}
 			}
 		}
 		if b.Secrets != nil {

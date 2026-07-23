@@ -147,6 +147,16 @@ first, fixed with the smallest robust change, and documented in
 
 ### Known issues
 
+### Fixed
+
+- **Session graceful-close race (structural fix)**: `endpoint.sendClose` now
+  commits the close atomically with the CLOSE frame write, so a one-shot
+  sender (steer/push) whose peer finalizes the session first can no longer
+  redial and misreport a fully acknowledged delivery as "requested resume
+  session is no longer available". Complements the reconnectLoop drain-phase
+  wait shipped in the same cycle; an unknown resume id remains a terminal
+  rejection. Deterministic regression: `TestGracefulDrainCloseNeverReattaches`.
+
 - The license is unresolved (proprietary/read-only); see `LICENSE-DECISION.md`.
   Cutting the first tag is blocked on that owner decision, not on the pipeline:
   all five release targets cross-compile clean and the workflow is ready.

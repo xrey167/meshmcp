@@ -13,6 +13,9 @@ import (
 	"net/http/httputil"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -99,9 +102,12 @@ func cmdServe(args []string) error {
 		if serr != nil {
 			return fmt.Errorf("shared audit log: %w", serr)
 		}
-		f, err := os.OpenFile(cfg.AuditLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		f, err := openAuditWriter(cfg.AuditLog, cfg.AuditRotateBytes)
 		if err != nil {
 			return fmt.Errorf("open shared audit log %s: %w", cfg.AuditLog, err)
+		}
+		if cfg.AuditRotateBytes > 0 {
+			log.Printf("shared audit ledger: size rotation at %d bytes (sealed segments continue one chain; verify the full history by concatenating segments)", cfg.AuditRotateBytes)
 		}
 		sharedAudit = policy.NewAuditLog(f, func() string { return time.Now().UTC().Format(time.RFC3339) }).
 			WithFailClosed(cfg.AuditFailClosed).
@@ -225,12 +231,21 @@ func cmdServe(args []string) error {
 		var httpEnf *httpEnforcer
 		if len(b.Stdio) > 0 {
 			var eng *policy.Engine
-			factory, eng = backendFactory(b, audit, tracer, hookSink)
+			factory, eng = backendFactory(b, audit, tracer, hookSink, meshPubKey)
 			if eng != nil {
 				engines[b.Name] = eng
 			}
 		} else if b.Policy != nil {
-			httpEnf = newHTTPEnforcer(b, audit)
+			var enfErr error
+			httpEnf, enfErr = newHTTPEnforcer(b, audit)
+			if enfErr != nil {
+				close(shutdown)
+				for _, l := range listeners {
+					l.Close()
+				}
+				wg.Wait()
+				return enfErr
+			}
 			engines[b.Name] = httpEnf.eng
 			log.Printf("backend %q: HTTP policy enforcement on (%d rules)", b.Name, len(b.Policy.Rules))
 		}
@@ -559,9 +574,14 @@ func reloadPolicies(cfgPath string, engines map[string]*policy.Engine, backends 
 		applied++
 		log.Printf("reload: backend %q policy updated (%d rules, default %s)", b.Name, len(pol.Rules), allowWord(pol.DefaultAllow))
 	}
-	// Control-surface ACLs. loadConfig guarantees an enabled control endpoint
-	// never loads with an empty allow surface, so a swap cannot open it wide.
-	if newCfg.Control != nil {
+	// Control-surface ACLs. Only swap when the endpoint is actually enabled
+	// (Port > 0): loadConfig only forbids an empty control allow surface for an
+	// enabled endpoint, so a reload that sets control.port to 0 (with an emptied
+	// allow list) must not swap the ACL of the listener still serving from
+	// startup to empty. Defence in depth: the control handlers additionally treat
+	// an empty control ACL as default-deny (aircontrol.go), so the surface fails
+	// closed even if an empty allow list ever reaches this swap.
+	if newCfg.Control != nil && newCfg.Control.Port > 0 {
 		controlAllow.swap(append(append([]string(nil), newCfg.Control.Allow...), operatorPatterns(newCfg.Operators)...))
 		controlOnBehalf.swap(newCfg.Control.OnBehalfAllow)
 	}
@@ -578,7 +598,11 @@ func reloadPolicies(cfgPath string, engines map[string]*policy.Engine, backends 
 // tracer is configured; with neither, the raw subprocess is used.
 // It also returns the per-backend policy Engine (nil when the backend has no
 // policy/capabilities) so the caller can hot-swap its policy on SIGHUP.
-func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer, hook policy.EventHook) (session.BackendFactory, *policy.Engine) {
+// meshPubKey is this gateway's own mesh identity — the AUDIENCE a presented
+// router-delegation token must name (empty is fatal when router_delegation is
+// configured: every verify would fail closed at the first call, so fail at
+// startup with a clear error instead).
+func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer, hook policy.EventHook, meshPubKey string) (session.BackendFactory, *policy.Engine) {
 	exec := session.ExecBackendFactory(b.Stdio[0], b.Stdio[1:], os.Environ())
 	if b.Policy == nil && tracer == nil && b.Capabilities == nil {
 		return exec, nil
@@ -611,6 +635,12 @@ func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer, h
 		if err != nil {
 			log.Fatalf("backend %q: capabilities: %v", b.Name, err)
 		}
+		// Single-use (jti) replay cache, shared across the backend's connections
+		// so a one-shot grant is one-shot per backend, not per connection.
+		// Per-process only: a multi-gateway HA deployment gets per-gateway replay
+		// windows — a shared pgstore-backed NonceStore is the follow-up, matching
+		// the delegation nonce-store precedent above.
+		v = v.WithReplayCache(policy.NewMemNonceStore())
 		if b.Capabilities.RevocationStore != "" {
 			// Create the store at startup so IsRevoked can later fail closed on a
 			// vanished/unavailable store; a store that cannot be created is a
@@ -623,6 +653,25 @@ func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer, h
 			log.Printf("backend %q: capability revocation store: %s", b.Name, b.Capabilities.RevocationStore)
 		}
 		capVerifier = v
+	}
+	// Router-delegation verifier: pins the router-authority keys, binds this
+	// gateway's own mesh identity as the audience, and shares ONE in-memory
+	// nonce store across the backend's connections (never nil — a nil store
+	// would skip replay protection). Per-process only: a multi-gateway HA
+	// deployment gets per-gateway replay windows (a shared/pg store is a
+	// follow-up, matching the SessionStore precedent).
+	var delegVerifier *policy.DelegationVerifier
+	if b.RouterDelegation != nil {
+		if meshPubKey == "" {
+			log.Fatalf("backend %q: router_delegation is configured but the gateway's mesh public key is unavailable — no audience to verify tokens against (fail closed at startup, not at first call)", b.Name)
+		}
+		v, err := policy.NewDelegationVerifier(b.RouterDelegation.TrustedPublicKeys, meshPubKey, policy.NewMemNonceStore(), nil)
+		if err != nil {
+			log.Fatalf("backend %q: router_delegation: %v", b.Name, err)
+		}
+		delegVerifier = v
+		log.Printf("backend %q: router-delegation enforcement on (required=%v, %d pinned authority key(s); replay window per-gateway-process)",
+			b.Name, b.RouterDelegation.Required, len(b.RouterDelegation.TrustedPublicKeys))
 	}
 	// Held-request registry lives in the cosign directory, so an approver
 	// (a human identity / a phone on the mesh) sees pending calls next to the
@@ -700,6 +749,9 @@ func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer, h
 		if capVerifier != nil {
 			f.SetCapabilityVerifier(capVerifier, b.Capabilities.Required)
 		}
+		if delegVerifier != nil {
+			f.SetDelegationVerifier(delegVerifier, b.RouterDelegation.Required)
+		}
 		if dlpHook != nil {
 			f.AddDecisionHook(dlpHook)
 		}
@@ -754,24 +806,40 @@ func buildTracer(cfg *TraceConfig) (*policy.Tracer, error) {
 // instead of resetting to seq 1 with a fresh genesis. It refuses to append to a
 // malformed or tampered log (fail closed): silently starting a second chain in
 // the same file would produce a duplicate seq 1 and make the log unverifiable.
-// An absent or empty file returns (0, "", nil).
+// An absent or empty file returns (0, "", nil) — unless rotation archives
+// exist next to it, in which case the chain continues from the newest
+// archive's head (a fresh seq-1 genesis would collide with the archived
+// history and make the concatenated set unverifiable).
+//
+// Rotated ledgers (S51, audit_rotate_bytes): the active file is a chain
+// SEGMENT whose first record links into the newest sealed archive
+// (<path>.<timestamp>). Its linkage is verified against that archive's head;
+// full-history verification remains an offline concatenation of the segments
+// in name order.
 func seedAuditFromExisting(path string) (seq int, lastHash string, err error) {
 	if path == "" {
 		return 0, "", nil
 	}
+	// A rotated ledger seeds verification from the newest archive's head.
+	seedSeq, seedHash, serr := auditArchiveHead(path)
+	if serr != nil {
+		return 0, "", serr
+	}
 	data, rerr := os.ReadFile(path)
 	if os.IsNotExist(rerr) {
-		return 0, "", nil
+		return seedSeq, seedHash, nil
 	}
 	if rerr != nil {
 		return 0, "", rerr
 	}
 	if len(bytes.TrimSpace(data)) == 0 {
-		return 0, "", nil
+		return seedSeq, seedHash, nil
 	}
-	res, truncateTo, torn := policy.VerifyForRepair(data)
+	// With no archives (seedSeq 0) this verifies from genesis; a stray rotated
+	// segment whose archives were deleted then fails closed on its seq>1 start.
+	res, truncateTo, torn := policy.VerifyForRepairFrom(data, seedSeq, seedHash)
 	if res.OK {
-		return res.Count, res.LastHash, nil
+		return seedSeq + res.Count, res.LastHash, nil
 	}
 	if torn {
 		// A crash/power-loss left an incomplete trailing record. Everything
@@ -782,10 +850,62 @@ func seedAuditFromExisting(path string) (seq int, lastHash string, err error) {
 			return 0, "", fmt.Errorf("audit log %s: repairing torn tail: %w", path, err)
 		}
 		log.Printf("audit log %s: recovered an incomplete trailing record (%s); truncated to %d bytes, resuming from seq %d",
-			path, res.Reason, truncateTo, res.Count)
-		return res.Count, res.LastHash, nil
+			path, res.Reason, truncateTo, seedSeq+res.Count)
+		return seedSeq + res.Count, res.LastHash, nil
 	}
 	return 0, "", fmt.Errorf("existing audit log %s is unverifiable (break at seq %d: %s); refusing to append and reset the chain", path, res.BreakSeq, res.Reason)
+}
+
+// openAuditWriter opens an audit ledger file for append: plain O_APPEND when
+// rotateBytes is 0, else a size-rotating sink (S51, opt-in audit_rotate_bytes).
+// Both support Sync(), so WithSync durability applies either way.
+func openAuditWriter(path string, rotateBytes int64) (io.Writer, error) {
+	if rotateBytes > 0 {
+		return policy.OpenRotatingFileSink(path, rotateBytes, nil)
+	}
+	return os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+}
+
+// auditArchivePattern matches the suffix RotatingFileSink stamps on sealed
+// segments: .<UTC timestamp>[-NNN]. Deliberately narrow so unrelated siblings
+// (checkpoints, anchors) are never mistaken for archives.
+var auditArchivePattern = regexp.MustCompile(`\.\d{8}T\d{6}Z(-\d{3})?$`)
+
+// auditArchiveHead finds the newest rotation archive of path (if any) and
+// returns its last record's (seq, hash) — the seed the active segment's chain
+// must continue from. (0, "", nil) when no archives exist. The archive's own
+// interior is NOT re-verified here (full-history verification is an offline
+// concatenation); what restart proves is the ACTIVE segment's integrity and
+// its linkage into this head.
+func auditArchiveHead(path string) (seq int, hash string, err error) {
+	matches, gerr := filepath.Glob(path + ".*")
+	if gerr != nil || len(matches) == 0 {
+		return 0, "", nil
+	}
+	var archives []string
+	for _, m := range matches {
+		if auditArchivePattern.MatchString(m) {
+			archives = append(archives, m)
+		}
+	}
+	if len(archives) == 0 {
+		return 0, "", nil
+	}
+	sort.Strings(archives) // timestamp format is lexicographically chronological
+	newest := archives[len(archives)-1]
+	f, err := os.Open(newest)
+	if err != nil {
+		return 0, "", fmt.Errorf("audit archive %s: %w", newest, err)
+	}
+	defer f.Close()
+	seq, hash, err = policy.LastLink(f)
+	if err != nil {
+		return 0, "", fmt.Errorf("audit archive %s: %w", newest, err)
+	}
+	if seq == 0 {
+		return 0, "", fmt.Errorf("audit archive %s exists but holds no records; refusing to guess the chain head", newest)
+	}
+	return seq, hash, nil
 }
 
 // seedCheckpointFromExisting returns the last checkpoint's ordinal and hash from
@@ -814,6 +934,45 @@ func seedCheckpointFromExisting(path string) (cpSeq int, prevCPHash string, err 
 	return cp.Seq, cp.Hash(), nil
 }
 
+// seedAnchorFromExisting returns the AnchorLineHash of an existing anchor
+// file's last line (the seed for continuing the self-linked witness chain
+// across restarts, mirroring seedCheckpointFromExisting). Absent/empty file ⇒
+// "". An unreadable record is fatal: appending past it would hide whatever the
+// bad line replaced.
+func seedAnchorFromExisting(path string) (prevHash string, err error) {
+	if path == "" {
+		return "", nil
+	}
+	f, oerr := os.Open(path)
+	if os.IsNotExist(oerr) {
+		return "", nil
+	}
+	if oerr != nil {
+		return "", oerr
+	}
+	defer f.Close()
+	_, lastHash, rerr := policy.ReadAnchorRecords(f)
+	if rerr != nil {
+		return "", fmt.Errorf("anchor file %s: %w", path, rerr)
+	}
+	return lastHash, nil
+}
+
+// multiAnchor fans one checkpoint out to several witnesses; every witness
+// fires and all failures are reported together (anchoring is evidence, so a
+// partial failure must still surface).
+type multiAnchor []policy.Anchor
+
+func (m multiAnchor) Anchor(c policy.Checkpoint) error {
+	var errs []error
+	for _, a := range m {
+		if err := a.Anchor(c); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
 func auditSink(b *Backend) (*policy.AuditLog, error) {
 	if b.Policy == nil {
 		return nil, nil
@@ -827,7 +986,7 @@ func auditSink(b *Backend) (*policy.AuditLog, error) {
 		if serr != nil {
 			return nil, fmt.Errorf("backend %q audit log: %w", b.Name, serr)
 		}
-		f, err := os.OpenFile(b.AuditLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		f, err := openAuditWriter(b.AuditLog, b.AuditRotateBytes)
 		if err != nil {
 			return nil, fmt.Errorf("backend %q: open audit log %s: %w", b.Name, b.AuditLog, err)
 		}
@@ -896,15 +1055,36 @@ func checkpointer(b *Backend, now func() string) (*policy.Checkpointer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("backend %q: open checkpoints %s: %w", b.Name, b.AuditCheckpoints, err)
 	}
-	var anchor policy.Anchor
+	name := b.Name
+	var anchors []policy.Anchor
 	if b.AuditAnchor != "" {
+		prevAnchor, aerr := seedAnchorFromExisting(b.AuditAnchor)
+		if aerr != nil {
+			return nil, fmt.Errorf("backend %q: %w", b.Name, aerr)
+		}
 		af, err := os.OpenFile(b.AuditAnchor, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 		if err != nil {
 			return nil, fmt.Errorf("backend %q: open anchor %s: %w", b.Name, b.AuditAnchor, err)
 		}
-		anchor = &policy.FileAnchor{W: af}
+		anchors = append(anchors, policy.NewFileAnchor(af, prevAnchor))
 	}
-	name := b.Name
+	if b.AuditAnchorURL != "" {
+		// Peer delivery is asynchronous (a slow witness must never stall the
+		// audit write path), so its post failures surface through the anchor's
+		// own handler rather than the Checkpointer's returned error.
+		anchors = append(anchors, policy.NewPeerAnchor(b.AuditAnchorURL).
+			WithErrorHandler(func(err error) {
+				log.Printf("backend %q: AUDIT CHECKPOINT ERROR: checkpoint anchor: %v", name, err)
+			}))
+	}
+	var anchor policy.Anchor
+	switch len(anchors) {
+	case 0:
+	case 1:
+		anchor = anchors[0]
+	default:
+		anchor = multiAnchor(anchors)
+	}
 	cp := policy.NewCheckpointer(signer, f, b.AuditCheckpointEvery, now, anchor)
 	if cpSeq > 0 {
 		cp.SeedFrom(cpSeq, prevCPHash) // continue the checkpoint chain across restart

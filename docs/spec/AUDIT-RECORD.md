@@ -35,6 +35,9 @@ record's hash, forming a hash chain.
 | `seq` | number | yes | 1-based monotonic sequence number. |
 | `prev_hash` | string | yes | Hex SHA-256 of the previous record (`""` for `seq` 1). |
 | `hash` | string | yes | Hex SHA-256 of this record (see 1.2). |
+| `delegated_caller` | string | no | Router delegation (Phase 4): the VERIFIED `DelegationToken`'s original-caller claim. Empty/absent when no decodable token was presented. |
+| `delegation_router` | string | no | Router delegation: the transport-proven connecting router — recorded explicitly (alongside `peer_key`) so a forwarded call preserves BOTH identities per ROUTER-DELEGATION.md. |
+| `delegation_nonce` | string | no | Router delegation: the token's single-use replay nonce. |
 
 ### 1.2 Record hash
 
@@ -170,6 +173,53 @@ RFC 6962 transparency log, a notary, or a peer gateway). Anchoring defends
 against an insider who controls both the file and the signing key: once a
 checkpoint head is witnessed elsewhere, the log cannot be rolled back past it
 without the witness disagreeing.
+
+#### 2.6.1 Anchor record (v1)
+
+A witness records one JSONL line per checkpoint:
+
+```json
+{"v":1,"checkpoint_seq":N,"chain_head":"<hex>","checkpoint":"<hex>",
+ "time":"<ts>","signer":"<hex pubkey, optional>","prev_anchor":"<hex>"}
+```
+
+- `checkpoint` — the anchored checkpoint's own hash (§2.3), which commits to
+  its span, Merkle root, chain head, previous-checkpoint link, signer key, and
+  signature.
+- `prev_anchor` — SHA-256 (hex) of the previous anchor line's exact JSON bytes
+  (without the trailing newline); `""` for the first line. This self-links the
+  anchor file so an edited or dropped anchor line is itself detectable.
+- `signer` — set by a peer witness (`/v1/anchor`) to the pinned signer public
+  key the checkpoint was verified against; absent for a local anchor file.
+
+Legacy records (the pre-v1 format: no `v`/`prev_anchor`, `checkpoint_seq` as a
+JSON string) MUST still be accepted by verifiers; linkage is enforced only on
+records that carry it.
+
+#### 2.6.2 Anchor verification
+
+`meshmcp audit verify <log> --checkpoints <f> --pubkey <hex> --anchors <f>`
+cross-checks every witness record against the checkpoints file (recomputing
+each checkpoint's hash) and reports an anchor verdict ORTHOGONAL to the
+four-state status — it never remaps `invalid`/`untrusted_key`/`unsealed`/
+`sealed`, only adds evidence:
+
+- `anchored` — every checkpoint is witnessed and every witness record matches.
+- `anchor_partial` — all witnessed records match, but some checkpoints are not
+  yet witnessed (witness lag); the unwitnessed window is reported and can be
+  healed with `meshmcp audit anchor` (idempotent replay). Witness records
+  attributed to a *different* signer are skipped (a shared witness file holds
+  several gateways' chains) but counted; when **no** record matches this
+  signer and other-signer records exist, the reason names them — a witness
+  that knew this gateway under a previously pinned key is possible
+  rewrite-under-a-new-signer evidence, not plain lag.
+- `anchor_mismatch` — the witness disagrees: a witnessed checkpoint is absent
+  (rollback), its hash/chain head differs (rewrite, even re-signed with the
+  real key), duplicate witness records conflict (fork), or the anchor file's
+  self-linkage is broken. Verification exits non-zero **even when the chain is
+  internally sealed** — this is the key-holding-insider rollback case
+  anchoring exists to catch, and it holds only as far as the witness is
+  independently administered.
 
 ## 3. Canonical JSON
 

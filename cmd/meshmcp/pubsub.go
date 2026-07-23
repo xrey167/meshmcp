@@ -307,7 +307,9 @@ func cmdPubsub(args []string) error {
 		if err != nil {
 			return fmt.Errorf("capabilities: %w", err)
 		}
-		capVerifier = v
+		// jti replay cache so SingleUse grants are enforceable (in-memory,
+		// per-process; a shared pgstore-backed NonceStore is the HA follow-up).
+		capVerifier = v.WithReplayCache(policy.NewMemNonceStore())
 		log.Printf("capability grants accepted from %d authority key(s) for audience %q", len(cfg.TrustedKeys), cfg.Name)
 	}
 
