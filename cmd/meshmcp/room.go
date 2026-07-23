@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
@@ -8,6 +9,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -65,6 +67,15 @@ type roomServer struct {
 	mesh       *embed.Client // nil = view-only (no mesh creds)
 	localShell bool
 	token      string // bearer required by the actuator endpoints (call/shell)
+
+	// control is the SOURCE gateway's mesh control address (from --control). When
+	// set (and the room has mesh credentials) the room can list live sessions and
+	// trigger a live-session MOVE by proxying to that gateway's /v1/sessions and
+	// /v1/move. The room reaches the gateway as an ordinary mesh client whose OWN
+	// WireGuard identity must be on the gateway's control.allow — the room holds
+	// no special power; an un-allowed room is refused (403) by the gateway.
+	control   string
+	controlHC *http.Client // mesh-dialing HTTP client to `control`; nil when unwired
 
 	mu   sync.Mutex
 	pool map[string]*mcpclient.Client // target -> reused MCP client over the mesh
@@ -179,6 +190,7 @@ func cmdRoom(args []string) error {
 	recent := fs.Int("recent", 120, "live-feed events to keep")
 	title := fs.String("title", "meshmcp control room", "page title / header")
 	localShell := fs.Bool("local-shell", false, "expose a RAW local shell on this host (loopback bind only; a firewall bypass)")
+	control := fs.String("control", "", "source gateway mesh control address (ip:port) — enables the live Sessions panel and drag-to-handoff; the room's own WireGuard identity must be on that gateway's control.allow")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -194,7 +206,8 @@ func cmdRoom(args []string) error {
 		return fmt.Errorf("generate room token: %w", err)
 	}
 	rs := &roomServer{auditPath: *auditPath, recent: *recent, title: *title,
-		localShell: *localShell, token: tok, pool: map[string]*mcpclient.Client{}}
+		localShell: *localShell, token: tok, control: strings.TrimSpace(*control),
+		pool: map[string]*mcpclient.Client{}}
 
 	// Join the mesh only if credentials are available; otherwise stay view-only.
 	if o.SetupKey != "" {
@@ -208,8 +221,24 @@ func cmdRoom(args []string) error {
 		if st, err := client.Status(); err == nil {
 			log.Printf("control room joined mesh as %s", st.LocalPeerState.FQDN)
 		}
+		// The live Sessions panel + drag-to-handoff proxy to the source gateway's
+		// control endpoint over the mesh, under the room's own WireGuard identity.
+		if rs.control != "" {
+			rs.controlHC = &http.Client{
+				Timeout: moveTriggerTimeout + 15*time.Second, // a move warms a backend on the destination
+				Transport: &http.Transport{
+					DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+						return rs.mesh.Dial(ctx, "tcp", rs.control)
+					},
+				},
+			}
+			log.Printf("control room wired to gateway control %s (live sessions + drag-to-handoff; the room's WireGuard key must be on that gateway's control.allow)", rs.control)
+		}
 	} else {
 		log.Printf("control room: no mesh credentials — live view only (set NB_SETUP_KEY to drive backends)")
+		if rs.control != "" {
+			log.Printf("control room: --control %s set but no mesh credentials — the Sessions panel needs NB_SETUP_KEY to reach the gateway", rs.control)
+		}
 	}
 	if *localShell {
 		log.Printf("WARNING: --local-shell is ON. Anyone who can reach http://%s can run commands on THIS host.", *addr)
@@ -231,6 +260,12 @@ func cmdRoom(args []string) error {
 	mux.HandleFunc("/api/ls", rs.requireToken(rs.handleLs))
 	mux.HandleFunc("/api/call", rs.requireToken(rs.handleCall))
 	mux.HandleFunc("/api/shell", rs.requireToken(rs.handleShell))
+	// Live sessions + drag-to-handoff proxy to the source gateway's control
+	// endpoint. Token-gated (browser->room) exactly like the other actuators; the
+	// room->gateway hop re-gates on the gateway's operator ACL, so an
+	// unauthenticated viewer cannot fire a move even past the room token.
+	mux.HandleFunc("/api/sessions", rs.requireToken(rs.handleSessions))
+	mux.HandleFunc("/api/move", rs.requireToken(rs.handleMove))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -339,7 +374,85 @@ func (rs *roomServer) handleCaps(w http.ResponseWriter, r *http.Request) {
 		"mesh":        rs.mesh != nil,
 		"local_shell": rs.localShell,
 		"title":       rs.title,
+		// control advertises whether the live Sessions panel + drag-to-handoff are
+		// wired (--control set AND mesh credentials present). The SPA hides the panel
+		// entirely when false, so an unwired room is byte-for-byte the read-only view.
+		"control": rs.control != "" && rs.controlHC != nil,
 	})
+}
+
+// proxyControl forwards one request to the wired source gateway's control
+// endpoint over the mesh and streams its status + body straight back. Passing the
+// gateway's verdict through UNCHANGED is load-bearing: the browser sees the real
+// server-side outcome (moved / refused / unknown), never a status the room
+// synthesized. Fails closed with a clear message when the room is not wired.
+func (rs *roomServer) proxyControl(w http.ResponseWriter, method, path string, body []byte) {
+	if rs.control == "" {
+		http.Error(w, "room not wired to a control gateway (start the room with --control <gateway-mesh-addr>)", http.StatusConflict)
+		return
+	}
+	if rs.controlHC == nil {
+		http.Error(w, "room has no mesh credentials to reach the control gateway (set NB_SETUP_KEY)", http.StatusConflict)
+		return
+	}
+	var rdr io.Reader
+	if body != nil {
+		rdr = bytes.NewReader(body)
+	}
+	req, err := http.NewRequest(method, "http://air-control"+path, rdr)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := rs.controlHC.Do(req)
+	if err != nil {
+		http.Error(w, "control gateway unreachable: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = w.Write(b)
+}
+
+// handleSessions proxies GET /v1/sessions from the wired source gateway, so the
+// room's Sessions panel shows the gateway's LIVE sessions (not the audit rollup).
+func (rs *roomServer) handleSessions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	rs.proxyControl(w, http.MethodGet, "/v1/sessions", nil)
+}
+
+// handleMove proxies POST /v1/move: the drag-to-handoff actuator. The browser
+// supplies {backend,id,dest_key,dest_addr}; the room forwards it to the gateway,
+// which re-gates on its operator ACL and runs the tested move engine. The
+// gateway's status/verdict passes through unchanged (delivered/refused/failed).
+func (rs *roomServer) handleMove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Backend  string `json:"backend"`
+		ID       string `json:"id"`
+		DestKey  string `json:"dest_key"`
+		DestAddr string `json:"dest_addr"`
+	}
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body) != nil ||
+		body.Backend == "" || body.ID == "" || body.DestKey == "" || body.DestAddr == "" {
+		http.Error(w, "backend, id, dest_key and dest_addr are required", http.StatusBadRequest)
+		return
+	}
+	out, _ := json.Marshal(body)
+	rs.proxyControl(w, http.MethodPost, "/v1/move", out)
 }
 
 // client returns a reused MCP client to target over the mesh, dialing lazily.
@@ -523,6 +636,19 @@ main{display:grid;grid-template-columns:1.5fr 1fr;gap:14px;padding:16px 20px}
 .pill.deny{color:var(--deny);background:color-mix(in srgb,var(--deny) 14%,transparent)}
 .pill.cosign{color:var(--warn);background:color-mix(in srgb,var(--warn) 14%,transparent)}
 .empty{color:var(--faint);padding:16px;text-align:center}
+/* live-session move (drag-to-handoff) */
+.srow{cursor:grab}.srow:active{cursor:grabbing}.srow.dragging{opacity:.5}
+.srow .av{background:var(--accent)!important}
+.mv-dests{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+.mv-dest{flex:1 1 45%;min-width:130px;padding:9px 10px;background:var(--panel2);border:1px dashed var(--line);border-radius:9px;font-size:12px}
+.mv-dest.over{border-color:var(--accent);border-style:solid;background:color-mix(in srgb,var(--accent) 12%,transparent)}
+.mv-dest .dn{font-weight:600;font-size:12px}.mv-dest .da{color:var(--faint);font-size:10.5px;word-break:break-all;margin-top:1px}
+.mv-dest .rm{float:right;color:var(--faint);cursor:pointer;font-size:10.5px}.mv-dest .rm:hover{color:var(--deny)}
+.mv-add{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.mv-add input{flex:1 1 30%;min-width:80px;background:var(--term);border:1px solid var(--line);border-radius:7px;color:var(--fg);font:12px ui-monospace,Menlo,monospace;padding:6px 8px;outline:none}
+.mv-add button{background:var(--accent);color:#fff;border:0;border-radius:7px;padding:6px 12px;font:600 12px inherit;cursor:pointer}
+.mv-stat{font-size:10.5px;margin-top:3px;min-height:13px}
+.mv-stat.moving{color:var(--warn)}.mv-stat.delivered{color:var(--ok)}.mv-stat.refused{color:var(--warn)}.mv-stat.failed{color:var(--deny)}
 /* console */
 .console{margin:0 20px 20px}
 .term{background:var(--term);border:1px solid var(--line);border-radius:11px;overflow:hidden}
@@ -556,6 +682,17 @@ main{display:grid;grid-template-columns:1.5fr 1fr;gap:14px;padding:16px 20px}
   </div>
   <div class="col">
     <div class="card"><h2>Identities · agent apps</h2><div class="idlist" id="ids"></div></div>
+    <div class="card" id="movecard" style="display:none">
+      <h2><span>Live sessions · drag to hand off</span><span class="dim" style="text-transform:none;letter-spacing:0">drag a session → a destination</span></h2>
+      <div class="idlist" id="sessions"></div>
+      <div class="mv-dests" id="dests"></div>
+      <form class="mv-add" id="destform" autocomplete="off">
+        <input id="d-label" placeholder="label (optional)" aria-label="destination label">
+        <input id="d-addr" placeholder="dest addr ip:port" aria-label="destination mesh address" required>
+        <input id="d-key" placeholder="dest WireGuard key" aria-label="destination WireGuard key" required>
+        <button type="submit">add destination</button>
+      </form>
+    </div>
   </div>
 </main>
 <div class="console">
@@ -688,6 +825,69 @@ function run(line){
     }).catch(function(e){pr('error: '+e,'err')});return}
   pr('unknown command: '+cmd+' (try help)','err');
 }
+/* ---- live-session move (drag-to-handoff) ---- */
+function humanAgeJS(s){s=s||0;if(s<60)return s+'s';if(s<3600)return Math.floor(s/60)+'m';return Math.floor(s/3600)+'h'}
+function mvDests(){try{return JSON.parse(localStorage.getItem('roomMoveDests')||'[]')}catch(e){return []}}
+function mvSaveDests(d){try{localStorage.setItem('roomMoveDests',JSON.stringify(d))}catch(e){}}
+function moveReq(body){
+  var h={'Content-Type':'application/json'};if(window.__ROOM_TOKEN)h['X-Room-Token']=window.__ROOM_TOKEN;
+  return fetch('/api/move',{method:'POST',headers:h,body:JSON.stringify(body)}).then(function(r){
+    return r.text().then(function(t){var j=null;try{j=JSON.parse(t)}catch(_){}
+      return {status:r.status,ok:r.ok,json:j,text:(t||'').trim()}})});
+}
+function doMove(s,d,st){
+  if(!window.confirm('Move session '+s.id+'\nfrom backend '+s.backend+'\n→ '+(d.label||d.addr)+' ('+d.addr+') ?'))return;
+  st.className='mv-stat moving';st.textContent='moving…';
+  moveReq({backend:s.backend,id:s.id,dest_key:d.key,dest_addr:d.addr}).then(function(r){
+    /* honest surfacing: delivered ONLY on the gateway's own 200 {status:"moved"};
+       409 means the source thawed and still serves; anything else failed. */
+    if(r.ok&&r.json&&r.json.status==='moved'){st.className='mv-stat delivered';st.textContent='delivered ✓ — now on '+(d.label||d.addr);loadSessions()}
+    else if(r.status===409){st.className='mv-stat refused';st.textContent='refused — source still serving: '+r.text}
+    else{st.className='mv-stat failed';st.textContent='failed ('+r.status+'): '+(r.text||'error')}
+  }).catch(function(e){st.className='mv-stat failed';st.textContent='failed: '+e});
+}
+function renderDests(){
+  var host=$('dests');if(!host)return;host.textContent='';
+  var ds=mvDests();
+  if(!ds.length){host.appendChild(el('div','empty','add a destination gateway below, then drag a session onto it'));return}
+  ds.forEach(function(d,i){
+    var t=el('div','mv-dest');
+    var rm=el('span','rm','remove');rm.addEventListener('click',function(){var a=mvDests();a.splice(i,1);mvSaveDests(a);renderDests()});t.appendChild(rm);
+    t.appendChild(el('div','dn',d.label||d.addr));
+    t.appendChild(el('div','da',d.addr+' · '+String(d.key||'').slice(0,20)+'…'));
+    var st=el('div','mv-stat');t.appendChild(st);
+    t.addEventListener('dragover',function(e){e.preventDefault();e.dataTransfer.dropEffect='move';t.classList.add('over')});
+    t.addEventListener('dragleave',function(){t.classList.remove('over')});
+    t.addEventListener('drop',function(e){e.preventDefault();t.classList.remove('over');
+      var raw=e.dataTransfer.getData('text/plain');if(!raw)return;var s;try{s=JSON.parse(raw)}catch(_){return}doMove(s,d,st)});
+    host.appendChild(t);
+  });
+}
+function renderSessions(list){
+  var host=$('sessions');if(!host)return;host.textContent='';
+  if(!list||!list.length){host.appendChild(el('div','empty','no live sessions'));return}
+  list.forEach(function(s){
+    var row=el('div','id srow');row.draggable=true;
+    var av=el('div','av',((s.backend||'?')[0]||'?').toUpperCase());row.appendChild(av);
+    var info=el('div','info');info.appendChild(el('div','nm',s.backend+' · '+s.id));
+    info.appendChild(el('div','sub',(s.peer||s.peer_key||'(peer)')+' · '+humanAgeJS(s.age_sec)));row.appendChild(info);
+    row.addEventListener('dragstart',function(e){e.dataTransfer.setData('text/plain',JSON.stringify({backend:s.backend,id:s.id}));e.dataTransfer.effectAllowed='move';row.classList.add('dragging')});
+    row.addEventListener('dragend',function(){row.classList.remove('dragging')});
+    host.appendChild(row);
+  });
+}
+function loadSessions(){
+  if(!caps.control)return;
+  var h={};if(window.__ROOM_TOKEN)h['X-Room-Token']=window.__ROOM_TOKEN;
+  fetch('/api/sessions',{headers:h}).then(function(r){return r.ok?r.json():{sessions:[]}}).then(function(j){renderSessions(j.sessions||[])}).catch(function(){});
+}
+var destForm=$('destform');
+if(destForm){destForm.addEventListener('submit',function(e){e.preventDefault();
+  var addr=$('d-addr').value.trim(),key=$('d-key').value.trim();if(!addr||!key)return;
+  var ds=mvDests();ds.push({label:$('d-label').value.trim(),addr:addr,key:key});mvSaveDests(ds);
+  $('d-label').value='';$('d-addr').value='';$('d-key').value='';renderDests();
+});}
+
 $('in').addEventListener('keydown',function(e){
   if(e.key==='Enter'){var v=e.target.value;if(v.trim()){history.push(v);hIdx=history.length}run(v);e.target.value='';}
   else if(e.key==='ArrowUp'){if(hIdx>0){hIdx--;e.target.value=history[hIdx]||'';e.preventDefault()}}
@@ -700,6 +900,8 @@ fetch('/api/caps').then(function(r){return r.json()}).then(function(c){
   var s=el('span',null,'  shell: ');s.appendChild(el('b',c.local_shell?'on':'off',c.local_shell?'ON':'off'));
   el2.appendChild(m);el2.appendChild(s);
   pr('meshmcp control room. mesh '+(c.mesh?'connected':'view-only')+', local shell '+(c.local_shell?'ENABLED':'off')+'. type help.','dim');
+  if(c.control){var mc=$('movecard');if(mc)mc.style.display='';renderDests();loadSessions();}
 }).catch(function(){});
 tick();setInterval(tick,1500);
+setInterval(loadSessions,3000);
 </script></body></html>`

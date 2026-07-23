@@ -21,6 +21,82 @@ func writeConfig(t *testing.T, body string) string {
 	return p
 }
 
+func TestConfigMovePortValidation(t *testing.T) {
+	valid := `
+backends:
+  - name: fs
+    port: 9101
+    stdio: ["echo"]
+    resumable: true
+    session_store: ` + "\"" + filepath.ToSlash(t.TempDir()) + "\"" + `
+    move_port: 9601
+    move_grant_store: ` + "\"" + filepath.ToSlash(filepath.Join(t.TempDir(), "grants.json")) + "\"" + `
+`
+	if _, err := loadConfig(writeConfig(t, valid)); err != nil {
+		t.Fatalf("valid move_port config should load: %v", err)
+	}
+
+	store := "\"" + filepath.ToSlash(t.TempDir()) + "\""
+	grants := "\"" + filepath.ToSlash(filepath.Join(t.TempDir(), "g.json")) + "\""
+	cases := []struct{ name, body, want string }{
+		{"needs resumable+store", `
+backends:
+  - name: fs
+    port: 9101
+    stdio: ["echo"]
+    move_port: 9601
+    move_grant_store: ` + grants + `
+`, "requires resumable"},
+		{"needs grant store", `
+backends:
+  - name: fs
+    port: 9101
+    stdio: ["echo"]
+    resumable: true
+    session_store: ` + store + `
+    move_port: 9601
+`, "requires move_grant_store"},
+		{"rejects full mode", `
+backends:
+  - name: fs
+    port: 9101
+    stdio: ["echo"]
+    resumable: true
+    session_store: ` + store + `
+    session_store_mode: full
+    move_port: 9601
+    move_grant_store: ` + grants + `
+`, "handshake or backend"},
+		{"grant store needs port", `
+backends:
+  - name: fs
+    port: 9101
+    stdio: ["echo"]
+    resumable: true
+    session_store: ` + store + `
+    move_grant_store: ` + grants + `
+`, "requires move_port"},
+		{"port collision", `
+backends:
+  - name: fs
+    port: 9101
+    stdio: ["echo"]
+    resumable: true
+    session_store: ` + store + `
+    move_port: 9101
+    move_grant_store: ` + grants + `
+`, "already used"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := loadConfig(writeConfig(t, tc.body))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("want error containing %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
 func TestConfigComponentCardIdentity(t *testing.T) {
 	valid, err := loadConfig(writeConfig(t, `
 backends:
