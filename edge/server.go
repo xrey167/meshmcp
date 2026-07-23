@@ -26,6 +26,9 @@ type Server struct {
 	audit  *auditLedger
 
 	clients *ClientStore
+	authz   *AuthzStore
+	codes   *codeStore
+	tokens  *tokenStore
 	iats    []resolvedIAT
 
 	preauthLimit  *fixedWindowLimiter
@@ -93,6 +96,18 @@ func New(cfg Config, opts Options) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	authz, err := NewAuthzStore(filepath.Join(cfg.StateDir, "authz"), now)
+	if err != nil {
+		return nil, err
+	}
+	codes, err := newCodeStore(filepath.Join(cfg.StateDir, "codes"))
+	if err != nil {
+		return nil, err
+	}
+	tokens, err := newTokenStore(filepath.Join(cfg.StateDir, "tokens"))
+	if err != nil {
+		return nil, err
+	}
 
 	s := &Server{
 		cfg:           cfg,
@@ -100,6 +115,9 @@ func New(cfg Config, opts Options) (*Server, error) {
 		verify:        verify,
 		audit:         audit,
 		clients:       clients,
+		authz:         authz,
+		codes:         codes,
+		tokens:        tokens,
 		iats:          iats,
 		preauthLimit:  newFixedWindowLimiter(cfg.Limits.PreauthPerIPPerMin, time.Minute, now),
 		registerLimit: newFixedWindowLimiter(cfg.Limits.RegisterPerIPPerMin, time.Minute, now),
@@ -149,6 +167,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc(pathMCP, s.handleMCP)
 	mux.HandleFunc(pathRegister, s.handleRegister)
 	mux.HandleFunc(pathRegister+"/", s.handleManage)
+	mux.HandleFunc(pathAuthorizeStat, s.handleAuthorizeStatus)
+	mux.HandleFunc(pathAuthorize, s.handleAuthorize)
+	mux.HandleFunc(pathToken, s.handleToken)
 	return mux
 }
 

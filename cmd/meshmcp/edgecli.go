@@ -84,6 +84,67 @@ func printClientTable(recs []edge.ClientRecord) {
 	_ = tw.Flush()
 }
 
+// cmdEdgeAuthz is the operator surface for deciding in-flight authorization
+// requests: `meshmcp edge authz <list|approve|deny> --state <dir> [request_id]`.
+func cmdEdgeAuthz(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: meshmcp edge authz <list|approve|deny> --state <dir> [request_id]")
+	}
+	sub := args[0]
+	fs := flag.NewFlagSet("edge authz "+sub, flag.ExitOnError)
+	stateDir := fs.String("state", "", "edge state_dir (as in edge.yaml)")
+	by := fs.String("by", defaultApprover(), "operator identity recorded on the decision")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	if *stateDir == "" {
+		return fmt.Errorf("edge authz: --state <dir> is required")
+	}
+	store, err := edge.NewAuthzStore(filepath.Join(*stateDir, "authz"), time.Now)
+	if err != nil {
+		return err
+	}
+
+	switch sub {
+	case "list":
+		pend, err := store.ListPending()
+		if err != nil {
+			return err
+		}
+		if len(pend) == 0 {
+			fmt.Println("no pending authorization requests")
+			return nil
+		}
+		tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+		fmt.Fprintln(tw, "REQUEST_ID\tCLIENT_ID\tNAME\tREQUESTED")
+		for _, p := range pend {
+			name := p.ClientName
+			if name == "" {
+				name = "-"
+			}
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", p.RequestID, p.ClientID, name, p.CreatedAt.Format(time.RFC3339))
+		}
+		return tw.Flush()
+	case "approve", "deny":
+		id := fs.Arg(0)
+		if id == "" {
+			return fmt.Errorf("edge authz %s: a request_id argument is required", sub)
+		}
+		if sub == "approve" {
+			err = store.Approve(id, *by)
+		} else {
+			err = store.Deny(id, *by)
+		}
+		if err != nil {
+			return fmt.Errorf("edge authz %s: %w", sub, err)
+		}
+		fmt.Printf("authorization request %s is now %sd\n", id, sub)
+		return nil
+	default:
+		return fmt.Errorf("edge authz: unknown subcommand %q (want list | approve | deny)", sub)
+	}
+}
+
 // defaultApprover derives a best-effort operator identity for decision records.
 func defaultApprover() string {
 	if u := os.Getenv("USER"); u != "" {
