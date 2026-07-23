@@ -205,13 +205,15 @@ style rule in CONTRIBUTING.md ("every user-facing error names a next step") make
 Zero `func Benchmark` in the repo. Coverage is neither measured nor gated. There is no
 automated multi-node mesh test — the only real client→gateway→backend-over-WireGuard flow
 is the manual `demo/run-mesh.sh` (needs a live NetBird key, never run in CI); everything
-else is in-process. `TestTaskSteer` has been quarantined in CI "until PR #7 merges" —
-PR #68 has merged since, and it is still skipped. `staticcheck` and `govulncheck` are
+else is in-process. (An earlier gap here — `TestTaskSteer` and
+`TestSteerDeliveryRequiresApplicationAck` quarantined in CI — is closed: the underlying
+graceful-close/resume race is fixed in `session/endpoint.go` and both tests run
+unskipped.) `staticcheck` and `govulncheck` are
 `continue-on-error: true`. For a security product claiming "it just works," the release
 gate must make regressions impossible, not advisory.
 
-**Fix:** fix or delete the flaky test (a permanent `-skip` is a silent hole in the
-`tasks/steer` surface); promote staticcheck/govulncheck to required; add coverage
+**Fix:** the flaky-test quarantine is lifted (done); still open: promote
+staticcheck/govulncheck to required; add coverage
 reporting with a ratchet; add benchmarks for the hot path (policy decision, session
 resume, audit append) with CI thresholds; build a two-node e2e using network namespaces
 or two containers with static WireGuard keys (the `serve → call` path does not need the
@@ -361,9 +363,9 @@ deliberate, documented trade recorded in the threat model (adversaries 12–13).
 5. **Ship the phone approver** — SwiftUI shell over the existing `mobile/` bindings with
    APNs; macOS menu-bar approver from the same seam.
 6. **One design language** — `agent-os.css` everywhere, starting with `air-live.html`.
-7. **Close the quality gates** — un-quarantine `TestTaskSteer`, required
-   staticcheck/govulncheck, coverage ratchet, benchmarks with thresholds, a two-node e2e
-   as a required check.
+7. **Close the quality gates** — required staticcheck/govulncheck, coverage ratchet,
+   benchmarks with thresholds, a two-node e2e as a required check (`TestTaskSteer` and
+   the steer-delivery test are already un-quarantined).
 8. **Trust lifecycle** — atomic device revocation, request-bound approvals (Phase 3),
    rotation/backup docs, external audit commitment.
 9. **Supportability** — slog + levels, `diag --bundle`, guided recovery for the top three

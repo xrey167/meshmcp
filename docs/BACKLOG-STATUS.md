@@ -35,7 +35,7 @@ content lands in BACKLOG.md.
 | 23 | Fenced-dispatch regression test | **done** | Bound proven in handshake + backend modes |
 | 24 | FileStore lock-steal hardening | **done** | Owner-token release; steal contract preserved |
 | 25 | Thin policy test spots | **done** | 8 new test files: cosign, pending, groups, shadow, cost/quota, windows, merkle, checkpoint |
-| 26 | Steer close/resume race fix | todo | Local fix + re-enable; cross-OS confirm rides 1 |
+| 26 | Steer close/resume race fix | **done** | Atomic sendClose (structural) + reconnectLoop drain-wait (parallel session, defensive); quarantine removed |
 | 27 | Manifest gating decision | **done** | Decided (b): distribution-only; boundary documented in MARKETPLACE.md |
 | 28 | SpiffeLabel schema/doc pairing | **done** | trust_domain config; stdio+HTTP emit; chain byte-identity proven |
 | 29 | `air stream` over the mesh | **done** | Shipped 2026-07-23; review fixed escape-injection + inbound-line cap |
