@@ -92,12 +92,19 @@ ack-consistent checkpoints and an ownership **lease**; full bidirectional MCP
 checks; and a self-registering discovery **registry**.
 
 The durable store (`FileStore`) is now hardened for concurrent multi-gateway
-use: writes are atomic (temp + **fsync** + rename) and `Save`/`DeleteIfOwner`
-serialize across processes via a **cross-process advisory lock** (`flock.go`,
-exclusive lock file with stale-holder stealing), so the lease is enforced
-atomically even when two gateways contend. Tested: `flock_test.go`,
-`store_test.go`. That said, `FileStore`'s CAS holds only on a single host (or a
-lock-correct shared filesystem) — it remains the single-node default.
+use: writes are atomic (unique temp + **fsync** + rename) and `Save`/
+`DeleteIfOwner` serialize across processes via a **cross-process advisory
+lock** (`flock.go`, exclusive lock file with stale-holder stealing), so the
+lease is enforced atomically even when two gateways contend. Every mutation
+re-verifies its lock token immediately before the commit rename/remove, so a
+holder paused past the staleness window whose lock was stolen aborts instead
+of renaming a stale image (old owner, old generation) over the new holder's
+commit. Tested: `flock_test.go`, `store_test.go`, `flock_steal_test.go`. That
+said, the residual instant between the token check and the rename means a
+stolen lock is narrowed, not impossible — `FileStore`'s CAS holds only for
+crash-or-alive holders on a single host (or a lock-correct shared filesystem).
+It remains the single-node default, and the autonomous standby sweep refuses
+to run over it (see below).
 
 **Replicated store backend — BUILT (store layer).** `pgstore/` implements
 `SessionStore` + `LeaseStore` (and the replay-protection stores) on PostgreSQL:
@@ -115,7 +122,64 @@ identity-verified `TakeoverLease` when the session's creator reattaches to a
 different gateway; `session/storetest.RunSessionMigration` proves the full
 crash → reattach → rehydrate → takeover flow, including against live
 PostgreSQL (`MESHMCP_TEST_PG_DSN`). Two gateways sharing one PostgreSQL
-session store is a supported deployment. What remains open (capability-matrix
-Phase 6): failover is reattach-driven only — there is no lease-expiry-driven
-automatic takeover by a standby — and ambiguous-outcome mutating calls are
-still not auto-retried (no enforced idempotency keys).
+session store is a supported deployment.
+
+**Lease renewal + expiry-driven standby failover — BUILT** (`session/failover.go`).
+Three pieces, all ordinary lease ops serialized by the store's generation CAS
+(safety never rests on timing; the intervals and margin tune availability only):
+
+- **Renewal heartbeat** — always on when the store supports leases: every
+  session's lease is renewed at ~TTL/3 (±20% jitter), so `LeaseExpiry` finally
+  means "the owner is alive". A *fenced* renewal (another gateway took the
+  session over) yields the session, exactly like a fenced checkpoint; a store
+  *error* retains it and retries next tick (an outage must not mass-kill
+  sessions — the sweep margin absorbs several missed ticks symmetrically).
+  Degraded sessions (lease acquire failed at create, generation 0) hold no
+  fencing token, so on a lease-capable store they never checkpoint at all —
+  they serve without migration rather than writing unfenced state that could
+  regress a record a peer has since taken over.
+- **Release on clean shutdown** — `Server.Shutdown()` first joins the
+  maintenance goroutine (so an in-flight sweep adoption lands before the drain
+  and is handed off, never leaked), then checkpoints each session and
+  `ReleaseLease`s it (owner cleared, generation + state preserved), so a peer
+  gateway claims instantly instead of waiting out an expiry. Termination paths
+  (client close, TTL reap, fence yield) keep `DeleteIfOwner`.
+- **Standby sweep** — opt-in per backend (`session_failover: standby`,
+  `session_sweep_seconds`, default 30); requires a **PostgreSQL**
+  `session_store` (config-enforced, and the server disables the sweep over a
+  `FileStore` even if reached directly): a file lock stolen from a
+  paused-not-dead holder could regress the generation an adoption committed,
+  the one split-brain the sweep must never create. Reattach-driven failover
+  keeps working on `FileStore`. The gateway lists the store and adopts
+  sessions whose lease is released or expired **past a margin of 2×TTL** —
+  i.e. only after ≥3×TTL of total owner silence (expiry already trails the
+  last renewal by a full TTL). The claim is `AcquireLease`'s generation CAS
+  (never `TakeoverLease`, which stays reserved for identity-verified creator
+  reattach), so exactly one standby wins and the paused-not-dead owner is
+  fenced out of `SaveIfOwned`/`RenewLease` the instant the claim commits. The
+  adopter respawns the backend immediately — checkpoints now persist the
+  creator's `PeerFQDN`/`PeerAddr` (additive, schema still v1), so the respawn
+  runs under the creator's original policy identity; pre-upgrade records
+  without those fields — and records stamped with a newer schema version than
+  this build (pgstore now stamps and filters `SchemaVersion` exactly like
+  `FileStore`, so a mixed-version fleet's older standby never adopts state it
+  may misread) — are never adopted (they keep the client-reattach path).
+  The client's reattach then lands on a warm session through the unchanged
+  identity-bound attach path (attach absorbs a takeover CAS lost to a
+  concurrent adopt by re-Loading and retrying, bounded, since the client
+  treats an attach rejection as terminal); if it never returns, the adopted
+  session is reaped at TTL (which also GCs dead-owner records). **Honest margins:** a
+  standby takes over roughly `expiry + 2×TTL` after the owner's last renewal
+  (≈6 min at the default 2-min TTL) plus up to one sweep interval — adopting
+  earlier would only trade false yields of live-but-slow owners, never
+  correctness, because the generation fence is the protection either way.
+  Tested: `session/server_lease_test.go` (renewal semantics, shutdown
+  release), `session/sweep_test.go` (eligibility matrix, end-to-end
+  paused-gateway adoption + reattach, re-load freshness, reap, failure
+  release), `session/sweep_race_test.go` (renew-vs-sweep, adopt-vs-rehydrate,
+  standby-vs-standby single winner, high `-count`).
+
+What remains open (capability-matrix Phase 6): ambiguous-outcome mutating
+calls are still not auto-retried (no enforced idempotency keys), and a
+failover from a mid-request checkpoint keeps handshake-mode's existing
+in-flight-response window (`MigrateFull`/`MigrateBackend` are the remedies).

@@ -471,6 +471,21 @@ func serveResumable(client *embed.Client, b *Backend, ln net.Listener, shutdown 
 			log.Printf("backend %q: session migration enabled via %s (mode=%s)", b.Name, display, modeName)
 		}
 	}
+	if b.SessionFailover == "standby" {
+		sweep := time.Duration(b.SessionSweepSeconds) * time.Second
+		srv = srv.WithFailover(session.FailoverConfig{Enabled: true, SweepInterval: sweep})
+		if sweep == 0 {
+			sweep = 30 * time.Second
+		}
+		effTTL := ttl
+		if effTTL <= 0 {
+			effTTL = session.DefaultSessionTTL
+		}
+		log.Printf("backend %q: session failover standby on (sweep %s, margin %s)", b.Name, sweep, 2*effTTL)
+	}
+	// Renewal heartbeat (and the sweep, when enabled) run until shutdown; a
+	// store without CAS leases makes this a no-op.
+	srv.StartLeaseMaintenance(shutdown)
 	if register != nil {
 		register(srv)
 	}
@@ -483,6 +498,10 @@ func serveResumable(client *embed.Client, b *Backend, ln net.Listener, shutdown 
 			default:
 				log.Printf("backend %q: accept: %v", b.Name, err)
 			}
+			// Release every live session's lease on the way out so a peer
+			// gateway (or this one, restarted) claims them without waiting
+			// out the lease expiry.
+			srv.Shutdown()
 			return
 		}
 

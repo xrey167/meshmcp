@@ -3,6 +3,7 @@ package session
 import (
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -28,11 +29,20 @@ type PersistedSession struct {
 	// session. A gateway resuming this session (failover) must reject a
 	// reattach from any other identity, so the session id alone can never be
 	// used to take over the backend and its buffered output.
-	CreatorKey string           `json:"creator_key,omitempty"`
-	SendSeq    uint64           `json:"send_seq"`
-	Acked      uint64           `json:"acked"`
-	RecvSeq    uint64           `json:"recv_seq"`
-	SendBuf    []PersistedFrame `json:"send_buf"`
+	CreatorKey string `json:"creator_key,omitempty"`
+	// PeerFQDN/PeerAddr are the creator's mesh identity as observed at session
+	// creation, persisted so a standby gateway adopting an expired-lease
+	// session can spawn its backend under the SAME policy identity the
+	// creator presented (the backend factory builds the policy Caller and
+	// SPIFFE id from Meta). Additive + omitempty: the schema version stays 1,
+	// and a record written before this field exists is simply never adopted
+	// by a sweep (it keeps the client-reattach rehydrate path).
+	PeerFQDN string           `json:"peer_fqdn,omitempty"`
+	PeerAddr string           `json:"peer_addr,omitempty"`
+	SendSeq  uint64           `json:"send_seq"`
+	Acked    uint64           `json:"acked"`
+	RecvSeq  uint64           `json:"recv_seq"`
+	SendBuf  []PersistedFrame `json:"send_buf"`
 	// Replay is the captured client->backend bytes to replay against a fresh
 	// backend on migration; ReplayResponses is how many response lines that
 	// replay produces (to discard, since the client already has them).
@@ -60,6 +70,13 @@ type PersistedSession struct {
 
 // sessionSchemaVersion is the current persisted-session on-disk format version.
 const sessionSchemaVersion = 1
+
+// SessionSchemaVersion exports the current persisted-session format version so
+// out-of-package SessionStore implementations (pgstore) can stamp what they
+// write and apply the same newer-format read guard as FileStore — without it a
+// mixed-version fleet's older gateway could adopt and misread a newer build's
+// checkpoints.
+const SessionSchemaVersion = sessionSchemaVersion
 
 // SessionStore persists session state so a session survives the gateway that
 // created it. Implementations must be safe for concurrent use.
@@ -291,36 +308,9 @@ func (s *FileStore) lock() fileLock {
 }
 
 func (s *FileStore) Save(ps PersistedSession) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	lk := s.lock()
-	if err := lk.acquire(); err != nil {
-		return err
-	}
-	defer lk.release()
-
-	ps.SchemaVersion = sessionSchemaVersion
-	b, err := json.Marshal(ps)
-	if err != nil {
-		return err
-	}
-	tmp := s.path(ps.ID) + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(b); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil { // durable: bytes on disk before rename
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.path(ps.ID)) // atomic replace
+	return s.withLock(func(lk *fileLock) error {
+		return s.writeLocked(lk, ps)
+	})
 }
 
 func (s *FileStore) Load(id string) (PersistedSession, bool, error) {
@@ -346,33 +336,33 @@ func (s *FileStore) Load(id string) (PersistedSession, bool, error) {
 }
 
 func (s *FileStore) DeleteIfOwner(id, owner string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	lk := s.lock()
-	if err := lk.acquire(); err != nil {
+	return s.withLock(func(lk *fileLock) error {
+		b, err := os.ReadFile(s.path(id))
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		var ps PersistedSession
+		if err := json.Unmarshal(b, &ps); err != nil {
+			return err
+		}
+		if ps.Owner != owner {
+			return nil // superseded by another gateway; leave it
+		}
+		if !lk.stillHeld() {
+			// Our stale lock was stolen while we were paused: the record we
+			// just read may already have been superseded. Never delete on a
+			// lock we no longer hold.
+			return errLockStolen
+		}
+		err = os.Remove(s.path(id))
+		if os.IsNotExist(err) {
+			return nil
+		}
 		return err
-	}
-	defer lk.release()
-
-	b, err := os.ReadFile(s.path(id))
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	var ps PersistedSession
-	if err := json.Unmarshal(b, &ps); err != nil {
-		return err
-	}
-	if ps.Owner != owner {
-		return nil // superseded by another gateway; leave it
-	}
-	err = os.Remove(s.path(id))
-	if os.IsNotExist(err) {
-		return nil
-	}
-	return err
+	})
 }
 
 // readUnlocked reads and parses one session file. Caller holds s.mu (and, for a
@@ -392,36 +382,57 @@ func (s *FileStore) readUnlocked(id string) (PersistedSession, bool, error) {
 	return ps, true, nil
 }
 
-// writeUnlocked writes ps atomically (temp + fsync + rename). Caller holds the
-// locks.
-func (s *FileStore) writeUnlocked(ps PersistedSession) error {
+// errLockStolen reports that the cross-process store lock was observed under
+// another holder's token (or gone) at commit time: this process was paused
+// long enough mid-operation for its lock to be stolen as stale. The mutation
+// is aborted, so a resumed-from-pause holder can never rename a stale image
+// over state the current lock holder committed — the generation regression
+// that would un-fence a superseded owner. Callers see an ordinary store error:
+// renewals retain the session and retry, checkpoints log and retry on the next
+// trigger.
+var errLockStolen = errors.New("session: store lock lost mid-operation (stolen as stale during a pause); mutation aborted")
+
+// writeLocked writes ps atomically (unique temp + fsync + rename), verifying
+// immediately before the rename that lk still holds the cross-process lock. A
+// unique temp file keeps a paused-then-resumed writer from truncating a new
+// holder's in-progress temp; the pre-rename token check keeps it from renaming
+// a stale image over state a newer holder committed. Caller holds s.mu and lk.
+func (s *FileStore) writeLocked(lk *fileLock, ps PersistedSession) error {
 	ps.SchemaVersion = sessionSchemaVersion
 	b, err := json.Marshal(ps)
 	if err != nil {
 		return err
 	}
-	tmp := s.path(ps.ID) + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	f, err := os.CreateTemp(s.dir, ps.ID+".*.tmp")
 	if err != nil {
 		return err
 	}
+	tmp := f.Name()
 	if _, err := f.Write(b); err != nil {
 		f.Close()
+		_ = os.Remove(tmp)
 		return err
 	}
-	if err := f.Sync(); err != nil {
+	if err := f.Sync(); err != nil { // durable: bytes on disk before rename
 		f.Close()
+		_ = os.Remove(tmp)
 		return err
 	}
 	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, s.path(ps.ID))
+	if !lk.stillHeld() {
+		_ = os.Remove(tmp)
+		return errLockStolen
+	}
+	return os.Rename(tmp, s.path(ps.ID)) // atomic replace
 }
 
 // withLock runs fn while holding both s.mu and the cross-process store lock, so
-// a read-modify-write is atomic across processes (the CAS guarantee).
-func (s *FileStore) withLock(fn func() error) error {
+// a read-modify-write is atomic across processes (the CAS guarantee). fn gets
+// the lock so commits can re-verify it (writeLocked / DeleteIfOwner).
+func (s *FileStore) withLock(fn func(lk *fileLock) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	lk := s.lock()
@@ -429,13 +440,13 @@ func (s *FileStore) withLock(fn func() error) error {
 		return err
 	}
 	defer lk.release()
-	return fn()
+	return fn(&lk)
 }
 
 func (s *FileStore) AcquireLease(id, owner string, expectedGen uint64, ttl time.Duration, now time.Time) (Lease, bool, error) {
 	var lease Lease
 	var ok bool
-	err := s.withLock(func() error {
+	err := s.withLock(func(lk *fileLock) error {
 		cur, exists, err := s.readUnlocked(id)
 		if err != nil {
 			return err
@@ -446,7 +457,7 @@ func (s *FileStore) AcquireLease(id, owner string, expectedGen uint64, ttl time.
 		}
 		exp := now.Add(ttl)
 		cur.ID, cur.Owner, cur.Generation, cur.LeaseExpiry = id, owner, newGen, exp.UnixNano()
-		if err := s.writeUnlocked(cur); err != nil {
+		if err := s.writeLocked(lk, cur); err != nil {
 			return err
 		}
 		lease, ok = Lease{SessionID: id, Owner: owner, Generation: newGen, Expiry: exp}, true
@@ -458,7 +469,7 @@ func (s *FileStore) AcquireLease(id, owner string, expectedGen uint64, ttl time.
 func (s *FileStore) TakeoverLease(id, owner string, expectedGen uint64, ttl time.Duration, now time.Time) (Lease, bool, error) {
 	var lease Lease
 	var ok bool
-	err := s.withLock(func() error {
+	err := s.withLock(func(lk *fileLock) error {
 		cur, exists, err := s.readUnlocked(id)
 		if err != nil {
 			return err
@@ -469,7 +480,7 @@ func (s *FileStore) TakeoverLease(id, owner string, expectedGen uint64, ttl time
 		}
 		exp := now.Add(ttl)
 		cur.ID, cur.Owner, cur.Generation, cur.LeaseExpiry = id, owner, newGen, exp.UnixNano()
-		if err := s.writeUnlocked(cur); err != nil {
+		if err := s.writeLocked(lk, cur); err != nil {
 			return err
 		}
 		lease, ok = Lease{SessionID: id, Owner: owner, Generation: newGen, Expiry: exp}, true
@@ -481,14 +492,14 @@ func (s *FileStore) TakeoverLease(id, owner string, expectedGen uint64, ttl time
 func (s *FileStore) RenewLease(id, owner string, gen uint64, ttl time.Duration, now time.Time) (Lease, bool, error) {
 	var lease Lease
 	var ok bool
-	err := s.withLock(func() error {
+	err := s.withLock(func(lk *fileLock) error {
 		cur, exists, err := s.readUnlocked(id)
 		if err != nil || !exists || cur.Owner != owner || cur.Generation != gen {
 			return err
 		}
 		exp := now.Add(ttl)
 		cur.LeaseExpiry = exp.UnixNano()
-		if err := s.writeUnlocked(cur); err != nil {
+		if err := s.writeLocked(lk, cur); err != nil {
 			return err
 		}
 		lease, ok = Lease{SessionID: id, Owner: owner, Generation: gen, Expiry: exp}, true
@@ -499,13 +510,13 @@ func (s *FileStore) RenewLease(id, owner string, gen uint64, ttl time.Duration, 
 
 func (s *FileStore) ReleaseLease(id, owner string, gen uint64) (bool, error) {
 	var ok bool
-	err := s.withLock(func() error {
+	err := s.withLock(func(lk *fileLock) error {
 		cur, exists, err := s.readUnlocked(id)
 		if err != nil || !exists || cur.Owner != owner || cur.Generation != gen {
 			return err
 		}
 		cur.Owner, cur.LeaseExpiry = "", 0
-		if err := s.writeUnlocked(cur); err != nil {
+		if err := s.writeLocked(lk, cur); err != nil {
 			return err
 		}
 		ok = true
@@ -516,13 +527,13 @@ func (s *FileStore) ReleaseLease(id, owner string, gen uint64) (bool, error) {
 
 func (s *FileStore) SaveIfOwned(ps PersistedSession, owner string, gen uint64) (bool, error) {
 	var ok bool
-	err := s.withLock(func() error {
+	err := s.withLock(func(lk *fileLock) error {
 		cur, exists, err := s.readUnlocked(ps.ID)
 		if err != nil || !exists || cur.Owner != owner || cur.Generation != gen {
 			return err // fenced (or error): do not write
 		}
 		ps.Owner, ps.Generation, ps.LeaseExpiry = owner, gen, cur.LeaseExpiry
-		if err := s.writeUnlocked(ps); err != nil {
+		if err := s.writeLocked(lk, ps); err != nil {
 			return err
 		}
 		ok = true
