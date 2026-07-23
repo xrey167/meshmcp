@@ -36,9 +36,13 @@ type parentLine struct {
 
 // newRagStore opens (or starts) the vector index at indexPath, loads the parent
 // sidecar beside it, and rebuilds the BM25 index over every stored chunk so the
-// keyword arm survives a restart with no separate postings file.
-func newRagStore(indexPath, peer string, chunkSize, overlap int) (*ragStore, error) {
-	ix, err := vectors.Open(indexPath, embed.NewHashing(256))
+// keyword arm survives a restart with no separate postings file. A nil embedder
+// selects the local deterministic Hashing default.
+func newRagStore(indexPath, peer string, chunkSize, overlap int, embedder embed.Embedder) (*ragStore, error) {
+	if embedder == nil {
+		embedder = embed.NewHashing(256)
+	}
+	ix, err := vectors.Open(indexPath, embedder)
 	if err != nil {
 		return nil, err
 	}
