@@ -172,6 +172,11 @@ func cmdAirNode(args []string) error {
 	flags := bindPresenceFlags(fs)
 	interval := fs.Duration("interval", 30*time.Second, "heartbeat cadence (must be shorter than --ttl)")
 	quiet := fs.Bool("quiet", false, "suppress heartbeat status; errors still print")
+	inboxPort := fs.Int("inbox-port", 0, "host the drop/push inbox receiver on this mesh port and announce it (with drop.complete.v1)")
+	inboxDir := fs.String("inbox-dir", "", "destination directory for the hosted inbox (required with --inbox-port)")
+	var inboxAllow multiFlag
+	fs.Var(&inboxAllow, "inbox-allow", `hosted-inbox sender ACL: FQDN glob or pubkey:<key> (repeatable; required — pass "*" to allow any mesh peer)`)
+	inboxAudit := fs.String("inbox-audit", "", "hash-chained JSONL audit log for the hosted inbox (optional)")
 	control, err := parseAirControlFlags(fs, args)
 	if err != nil {
 		return err
@@ -183,7 +188,23 @@ func cmdAirNode(args []string) error {
 	if *interval <= 0 || *interval >= time.Duration(announcement.TTLSeconds)*time.Second {
 		return errors.New("air node: --interval must be positive and shorter than the effective --ttl")
 	}
-	hc, cleanup, err := airControlHTTP(o, control)
+	hosting := *inboxPort != 0
+	if hosting {
+		if *inboxPort < 1 || *inboxPort > 65535 {
+			return errors.New("air node: --inbox-port must be 1-65535")
+		}
+		if *inboxDir == "" {
+			return errors.New("air node: --inbox-dir is required with --inbox-port")
+		}
+		if len(inboxAllow) == 0 {
+			return errors.New(`air node: --inbox-allow is required with --inbox-port (deny-by-default); pass --inbox-allow "*" to allow any mesh peer`)
+		}
+		announcement, err = mergeHostedInbox(announcement, *inboxPort)
+		if err != nil {
+			return fmt.Errorf("air node: %w", err)
+		}
+	}
+	hc, meshClient, cleanup, err := airControlMesh(o, control, !hosting)
 	if err != nil {
 		return err
 	}
@@ -191,6 +212,19 @@ func cmdAirNode(args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), shutdownSignals...)
 	defer stop()
+
+	// The listener is up before the card advertises it, so a resolved Send
+	// can never race an announced-but-absent inbox.
+	if hosting {
+		stopInbox, err := hostInboxService(meshClient, *inboxPort, *inboxDir, inboxAllow, *inboxAudit)
+		if err != nil {
+			return fmt.Errorf("air node: inbox: %w", err)
+		}
+		defer stopInbox()
+		if !*quiet {
+			fmt.Fprintln(os.Stderr, okLine("hosting inbox on mesh port %d", *inboxPort)+dim(" · dir "+*inboxDir))
+		}
+	}
 	first, err := postPresence(ctx, hc, announcement)
 	if err != nil {
 		return fmt.Errorf("air node: initial announce: %w", err)

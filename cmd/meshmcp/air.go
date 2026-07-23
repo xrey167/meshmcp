@@ -150,7 +150,7 @@ func airUsage() error {
 	fmt.Fprintln(os.Stderr, "  "+b("air send")+"        <control-ip:port> --to <node> [--text s] [--name n] [--file path ...] "+dim("receiver-confirmed · --file repeatable · 8 MiB each · 64 MiB total"))
 	fmt.Fprintln(os.Stderr, "  "+b("air announce")+"    <control-ip:port> --name n --kind agent --service steer=9120")
 	fmt.Fprintln(os.Stderr, "                  "+dim("publish one short-lived Presence + Activity card"))
-	fmt.Fprintln(os.Stderr, "  "+b("air node")+"        <control-ip:port> --name n [presence flags]")
+	fmt.Fprintln(os.Stderr, "  "+b("air node")+"        <control-ip:port> --name n [presence flags] [--inbox-port p --inbox-dir d --inbox-allow acl]")
 	fmt.Fprintln(os.Stderr, "                  "+dim("keep a Presence card alive; graceful leave, crash-safe TTL"))
 	fmt.Fprintln(os.Stderr, "  "+b("air handoff")+"     offer|receive|list|show|accept|decline|continue|rearm|archive  "+dim("Continue on… with an exact-key-bound Context Capsule"))
 	fmt.Fprintln(os.Stderr)
@@ -200,10 +200,19 @@ func airUsage() error {
 // gateway's Air control endpoint over the mesh (the URL host is ignored), plus
 // a cleanup that leaves the mesh.
 func airControlHTTP(o *meshOptions, control string) (*http.Client, func(), error) {
-	o.BlockInbound = true
+	hc, _, cleanup, err := airControlMesh(o, control, true)
+	return hc, cleanup, err
+}
+
+// airControlMesh joins the mesh and returns the control HTTP client together
+// with the underlying mesh client, for commands that also host listeners on
+// the same identity (a hosting `air node`). Read-only control callers should
+// use airControlHTTP, which blocks inbound.
+func airControlMesh(o *meshOptions, control string, blockInbound bool) (*http.Client, *embed.Client, func(), error) {
+	o.BlockInbound = blockInbound
 	client, err := startMesh(o, os.Stderr)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	hc := &http.Client{
 		Timeout: 20 * time.Second,
@@ -213,7 +222,7 @@ func airControlHTTP(o *meshOptions, control string) (*http.Client, func(), error
 			},
 		},
 	}
-	return hc, func() { stopMesh(client) }, nil
+	return hc, client, func() { stopMesh(client) }, nil
 }
 
 // cmdAirSessions lists a gateway's live resumable sessions.
