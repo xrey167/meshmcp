@@ -12,7 +12,7 @@
 // SELECT with no writable-CTE surface, and it over-approximates the tables a
 // query references (it may deny a legitimate query, but it must never let an
 // unlisted table through unchecked). The load-bearing rule is that classification
-// runs on a REAL tokenizer — comments, string literals with '' escapes, quoted
+// runs on a REAL tokenizer — comments, string literals with ” escapes, quoted
 // identifiers and semicolons-inside-strings are all handled before any keyword is
 // inspected — so the comment-hidden-DML and statement-stacking bypasses that
 // defeat naive string matching cannot reach the guard.
@@ -140,7 +140,7 @@ func Tokenize(sql string) ([]Token, error) {
 }
 
 // scanQuoted reads a quote-delimited run starting at the opening quote sql[start],
-// treating a doubled quote (e.g. '' inside a string, or "" inside an identifier)
+// treating a doubled quote (e.g. ” inside a string, or "" inside an identifier)
 // as one escaped literal quote rather than a close. It returns the inner text
 // (escapes preserved as written) and the index just past the closing quote.
 func scanQuoted(sql string, start int, q byte) (text string, next int, err error) {

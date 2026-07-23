@@ -36,9 +36,18 @@ func NewFileRegistry(dir string) (*FileRegistry, error) {
 	return &FileRegistry{dir: dir}, nil
 }
 
+// registrySchemaVersion is the current on-disk format version of a registration
+// file. The registry is discovery state, not a security store, so a newer-format
+// entry is skipped on lookup (like any unreadable entry) rather than failing the
+// whole lookup closed.
+const registrySchemaVersion = 1
+
 type entry struct {
-	Name string `json:"name"`
-	Addr string `json:"addr"`
+	// SchemaVersion self-describes the registration format so a newer build's
+	// entry is skipped by an older reader instead of being misinterpreted.
+	SchemaVersion int    `json:"schema_version,omitempty"`
+	Name          string `json:"name"`
+	Addr          string `json:"addr"`
 }
 
 func (r *FileRegistry) file(name, addr string) string {
@@ -55,7 +64,7 @@ func (r *FileRegistry) file(name, addr string) string {
 func (r *FileRegistry) Register(name, addr string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	b, err := json.Marshal(entry{Name: name, Addr: addr})
+	b, err := json.Marshal(entry{SchemaVersion: registrySchemaVersion, Name: name, Addr: addr})
 	if err != nil {
 		return err
 	}
@@ -93,6 +102,9 @@ func (r *FileRegistry) Lookup() (map[string][]string, error) {
 		var e entry
 		if json.Unmarshal(b, &e) != nil || e.Name == "" || e.Addr == "" {
 			continue
+		}
+		if e.SchemaVersion > registrySchemaVersion {
+			continue // written by a newer build — skip rather than misread
 		}
 		if seen[e.Name] == nil {
 			seen[e.Name] = map[string]bool{}

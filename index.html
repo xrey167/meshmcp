@@ -713,9 +713,10 @@ REGRESSIONS (were allowed, now blocked):
   <div class="wrap">
     <div class="sechead reveal-on">
       <span class="eyebrow">reference</span>
-      <h2>19 commands, one static binary</h2>
-      <p class="lede">Everything is one <span class="mono" style="color:var(--ink)">meshmcp</span> binary. Mesh credentials come from
-      <span class="mono" style="color:var(--ink)">$NB_SETUP_KEY</span> or flags.</p>
+      <h2>40+ commands, one static binary</h2>
+      <p class="lede">Everything is one <span class="mono" style="color:var(--ink)">meshmcp</span> binary — from raw
+      <span class="mono" style="color:var(--ink)">serve</span> to the one-command <span class="mono" style="color:var(--ink)">air up</span>
+      Agent-OS surface. Mesh credentials come from <span class="mono" style="color:var(--ink)">$NB_SETUP_KEY</span> or flags.</p>
     </div>
     <div class="cmds">
       <div class="cgroup reveal-on">
@@ -743,6 +744,15 @@ REGRESSIONS (were allowed, now blocked):
         <div class="row"><span class="cn">insight</span><span class="cd">profile · recommend · simulate · detect</span></div>
         <div class="row"><span class="cn">replay</span><span class="cd">re-issue a session &amp; diff responses</span></div>
       </div>
+      <div class="cgroup reveal-on">
+        <div class="gh">agent OS &amp; operate</div>
+        <div class="row"><span class="cn">air up · init</span><span class="cd">scaffold a safe config, then serve</span></div>
+        <div class="row"><span class="cn">air join · pair</span><span class="cd">AirDrop-style access requests &amp; approvals</span></div>
+        <div class="row"><span class="cn">air operator</span><span class="cd">add a second operator, no YAML edits</span></div>
+        <div class="row"><span class="cn">edge</span><span class="cd">public OAuth ingress for hosted clients (claude.ai)</span></div>
+        <div class="row"><span class="cn">profile</span><span class="cd">remember a default gateway address</span></div>
+        <div class="row"><span class="cn">uninstall</span><span class="cd">leave the mesh — remove local identity &amp; state</span></div>
+      </div>
     </div>
 
     <div class="term reveal-on" style="margin-top:26px">
@@ -750,12 +760,13 @@ REGRESSIONS (were allowed, now blocked):
 <pre><span class="prompt">$</span> go build -o meshmcp .
 <span class="prompt">$</span> export NB_SETUP_KEY=<span class="dim">&lt;key from app.netbird.io&gt;</span>
 
-<span class="prompt">$</span> meshmcp serve --config examples/demo-backends.yaml   <span class="c"># prints mesh IP 100.x.y.z</span>
+<span class="c"># one command: scaffolds a safe-by-default config (deny-by-default, audit on), then serves</span>
+<span class="prompt">$</span> meshmcp air up   <span class="c"># prints your mesh IP 100.x.y.z</span>
 
 <span class="c"># from any other machine on the mesh — nothing is exposed to the internet:</span>
-<span class="prompt">$</span> meshmcp ls   100.x.y.z:9101
-<span class="prompt">$</span> meshmcp call 100.x.y.z:9101 add --arg a=2 --arg b=40
-  <span class="ok">→ 42</span></pre>
+<span class="prompt">$</span> meshmcp air home 100.x.y.z:9600   <span class="c"># peers · sessions · reachable · waiting</span>
+<span class="prompt">$</span> meshmcp ls        100.x.y.z:9101   <span class="c"># list a backend's tools</span>
+  <span class="ok">→ tools gated by policy — grant on request, every call audited</span></pre>
     </div>
   </div>
 </section>

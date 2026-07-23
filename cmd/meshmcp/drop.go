@@ -520,7 +520,7 @@ func dropReceive(cfgPath string) error {
 	checker := newACL(cfg.Allow)
 
 	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt)
+	signal.Notify(sig, shutdownSignals...)
 	go func() { <-sig; ln.Close() }()
 
 	place := dirPlacer(cfg.Dir)

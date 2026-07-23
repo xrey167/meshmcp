@@ -255,9 +255,9 @@ func TestGrantAuditChainVerifies(t *testing.T) {
 	kgH := rig.kgFor(grPeerKey, grPeerFQDN)
 	opH := rig.grantFor(grOpKey, grOpFQDN)
 
-	do(kgH, http.MethodGet, "/v1/kg/query?corpus=proj", "")                                    // request (opportunity) + deny
+	do(kgH, http.MethodGet, "/v1/kg/query?corpus=proj", "")                                         // request (opportunity) + deny
 	do(opH, http.MethodPost, "/v1/grant/allow", `{"pubkey":"peer-key","scope":"proj","once":true}`) // allow
-	do(kgH, http.MethodGet, "/v1/kg/query?corpus=proj", "")                                    // consume + allow
+	do(kgH, http.MethodGet, "/v1/kg/query?corpus=proj", "")                                         // consume + allow
 	do(opH, http.MethodPost, "/v1/grant/allow", `{"pubkey":"peer-key","scope":"docs","once":false}`)
 	do(opH, http.MethodPost, "/v1/grant/revoke", `{"pubkey":"peer-key","scope":"docs"}`) // revoke
 

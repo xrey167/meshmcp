@@ -188,10 +188,10 @@ func TestAirKGAuditChainVerifies(t *testing.T) {
 	rig := newKGRig(t, "key1", "caller.mesh", []string{"pubkey:key1"},
 		kgGrants{{pattern: "pubkey:key1", corpora: []string{"notes"}}})
 
-	rig.do(http.MethodPost, "/v1/kg/assert", `{"corpus":"notes","s":"a","p":"b","o":"c"}`)         // allow write
-	rig.do(http.MethodPost, "/v1/kg/assert", `{"corpus":"secret","s":"x","p":"y","o":"z"}`)        // deny write (no grant)
-	rig.do(http.MethodGet, "/v1/kg/query?corpus=notes", "")                                        // allow read
-	rig.do(http.MethodGet, "/v1/kg/query?corpus=secret", "")                                       // deny read
+	rig.do(http.MethodPost, "/v1/kg/assert", `{"corpus":"notes","s":"a","p":"b","o":"c"}`)  // allow write
+	rig.do(http.MethodPost, "/v1/kg/assert", `{"corpus":"secret","s":"x","p":"y","o":"z"}`) // deny write (no grant)
+	rig.do(http.MethodGet, "/v1/kg/query?corpus=notes", "")                                 // allow read
+	rig.do(http.MethodGet, "/v1/kg/query?corpus=secret", "")                                // deny read
 
 	res, err := policy.VerifyChain(bytes.NewReader(rig.audit.Bytes()))
 	if err != nil {

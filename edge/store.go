@@ -84,16 +84,44 @@ func secureDir(dir string) error {
 	return nil
 }
 
+// edgeSchemaVersion is the current on-disk format version stamped into every
+// edge store record. A record read with a higher version was written by a newer
+// build and is refused (fail closed) rather than misinterpreted — see readJSON.
+const edgeSchemaVersion = 1
+
+// stampSchemaVersion injects the current schema_version into a record's
+// top-level JSON object, centrally, so every edge store record self-describes
+// its format without each record struct having to declare the field. It errors
+// only if the record does not marshal to a JSON object (every edge record is a
+// struct, so this never fires in practice).
+func stampSchemaVersion(rec any) ([]byte, error) {
+	raw, err := json.Marshal(rec)
+	if err != nil {
+		return nil, fmt.Errorf("edge: marshal record: %w", err)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil, fmt.Errorf("edge: record is not a JSON object: %w", err)
+	}
+	vb, err := json.Marshal(edgeSchemaVersion)
+	if err != nil {
+		return nil, err
+	}
+	obj["schema_version"] = vb
+	return json.MarshalIndent(obj, "", "  ")
+}
+
 // writeAtomicJSON marshals rec and writes it to dst via tmp+fsync+rename, so a
 // reader never observes a partially-written record and a crash cannot corrupt
-// an existing one.
+// an existing one. It stamps the record with the current schema_version so a
+// future incompatible format is refused by an older reader.
 func writeAtomicJSON(dst string, rec any) error {
 	if err := secureDir(filepath.Dir(dst)); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(rec, "", "  ")
+	b, err := stampSchemaVersion(rec)
 	if err != nil {
-		return fmt.Errorf("edge: marshal record: %w", err)
+		return err
 	}
 	tmp := dst + ".tmp-" + randHex(8)
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
@@ -122,11 +150,24 @@ func writeAtomicJSON(dst string, rec any) error {
 }
 
 // readJSON reads and unmarshals a record. os.IsNotExist(err) distinguishes a
-// missing record from a corrupt one.
+// missing record from a corrupt one. It first checks the record's stamped
+// schema_version and refuses (fail closed) any record written by a newer build,
+// so an older reader never misinterprets a future format. A record with version
+// 0 (or the field absent) predates versioning and is accepted at the current
+// version; the out struct simply ignores the extra schema_version key.
 func readJSON(path string, out any) error {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return err
+	}
+	var probe struct {
+		SchemaVersion int `json:"schema_version"`
+	}
+	if err := json.Unmarshal(b, &probe); err != nil {
+		return fmt.Errorf("edge: parse record %s: %w", path, err)
+	}
+	if probe.SchemaVersion > edgeSchemaVersion {
+		return fmt.Errorf("edge: record %s has schema version %d, newer than this build supports (%d) — upgrade meshmcp", path, probe.SchemaVersion, edgeSchemaVersion)
 	}
 	if err := json.Unmarshal(b, out); err != nil {
 		return fmt.Errorf("edge: parse record %s: %w", path, err)

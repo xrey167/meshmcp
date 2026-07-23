@@ -80,7 +80,7 @@ func cmdAirScreen(args []string) error {
 		return fmt.Errorf("air screen: %w", err)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), shutdownSignals...)
 	defer stop()
 	fmt.Fprintln(os.Stderr, dim("sharing ")+bold(*watch)+dim(" → "+peer+" · Ctrl-C to stop"))
 
@@ -168,7 +168,7 @@ func screenReceive(o *meshOptions, dir string, allow multiFlag, port int, auditP
 		return fmt.Errorf("air screen: listen on mesh port %d: %w", port, err)
 	}
 	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt)
+	signal.Notify(sig, shutdownSignals...)
 	go func() { <-sig; ln.Close() }()
 
 	checker := newACL(allow)

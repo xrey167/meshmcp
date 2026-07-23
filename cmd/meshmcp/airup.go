@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/xrey167/meshmcp/air"
 )
@@ -29,23 +30,29 @@ func cmdAirUp(args []string) error {
 		return err
 	}
 
-	cfgPath := "meshmcp.yaml"
+	cfgPath := defaultConfigPath()
 	if fs.NArg() >= 1 {
 		cfgPath = fs.Arg(0)
 	}
 
-	// Ensure a config exists: scaffold a safe default in place if missing.
+	// Ensure a config exists: scaffold a safe default in place if missing. The
+	// scaffold roots the mesh identity/audit/pairing files at the canonical data
+	// dir so `air up` from any directory reuses the same identity instead of
+	// forking a new one.
 	if _, statErr := os.Stat(cfgPath); errors.Is(statErr, os.ErrNotExist) {
 		if !*asJSON {
 			fmt.Println(dim("no config at " + cfgPath + " — scaffolding a safe default"))
 		}
-		cfg, summary, err := buildScaffoldConfig(scaffoldOptions{OutPath: cfgPath, DeviceName: *name})
+		cfg, summary, err := buildScaffoldConfig(scaffoldOptions{OutPath: cfgPath, DeviceName: *name, BaseDir: scaffoldBaseDir()})
 		if err != nil {
 			return fmt.Errorf("air up: %w", err)
 		}
 		data, err := renderScaffoldYAML(cfg)
 		if err != nil {
 			return fmt.Errorf("air up: %w", err)
+		}
+		if err := os.MkdirAll(filepath.Dir(cfgPath), 0o700); err != nil {
+			return fmt.Errorf("air up: create config dir: %w", err)
 		}
 		if err := os.WriteFile(cfgPath, data, 0o600); err != nil {
 			return fmt.Errorf("air up: write %s: %w", cfgPath, err)

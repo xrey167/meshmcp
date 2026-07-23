@@ -39,7 +39,7 @@ func TestAnalyze_SecretsNoCosign_IsCritical(t *testing.T) {
 func TestAnalyze_SecretsCosigned_NotFlagged(t *testing.T) {
 	m := MeshExposure{Backends: []BackendExposure{{
 		Name: "payments", Transport: "stdio", Allow: []string{"pubkey:AAA"}, Audited: true,
-		PolicyGated: true,
+		PolicyGated:  true,
 		SecretGrants: []SecretGrantExposure{{Secrets: []string{"STRIPE_KEY"}, Peers: []string{"pubkey:AAA"}, Cosigned: true}},
 	}}}
 	if hasRule(Analyze(m), "secrets-no-cosign") {
@@ -166,7 +166,7 @@ func TestReachabilityFor_EmptyIdentity_DeniedEverywhere(t *testing.T) {
 
 func TestReachabilityFor_ViaWildcard_TrackedSeparately(t *testing.T) {
 	m := MeshExposure{Backends: []BackendExposure{
-		{Name: "open", Allow: nil},               // any peer
+		{Name: "open", Allow: nil}, // any peer
 		{Name: "scoped", Allow: []string{"pubkey:X"}},
 	}}
 	r := ReachabilityFor(m, "pubkey:X")

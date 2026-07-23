@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -160,7 +161,12 @@ type bucket struct {
 // evaluates the taint_guard/taint_source rule flags against the taint state the
 // caller passes in.
 type Engine struct {
-	pol          *Policy
+	// pol is the active policy, held behind an atomic pointer so it can be
+	// hot-swapped (config hot-reload) without a lock on the decision hot path:
+	// a decision Loads the pointer once and evaluates against that snapshot,
+	// while SetPolicy Stores a new one. An in-flight decision completes against
+	// whichever policy it loaded; the next decision sees the new policy.
+	pol          atomic.Pointer[Policy]
 	now          func() time.Time
 	cosign       CosignStore
 	reqApprovals RequestApprovalStore // optional: request-bound single-use approvals (Phase 3)
@@ -169,19 +175,42 @@ type Engine struct {
 	mu      sync.Mutex
 	buckets map[string]*bucket // key: ruleID|peerKey
 
-	phOnce sync.Once
-	ph     string // cached policy hash
+	// ph caches the hash of the active policy, recomputed on every SetPolicy so
+	// PolicyHash always reflects the policy currently in force (request-bound
+	// co-sign approvals bind to it).
+	ph atomic.Pointer[string]
+}
+
+// setPolicy stores pol and recomputes the cached policy hash. It is the single
+// writer of both, used by NewEngine and SetPolicy.
+func (e *Engine) setPolicy(pol *Policy) {
+	e.pol.Store(pol)
+	b, _ := json.Marshal(pol)
+	sum := sha256.Sum256(b)
+	h := hex.EncodeToString(sum[:])
+	e.ph.Store(&h)
+}
+
+// SetPolicy atomically swaps the active policy (config hot-reload) and
+// recomputes PolicyHash. It is safe to call concurrently with decisions: buckets
+// and co-sign state are preserved (only the rules change), so in-flight rate
+// limits and approvals are not reset by a reload.
+func (e *Engine) SetPolicy(pol *Policy) {
+	if pol == nil {
+		return
+	}
+	e.setPolicy(pol)
 }
 
 // PolicyHash returns a stable hash of the active policy, used to bind a
-// request-approval to the policy version in force when it was granted.
+// request-approval to the policy version in force when it was granted. It
+// tracks SetPolicy, so an approval minted under one policy no longer verifies
+// after a reload changes the rules.
 func (e *Engine) PolicyHash() string {
-	e.phOnce.Do(func() {
-		b, _ := json.Marshal(e.pol)
-		sum := sha256.Sum256(b)
-		e.ph = hex.EncodeToString(sum[:])
-	})
-	return e.ph
+	if p := e.ph.Load(); p != nil {
+		return *p
+	}
+	return ""
 }
 
 // SetRequestApprovals attaches a request-bound approval store. When set,
@@ -229,11 +258,15 @@ func NewEngine(pol *Policy, now func() time.Time, cosign CosignStore) *Engine {
 	if now == nil {
 		now = time.Now
 	}
-	return &Engine{pol: pol, now: now, cosign: cosign, buckets: map[string]*bucket{}}
+	e := &Engine{now: now, cosign: cosign, buckets: map[string]*bucket{}}
+	e.setPolicy(pol)
+	return e
 }
 
-// Policy exposes the wrapped policy (for method decisions and reporting).
-func (e *Engine) Policy() *Policy { return e.pol }
+// Policy exposes the active policy (for method decisions and reporting). It
+// returns the current snapshot; a concurrent SetPolicy may replace it after the
+// call returns.
+func (e *Engine) Policy() *Policy { return e.pol.Load() }
 
 // DecideToolCall authorizes a tools/call, applying rate limits, time windows,
 // co-sign, and data-flow labels. labels is the session's current label set
@@ -258,7 +291,10 @@ func (e *Engine) DecideToolCallBound(peerFQDN, peerKey, backend, tool string, ar
 
 func (e *Engine) decideTool(peerFQDN, peerKey, backend, tool string, args []byte, labels map[string]bool, bound bool) Decision {
 	now := e.now()
-	for i, r := range e.pol.Rules {
+	// Snapshot the policy once so the whole decision evaluates against a
+	// consistent view even if SetPolicy swaps the policy mid-decision.
+	pol := e.pol.Load()
+	for i, r := range pol.Rules {
 		if len(r.Methods) > 0 {
 			continue
 		}
@@ -307,7 +343,7 @@ func (e *Engine) decideTool(peerFQDN, peerKey, backend, tool string, args []byte
 		}
 		return Decision{Allow: true, RuleID: i, Outcome: OutcomeAllow, AddLabels: r.emitSet(), Cost: ruleCost(r)}
 	}
-	return Decision{Allow: e.pol.DefaultAllow, RuleID: -1, Outcome: outcomeOf(e.pol.DefaultAllow)}
+	return Decision{Allow: pol.DefaultAllow, RuleID: -1, Outcome: outcomeOf(pol.DefaultAllow)}
 }
 
 // ruleCost is the cost/quota units an allowed call under rule r consumes: the

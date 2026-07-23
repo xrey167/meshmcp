@@ -45,6 +45,10 @@ func cmdAir(args []string) error {
 		return cmdAirJoin(args[1:])
 	case "pair":
 		return cmdAirPair(args[1:])
+	case "operator", "operators":
+		return cmdAirOperator(args[1:])
+	case "remove", "uninstall":
+		return cmdUninstall(args[1:])
 	case "grant":
 		return cmdAirGrant(args[1:])
 	case "nearby":
@@ -118,7 +122,7 @@ func cmdAir(args []string) error {
 	case "-h", "--help", "help":
 		return airUsage()
 	default:
-		return fmt.Errorf("meshmcp air: unknown subcommand %q (want init | up | join | pair | grant | home | nearby | send | announce | node | handoff | whoami | map | browse | stream | vision | bind | film | play | ring | listen | cast | drive | screen | catalog | change | osint | dns | kg | database | sessions | steer | launch | agent-steer | tasks | task-steer | workflow | graph | rag | serve)", args[0])
+		return fmt.Errorf("meshmcp air: unknown subcommand %q (want init | up | join | pair | operator | grant | home | nearby | send | announce | node | handoff | whoami | map | browse | stream | vision | bind | film | play | ring | listen | cast | drive | screen | catalog | change | osint | dns | kg | database | sessions | steer | launch | agent-steer | tasks | task-steer | workflow | graph | rag | serve)", args[0])
 	}
 }
 
@@ -133,6 +137,9 @@ func airUsage() error {
 	fmt.Fprintln(os.Stderr, "  "+b("air join")+"        <pair-addr> [--label name]        "+dim("ask a gateway for access — request, then wait for the operator's tap"))
 	fmt.Fprintln(os.Stderr, "  "+b("air pair")+"        list|approve|deny|revoke <control-ip:port> [peer-key]")
 	fmt.Fprintln(os.Stderr, "                  "+dim("operator side: approve peers onto the mesh — no YAML editing (identity only, not tool access)"))
+	fmt.Fprintln(os.Stderr, "  "+b("air operator")+"    list|add|remove --pubkey <key> [--fqdn f] [--config cfg]")
+	fmt.Fprintln(os.Stderr, "                  "+dim("add a second operator (control/steer + pairing-approver) without hand-editing control.allow"))
+	fmt.Fprintln(os.Stderr, "  "+b("air remove")+"      [--config f] [--yes] [--purge]     "+dim("leave the mesh: remove this gateway's local identity + state (dry-run without --yes)"))
 	fmt.Fprintln(os.Stderr, "  "+b("air grant")+"       list|allow|deny|revoke <control-ip:port> [peer-key] [scope] [--once|--always]")
 	fmt.Fprintln(os.Stderr, "                  "+dim("operator side: turn a recognized peer's denied request into a one-tap grant (Allow once / Always / Deny)"))
 	fmt.Fprintln(os.Stderr)
@@ -217,10 +224,11 @@ func cmdAirSessions(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if fs.NArg() != 1 {
-		return errors.New("usage: meshmcp air sessions [flags] <control-ip:port>")
+	control, err := resolveControlPositional(fs.NArg(), fs.Arg(0), "usage: meshmcp air sessions [flags] <control-ip:port>")
+	if err != nil {
+		return err
 	}
-	hc, cleanup, err := airControlHTTP(o, fs.Arg(0))
+	hc, cleanup, err := airControlHTTP(o, control)
 	if err != nil {
 		return err
 	}
@@ -625,7 +633,7 @@ func cmdAirAgentSteer(args []string) error {
 	}
 	defer stopMesh(client)
 
-	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	signalCtx, stop := signal.NotifyContext(context.Background(), shutdownSignals...)
 	defer stop()
 	deliveryCtx, cancel := context.WithTimeout(signalCtx, *deliveryTimeout)
 	defer cancel()

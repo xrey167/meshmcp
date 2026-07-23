@@ -44,6 +44,11 @@ func VerifyChain(r io.Reader) (VerifyResult, error) {
 			res.Reason = fmt.Sprintf("record %d is not valid JSON: %v", expectSeq, err)
 			return res, nil
 		}
+		if rec.SchemaVersion > auditSchemaVersion {
+			res.BreakSeq = expectSeq
+			res.Reason = fmt.Sprintf("record %d has schema version %d, newer than this build supports (%d) — upgrade meshmcp", expectSeq, rec.SchemaVersion, auditSchemaVersion)
+			return res, nil
+		}
 		if rec.Seq != expectSeq {
 			res.BreakSeq = rec.Seq
 			res.Reason = fmt.Sprintf("record #%d has seq %d (expected %d): a record was inserted or removed", res.Count, rec.Seq, expectSeq)
@@ -74,6 +79,99 @@ func VerifyChain(r io.Reader) (VerifyResult, error) {
 	res.OK = true
 	res.LastHash = prev
 	return res, nil
+}
+
+// VerifyForRepair verifies the chain in data and, when the ONLY defect is an
+// incomplete trailing record (a torn write left by a crash or power loss),
+// reports the byte offset to truncate the file to so the remaining chain is
+// fully intact, along with the last good (seq, hash) via res.Count/res.LastHash.
+//
+// It is deliberately conservative to preserve tamper-evidence: a tear is only
+// recoverable when the LAST non-blank line fails to parse as JSON (a partially
+// written final record) and every record before it verifies. A complete record
+// whose seq, prev_hash, or hash is wrong — an edit, reorder, deletion, or
+// insertion — is NEVER repairable and surfaces as a hard failure (torn=false,
+// res.OK=false), the same as corruption anywhere before the final line. Because
+// only the single trailing line is ever dropped and it is by construction the
+// newest record, truncation can never remove a checkpoint-covered record.
+func VerifyForRepair(data []byte) (res VerifyResult, truncateTo int64, torn bool) {
+	prev := ""
+	expectSeq := 0
+	var offset int64
+	n := int64(len(data))
+	for offset < n {
+		recStart := offset
+		nl := bytes.IndexByte(data[offset:], '\n')
+		var lineEnd int64
+		hasNL := nl >= 0
+		if hasNL {
+			lineEnd = offset + int64(nl)
+			offset = lineEnd + 1
+		} else {
+			lineEnd = n
+			offset = n
+		}
+		line := bytes.TrimSpace(data[recStart:lineEnd])
+		if len(line) == 0 {
+			truncateTo = offset // keep blank lines in the good prefix
+			continue
+		}
+		expectSeq++
+		var rec AuditRecord
+		if err := json.Unmarshal(line, &rec); err != nil {
+			// A parse failure on the FINAL non-blank line is a torn trailing
+			// write: recoverable by dropping it. Anywhere earlier it is
+			// mid-chain corruption and must fail hard.
+			if !hasMoreContent(data, offset) {
+				res.BreakSeq = expectSeq
+				res.Reason = fmt.Sprintf("incomplete trailing record %d: %v", expectSeq, err)
+				return res, recStart, true
+			}
+			res.BreakSeq = expectSeq
+			res.Reason = fmt.Sprintf("record %d is not valid JSON: %v", expectSeq, err)
+			return res, 0, false
+		}
+		// A record from a newer format is complete and well-formed — never a torn
+		// tail. Refuse it hard rather than truncating a valid future record.
+		if rec.SchemaVersion > auditSchemaVersion {
+			res.BreakSeq = rec.Seq
+			res.Reason = fmt.Sprintf("record %d has schema version %d, newer than this build supports (%d) — upgrade meshmcp", expectSeq, rec.SchemaVersion, auditSchemaVersion)
+			return res, 0, false
+		}
+		if rec.Seq != expectSeq {
+			res.BreakSeq = rec.Seq
+			res.Reason = fmt.Sprintf("record #%d has seq %d (expected %d): a record was inserted or removed", res.Count+1, rec.Seq, expectSeq)
+			return res, 0, false
+		}
+		if rec.PrevHash != prev {
+			res.BreakSeq = rec.Seq
+			res.Reason = fmt.Sprintf("record seq %d prev_hash %q does not link to prior hash %q", rec.Seq, short(rec.PrevHash), short(prev))
+			return res, 0, false
+		}
+		want, _, err := chainHash(rec)
+		if err != nil {
+			res.BreakSeq = rec.Seq
+			res.Reason = fmt.Sprintf("record seq %d could not be re-hashed: %v", rec.Seq, err)
+			return res, 0, false
+		}
+		if rec.Hash != want {
+			res.BreakSeq = rec.Seq
+			res.Reason = fmt.Sprintf("record seq %d was edited: stored hash %q != recomputed %q", rec.Seq, short(rec.Hash), short(want))
+			return res, 0, false
+		}
+		prev = rec.Hash
+		res.Count++
+		res.LastHash = prev
+		truncateTo = offset
+	}
+	res.OK = true
+	res.LastHash = prev
+	return res, truncateTo, false
+}
+
+// hasMoreContent reports whether any non-blank line remains in data from offset.
+func hasMoreContent(data []byte, offset int64) bool {
+	return len(bytes.TrimSpace(data[offset:])) > 0
 }
 
 // LastLink reads to the end of an audit log and returns the final record's

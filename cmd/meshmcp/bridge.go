@@ -109,7 +109,7 @@ func cmdForward(args []string) error {
 	log.Printf("forwarding %s -> mesh %s", ln.Addr(), target)
 
 	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt)
+	signal.Notify(sig, shutdownSignals...)
 	go func() {
 		<-sig
 		ln.Close()

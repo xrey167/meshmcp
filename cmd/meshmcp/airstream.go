@@ -41,7 +41,7 @@ func cmdAirStream(args []string) error {
 	}
 	path := fs.Arg(0)
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), shutdownSignals...)
 	defer stop()
 
 	fmt.Fprintln(os.Stderr, dim("streaming ")+bold(path)+dim(" · Ctrl-C to stop"))
