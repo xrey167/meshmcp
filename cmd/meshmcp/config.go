@@ -48,16 +48,16 @@ type Config struct {
 	// AuditWebhook POSTs audit records to an external URL (SIEM / Slack /
 	// PagerDuty) via a best-effort observer sink. AuditWebhookAll forwards every
 	// record; by default only deny/cosign records are sent.
-	AuditWebhook    string       `yaml:"audit_webhook"`
-	AuditWebhookAll bool         `yaml:"audit_webhook_all"`
+	AuditWebhook    string `yaml:"audit_webhook"`
+	AuditWebhookAll bool   `yaml:"audit_webhook_all"`
 	// MetricsListen serves Prometheus text-format metrics (aggregated from the
 	// shared audit ledger; metadata-only labels, never a peer identity or
 	// payload) on GET /metrics at this address. Bind it to localhost or a mesh
 	// IP — the endpoint is unauthenticated by Prometheus convention. Empty
 	// disables it. Requires audit_log (the sink observes the shared ledger).
-	MetricsListen string `yaml:"metrics_listen"`
-	Trace           *TraceConfig `yaml:"trace"`
-	Registry        string       `yaml:"registry"` // dir: register backends for router discovery
+	MetricsListen string       `yaml:"metrics_listen"`
+	Trace         *TraceConfig `yaml:"trace"`
+	Registry      string       `yaml:"registry"` // dir: register backends for router discovery
 	// Groups maps a group name to member patterns (pubkey:<key> or FQDN glob)
 	// so policy rules can match `group:<name>` (F17). Shared by all backends.
 	Groups map[string][]string `yaml:"groups"`
@@ -259,6 +259,21 @@ type Backend struct {
 	httpURL   *url.URL
 	remoteURL *url.URL            // parsed Remote.Endpoint, set at load
 	groups    map[string][]string // resolved from Config.Groups at load
+	// allowACL is the RUNNING gateway's peer-admission handle for this backend,
+	// set by cmdServe before the accept loops start. It shares its pattern list
+	// atomically across copies, so a SIGHUP reload can swap the patterns and
+	// every already-captured checker sees the change (see acl.swap).
+	allowACL acl
+}
+
+// peerACL returns the backend's live admission handle when the gateway
+// installed one, else a fresh ACL from the static config — the fallback keeps
+// direct callers (tests exercising serveStdio and friends) working unchanged.
+func (b *Backend) peerACL() acl {
+	if b.allowACL.p != nil {
+		return b.allowACL
+	}
+	return newACL(b.Allow)
 }
 
 // RemoteBackendConfig configures a "remote" backend: the gateway dials out to

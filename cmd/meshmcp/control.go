@@ -80,8 +80,8 @@ func cmdControl(args []string) error {
 	if token == "" {
 		token = os.Getenv("NB_API_TOKEN")
 	}
+	var enrollLog *policy.AuditLog
 	if token != "" {
-		var enrollLog *policy.AuditLog
 		if *enrollAudit != "" {
 			f, err := os.OpenFile(*enrollAudit, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 			if err != nil {
@@ -132,6 +132,9 @@ func cmdControl(args []string) error {
 	}
 
 	handler := srv.Handler()
+	// Seal the enrollment ledger's final checkpoint batch on shutdown, so a
+	// `systemctl stop` never strands issued-key records outside a checkpoint.
+	flushEnroll := func() { enrollLog.Flush() }
 
 	// Dev/testing path: bind a plain local port, no mesh. There is no mesh
 	// transport to derive identity from here, so Identify stays nil and every
@@ -139,7 +142,7 @@ func cmdControl(args []string) error {
 	// the mesh and must not be exposed as an administrative endpoint.
 	if *addr != "" {
 		log.Printf("control plane on http://%s (LOCAL, not on the mesh — privileged routes are DENIED, no transport identity)", *addr)
-		return http.ListenAndServe(*addr, handler)
+		return serveGracefully(&http.Server{Addr: *addr, Handler: handler}, nil, flushEnroll)
 	}
 
 	o.BlockInbound = false
@@ -169,7 +172,7 @@ func cmdControl(args []string) error {
 		return fmt.Errorf("listen on mesh port %d: %w", *port, err)
 	}
 	defer ln.Close()
-	return http.Serve(ln, handler)
+	return serveGracefully(&http.Server{Handler: handler}, ln, flushEnroll)
 }
 
 // controlAuditSink writes privileged control-plane decisions as JSON lines to a

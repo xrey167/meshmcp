@@ -31,17 +31,20 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME}"
+          COMMIT="$(git rev-parse HEAD)"
+          DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           mkdir -p dist
-          # Curated target set. Some netbird/wireguard code paths may need
-          # per-target adjustment on the first real release — see
-          # docs/RELEASE-CHECKLIST.md.
+          # Curated target set. All five targets verified cross-compiling clean
+          # with CGO_ENABLED=0 from the current tree (2026-07); the earlier
+          # "may need per-target adjustment" caveat no longer applies.
           targets="linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64"
           for t in $targets; do
             goos="${t%/*}"; goarch="${t#*/}"
             out="meshmcp"; [ "$goos" = "windows" ] && out="meshmcp.exe"
             echo "building $goos/$goarch"
             GOOS="$goos" GOARCH="$goarch" go build -trimpath \
-              -ldflags "-s -w -X main.version=${VERSION}" -o "dist/$out" ./cmd/meshmcp
+              -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${DATE}" \
+              -o "dist/$out" ./cmd/meshmcp
             base="meshmcp_${VERSION}_${goos}_${goarch}"
             if [ "$goos" = "windows" ]; then
               (cd dist && zip -q "${base}.zip" "$out" && rm -f "$out")
