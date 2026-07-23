@@ -84,7 +84,7 @@ func newTestHandler(c airController, allowCaller bool) http.Handler {
 }
 
 func TestAirControlSessions(t *testing.T) {
-	c := &fakeAirControl{list: []AirSession{{Backend: "fs", ID: "9f2a", Peer: "agent.mesh", AgeSec: 4}}}
+	c := &fakeAirControl{list: []AirSession{{Backend: "fs", ID: "9f2a", Peer: "agent.mesh", PeerKey: "AGENTKEY", AgeSec: 4}}}
 	rr := httptest.NewRecorder()
 	newTestHandler(c, true).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/v1/sessions", nil))
 	if rr.Code != http.StatusOK {
@@ -97,7 +97,7 @@ func TestAirControlSessions(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
 		t.Fatalf("bad json: %v", err)
 	}
-	if len(out.Sessions) != 1 || out.Sessions[0].Backend != "fs" || out.Sessions[0].ID != "9f2a" {
+	if len(out.Sessions) != 1 || out.Sessions[0].Backend != "fs" || out.Sessions[0].ID != "9f2a" || out.Sessions[0].PeerKey != "AGENTKEY" {
 		t.Fatalf("unexpected sessions: %+v", out.Sessions)
 	}
 	if out.You != "caller.mesh" {

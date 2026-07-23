@@ -326,8 +326,9 @@ func TestAirLiveUniversalActionsWiring(t *testing.T) {
 		`Search agents, sessions, and actions`,
 		`Verified destinations · actions remain policy governed`,
 		`fetch("api/ring"`,
-		`payload.recipient=recipient`,
-		`form.append("recipient",recipient)`,
+		`return{field:"to",value:selectedRecipient}`,
+		`payload[recipient.field]=recipient.value`,
+		`form.append(recipient.field,recipient.value)`,
 		`title:"Browse reachable services"`,
 		`tabindex="-1"`,
 		`maxlength="500"`,
@@ -342,15 +343,23 @@ func TestAirLiveUniversalActionsWiring(t *testing.T) {
 		t.Fatal("logical actions no longer prefer the durable full public-key selector")
 	}
 
-	for name, body := range map[string]string{
-		"sessionForNode":  section("function sessionForNode", "function actionsForNode"),
-		"matchingSession": section("function matchingSession", "function updateSummary"),
-	} {
-		if strings.Contains(body, "n.name") || strings.Contains(body, "activity.target") || strings.Contains(body, `"session:"`) {
-			t.Errorf("%s uses client-authored Presence metadata to select a steerable session", name)
+	sessionForNode := section("function sessionForNode", "function actionsForNode")
+	if !strings.Contains(sessionForNode, "return matchingSession(n)") {
+		t.Fatal("node actions no longer share the identity-bound session matcher")
+	}
+	matchingSession := section("function matchingSession", "function findNearbyCard")
+	for _, unsafe := range []string{"n.name", "activity.target", `"session:"`, "s.peer||"} {
+		if strings.Contains(matchingSession, unsafe) {
+			t.Errorf("matchingSession uses unsafe client-authored or name-based selector %q", unsafe)
 		}
-		if !strings.Contains(body, "n.fqdn") || !strings.Contains(body, "n.public_key") || !strings.Contains(body, "n.ip") {
-			t.Errorf("%s no longer associates sessions through transport-stamped identities", name)
+	}
+	for _, want := range []string{
+		"fullNodeKey(n)",
+		`String(s.peer_key||"")===key`,
+		"matches.length===1",
+	} {
+		if !strings.Contains(matchingSession, want) {
+			t.Errorf("matchingSession lost exact-key unique-match contract %q", want)
 		}
 	}
 }

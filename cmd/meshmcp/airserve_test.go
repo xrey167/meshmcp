@@ -28,6 +28,25 @@ func TestAirServePage(t *testing.T) {
 	}
 }
 
+func TestAirServePageBindsNodeSteerToTransportIdentity(t *testing.T) {
+	page := string(airLiveHTML)
+	for _, contract := range []string{
+		`var key=fullNodeKey(n);`,
+		`String(s.peer_key||"")===key`,
+		`return matches.length===1?matches[0]:null;`,
+		`No identity-bound live session`,
+	} {
+		if !strings.Contains(page, contract) {
+			t.Fatalf("Air page lost identity-bound Steer contract %q", contract)
+		}
+	}
+	for _, unsafeFallback := range []string{`p===n.fqdn`, `p===n.name`} {
+		if strings.Contains(page, unsafeFallback) {
+			t.Fatalf("Air page restored an unsafe name-based Steer fallback %q", unsafeFallback)
+		}
+	}
+}
+
 func TestAirServePeers(t *testing.T) {
 	h := airServeHandler(airServeDeps{peers: func() ([]airPeerRow, error) {
 		return []airPeerRow{{Status: "connected", IP: "100.64.0.2", FQDN: "gw.mesh", PubKey: "Ab…"}}, nil
@@ -139,6 +158,10 @@ func TestAirServePushDrop(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("push status %d: %s", rr.Code, rr.Body)
 	}
+	var pushResult map[string]string
+	if err := json.Unmarshal(rr.Body.Bytes(), &pushResult); err != nil || pushResult["status"] != "pushed" || pushResult["target"] != "100.64.0.9:9110" || pushResult["name"] != "clip.txt" {
+		t.Fatalf("legacy push result = %+v, err=%v", pushResult, err)
+	}
 	if len(got) != 1 || got[0].name != "clip.txt" || string(got[0].data) != "meet at 15:00" {
 		t.Fatalf("push not delivered: %+v", got)
 	}
@@ -156,6 +179,13 @@ func TestAirServePushDrop(t *testing.T) {
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("drop status %d: %s", rr.Code, rr.Body)
+	}
+	var dropResult struct {
+		Status, Target, Name string
+		Bytes                int
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &dropResult); err != nil || dropResult.Status != "dropped" || dropResult.Target != "100.64.0.9:9110" || dropResult.Name != "report.pdf" || dropResult.Bytes != 7 {
+		t.Fatalf("legacy drop result = %+v, err=%v", dropResult, err)
 	}
 	if len(got) != 2 || got[1].name != "report.pdf" || string(got[1].data) != "PDFDATA" {
 		t.Fatalf("drop not delivered: %+v", got[1])
@@ -175,15 +205,15 @@ func TestAirServePushDrop(t *testing.T) {
 		return req
 	}
 	rr = httptest.NewRecorder()
-	h.ServeHTTP(rr, dropRequest(maxAirUpload))
+	h.ServeHTTP(rr, dropRequest(int(maxAirUpload)))
 	if rr.Code != http.StatusOK || len(got) != 3 {
 		t.Fatalf("exact-limit drop = %d, deliveries=%d: %s", rr.Code, len(got), rr.Body)
 	}
-	if len(got[2].data) != maxAirUpload {
+	if len(got[2].data) != int(maxAirUpload) {
 		t.Fatalf("exact-limit delivery bytes = %d, want %d", len(got[2].data), maxAirUpload)
 	}
 	rr = httptest.NewRecorder()
-	h.ServeHTTP(rr, dropRequest(maxAirUpload+1))
+	h.ServeHTTP(rr, dropRequest(int(maxAirUpload)+1))
 	if rr.Code != http.StatusRequestEntityTooLarge || len(got) != 3 {
 		t.Fatalf("oversize drop = %d, deliveries=%d; want 413 without delivery", rr.Code, len(got))
 	}
@@ -233,21 +263,21 @@ func TestAirServeLogicalPushDropResolveInbox(t *testing.T) {
 		if got := r.Header.Get("X-Air-On-Behalf-Key"); got != "phone-key" {
 			t.Errorf("presence request key %q, want phone-key", got)
 		}
-		_, _ = io.WriteString(w, `{"presence":[{"name":"Research Agent","fqdn":"research.mesh","public_key":"research-key","services":[{"kind":"inbox","address":"100.64.0.9:9110"}]}]}`)
+		_, _ = io.WriteString(w, `{"presence":[{"name":"Research Agent","fqdn":"research.mesh","public_key":"research-key","services":[{"kind":"inbox","capabilities":["drop.complete.v1"],"address":"100.64.0.9:9110"}]}]}`)
 	}))
 	defer control.Close()
 
 	type sent struct {
-		target, name string
-		data         []byte
+		target, expectedKey, name string
+		data                      []byte
 	}
 	var got []sent
 	h := airServeHandler(airServeDeps{
 		controlHC:   control.Client(),
 		controlBase: control.URL,
 		identify:    func(*http.Request) (string, string) { return "phone-key", "phone.mesh" },
-		push: func(_ context.Context, target, name string, data []byte) error {
-			got = append(got, sent{target: target, name: name, data: append([]byte(nil), data...)})
+		pushConfirmed: func(_ context.Context, target, expectedKey, name string, data []byte) error {
+			got = append(got, sent{target: target, expectedKey: expectedKey, name: name, data: append([]byte(nil), data...)})
 			return nil
 		},
 	})
@@ -277,6 +307,9 @@ func TestAirServeLogicalPushDropResolveInbox(t *testing.T) {
 	}
 	if len(got) != 2 || got[0].target != "100.64.0.9:9110" || got[1].target != "100.64.0.9:9110" {
 		t.Fatalf("logical actions resolved to wrong targets: %+v", got)
+	}
+	if got[0].expectedKey != "research-key" || got[1].expectedKey != "research-key" {
+		t.Fatalf("logical actions were not identity-bound: %+v", got)
 	}
 	if got[0].name != "clip.txt" || string(got[0].data) != "meet at 15:00" || got[1].name != "report.pdf" || string(got[1].data) != "PDFDATA" {
 		t.Fatalf("logical action payloads changed: %+v", got)
@@ -344,7 +377,7 @@ func TestAirServeLogicalRecipientResolverUnavailable(t *testing.T) {
 		})
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/push", strings.NewReader(`{"recipient":"Agent","text":"hello"}`)))
-		if rr.Code != http.StatusServiceUnavailable || !strings.Contains(rr.Body.String(), "presence") {
+		if rr.Code != http.StatusServiceUnavailable || !strings.Contains(rr.Body.String(), "control endpoint") {
 			t.Fatalf("unconfigured logical resolver = %d %q, want 503", rr.Code, rr.Body.String())
 		}
 		if called {
@@ -364,8 +397,8 @@ func TestAirServeLogicalRecipientResolverUnavailable(t *testing.T) {
 		})
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/push", strings.NewReader(`{"recipient":"Agent","text":"hello"}`)))
-		if rr.Code != http.StatusBadGateway || !strings.Contains(rr.Body.String(), "unavailable") {
-			t.Fatalf("failed logical resolver = %d %q, want 502", rr.Code, rr.Body.String())
+		if rr.Code != http.StatusBadGateway || !strings.Contains(rr.Body.String(), "503 Service Unavailable") {
+			t.Fatalf("failed logical resolver = %d %q, want 502 with upstream status", rr.Code, rr.Body.String())
 		}
 		if called {
 			t.Fatal("push ran after the Presence resolver failed")
@@ -451,6 +484,51 @@ func TestAirServeRing(t *testing.T) {
 	failed.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/ring", strings.NewReader(`{"target":"100.64.0.7:9121","message":"hello"}`)))
 	if rr.Code != http.StatusBadGateway || !strings.Contains(rr.Body.String(), "not acknowledged") {
 		t.Fatalf("failed ring = %d %q, want 502 delivery error", rr.Code, rr.Body.String())
+	}
+}
+
+func TestAirServePushAcceptsExactEscapedPayloadLimit(t *testing.T) {
+	payload := strings.Repeat("\"", int(maxAirUpload))
+	body, err := json.Marshal(map[string]string{
+		"target": "100.64.0.9:9110",
+		"text":   payload,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int64(len(body)) <= maxAirUpload {
+		t.Fatal("test payload did not exercise JSON escaping overhead")
+	}
+	var delivered int
+	h := airServeHandler(airServeDeps{push: func(_ context.Context, _, _ string, data []byte) error {
+		delivered = len(data)
+		return nil
+	}})
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/push", bytes.NewReader(body)))
+	if rr.Code != http.StatusOK || delivered != int(maxAirUpload) {
+		t.Fatalf("exact escaped payload = status %d delivered %d body %s", rr.Code, delivered, rr.Body)
+	}
+}
+
+func TestAirServePushRejectsDecodedPayloadOverLimit(t *testing.T) {
+	payload := strings.Repeat("\n", int(maxAirUpload)+1)
+	body, err := json.Marshal(map[string]string{
+		"target": "100.64.0.9:9110",
+		"text":   payload,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	h := airServeHandler(airServeDeps{push: func(_ context.Context, _, _ string, _ []byte) error {
+		called = true
+		return nil
+	}})
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/push", bytes.NewReader(body)))
+	if rr.Code != http.StatusRequestEntityTooLarge || called {
+		t.Fatalf("oversized decoded payload = status %d called=%v body=%s", rr.Code, called, rr.Body)
 	}
 }
 
@@ -572,10 +650,167 @@ func TestValidMeshTarget(t *testing.T) {
 			t.Errorf("validMeshTarget(%q) = false, want true", ok)
 		}
 	}
-	for _, bad := range []string{"", "no-port", "host:", ":9110", "host:abc", "a:b:c"} {
+	for _, bad := range []string{"", "no-port", "host:", ":9110", "host:abc", "host:0", "host:-1", "host:65536", "a:b:c"} {
 		if validMeshTarget(bad) {
 			t.Errorf("validMeshTarget(%q) = true, want false", bad)
 		}
+	}
+}
+
+func TestAirServeResolvedPushUsesFullKeyAndReturnsSafeReceipt(t *testing.T) {
+	const fullKey = "full-wireguard-public-key-for-analyst"
+	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/presence" {
+			http.NotFound(w, r)
+			return
+		}
+		if got := r.Header.Get("X-Air-On-Behalf"); got != "phone.mesh" {
+			t.Errorf("presence lookup attested as %q, want phone.mesh", got)
+		}
+		_, _ = io.WriteString(w, `{"presence":[{"version":"air.presence/v1","name":"Analyst","kind":"agent","status":"available","labels":[],"services":[{"kind":"inbox","port":9110,"protocol":"tcp","capabilities":["drop.complete.v1"],"address":"100.64.0.9:9110"}],"public_key":"`+fullKey+`","fqdn":"analyst.mesh","ip":"100.64.0.9","seen_at":"2026-07-22T12:00:00Z","expires_at":"2026-07-22T12:01:30Z"}]}`)
+	}))
+	defer control.Close()
+
+	var deliveredTarget, deliveredKey, deliveredName, deliveredText string
+	h := airServeHandler(airServeDeps{
+		controlHC: control.Client(), controlBase: control.URL,
+		identify: func(*http.Request) (string, string) { return "phone-key", "phone.mesh" },
+		pushConfirmed: func(_ context.Context, target, expectedKey, name string, data []byte) error {
+			deliveredTarget, deliveredKey, deliveredName, deliveredText = target, expectedKey, name, string(data)
+			return nil
+		},
+	})
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/push", strings.NewReader(`{"to":"pubkey:`+fullKey+`","text":"launch-code-red"}`))
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("resolved push = %d: %s", rr.Code, rr.Body)
+	}
+	if deliveredTarget != "100.64.0.9:9110" || deliveredName != "clip.txt" || deliveredText != "launch-code-red" {
+		t.Fatalf("resolved delivery = target %q name %q text %q", deliveredTarget, deliveredName, deliveredText)
+	}
+	if deliveredKey != fullKey {
+		t.Fatalf("resolved delivery expected key = %q, want %q", deliveredKey, fullKey)
+	}
+	var result air.ActionResult
+	if err := json.Unmarshal(rr.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if err := result.Validate(); err != nil {
+		t.Fatalf("result invalid: %v", err)
+	}
+	if result.Recipient.PublicKey != fullKey || result.Recipient.FQDN != "analyst.mesh" || result.Recipient.Address != deliveredTarget {
+		t.Fatalf("result recipient = %+v", result.Recipient)
+	}
+	if result.Bytes != int64(len(deliveredText)) || len(result.Receipts) != 1 || result.Receipts[0].PayloadName != "clip.txt" || result.Status != air.ActionDelivered {
+		t.Fatalf("result metadata = %+v", result)
+	}
+	if strings.Contains(rr.Body.String(), deliveredText) {
+		t.Fatalf("receipt leaked raw payload: %s", rr.Body)
+	}
+}
+
+func TestAirServeResolvedDrop(t *testing.T) {
+	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"presence":[{"name":"Analyst","services":[{"kind":"inbox","capabilities":["drop.complete.v1"],"address":"100.64.0.9:9110"}],"public_key":"FULL","fqdn":"analyst.mesh"}]}`)
+	}))
+	defer control.Close()
+	var target string
+	h := airServeHandler(airServeDeps{
+		controlHC: control.Client(), controlBase: control.URL,
+		pushConfirmed: func(_ context.Context, got, _ string, _ string, _ []byte) error { target = got; return nil },
+	})
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	_ = mw.WriteField("to", "pubkey:FULL")
+	fw, _ := mw.CreateFormFile("file", "report.pdf")
+	_, _ = fw.Write([]byte("PDFDATA"))
+	_ = mw.Close()
+	req := httptest.NewRequest(http.MethodPost, "/api/drop", &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK || target != "100.64.0.9:9110" {
+		t.Fatalf("resolved drop = %d target=%q body=%s", rr.Code, target, rr.Body)
+	}
+}
+
+func TestAirServeRecipientRejectsBothFields(t *testing.T) {
+	called := false
+	h := airServeHandler(airServeDeps{push: func(_ context.Context, _, _ string, _ []byte) error {
+		called = true
+		return nil
+	}})
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/push", strings.NewReader(`{"to":"Analyst","target":"100.64.0.9:9110","text":"x"}`)))
+	if rr.Code != http.StatusBadRequest || called {
+		t.Fatalf("push with to+target = %d called=%v, want 400/false", rr.Code, called)
+	}
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	_ = mw.WriteField("to", "Analyst")
+	_ = mw.WriteField("target", "100.64.0.9:9110")
+	fw, _ := mw.CreateFormFile("file", "x.txt")
+	_, _ = fw.Write([]byte("x"))
+	_ = mw.Close()
+	req := httptest.NewRequest(http.MethodPost, "/api/drop", &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest || called {
+		t.Fatalf("drop with to+target = %d called=%v, want 400/false", rr.Code, called)
+	}
+}
+
+func TestAirServeResolvedRecipientErrors(t *testing.T) {
+	tests := []struct {
+		name, selector, response, wantText string
+	}{
+		{"missing", "Nobody", `{"presence":[]}`, "no nearby node matches"},
+		{"ambiguous", "Analyst", `{"presence":[{"name":"Analyst","public_key":"A","services":[{"kind":"inbox","address":"100.64.0.8:9110"}]},{"name":"Analyst","public_key":"B","services":[{"kind":"inbox","address":"100.64.0.9:9110"}]}]}`, "ambiguous"},
+		{"no inbox", "pubkey:A", `{"presence":[{"name":"Analyst","public_key":"A","services":[{"kind":"steer","address":"100.64.0.8:9120"}]}]}`, "does not advertise service"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, tt.response)
+			}))
+			defer control.Close()
+			called := false
+			h := airServeHandler(airServeDeps{
+				controlHC: control.Client(), controlBase: control.URL,
+				push: func(_ context.Context, _, _ string, _ []byte) error { called = true; return nil },
+			})
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/push", strings.NewReader(`{"to":"`+tt.selector+`","text":"x"}`)))
+			if rr.Code != http.StatusBadRequest || called || !strings.Contains(rr.Body.String(), tt.wantText) {
+				t.Fatalf("status=%d called=%v body=%q, want 400/false containing %q", rr.Code, called, rr.Body.String(), tt.wantText)
+			}
+		})
+	}
+}
+
+func TestAirServeRejectsSelectorBeforePresenceLookup(t *testing.T) {
+	called := false
+	control := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		called = true
+	}))
+	defer control.Close()
+	h := airServeHandler(airServeDeps{
+		controlHC: control.Client(), controlBase: control.URL,
+		pushConfirmed: func(context.Context, string, string, string, []byte) error {
+			t.Fatal("invalid selector reached delivery")
+			return nil
+		},
+	})
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/push", strings.NewReader(`{"to":"unsafe\u0085selector","text":"x"}`)))
+	if rr.Code != http.StatusBadRequest || called {
+		t.Fatalf("invalid selector = status %d control-called=%v body=%s", rr.Code, called, rr.Body)
 	}
 }
 
@@ -782,12 +1017,13 @@ func TestAirServeCatalogProxy(t *testing.T) {
 // TestAPIHomeAggregates proves /api/home fuses the wired sources into one
 // payload carrying peers + sessions + reachable + receipts + cast + summary.
 func TestAPIHomeAggregates(t *testing.T) {
+	const researchKey = "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1w="
 	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/presence":
-			_, _ = io.WriteString(w, `{"presence":[{"version":"air.presence/v1","name":"Research Agent","kind":"agent","status":"available","labels":[],"services":[{"kind":"steer","port":9120,"protocol":"tcp","address":"100.64.0.4:9120"}],"activity":{"schema":"air.activity/v1","id":"research","kind":"task","title":"Customer research","state":"running","progress":68},"public_key":"K2","fqdn":"research.mesh","ip":"100.64.0.4","seen_at":"2026-07-22T12:00:00Z","expires_at":"2026-07-22T12:01:30Z"}]}`)
+			_, _ = io.WriteString(w, `{"presence":[{"version":"air.presence/v1","name":"Research Agent","kind":"agent","status":"available","labels":[],"services":[{"kind":"steer","port":9120,"protocol":"tcp","address":"100.64.0.4:9120"}],"activity":{"schema":"air.activity/v1","id":"research","kind":"task","title":"Customer research","state":"running","progress":68},"public_key":"`+researchKey+`","fqdn":"research.mesh","ip":"100.64.0.4","seen_at":"2026-07-22T12:00:00Z","expires_at":"2026-07-22T12:01:30Z"}]}`)
 		case "/v1/sessions":
-			_, _ = io.WriteString(w, `{"sessions":[{"backend":"fs","id":"9f2a","peer":"gw.mesh","age_sec":4}]}`)
+			_, _ = io.WriteString(w, `{"sessions":[{"backend":"fs","id":"9f2a","peer":"research.mesh","peer_key":"`+researchKey+`","age_sec":4}]}`)
 		case airCatalogPath:
 			_, _ = io.WriteString(w, `{"service":"meshmcp","version":"t","endpoints":[{"name":"fs","address":"100.64.0.2:9101","transport":"stdio","steerable":true}]}`)
 		default:
@@ -827,6 +1063,9 @@ func TestAPIHomeAggregates(t *testing.T) {
 	if len(home.Peers) != 1 || len(home.Nearby) != 1 || len(home.Sessions) != 1 || len(home.Reachable) != 1 || len(home.Activity) != 1 {
 		t.Fatalf("sections not all aggregated: peers=%d nearby=%d sessions=%d reachable=%d activity=%d",
 			len(home.Peers), len(home.Nearby), len(home.Sessions), len(home.Reachable), len(home.Activity))
+	}
+	if home.Sessions[0].PeerKey != researchKey {
+		t.Fatalf("session transport identity was not preserved: %+v", home.Sessions[0])
 	}
 	if home.Sessions[0].ID != "9f2a" || home.Showing == nil || home.Showing.Name != "slide.png" {
 		t.Errorf("session/cast wrong: %+v %+v", home.Sessions, home.Showing)

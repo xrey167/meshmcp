@@ -938,3 +938,66 @@ func TestResolvePresenceSelectorsServicesAndErrors(t *testing.T) {
 		t.Fatalf("duplicate verified FQDN did not fail as ambiguous: %v", err)
 	}
 }
+
+func TestResolvePresenceBoundsAndDoesNotReflectSelectors(t *testing.T) {
+	atLimit := strings.Repeat("k", MaxPresenceSelectorBytes)
+	card := Presence{
+		Name:      "Safe node",
+		PublicKey: atLimit,
+		Services:  []Service{{Kind: ServiceSteer, Port: 9120}},
+	}
+	if got, err := ResolvePresence([]Presence{card}, atLimit, ServiceSteer); err != nil || got.Node.PublicKey != atLimit {
+		t.Fatalf("selector at %d-byte limit: got=%+v err=%v", MaxPresenceSelectorBytes, got, err)
+	}
+
+	tests := []struct {
+		name     string
+		selector string
+	}{
+		{name: "empty", selector: ""},
+		{name: "trimmed empty", selector: "\u2003  \u2003"},
+		{name: "oversized", selector: "SENSITIVE-" + strings.Repeat("x", MaxPresenceSelectorBytes)},
+		{name: "invalid utf8", selector: "SENSITIVE-" + string([]byte{0xff})},
+		{name: "C0 control", selector: "SENSITIVE\nselector"},
+		{name: "DEL control", selector: "SENSITIVE\x7fselector"},
+		{name: "C1 control", selector: "SENSITIVE\u0085selector"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ResolvePresence([]Presence{card}, tc.selector, ServiceSteer)
+			if err == nil {
+				t.Fatalf("unsafe selector was accepted")
+			}
+			if (tc.selector != "" && strings.Contains(err.Error(), tc.selector)) || strings.Contains(err.Error(), "SENSITIVE") {
+				t.Fatalf("resolver reflected selector in error %q", err)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name string
+		list []Presence
+		kind ServiceKind
+	}{
+		{name: "not found", kind: ServiceSteer},
+		{name: "missing service", list: []Presence{{Name: "SENSITIVE", PublicKey: "key"}}, kind: ServiceSteer},
+		{
+			name: "ambiguous",
+			list: []Presence{
+				{Name: "SENSITIVE", PublicKey: "key-1", Services: []Service{{Kind: ServiceSteer, Port: 9120}}},
+				{Name: "SENSITIVE", PublicKey: "key-2", Services: []Service{{Kind: ServiceSteer, Port: 9121}}},
+			},
+			kind: ServiceSteer,
+		},
+	} {
+		t.Run("non-reflection "+tc.name, func(t *testing.T) {
+			_, err := ResolvePresence(tc.list, "SENSITIVE", tc.kind)
+			if err == nil {
+				t.Fatalf("expected resolver error")
+			}
+			if strings.Contains(err.Error(), "SENSITIVE") {
+				t.Fatalf("resolver reflected selector in error %q", err)
+			}
+		})
+	}
+}

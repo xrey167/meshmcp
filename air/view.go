@@ -11,6 +11,7 @@ type Session struct {
 	Backend string `json:"backend"`
 	ID      string `json:"id"`
 	Peer    string `json:"peer"`
+	PeerKey string `json:"peer_key,omitempty"`
 	AgeSec  int    `json:"age_sec"`
 }
 

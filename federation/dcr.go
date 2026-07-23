@@ -319,10 +319,10 @@ func (s *DCRStore) writeAtomic(clientID string, rec clientRecord) error {
 	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
 		return fmt.Errorf("dcr: create store dir: %w", err)
 	}
-	// MkdirAll preserves the mode of an existing directory. The DCR store may
-	// contain registration access-token hashes, so repair a pre-created path
-	// (for example an operator-provisioned mount) to the same private boundary
-	// promised for a newly created store.
+	// MkdirAll does not tighten an existing directory. The DCR store contains
+	// registration access-token hashes, so repair a pre-created path (including
+	// an operator-provisioned mount created with a permissive umask) to the same
+	// private boundary promised for a newly created store on every write.
 	if err := os.Chmod(s.Dir, 0o700); err != nil {
 		return fmt.Errorf("dcr: secure store dir: %w", err)
 	}

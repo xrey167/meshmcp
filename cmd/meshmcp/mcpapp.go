@@ -229,11 +229,12 @@ func (a *meshApp) register(s *mcp.Server) {
 	})
 	s.AddTool(mcp.Tool{
 		Name:        "drop_file",
-		Description: "AirDrop a local file to a peer's drop receiver over the mesh (resumable, audited). target is peer-ip:port.",
+		Description: "AirDrop a local file to a peer's inbox over the mesh (resumable, audited). Give either legacy target=peer-ip:port or to=a nearby node selector. Logical `to` deliveries return receipts and allow up to 256 payloads, 8 MiB each and 64 MiB total; raw target keeps legacy behavior.",
 		InputSchema: appObj(map[string]any{
 			"target": appStr("drop receiver mesh address, e.g. 100.64.0.5:9110"),
+			"to":     appStr("nearby node name, FQDN, or full public key; resolves its inbox service via --control"),
 			"path":   appStr("local file path to send"),
-		}, "target", "path"),
+		}, "path"),
 		Handler: a.toolDropFile,
 	})
 	s.AddTool(mcp.Tool{
@@ -288,13 +289,25 @@ func (a *meshApp) register(s *mcp.Server) {
 		Handler:     a.toolAirPeers,
 	})
 	s.AddTool(mcp.Tool{
+		Name:        "air_send",
+		Description: "Resolve a nearby node's verified Inbox service and send text and/or one local file or directory in a single governed, resumable delivery. Requires --control. Up to 256 payloads, 8 MiB each and 64 MiB total. The result contains metadata only, never payload content.",
+		InputSchema: appObj(map[string]any{
+			"to":   appStr("nearby node name, FQDN, or full public key"),
+			"text": appStr("optional text payload"),
+			"path": appStr("optional local file or directory path"),
+			"name": appStr("optional name for the text payload (default clip.txt)"),
+		}, "to"),
+		Handler: a.toolAirSend,
+	})
+	s.AddTool(mcp.Tool{
 		Name:        "air_push",
-		Description: "Push a small text payload (clipboard / a task) to a peer's inbox over the resumable mesh channel. target is peer-ip:port.",
+		Description: "Push a small text payload to a peer's inbox. Give either legacy target=peer-ip:port or to=a nearby node selector. Logical `to` returns a metadata-only receipt and is capped at 8 MiB; raw target keeps legacy behavior.",
 		InputSchema: appObj(map[string]any{
 			"target": appStr("peer inbox mesh address, e.g. 100.64.0.5:9110"),
+			"to":     appStr("nearby node name, FQDN, or full public key; resolves its inbox service via --control"),
 			"text":   appStr("the payload text to push"),
 			"name":   appStr("optional name for the payload (default clip.txt)"),
-		}, "target", "text"),
+		}, "text"),
 		Handler: a.toolAirPush,
 	})
 	s.AddTool(mcp.Tool{
@@ -454,23 +467,63 @@ func (a *meshApp) toolPubsubStats(ctx context.Context, args json.RawMessage) (mc
 
 // toolDropFile streams a local file to a peer's drop receiver over the mesh.
 func (a *meshApp) toolDropFile(ctx context.Context, args json.RawMessage) (mcp.ToolResult, error) {
-	var p struct{ Target, Path string }
-	if err := json.Unmarshal(args, &p); err != nil || p.Target == "" || p.Path == "" {
-		return errTxt("target and path are required"), nil
+	var p struct{ Target, To, Path string }
+	if err := json.Unmarshal(args, &p); err != nil || p.Path == "" {
+		return errTxt("path and either target or to are required"), nil
+	}
+	if err := validateAppInboxChoice(p.Target, p.To); err != nil {
+		return errTxt("drop_file: %v", err), nil
 	}
 	if a.mesh == nil {
 		return errTxt("not joined to the mesh (set NB_SETUP_KEY)"), nil
 	}
+	if strings.TrimSpace(p.To) != "" {
+		result, err := a.sendResolvedAirDelivery(ctx, p.To, airDelivery{files: []string{p.Path}})
+		if err != nil {
+			return errTxt("drop_file: %v", err), nil
+		}
+		return jsonTxt(result), nil
+	}
 	if _, err := os.Stat(p.Path); err != nil {
 		return errTxt("cannot send %s: %v", p.Path, err), nil
 	}
+	target, _, err := a.appInboxTarget(ctx, p.Target, "")
+	if err != nil {
+		return errTxt("drop_file: %v", err), nil
+	}
 	pr, pw := io.Pipe()
 	go func() { pw.CloseWithError(sendFiles(pw, []string{p.Path})) }()
-	dial := func(ctx context.Context) (net.Conn, error) { return a.mesh.Dial(ctx, "tcp", p.Target) }
+	dial := func(ctx context.Context) (net.Conn, error) { return a.mesh.Dial(ctx, "tcp", target) }
 	if err := session.NewClient(dial, nil).Run(ctx, sendStream{r: pr}); err != nil {
-		return errTxt("drop to %s failed: %v", p.Target, err), nil
+		return errTxt("drop to %s failed: %v", target, err), nil
 	}
-	return txt(fmt.Sprintf("dropped %s to %s", p.Path, p.Target)), nil
+	return txt(fmt.Sprintf("dropped %s to %s", p.Path, target)), nil
+}
+
+// toolAirSend resolves a friendly nearby selector and carries text plus an
+// optional local path over one resumable Inbox delivery. Its result is metadata
+// only: payload text and local path never echo back into the model transcript.
+func (a *meshApp) toolAirSend(ctx context.Context, args json.RawMessage) (mcp.ToolResult, error) {
+	var p struct{ To, Text, Path, Name string }
+	if err := json.Unmarshal(args, &p); err != nil || strings.TrimSpace(p.To) == "" {
+		return errTxt("to is required"), nil
+	}
+	if p.Text == "" && p.Path == "" {
+		return errTxt("text or path is required"), nil
+	}
+	name := p.Name
+	if p.Text != "" && name == "" {
+		name = "clip.txt"
+	}
+	delivery := airDelivery{text: []byte(p.Text), textName: name}
+	if p.Path != "" {
+		delivery.files = []string{p.Path}
+	}
+	result, err := a.sendResolvedAirDelivery(ctx, p.To, delivery)
+	if err != nil {
+		return errTxt("air_send: %v", err), nil
+	}
+	return jsonTxt(result), nil
 }
 
 // toolAirNearby returns the same verified Presence projection used by Air Home
@@ -481,21 +534,9 @@ func (a *meshApp) toolAirNearby(ctx context.Context, _ json.RawMessage) (mcp.Too
 	if err != nil {
 		return errTxt("%v", err), nil
 	}
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://air-control/v1/presence", nil)
-	resp, err := hc.Do(req)
+	body, err := fetchPresenceRaw(ctx, hc)
 	if err != nil {
 		return errTxt("air_nearby: %v", err), nil
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPresenceListBytes+1))
-	if err != nil {
-		return errTxt("air_nearby: %v", err), nil
-	}
-	if len(body) > maxPresenceListBytes {
-		return errTxt("air_nearby: response exceeds %d bytes", maxPresenceListBytes), nil
-	}
-	if resp.StatusCode != http.StatusOK {
-		return errTxt("air_nearby: %s: %s", resp.Status, string(body)), nil
 	}
 	return txt(string(body)), nil
 }
@@ -634,9 +675,12 @@ func (a *meshApp) toolAirPeers(_ context.Context, _ json.RawMessage) (mcp.ToolRe
 
 // toolAirPush pushes a small text payload to a peer's inbox over the mesh.
 func (a *meshApp) toolAirPush(ctx context.Context, args json.RawMessage) (mcp.ToolResult, error) {
-	var p struct{ Target, Text, Name string }
-	if json.Unmarshal(args, &p) != nil || p.Target == "" || p.Text == "" {
-		return errTxt("target and text are required"), nil
+	var p struct{ Target, To, Text, Name string }
+	if json.Unmarshal(args, &p) != nil || p.Text == "" {
+		return errTxt("text and either target or to are required"), nil
+	}
+	if err := validateAppInboxChoice(p.Target, p.To); err != nil {
+		return errTxt("air_push: %v", err), nil
 	}
 	if a.mesh == nil {
 		return errTxt("not joined to the mesh (set NB_SETUP_KEY)"), nil
@@ -645,13 +689,26 @@ func (a *meshApp) toolAirPush(ctx context.Context, args json.RawMessage) (mcp.To
 	if name == "" {
 		name = "clip.txt"
 	}
+	if strings.TrimSpace(p.To) != "" {
+		result, err := a.sendResolvedAirDelivery(ctx, p.To, airDelivery{
+			text: []byte(p.Text), textName: name,
+		})
+		if err != nil {
+			return errTxt("air_push: %v", err), nil
+		}
+		return jsonTxt(result), nil
+	}
+	target, _, err := a.appInboxTarget(ctx, p.Target, "")
+	if err != nil {
+		return errTxt("air_push: %v", err), nil
+	}
 	pr, pw := io.Pipe()
 	go func() { pw.CloseWithError(sendData(pw, name, []byte(p.Text))) }()
-	dial := func(ctx context.Context) (net.Conn, error) { return a.mesh.Dial(ctx, "tcp", p.Target) }
+	dial := func(ctx context.Context) (net.Conn, error) { return a.mesh.Dial(ctx, "tcp", target) }
 	if err := session.NewClient(dial, nil).Run(ctx, sendStream{r: pr}); err != nil {
-		return errTxt("push to %s failed: %v", p.Target, err), nil
+		return errTxt("push to %s failed: %v", target, err), nil
 	}
-	return txt(fmt.Sprintf("pushed %d bytes (%q) to %s", len(p.Text), name, p.Target)), nil
+	return txt(fmt.Sprintf("pushed %d bytes (%q) to %s", len(p.Text), name, target)), nil
 }
 
 // toolAirFetch fetches a blob by content hash from a peer's CAS.

@@ -2,7 +2,8 @@
 
 **Air** is one name and one product surface for meshmcp's payload + human-in-the-loop
 layer: see verified agents/devices in **Nearby**, **continue** a privacy-safe Activity,
-**drop** a file, **push** a snippet or task, **fetch** a blob by content hash,
+**send** receiver-confirmed text or files to a verified node, **drop** a file,
+**push** a snippet or task, **fetch** a blob by content hash,
 **steer** live work (an agent, session, or task), **handoff** bounded active-work context
 to another device, **launch** a fresh agent, and **approve** a held call — from a phone,
 an assistant, or a laptop.
@@ -65,7 +66,8 @@ meshmcp air whoami       # the mesh identity a gateway's allow-list + audit see 
 meshmcp air nearby 100.x.y.z:9600                         # verified agents/devices + live Activities
 meshmcp air nearby 100.x.y.z:9600 --resolve analyst --service steer
 meshmcp air node 100.x.y.z:9600 --name analyst --kind agent \
-  --service steer=9120,task,nudge --activity-id research \
+  --service inbox=9110,drop.complete.v1 --service steer=9120,task,nudge \
+  --activity-id research \
   --activity-title "Customer research" --progress 68      # heartbeat until Ctrl-C
 meshmcp air catalog 100.x.y.z:9600   # what backends can I reach on this gateway?
 meshmcp air map 100.x.y.z:9600       # your reachable mesh as a tree (you → gateway → backends)
@@ -162,6 +164,33 @@ task.json             | meshmcp push 100.x.y.z:9110         # hand a task to an 
 `push` streams a small payload from stdin to the **same** drop inbox over the same
 resumable, audited channel (`push.go`). Anything on one device's clipboard — or a task
 for an agent — lands on another by identity.
+
+### Resolved Send — confirmation, not just transport acceptance
+
+```bash
+meshmcp air send 100.x.y.z:9600 --to analyst --text "review this" --file ./report.pdf
+```
+
+A receiver that supports resolved Send advertises the protocol capability with
+`--service inbox=9110,drop.complete.v1`. The capability is compatibility metadata,
+not authority: the destination's sender ACL and policy still decide whether delivery is
+allowed. Selectors are bounded to 512 bytes, must be valid UTF-8 without control
+characters, and resolver validation/match errors never echo an untrusted selector.
+
+Resolved clients require `drop.complete.v1`. After all payload frames, the sender writes
+a nonce-bound end marker; the receiver answers with one bounded
+`meshmcp.drop-completion/v1` record containing `status`, `nonce`,
+`installed_payloads`, and `installed_bytes`. A resolved action reports `delivered` only
+when the receiver says `installed` and both totals exactly match. A rejection, malformed
+or missing response, total mismatch, or timeout is an error—never a delivered receipt.
+If confirmation is lost after installation may have occurred, the error says so and the
+caller must not retry blindly.
+
+Mixed versions fail predictably: a new resolved sender refuses a Presence inbox that
+does not advertise `drop.complete.v1`; a current receiver still accepts the legacy
+EOF-terminated drop stream. Explicit raw `host:port` web/MCP routes retain their legacy
+response shapes and transport-era behavior for scripts; they do not return an
+`air.action-result/v1` confirmation envelope.
 
 ### Fetch
 ```bash
@@ -321,6 +350,7 @@ the session ones) wrap the same commands the way `drop_file` wraps `drop`:
 | `air_steer` | ships | `POST /v1/steer` → `Server.Steer` | "Steer session 9f2a on fs to re-read customer 42." |
 | `air_tasks` | ships | `mcpclient.ListTasks` | "What tasks are running on the analyst?" |
 | `air_task_steer` | ships | `mcpclient.SteerTask` → `tasks/steer` | "Nudge task-17 to focus on the API." |
+| `air_send` | ships | resolve Nearby identity → completion-aware inbox delivery | "Send report.pdf to analyst." |
 | `air_peers` · `air_push` · `air_fetch` | ships | `client.Status()` · `sendData` · `fetchBlob` | "Who's on the mesh?" / "Push this task." / "Fetch blob `<sha>`." |
 | `air_launch` | ships (opt-in) | `spawnAgent`, gated by `--allow-launch` | "Launch a reader agent." |
 
@@ -336,7 +366,8 @@ Config is unchanged from the existing app:
       "env": { "NB_SETUP_KEY": "<your-reusable-setup-key>" }
 } } }
 ```
-Then, in the assistant: *"AirDrop report.pdf to Rey's phone"* → `drop_file`;
+Then, in the assistant: *"Send report.pdf to analyst"* → `air_send`;
+*"AirDrop report.pdf to Rey's phone"* → `drop_file`;
 *"list the live sessions"* → `air_sessions`; *"steer session 9f2a on fs to re-read customer
 42"* → `air_steer`; *"nudge task-17 to focus on the API"* → `air_task_steer`;
 *"approve the transfer for billing.mesh"* → `approve`. Every one is a governed mesh
@@ -391,6 +422,9 @@ Air inherits meshmcp's invariants and the phone-approver model from
 - **Identity is cryptographic, never claimed.** A drop/push/approve resolves to the
   sender's WireGuard key + FQDN — the root of the receiver's `allow` ACL and of every
   audit record.
+- **Session actions are identity-bound.** ACL-filtered session/Home responses include
+  the owner's full public peer key so a client can match a Nearby card before exposing
+  Steer. The standard UI keeps that stable identifier out of the rendered interface.
 - **Key in the secure element (phone).** The device's WireGuard private key sits in the
   Secure Enclave / StrongBox; the mesh identity is as strong as the hardware.
 - **Biometric before the action, not the tunnel.** Gate `Approve` (and, if you like,
@@ -418,6 +452,7 @@ Honesty about the seam, so nobody mistakes the mockup for shipped product:
 | **Component Card v1** — stable ID · kind · version · owner · deterministic features · lifecycle; legacy catalogs remain readable | **Ships now (Labs discovery metadata)** | `air/component.go` · `air/catalog.go` · `air/change.go` · `air/home.go` · [ECOSYSTEM.md](ECOSYSTEM.md) |
 | Verified Presence + Activity cards, bounded TTL registry, friendly service resolver | **Ships now** | `air/presence.go` · `cmd/meshmcp/aircontrol.go` · `cmd/meshmcp/airnearby.go` |
 | Nearby/Home parity across terminal, responsive web, and assistant tool `air_nearby` | **Ships now** | `air/home.go` · `cmd/meshmcp/airhome.go` · `cmd/meshmcp/airserve.go` · `cmd/meshmcp/mcpapp.go` |
+| **Resolved Send v1** — select a verified name/FQDN/full key, stage bounded text/files, re-resolve its current inbox at delivery time, and return the shared metadata-only Action Result; raw address input remains compatible | **Ships now** | `air/action.go` · `cmd/meshmcp/airresolve.go` · `cmd/meshmcp/airsend.go` · `cmd/meshmcp/airserve.go` · `cmd/meshmcp/mcpapp.go` |
 | `discover` / `drop` / `push` / `fetch` / `approvals` CLI | **Ships now** | `peers.go` · `drop.go` · `push.go` · `cas.go` · `approvals.go` |
 | Resumable, E2E, sender-ACL, per-file audit on transfers | **Ships now** | `session/` · `drop.go` · `policy/` |
 | Assistant Air tools `drop_file` · `network` · `pending_approvals` · `approve`/`deny` | **Ships now** | `mcpapp.go` · [MCP-APP.md](MCP-APP.md) |
@@ -429,7 +464,7 @@ Honesty about the seam, so nobody mistakes the mockup for shipped product:
 | **Steer/Launch** — the `meshmcp air` CLI (`sessions --json` · `steer` · `launch` · `agent-steer --target/--id` · `tasks` · `task-steer` · `workflow`) + P4 runner | **Ships now** | `air.go` · `airworkflow.go` · `examples/air-workflow.yaml` |
 | **Workflow** — variables between steps (`as:` + `${var.field}`) · `parallel:` blocks · `on_error` · per-step `timeout` · `--json` summary · launch-race retry | **Ships now** | `airworkflow.go` · `airworkflow_test.go` |
 | **Handoff / Continuity v1** — exact-key-pinned device + agent hops · target-bound Context Capsule · deny-by-default receiver ACL · bounded application ACK/NACK · durable inbox · explicit accept/decline · atomic dispatch claim · destination-selected continuation · durable attempt receipts | **Ships now** | `air/handoff.go` · `airhandoff.go` · `airhandoff_store.go` · [AIR-CONTINUITY.md](AIR-CONTINUITY.md) |
-| Assistant tools `air_peers` · `air_push` · `air_fetch` · `air_launch` (opt-in) | **Ships now** | `mcpapp.go` · `mcpapp_air_test.go` |
+| Assistant tools `air_peers` · `air_send` · `air_push` · `air_fetch` · `air_launch` (opt-in) | **Ships now** | `mcpapp.go` · `mcpapp_air_test.go` |
 | A served **live** Air web page over the mesh (`meshmcp air serve`) — Nearby · Sessions/Steer · **Push/Drop** (sent over the relay's identity) · **Approvals link-out** (browser keeps its own identity) · **Receipts** (`--audit` tail) · **Vision** gallery (`--gallery` inbox — image drops rendered inline, path-safe) · viewer `--allow` ACL. A phone-first, polished consumer UI (large-title header, grouped cards, segmented steer sheet, light/dark), hardened as a browser surface: strict CSP, `nosniff`/frame-deny/no-referrer headers, and a same-origin guard on every state-changing POST (CSRF / DNS-rebinding). | **Ships now** | `airserve.go` · `cmd/meshmcp/site/air-live.html` · `airserve_test.go` |
 | **Vision arc** — `air browse` (backend tools/resources/prompts, identity-filtered) · `air stream` (live audit tail, decision-coloured, rotation-aware) · `air vision` (drop-inbox image inventory) · `air bind` (audit-triggered governed reactions, deny-by-default `run`) | **Ships now** | `airbrowse.go` · `airstream.go` · `airvision.go` · `airbind.go` (+ tests) · [AIR-VISION.md](AIR-VISION.md) · `examples/air-bindings.yaml` |
 | Push-wake seam (device registry + notify hook) + a **webhook Notifier** delivering over the network (no vendor creds) | **Ships now** | `pushwake.go` · `webhooknotify.go` · `approvals.go` (`--notify-webhook`) · `pushwake_test.go` · `webhooknotify_test.go` — [MOBILE.md §4](MOBILE.md) |
@@ -461,11 +496,13 @@ where they require vendor credentials or a physical device the repository cannot
 2. **Done — truthful Handoff v1.** Bounded, exact-key-bound Context Capsules follow an explicit
    offer → accept → dispatch → continue lifecycle with application ACKs and durable attempt
    receipts. They move inert context and references; they do not move bearer tokens, secrets,
-   capabilities, or a live session identity.
-3. **Next — universal addressing and a consolidated Air Node.** Every send/control verb should
-   accept a verified name/FQDN/full key plus service kind while preserving raw `host:port`.
-   One node runtime should host selected inbox/ring/cast/screen/approval/steer services and
-   announce them automatically.
+   capabilities, or a live session identity. Checkpoint-capable prepare → ready → commit
+   remains a separate transactional v2 with single-use grants and fencing.
+3. **Next — finish universal addressing and consolidate Air Node.** Receiver-confirmed Resolved
+   Send completes the first universal-addressing slice across web, CLI, and assistant: it accepts
+   a verified name/FQDN/full key and resolves the current inbox at action time while raw
+   `host:port` stays compatible. Steer/Ring/Cast/Screen still need that logical-address contract;
+   one Air Node should then host and announce the selected services automatically.
 4. **Push delivery — mostly done.** A **webhook `Notifier`** ships in-repo
    (`meshmcp approvals --devices <dir> --notify-webhook <url>`): each new pending is POSTed to
    an operator relay that fans out to APNs/FCM with its own credentials — real network delivery

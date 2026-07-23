@@ -16,11 +16,15 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/xrey167/meshmcp/air"
 )
 
-const maxPresenceListBytes = 64 << 20
+const (
+	maxPresenceListBytes  = 64 << 20
+	maxPresenceErrorBytes = 4 << 10
+)
 
 // presenceResponse is the gateway's identity-filtered Nearby projection.
 type presenceResponse struct {
@@ -352,24 +356,9 @@ type announceResponse struct {
 }
 
 func fetchPresence(ctx context.Context, hc *http.Client) (presenceResponse, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://air-control/v1/presence", nil)
+	body, err := fetchPresenceRaw(ctx, hc)
 	if err != nil {
 		return presenceResponse{}, err
-	}
-	resp, err := hc.Do(req)
-	if err != nil {
-		return presenceResponse{}, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPresenceListBytes+1))
-	if err != nil {
-		return presenceResponse{}, err
-	}
-	if len(body) > maxPresenceListBytes {
-		return presenceResponse{}, fmt.Errorf("presence response exceeds %d bytes", maxPresenceListBytes)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return presenceResponse{}, fmt.Errorf("%s: %s", resp.Status, bytes.TrimSpace(body))
 	}
 	var out presenceResponse
 	if err := json.Unmarshal(body, &out); err != nil {
@@ -379,6 +368,34 @@ func fetchPresence(ctx context.Context, hc *http.Client) (presenceResponse, erro
 		out.Presence = []air.Presence{}
 	}
 	return out, nil
+}
+
+// fetchPresenceRaw retains additive fields for pass-through API consumers
+// while applying the same status and memory bounds as the typed CLI view.
+func fetchPresenceRaw(ctx context.Context, hc *http.Client) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://air-control/v1/presence", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, readPresenceHTTPError(resp)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPresenceListBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxPresenceListBytes {
+		return nil, fmt.Errorf("presence response exceeds %d bytes", maxPresenceListBytes)
+	}
+	if !json.Valid(body) {
+		return nil, errors.New("bad response: invalid JSON")
+	}
+	return body, nil
 }
 
 func postPresence(ctx context.Context, hc *http.Client, announcement air.Announcement) (announceResponse, error) {
@@ -396,12 +413,12 @@ func postPresence(ctx context.Context, hc *http.Client, announcement air.Announc
 		return announceResponse{}, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return announceResponse{}, readPresenceHTTPError(resp)
+	}
 	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return announceResponse{}, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return announceResponse{}, fmt.Errorf("%s: %s", resp.Status, bytes.TrimSpace(responseBody))
 	}
 	var out announceResponse
 	if err := json.Unmarshal(responseBody, &out); err != nil {
@@ -420,11 +437,80 @@ func deletePresence(ctx context.Context, hc *http.Client) error {
 		return err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%s: %s", resp.Status, bytes.TrimSpace(body))
+		return readPresenceHTTPError(resp)
 	}
 	return nil
+}
+
+// readPresenceHTTPError turns an untrusted gateway response into one bounded,
+// terminal-safe diagnostic. The remote reason phrase is intentionally ignored:
+// only the numeric code and net/http's local StatusText enter the result.
+func readPresenceHTTPError(resp *http.Response) error {
+	status := strconv.Itoa(resp.StatusCode)
+	if text := http.StatusText(resp.StatusCode); text != "" {
+		status += " " + text
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPresenceErrorBytes+1))
+	if err != nil {
+		return errors.New(status + ": could not read error response")
+	}
+	truncated := len(body) > maxPresenceErrorBytes
+	if truncated {
+		body = body[:maxPresenceErrorBytes]
+	}
+	budget := maxPresenceErrorBytes - len(status) - len(": ")
+	detail := boundedRemoteErrorText(body, budget, truncated)
+	if detail == "" {
+		return errors.New(status)
+	}
+	return errors.New(status + ": " + detail)
+}
+
+func boundedRemoteErrorText(raw []byte, limit int, truncated bool) string {
+	if limit <= 0 {
+		return ""
+	}
+	var b strings.Builder
+	for len(raw) > 0 {
+		r, size := utf8.DecodeRune(raw)
+		if r == utf8.RuneError && size == 1 {
+			r = '?'
+		}
+		raw = raw[size:]
+		// Strip both C0 and C1 controls; the latter includes terminal control
+		// sequences that the general table-cell sanitizer intentionally does not
+		// need to handle for validated model values.
+		if r < 0x20 || (r >= 0x7f && r <= 0x9f) {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	detail := strings.TrimSpace(b.String())
+	if len(detail) > limit {
+		detail = truncateUTF8(detail, limit)
+		truncated = true
+	}
+	if !truncated {
+		return detail
+	}
+	const suffix = "..."
+	detail = strings.TrimSpace(truncateUTF8(detail, limit-len(suffix)))
+	return detail + suffix
+}
+
+func truncateUTF8(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	if len(value) <= limit {
+		return value
+	}
+	value = value[:limit]
+	for !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return value
 }
 
 func renderNearby(w io.Writer, out presenceResponse) {

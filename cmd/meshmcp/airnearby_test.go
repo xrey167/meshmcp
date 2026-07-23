@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/xrey167/meshmcp/air"
 )
@@ -139,6 +140,54 @@ func (r rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	clone.URL.Scheme = "http"
 	clone.URL.Host = strings.TrimPrefix(r.base, "http://")
 	return r.next.RoundTrip(clone)
+}
+
+type airRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f airRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+func TestFetchPresenceBoundsAndSanitizesErrorBody(t *testing.T) {
+	body := append([]byte("bad\x1b[31m\xc2\x85"), bytes.Repeat([]byte{0xff}, maxPresenceErrorBytes*2)...)
+	hc := &http.Client{Transport: airRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusBadGateway,
+			Status:     "502 \x1b[2J" + strings.Repeat("hostile-reason", maxPresenceErrorBytes),
+			Header:     make(http.Header),
+			Body:       io.NopCloser(bytes.NewReader(body)),
+		}, nil
+	})}
+
+	_, err := fetchPresence(context.Background(), hc)
+	if err == nil {
+		t.Fatal("non-200 Presence response was accepted")
+	}
+	message := err.Error()
+	if strings.ContainsRune(message, '\x1b') || strings.ContainsRune(message, '\u0085') {
+		t.Fatalf("error leaked a terminal control: %q", message)
+	}
+	if strings.Contains(message, "hostile-reason") || !strings.HasPrefix(message, "502 Bad Gateway") {
+		t.Fatalf("error trusted the remote reason phrase: %q", message)
+	}
+	if !utf8.ValidString(message) || len(message) > maxPresenceErrorBytes || !strings.HasSuffix(message, "...") {
+		t.Fatalf("error was not bounded/truncated: len=%d suffix=%q", len(message), message[len(message)-min(16, len(message)):])
+	}
+}
+
+func TestFetchPresenceRawPreservesAdditiveFields(t *testing.T) {
+	const response = `{"presence":[],"you":"phone.mesh","future":{"handoff":true}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, response)
+	}))
+	defer srv.Close()
+	hc := srv.Client()
+	hc.Transport = rewriteTransport{base: srv.URL, next: hc.Transport}
+	body, err := fetchPresenceRaw(context.Background(), hc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != response || !strings.Contains(string(body), `"future"`) {
+		t.Fatalf("raw Presence lost additive fields: %s", body)
+	}
 }
 
 func TestRenderNearbySanitizesRemoteValues(t *testing.T) {

@@ -25,6 +25,9 @@ func TestNoticeValidate(t *testing.T) {
 	if err := Ring("evil\x1b[31m").Validate(); err == nil {
 		t.Error("control chars should be rejected")
 	}
+	if err := Ring("evil\u009b31m").Validate(); err == nil {
+		t.Error("C1 control chars should be rejected")
+	}
 	// Bad priority / kind.
 	if err := (Notice{Message: "x", Priority: "loud"}).Validate(); err == nil {
 		t.Error("bad priority should be rejected")

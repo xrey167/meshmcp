@@ -59,6 +59,21 @@ first, fixed with the smallest robust change, and documented in
 
 ### Added
 
+- **Resolved Send v1 + Universal Node actions** — Air can now select a
+  transport-stamped Nearby identity once and carry it through Send, Drop, or a
+  transport-key-bound session Steer without copying an address. The web, CLI,
+  and MCP app resolve the identity's current advertised inbox immediately before
+  delivery, reuse the existing resumable governed transport, and return the same
+  bounded metadata-only result envelope only after a `drop.complete.v1` inbox
+  confirms nonce-bound installation and exact payload/byte totals. Missing,
+  rejected, or uncertain completion is an error. Friendly-name ambiguity and
+  unsafe or oversized selectors fail closed, and core resolver errors do not
+  reflect them. Raw `host:port` remains an explicit backward-compatible path
+  with its legacy response shape; discovery still never grants authority
+  because the receiver's ACL and policy decide the real action. Session/Home
+  JSON now carries an optional `peer_key` so clients can identity-bind Steer;
+  this is an additive wire change and a source-compatibility consideration for
+  Go consumers that use positional `SessionInfo`/`Session` composite literals.
 - **Component Card v1 ecosystem spine** — Air catalogs now carry a backward-compatible,
   validated descriptor for each reachable component: stable ID, kind, version, advertised
   owner identity, canonical versioned features, and lifecycle. Stable-ID-aware catalog

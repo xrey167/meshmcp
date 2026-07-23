@@ -367,7 +367,7 @@ func validDisplayText(field, value string, max int) error {
 		return fmt.Errorf("%s exceeds %d bytes", field, max)
 	}
 	for _, r := range value {
-		if r < 0x20 || r == 0x7f {
+		if r < 0x20 || (r >= 0x7f && r <= 0x9f) {
 			return fmt.Errorf("%s contains a control character", field)
 		}
 	}

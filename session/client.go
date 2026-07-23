@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"math/rand"
 	"net"
@@ -19,11 +20,18 @@ type Dialer func(ctx context.Context) (net.Conn, error)
 // session server, transparently reconnecting and resyncing whenever the
 // transport drops.
 type Client struct {
-	dial      Dialer
-	logf      func(string, ...any)
-	ep        *endpoint
-	drainWait time.Duration
+	dial                 Dialer
+	logf                 func(string, ...any)
+	ep                   *endpoint
+	drainWait            time.Duration
+	initialAttachTimeout time.Duration
 }
+
+var (
+	errAttachRejected   = errors.New("session: server rejected attach")
+	errInvalidSessionID = errors.New("session: server returned an invalid logical session id")
+	errSessionChanged   = errors.New("session: resumed server changed the logical session id")
+)
 
 // NewClient creates a session client. logf may be nil.
 func NewClient(dial Dialer, logf func(string, ...any)) *Client {
@@ -36,6 +44,18 @@ func NewClient(dial Dialer, logf func(string, ...any)) *Client {
 		ep:        newEndpoint(sessionID{}), // id assigned by the server on first ATTACH_OK
 		drainWait: drainTimeout,
 	}
+}
+
+// WithInitialAttachTimeout bounds the time spent establishing the first
+// session attachment, including dial failures, handshake failures, and retry
+// backoff. A non-positive duration disables the bound, which is the default
+// for backward compatibility. Configure the client before calling Run.
+func (c *Client) WithInitialAttachTimeout(d time.Duration) *Client {
+	if d < 0 {
+		d = 0
+	}
+	c.initialAttachTimeout = d
+	return c
 }
 
 // Run bridges local (an MCP client's stdio) to the remote session until
@@ -98,6 +118,25 @@ func (c *Client) reconnectLoop(ctx context.Context) error {
 	backoff := 250 * time.Millisecond
 	const maxBackoff = 10 * time.Second
 	first := true
+	var initialCtx context.Context
+	var cancelInitial context.CancelFunc
+	if c.initialAttachTimeout > 0 {
+		initialCtx, cancelInitial = context.WithTimeout(ctx, c.initialAttachTimeout)
+		defer cancelInitial()
+	}
+	initialTimedOut := func() bool {
+		if initialCtx == nil {
+			return false
+		}
+		if initialCtx.Err() != nil {
+			return true
+		}
+		deadline, ok := initialCtx.Deadline()
+		return ok && !time.Now().Before(deadline)
+	}
+	initialTimeoutError := func() error {
+		return fmt.Errorf("session: initial attach timed out after %s: %w", c.initialAttachTimeout, context.DeadlineExceeded)
+	}
 
 	for {
 		if c.ep.isClosed() {
@@ -107,26 +146,60 @@ func (c *Client) reconnectLoop(ctx context.Context) error {
 			c.ep.closeWith(err)
 			return err
 		}
+		if first && initialTimedOut() {
+			err := initialTimeoutError()
+			c.ep.closeWith(err)
+			return err
+		}
 
-		conn, recv, r, err := c.handshake(ctx)
+		attemptCtx := ctx
+		if first && initialCtx != nil {
+			attemptCtx = initialCtx
+		}
+		conn, recv, r, err := c.handshake(attemptCtx)
 		if err != nil {
+			if errors.Is(err, errAttachRejected) || errors.Is(err, errInvalidSessionID) || errors.Is(err, errSessionChanged) {
+				c.ep.closeWith(err)
+				return err
+			}
 			if c.ep.isClosed() {
 				return c.ep.closeError()
 			}
+			if ctx.Err() != nil {
+				c.ep.closeWith(ctx.Err())
+				return ctx.Err()
+			}
+			if first && initialTimedOut() {
+				err = initialTimeoutError()
+				c.ep.closeWith(err)
+				return err
+			}
 			c.logf("session: reconnect failed: %v (retrying in %s)", err, backoff)
-			if !sleepCtx(ctx, c.ep.Done(), backoff) {
+			if !sleepCtx(attemptCtx, c.ep.Done(), backoff) {
 				if c.ep.isClosed() {
 					return c.ep.closeError()
 				}
-				err := ctx.Err()
-				c.ep.closeWith(err)
-				return err
+				if ctx.Err() != nil {
+					c.ep.closeWith(ctx.Err())
+					return ctx.Err()
+				}
+				if first && initialTimedOut() {
+					err = initialTimeoutError()
+					c.ep.closeWith(err)
+					return err
+				}
+				continue
 			}
 			backoff = nextBackoff(backoff, maxBackoff)
 			continue
 		}
 		if !first {
 			c.logf("session %s: reattached, resuming", c.ep.id)
+		}
+		if first && cancelInitial != nil {
+			cancelInitial()
+			cancelInitial = nil
+			initialCtx = nil
 		}
 		first = false
 		backoff = 250 * time.Millisecond
@@ -169,7 +242,11 @@ func (c *Client) handshake(ctx context.Context) (net.Conn, uint64, *bufio.Reader
 		}
 	}()
 	defer close(watchDone)
-	_ = conn.SetDeadline(time.Now().Add(idleTimeout))
+	deadline := time.Now().Add(idleTimeout)
+	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
+		deadline = contextDeadline
+	}
+	_ = conn.SetDeadline(deadline)
 
 	w := bufio.NewWriter(conn)
 	if err := writeFrame(w, frame{typ: frameAttack, id: c.ep.id, seq: c.ep.recvCursor()}); err != nil {
@@ -184,11 +261,21 @@ func (c *Client) handshake(ctx context.Context) (net.Conn, uint64, *bufio.Reader
 	}
 	if f.typ == frameError {
 		conn.Close()
-		return nil, 0, nil, errors.New("server rejected attach: " + string(f.payload))
+		prefix := errAttachRejected.Error() + ": "
+		message := sanitizeErrorText(f.payload, maxPeerErrorBytes-len(prefix))
+		return nil, 0, nil, fmt.Errorf("%w: %s", errAttachRejected, message)
 	}
 	if f.typ != frameAttachOK {
 		conn.Close()
 		return nil, 0, nil, errors.New("session: expected ATTACH_OK")
+	}
+	if f.id.isZero() {
+		conn.Close()
+		return nil, 0, nil, errInvalidSessionID
+	}
+	if !c.ep.id.isZero() && f.id != c.ep.id {
+		conn.Close()
+		return nil, 0, nil, errSessionChanged
 	}
 	if c.ep.id.isZero() {
 		c.ep.id = f.id
@@ -241,6 +328,36 @@ func (c *Client) awaitDrain() error {
 			if c.ep.drained() {
 				return nil
 			}
+		}
+	}
+}
+
+// WaitForDrain waits until the peer has transport-acknowledged every DATA frame
+// currently queued by this client. Callers that need application-level
+// completion can use this to begin their response deadline only after outbound
+// bytes have reached the peer's session endpoint.
+func (c *Client) WaitForDrain(ctx context.Context) error {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		c.ep.mu.Lock()
+		drained := c.ep.acked >= c.ep.sendSeq
+		closed := c.ep.closed
+		closeErr := c.ep.closeErr
+		c.ep.mu.Unlock()
+		if drained {
+			return nil
+		}
+		if closed {
+			if closeErr != nil {
+				return closeErr
+			}
+			return errors.New("session closed before outbound data was acknowledged")
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
 		}
 	}
 }

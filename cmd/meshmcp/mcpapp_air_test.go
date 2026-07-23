@@ -44,6 +44,63 @@ func TestAirToolsRequireMesh(t *testing.T) {
 	}
 }
 
+func TestAirSendToolValidation(t *testing.T) {
+	app := &meshApp{}
+	for _, tc := range []struct {
+		name string
+		want string
+		call func() (string, bool)
+	}{
+		{
+			name: "send requires recipient",
+			want: "required",
+			call: func() (string, bool) {
+				r, _ := app.toolAirSend(context.Background(), json.RawMessage(`{"text":"hello"}`))
+				return r.Content[0].Text, r.IsError
+			},
+		},
+		{
+			name: "send requires content",
+			want: "required",
+			call: func() (string, bool) {
+				r, _ := app.toolAirSend(context.Background(), json.RawMessage(`{"to":"Analyst"}`))
+				return r.Content[0].Text, r.IsError
+			},
+		},
+		{
+			name: "push rejects two recipient forms",
+			want: "either",
+			call: func() (string, bool) {
+				r, _ := app.toolAirPush(context.Background(), json.RawMessage(`{"target":"203.0.113.9:9110","to":"Analyst","text":"hello"}`))
+				return r.Content[0].Text, r.IsError
+			},
+		},
+		{
+			name: "drop rejects two recipient forms",
+			want: "either",
+			call: func() (string, bool) {
+				r, _ := app.toolDropFile(context.Background(), json.RawMessage(`{"target":"203.0.113.9:9110","to":"Analyst","path":"report.txt"}`))
+				return r.Content[0].Text, r.IsError
+			},
+		},
+		{
+			name: "resolved send is nil-safe without mesh",
+			want: "not joined",
+			call: func() (string, bool) {
+				r, _ := app.toolAirSend(context.Background(), json.RawMessage(`{"to":"Analyst","text":"hello"}`))
+				return r.Content[0].Text, r.IsError
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			message, isError := tc.call()
+			if !isError || !strings.Contains(message, tc.want) {
+				t.Fatalf("validation result = error:%v %q", isError, message)
+			}
+		})
+	}
+}
+
 // TestAirCatalogRequiresControl proves air_catalog errors without a --control
 // endpoint (no mesh / no control configured), rather than panicking.
 func TestAirCatalogRequiresControl(t *testing.T) {
