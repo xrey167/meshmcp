@@ -28,7 +28,7 @@ import (
 
 func cmdServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
-	cfgPath := fs.String("config", "meshmcp.yaml", "path to the meshmcp config file")
+	cfgPath := fs.String("config", defaultConfigPath(), "path to the meshmcp config file")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

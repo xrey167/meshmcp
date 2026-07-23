@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"gopkg.in/yaml.v3"
 
@@ -42,6 +43,12 @@ type scaffoldOptions struct {
 	OutPath    string
 	DeviceName string            // explicit override; empty derives from hostname
 	Backends   []air.BackendSpec // explicit backends; empty means one example
+	// BaseDir, when set, roots the generated identity/audit/pairing files at an
+	// absolute location (the canonical data dir) so the mesh identity is stable
+	// regardless of the working directory. Empty keeps the historical
+	// CWD-relative defaults (and preserves buildScaffoldConfig's purity for
+	// tests that pass no BaseDir).
+	BaseDir string
 }
 
 // buildScaffoldConfig assembles a safe-by-default *Config and a matching
@@ -91,15 +98,27 @@ func buildScaffoldConfig(opts scaffoldOptions) (*Config, air.ScaffoldSummary, er
 		port++
 	}
 
+	// Root the identity/audit/pairing files at the canonical data dir when one is
+	// given, so the mesh identity is the same no matter which directory a command
+	// runs from; otherwise keep the CWD-relative defaults.
+	nbConfigPath := "./meshmcp-nb.json"
+	auditPath := scaffoldAuditLog
+	pairStorePath := scaffoldPairStore
+	if opts.BaseDir != "" {
+		nbConfigPath = filepath.Join(opts.BaseDir, "meshmcp-nb.json")
+		auditPath = filepath.Join(opts.BaseDir, "audit.jsonl")
+		pairStorePath = filepath.Join(opts.BaseDir, "paired.json")
+	}
+
 	cfg := &Config{
 		Mesh: MeshConfig{
 			DeviceName:  device,
 			SetupKeyEnv: scaffoldSetupKeyEnv,
-			ConfigPath:  "./meshmcp-nb.json", // persist identity: stable mesh IP across restarts
+			ConfigPath:  nbConfigPath, // persist identity: stable mesh IP across restarts
 			LogLevel:    "warn",
 		},
 		// Gateway-wide, tamper-evident audit ledger (one hash chain).
-		AuditLog: scaffoldAuditLog,
+		AuditLog: auditPath,
 		// Air control endpoint, present so pairing / air home works. Default-deny:
 		// only this device's own identity is granted until the user pairs peers
 		// (air join — coming). This keeps the privileged list/steer surface closed
@@ -110,7 +129,7 @@ func buildScaffoldConfig(opts scaffoldOptions) (*Config, air.ScaffoldSummary, er
 			// Pairing on by default: peers request with `air join`, this device's
 			// operator approves with `air pair approve`. Approval recognizes an
 			// identity; it never widens Allow above or grants a tool ACL.
-			PairStore: scaffoldPairStore,
+			PairStore: pairStorePath,
 		},
 		Backends: backends,
 	}
@@ -119,7 +138,7 @@ func buildScaffoldConfig(opts scaffoldOptions) (*Config, air.ScaffoldSummary, er
 		ConfigPath:    opts.OutPath,
 		DeviceName:    device,
 		Backends:      infos,
-		AuditLog:      scaffoldAuditLog,
+		AuditLog:      auditPath,
 		DenyByDefault: true,
 		ControlPort:   scaffoldControlPort,
 		PairAddress:   air.PairAddress(device, scaffoldControlPort),
@@ -152,7 +171,7 @@ func renderScaffoldYAML(cfg *Config) ([]byte, error) {
 // cmdAirInit implements `air init`.
 func cmdAirInit(args []string) error {
 	fs := flag.NewFlagSet("air init", flag.ExitOnError)
-	out := fs.String("out", "meshmcp.yaml", "path to write the generated config")
+	out := fs.String("out", defaultConfigPath(), "path to write the generated config")
 	force := fs.Bool("force", false, "overwrite an existing config file")
 	name := fs.String("name", "", "device name in the mesh (default: meshmcp-<hostname>)")
 	asJSON := fs.Bool("json", false, "print the result as JSON")
@@ -175,6 +194,7 @@ func cmdAirInit(args []string) error {
 		OutPath:    *out,
 		DeviceName: *name,
 		Backends:   specs,
+		BaseDir:    scaffoldBaseDir(),
 	})
 	if err != nil {
 		return fmt.Errorf("air init: %w", err)
@@ -183,6 +203,9 @@ func cmdAirInit(args []string) error {
 	data, err := renderScaffoldYAML(cfg)
 	if err != nil {
 		return fmt.Errorf("air init: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(*out), 0o700); err != nil {
+		return fmt.Errorf("air init: create config dir: %w", err)
 	}
 	if err := os.WriteFile(*out, data, 0o600); err != nil {
 		return fmt.Errorf("air init: write %s: %w", *out, err)
