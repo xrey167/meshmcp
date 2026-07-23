@@ -47,7 +47,7 @@ Trust and operate:
   config · status · budget · doctor
 
 Discover and extend:
-  graphrag · spotlight · market · plugins
+  graphrag · spotlight · market · plugins · edge
 
 Run "meshmcp air help" for the Agent OS surface or "meshmcp help all" for
 the complete command reference. Shared mesh credentials come from flags,
@@ -111,6 +111,7 @@ Usage:
   meshmcp plugins                                list extensions compiled into this build
   meshmcp spotlight [flags] <query>             federated semantic search across authorized mesh backends (F19)
   meshmcp market <keygen|publish|list|verify|install>  governed plugin marketplace: signed bundle manifests, metered + audited installs (F14)
+  meshmcp edge --config edge.yaml               public OAuth ingress for hosted MCP clients (e.g. claude.ai) — off by default, one tool-scoped path
   meshmcp version
 
 Mesh credentials come from flags, config, or $NB_SETUP_KEY / $NB_MANAGEMENT_URL.
@@ -218,6 +219,8 @@ func main() {
 		err = cmdSpotlight(os.Args[2:])
 	case "market":
 		err = cmdMarket(os.Args[2:])
+	case "edge":
+		err = cmdEdge(os.Args[2:])
 	case "version":
 		fmt.Println(version)
 	case "-h", "--help", "help":
