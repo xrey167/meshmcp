@@ -58,6 +58,15 @@ type Config struct {
 	MetricsListen string `yaml:"metrics_listen"`
 	Trace           *TraceConfig `yaml:"trace"`
 	Registry        string       `yaml:"registry"` // dir: register backends for router discovery
+	// TrustDomain is this gateway's SPIFFE trust domain (Feature A). When set,
+	// every local audit record is additively labeled with the caller's derived
+	// identity, spiffe://<trust_domain>/peer/<key>, in peer_spiffe_id. A label
+	// only — enforcement still keys solely on the WireGuard public key. Empty
+	// (the default) means no label is ever emitted and records are
+	// byte-identical to a build without the field. This is the LOCAL gateway
+	// domain; it is never used for federation crossings (those use the per-org
+	// mappings' trust_domain in the federate config, and vice versa).
+	TrustDomain string `yaml:"trust_domain"`
 	// Groups maps a group name to member patterns (pubkey:<key> or FQDN glob)
 	// so policy rules can match `group:<name>` (F17). Shared by all backends.
 	Groups map[string][]string `yaml:"groups"`
@@ -256,9 +265,10 @@ type Backend struct {
 	// unchanged (F24). A live canary for a policy change. Stdio + a policy.
 	ShadowPolicy *policy.Policy `yaml:"shadow_policy"`
 
-	httpURL   *url.URL
-	remoteURL *url.URL            // parsed Remote.Endpoint, set at load
-	groups    map[string][]string // resolved from Config.Groups at load
+	httpURL     *url.URL
+	remoteURL   *url.URL            // parsed Remote.Endpoint, set at load
+	groups      map[string][]string // resolved from Config.Groups at load
+	trustDomain string              // resolved from Config.TrustDomain at load (Feature A)
 }
 
 // RemoteBackendConfig configures a "remote" backend: the gateway dials out to
@@ -345,11 +355,18 @@ func loadConfig(path string) (*Config, error) {
 	if len(cfg.Backends) == 0 {
 		return nil, fmt.Errorf("config %s: no backends defined", path)
 	}
+	// Validate the SPIFFE trust domain up front (Feature A, mirroring
+	// federate.go): a malformed domain is a config error, not something to
+	// silently derive empty labels from later. Empty stays valid (labels off).
+	if cfg.TrustDomain != "" && !policy.ValidTrustDomain(cfg.TrustDomain) {
+		return nil, fmt.Errorf("config %s: invalid trust_domain %q (want lowercase DNS-label form, e.g. mesh.example.org)", path, cfg.TrustDomain)
+	}
 	seen := map[int]string{}
 	seenNames := map[string]bool{}
 	seenIDs := map[string]string{}
 	for i, b := range cfg.Backends {
 		b.groups = cfg.Groups
+		b.trustDomain = cfg.TrustDomain
 		// Canonicalize once before the name becomes a key in listener, ACL,
 		// session-server, registry, and component-card maps. Letting the card
 		// trim a different value later could miss the configured ACL and fall

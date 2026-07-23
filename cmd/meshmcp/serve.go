@@ -647,6 +647,11 @@ func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer, h
 			Peer:     meta.PeerFQDN,
 			PeerKey:  meta.PeerKey,
 			PeerAddr: meta.PeerAddr,
+			// Additive SPIFFE label (Feature A): derived here at the edge from
+			// the gateway's LOCAL trust domain — never a federation org's.
+			// Empty trust_domain (or a malformed key) yields "" and the audit
+			// field is elided, leaving records byte-identical to before.
+			SpiffeID: policy.SpiffeID(b.trustDomain, meta.PeerKey),
 		}, eng, audit, tracer)
 		if broker != nil {
 			f.SetSecretResolver(broker)
