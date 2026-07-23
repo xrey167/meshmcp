@@ -146,3 +146,36 @@ func TestRedactConfigMasksNonBlockStyling(t *testing.T) {
 		}
 	}
 }
+
+// TestRedactConfigMasksDSNAndWebhook proves the bundle hides the two secrets a
+// gateway config can carry BEYOND setup_key: a postgres session_store DSN's
+// password (host/db stay visible for support) and an audit_webhook URL (masked
+// whole — a Slack/PagerDuty URL is itself the credential). A plain-directory
+// session_store is not a secret and must stay intact.
+func TestRedactConfigMasksDSNAndWebhook(t *testing.T) {
+	in := `mesh:
+  setup_key: mesh-secret
+audit_webhook: https://hooks.slack.com/services/T000/B000/XXXXWEBHOOKTOKEN
+backends:
+  - name: kb
+    session_store: postgres://user:DBPASSWORD@db.internal:5432/meshmcp?sslmode=require
+  - name: files
+    session_store: /var/lib/meshmcp/sessions
+`
+	out := string(redactConfig([]byte(in)))
+
+	for _, secret := range []string{"mesh-secret", "DBPASSWORD", "XXXXWEBHOOKTOKEN"} {
+		if strings.Contains(out, secret) {
+			t.Errorf("secret %q survived redaction:\n%s", secret, out)
+		}
+	}
+	// A DSN keeps host/db visible — support needs to know WHICH database — with
+	// only the password masked.
+	if !strings.Contains(out, "db.internal:5432") {
+		t.Errorf("DSN host was over-redacted (support needs it):\n%s", out)
+	}
+	// A plain-directory session_store is not a secret and must stay intact.
+	if !strings.Contains(out, "/var/lib/meshmcp/sessions") {
+		t.Errorf("plain session_store dir was wrongly masked:\n%s", out)
+	}
+}

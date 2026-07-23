@@ -184,33 +184,64 @@ func collectDiag(cfgPath string) []diagFile {
 // with only the one irreducible secret hidden.
 var redactSetupKey = regexp.MustCompile(`(?m)^(\s*setup_key\s*:).*$`)
 
-// redactConfig masks the mesh setup key — the only inline secret a gateway
-// config can hold — before the config ships in a support bundle. Defense in
-// depth: the line regex handles the common block-style form readably, and a
-// structural pass then masks the ACTUAL secret value wherever it appears (any
-// depth, flow-style `{setup_key: X}`, quoted, etc.), so no YAML styling can slip
-// the secret past the line matcher. Every other credential-shaped config field
-// is a path or a store-name reference, never an inline value, so nothing else
-// needs masking.
+// secretScalarKeys names config keys whose scalar value is — or can embed — a
+// credential that must be masked before the config ships in a support bundle.
+// The bool is whether the value is a postgres DSN: a DSN keeps its host/db/user
+// visible (useful for support) with only the password masked via redactDSN;
+// every other key is masked whole. session_store is a plain directory in the
+// common case (isPostgresDSN false → nothing masked) and only carries a password
+// when it is a postgres DSN. dpop_replay_store lives in the edge config (a
+// separate file diag never reads) but is listed for forward-safety.
+var secretScalarKeys = map[string]bool{ // key → value is a postgres DSN
+	"setup_key":         false, // the mesh setup key — the classic inline secret
+	"audit_webhook":     false, // a SIEM/Slack/PagerDuty URL: the whole URL is the secret
+	"session_store":     true,  // a directory OR a postgres:// DSN whose password must go
+	"dpop_replay_store": true,  // edge-config DSN; forward-safety only
+}
+
+// redactConfig masks every inline secret a gateway config can hold before it
+// ships in a support bundle. Defense in depth: the line regex handles the common
+// block-style setup_key readably, and a structural pass then masks the ACTUAL
+// secret VALUES wherever they appear (any depth, flow-style `{setup_key: X}`,
+// quoted, etc.), so no YAML styling can slip a secret past the line matcher.
+// Postgres DSNs are password-masked (host/db stay visible); other secrets are
+// masked whole. Every remaining credential-shaped field is a path or a
+// secret-store *name* reference, never an inline value, so nothing else needs it.
 func redactConfig(raw []byte) []byte {
 	out := redactSetupKey.ReplaceAll(raw, []byte("$1 '[REDACTED]'"))
-	for _, secret := range setupKeyValues(raw) {
-		if secret != "" {
-			out = bytes.ReplaceAll(out, []byte(secret), []byte("[REDACTED]"))
+	for _, s := range secretScalars(raw) {
+		replacement := []byte("[REDACTED]")
+		if s.isDSN {
+			if !isPostgresDSN(s.value) {
+				continue // a plain path/dir under a DSN-capable key — not a secret
+			}
+			red := redactDSN(s.value)
+			if red == s.value {
+				continue // the DSN carried no password — nothing to mask
+			}
+			replacement = []byte(red)
 		}
+		out = bytes.ReplaceAll(out, []byte(s.value), replacement)
 	}
 	return out
 }
 
-// setupKeyValues extracts every setup_key scalar value from the config at any
-// nesting/style by parsing it, so redactConfig can mask the literal secret
-// bytes. Parse failures yield nothing (the line regex still applied).
-func setupKeyValues(raw []byte) []string {
+// secretScalar is one secret-bearing config value and whether it is a DSN.
+type secretScalar struct {
+	value string
+	isDSN bool
+}
+
+// secretScalars extracts every secret-bearing scalar (see secretScalarKeys) from
+// the config at any nesting/style by parsing it, so redactConfig can mask the
+// literal secret bytes regardless of YAML styling. Parse failures yield nothing
+// (the line regex still applied).
+func secretScalars(raw []byte) []secretScalar {
 	var doc yaml.Node
 	if err := yaml.Unmarshal(raw, &doc); err != nil {
 		return nil
 	}
-	var out []string
+	var out []secretScalar
 	var walk func(n *yaml.Node)
 	walk = func(n *yaml.Node) {
 		if n == nil {
@@ -218,9 +249,11 @@ func setupKeyValues(raw []byte) []string {
 		}
 		if n.Kind == yaml.MappingNode {
 			for i := 0; i+1 < len(n.Content); i += 2 {
-				if n.Content[i].Value == "setup_key" && n.Content[i+1].Kind == yaml.ScalarNode {
-					if v := strings.TrimSpace(n.Content[i+1].Value); v != "" {
-						out = append(out, v)
+				key := n.Content[i].Value
+				val := n.Content[i+1]
+				if isDSN, ok := secretScalarKeys[key]; ok && val.Kind == yaml.ScalarNode {
+					if v := strings.TrimSpace(val.Value); v != "" {
+						out = append(out, secretScalar{value: v, isDSN: isDSN})
 					}
 				}
 			}
