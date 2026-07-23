@@ -19,7 +19,7 @@ import (
 // fatal — a CI-safe readiness gate.
 func cmdDoctor(args []string) error {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
-	cfgPath := fs.String("config", "meshmcp.yaml", "config file to check")
+	cfgPath := fs.String("config", defaultConfigPath(), "config file to check")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
