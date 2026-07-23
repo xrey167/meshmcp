@@ -25,6 +25,9 @@ type Server struct {
 	verify *policy.CapabilityVerifier
 	audit  *auditLedger
 
+	clients *ClientStore
+	iats    []resolvedIAT
+
 	preauthLimit  *fixedWindowLimiter
 	registerLimit *fixedWindowLimiter
 	clientLimit   *tokenBucket
@@ -82,11 +85,22 @@ func New(cfg Config, opts Options) (*Server, error) {
 		return nil, err
 	}
 
+	clients, err := NewClientStore(filepath.Join(cfg.StateDir, "clients"), now)
+	if err != nil {
+		return nil, err
+	}
+	iats, err := resolveIATs(cfg.Registration)
+	if err != nil {
+		return nil, err
+	}
+
 	s := &Server{
 		cfg:           cfg,
 		signer:        signer,
 		verify:        verify,
 		audit:         audit,
+		clients:       clients,
+		iats:          iats,
 		preauthLimit:  newFixedWindowLimiter(cfg.Limits.PreauthPerIPPerMin, time.Minute, now),
 		registerLimit: newFixedWindowLimiter(cfg.Limits.RegisterPerIPPerMin, time.Minute, now),
 		clientLimit:   newTokenBucket(cfg.Limits.PerClientRPS, cfg.Limits.PerClientBurst, now),
@@ -133,6 +147,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc(wellKnownOIDC, s.handleAuthorizationServerMetadata)
 	mux.HandleFunc(pathHealthz, s.handleHealthz)
 	mux.HandleFunc(pathMCP, s.handleMCP)
+	mux.HandleFunc(pathRegister, s.handleRegister)
+	mux.HandleFunc(pathRegister+"/", s.handleManage)
 	return mux
 }
 

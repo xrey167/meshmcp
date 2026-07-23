@@ -78,3 +78,25 @@ func (a *auditLedger) append(rec policy.AuditRecord) error {
 	defer a.mu.Unlock()
 	return a.log.Append(rec)
 }
+
+// auditClientEvent records a client-lifecycle transition (register, approve,
+// deny, revoke, deregister) under the client's synthetic identity, so the whole
+// hosted-client lifecycle is attributable in the same tamper-evident ledger as
+// the tool calls.
+func (s *Server) auditClientEvent(rec ClientRecord, event, ip string) error {
+	return s.audit.append(policy.AuditRecord{
+		Backend:  "edge:" + s.cfg.Backend.Name,
+		Peer:     oauthIdentity(rec.ClientID),
+		PeerKey:  oauthIdentity(rec.ClientID),
+		PeerAddr: ip,
+		Method:   "edge/" + event,
+		Decision: "allow",
+		Reason:   "client " + rec.Status,
+		Rule:     -1,
+	})
+}
+
+// oauthIdentity is the synthetic identity string for a hosted OAuth client. It
+// is used as both the policy fqdn and key (the policy engine compares it as an
+// opaque string); rules reference it as pubkey:oauth:<client_id> or oauth:*.
+func oauthIdentity(clientID string) string { return "oauth:" + clientID }

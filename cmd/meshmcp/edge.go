@@ -26,9 +26,15 @@ func cmdEdge(args []string) error {
 	configPath := fs.String("config", "", "path to edge.yaml (required)")
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: meshmcp edge --config edge.yaml")
+		fmt.Fprintln(os.Stderr, "       meshmcp edge clients <list|approve|deny|revoke> --state <dir> [client_id]")
 		fmt.Fprintln(os.Stderr)
 		fmt.Fprintln(os.Stderr, "The public OAuth ingress for hosted MCP clients (e.g. claude.ai).")
 		fmt.Fprintln(os.Stderr, "Off by default; runs only when invoked with an operator-written config.")
+	}
+
+	// Management subcommands own the remaining args via their own flag sets.
+	if len(args) > 0 && args[0] == "clients" {
+		return cmdEdgeClients(args[1:])
 	}
 
 	if err := fs.Parse(args); err != nil {
