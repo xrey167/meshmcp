@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -174,6 +176,185 @@ func TestFollowAuditZeroIntervalNoPanic(t *testing.T) {
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatalf("followAudit with interval 0: %v", err)
+	}
+}
+
+// busEventLine builds one wire line as the hook bus emits it: a pubsub.Event
+// envelope (broker-stamped time/publisher) whose payload is a hookPayload.
+func busEventLine(t *testing.T, evTime string, p hookPayload) []byte {
+	t.Helper()
+	payload, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line, err := json.Marshal(map[string]any{
+		"topic": "gateway." + p.Event, "seq": 7, "time": evTime,
+		"publisher": "PUBKEY", "payload": json.RawMessage(payload), "prev_hash": "",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return line
+}
+
+// TestStreamBusLine proves the bus decode+render path: a hook event renders
+// the same decision-coloured row shape as the file tail (envelope time, event
+// as decision), filters apply, unknown fields are tolerated, and non-decision
+// lines are skipped.
+func TestStreamBusLine(t *testing.T) {
+	old := colorOn
+	colorOn = false
+	defer func() { colorOn = old }()
+
+	deny := busEventLine(t, "2026-07-22T14:31:02Z", hookPayload{
+		Event: "deny", Backend: "fs", Peer: "a.mesh", Method: "tools/call",
+		Tool: "write", Reason: "tainted", Rule: 3, AuditSeq: 17,
+	})
+	var buf bytes.Buffer
+	streamBusLine(deny, bindMatch{}, false, &buf)
+	out := buf.String()
+	if !strings.Contains(out, "14:31:02") || !strings.Contains(out, "deny") ||
+		!strings.Contains(out, "a.mesh") || !strings.Contains(out, "tools/call · write") ||
+		!strings.Contains(out, "fs") || !strings.Contains(out, "tainted") {
+		t.Fatalf("bus deny row wrong: %q", out)
+	}
+
+	// Filter: a mismatched decision drops the event; a matching glob keeps it.
+	buf.Reset()
+	streamBusLine(deny, bindMatch{Decision: "allow"}, false, &buf)
+	if buf.Len() != 0 {
+		t.Fatalf("decision filter should drop a mismatched event: %q", buf.String())
+	}
+	buf.Reset()
+	streamBusLine(deny, bindMatch{Decision: "d*"}, false, &buf)
+	if buf.Len() == 0 {
+		t.Fatal("decision glob should keep a matching event")
+	}
+
+	// Unknown fields in envelope and payload are tolerated (forward compat).
+	future := []byte(`{"topic":"gateway.cosign","seq":9,"time":"2026-07-22T15:00:01Z","future_env":true,` +
+		`"payload":{"event":"cosign","peer":"b.mesh","method":"tools/call","future_field":"x"},"prev_hash":""}`)
+	buf.Reset()
+	streamBusLine(future, bindMatch{}, false, &buf)
+	if !strings.Contains(buf.String(), "cosign") || !strings.Contains(buf.String(), "b.mesh") {
+		t.Fatalf("unknown fields not tolerated: %q", buf.String())
+	}
+
+	// Non-decision lines are skipped: junk, acks, foreign payloads.
+	for _, junk := range []string{"", "not json", `{"ok":true}`, `{"topic":"t","seq":1,"payload":{"hello":1},"prev_hash":""}`} {
+		buf.Reset()
+		streamBusLine([]byte(junk), bindMatch{}, false, &buf)
+		if buf.Len() != 0 {
+			t.Fatalf("non-decision line rendered: %q -> %q", junk, buf.String())
+		}
+	}
+
+	// --json passes the raw event line through untouched.
+	buf.Reset()
+	streamBusLine(append(deny, '\n'), bindMatch{}, true, &buf)
+	if got := strings.TrimRight(buf.String(), "\n"); got != string(deny) {
+		t.Fatalf("json passthrough altered the line: %q != %q", got, deny)
+	}
+}
+
+// TestStreamRowTimeSanitized proves the one broker-controlled field that skips
+// the RFC3339 fast path — time — cannot inject terminal escapes: a hostile
+// envelope time is stripped by sanitizeCell like every other cell, both when
+// streamTime passes it through untouched and when the escape hides inside the
+// 8-byte HH:MM:SS window after a 'T'.
+func TestStreamRowTimeSanitized(t *testing.T) {
+	old := colorOn
+	colorOn = false
+	defer func() { colorOn = old }()
+
+	for _, hostile := range []string{
+		"\x1b]0;pwned\x07\x1b[2J", // no 'T': streamTime returns it untouched
+		"AT\x1b[31mXXXXX",         // ESC inside the t[i+1:i+9] window
+	} {
+		line := busEventLine(t, hostile, hookPayload{Event: "deny", Peer: "a.mesh", Method: "tools/call"})
+		var buf bytes.Buffer
+		streamBusLine(line, bindMatch{}, false, &buf)
+		if out := buf.String(); strings.ContainsAny(out, "\x1b\x07") {
+			t.Fatalf("hostile time %q leaked escape bytes into the row: %q", hostile, out)
+		} else if !strings.Contains(out, "deny") {
+			t.Fatalf("hostile time %q dropped the row entirely: %q", hostile, out)
+		}
+	}
+}
+
+// TestBusLineHandlerThroughClientStream drives the exact subscribe-client seam
+// streamBus uses: synthetic wire bytes written into a clientStream (the fake
+// conn side) are line-split and fed to busLineHandler — the first line is the
+// subscribe ack (not rendered), later lines render, and a rejection ack
+// surfaces as an error.
+func TestBusLineHandlerThroughClientStream(t *testing.T) {
+	old := colorOn
+	colorOn = false
+	defer func() { colorOn = old }()
+
+	var buf bytes.Buffer
+	var acked *ackFrame
+	stream := &clientStream{done: make(chan struct{})}
+	stream.onLine = busLineHandler(bindMatch{}, false, &buf, func(a ackFrame) { acked = &a })
+
+	// Ack, then one event — written in two chunks to exercise line reassembly.
+	ev := busEventLine(t, "2026-07-22T14:31:02Z", hookPayload{Event: "deny", Peer: "a.mesh", Method: "tools/call"})
+	if _, err := stream.Write([]byte(`{"ok":true}` + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	half := len(ev) / 2
+	if _, err := stream.Write(ev[:half]); err != nil {
+		t.Fatal(err)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("partial line rendered early: %q", buf.String())
+	}
+	if _, err := stream.Write(append(ev[half:], '\n')); err != nil {
+		t.Fatal(err)
+	}
+
+	if acked == nil || !acked.OK {
+		t.Fatalf("subscribe ack not delivered to onAck: %+v", acked)
+	}
+	if strings.Contains(buf.String(), `"ok"`) {
+		t.Fatalf("ack line leaked into rendered output: %q", buf.String())
+	}
+	if !strings.Contains(buf.String(), "deny") || !strings.Contains(buf.String(), "a.mesh") {
+		t.Fatalf("event after ack not rendered: %q", buf.String())
+	}
+
+	// A rejection ack reaches onAck with the broker's error.
+	rejected := &clientStream{done: make(chan struct{})}
+	var rejErr string
+	rejected.onLine = busLineHandler(bindMatch{}, false, &buf, func(a ackFrame) { rejErr = a.Error })
+	if _, err := rejected.Write([]byte(`{"error":"not allowed"}` + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	if rejErr != "not allowed" {
+		t.Fatalf("rejection ack error not surfaced: %q", rejErr)
+	}
+}
+
+// TestAirStreamModeFlagConflicts proves a flag from the other source mode is
+// rejected at parse time instead of silently ignored — a user asking for
+// --from-start over the bus (or --since on a file) must get a diagnostic, not
+// a stream quietly missing what they asked for.
+func TestAirStreamModeFlagConflicts(t *testing.T) {
+	if err := cmdAirStream([]string{"--bus", "1.2.3.4:9000", "--from-start"}); err == nil ||
+		!strings.Contains(err.Error(), "file-mode flags") {
+		t.Fatalf("--from-start with --bus not rejected: %v", err)
+	}
+	if err := cmdAirStream([]string{"--bus", "1.2.3.4:9000", "--interval", "1s"}); err == nil ||
+		!strings.Contains(err.Error(), "file-mode flags") {
+		t.Fatalf("--interval with --bus not rejected: %v", err)
+	}
+	if err := cmdAirStream([]string{"--since", "5", "audit.jsonl"}); err == nil ||
+		!strings.Contains(err.Error(), "bus-mode flags") {
+		t.Fatalf("--since with a file not rejected: %v", err)
+	}
+	if err := cmdAirStream([]string{"--topic", "gateway.*", "audit.jsonl"}); err == nil ||
+		!strings.Contains(err.Error(), "bus-mode flags") {
+		t.Fatalf("--topic with a file not rejected: %v", err)
 	}
 }
 

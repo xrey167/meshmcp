@@ -97,6 +97,45 @@ func TestWireSubscribeGroup(t *testing.T) {
 	}
 }
 
+// TestClientStreamInboundLineCap proves the client end bounds the partial-line
+// buffer: a broker streaming bytes with no newline cannot grow memory without
+// bound — past the cap the Write errors (ending the session) and the buffered
+// partial line is released, while complete lines up to the cap still deliver.
+func TestClientStreamInboundLineCap(t *testing.T) {
+	var got [][]byte
+	s := &clientStream{done: make(chan struct{})}
+	s.onLine = func(line []byte) { got = append(got, append([]byte(nil), line...)) }
+
+	// A complete line under the cap delivers normally.
+	if _, err := s.Write([]byte("hello\n")); err != nil {
+		t.Fatalf("complete line errored: %v", err)
+	}
+	if len(got) != 1 || string(got[0]) != "hello" {
+		t.Fatalf("complete line not delivered: %q", got)
+	}
+
+	// An unterminated stream past the cap errors and drops the partial buffer.
+	chunk := make([]byte, 1<<20) // no newline anywhere
+	var err error
+	for i := 0; i < (maxInboundLine/len(chunk))+2; i++ {
+		if _, err = s.Write(chunk); err != nil {
+			break
+		}
+	}
+	if err == nil {
+		t.Fatal("unterminated inbound stream past the cap did not error")
+	}
+	if len(s.inbuf) != 0 {
+		t.Fatalf("overflowed partial buffer not released: %d bytes held", len(s.inbuf))
+	}
+	// The stream is finished, so the session's Read unblocks with EOF.
+	select {
+	case <-s.done:
+	default:
+		t.Fatal("overflow did not finish the stream")
+	}
+}
+
 // TestWireAckFrame verifies the subscribe wire path parses an inbound ack frame
 // ({"ack":<seq>}) and calls broker.Ack. It observes this through the backlog: an
 // at-least-once member with in-flight cap 1 holds the second job until it acks
