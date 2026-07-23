@@ -554,9 +554,14 @@ func reloadPolicies(cfgPath string, engines map[string]*policy.Engine, backends 
 		applied++
 		log.Printf("reload: backend %q policy updated (%d rules, default %s)", b.Name, len(pol.Rules), allowWord(pol.DefaultAllow))
 	}
-	// Control-surface ACLs. loadConfig guarantees an enabled control endpoint
-	// never loads with an empty allow surface, so a swap cannot open it wide.
-	if newCfg.Control != nil {
+	// Control-surface ACLs. Only swap when the endpoint is actually enabled
+	// (Port > 0): loadConfig only forbids an empty control allow surface for an
+	// enabled endpoint, so a reload that sets control.port to 0 (with an emptied
+	// allow list) must not swap the ACL of the listener still serving from
+	// startup to empty. Defence in depth: the control handlers additionally treat
+	// an empty control ACL as default-deny (aircontrol.go), so the surface fails
+	// closed even if an empty allow list ever reaches this swap.
+	if newCfg.Control != nil && newCfg.Control.Port > 0 {
 		controlAllow.swap(append(append([]string(nil), newCfg.Control.Allow...), operatorPatterns(newCfg.Operators)...))
 		controlOnBehalf.swap(newCfg.Control.OnBehalfAllow)
 	}
