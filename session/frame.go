@@ -21,7 +21,7 @@ import (
 type frameType uint8
 
 const (
-	frameAttack   frameType = 1 // ATTACH: client -> server, open or resume a session
+	frameAttach   frameType = 1 // ATTACH: client -> server, open or resume a session
 	frameAttachOK frameType = 2 // ATTACH_OK: server -> client, session id + server's recv cursor
 	frameData     frameType = 3 // DATA: application bytes with a sequence number
 	frameAck      frameType = 4 // ACK: highest contiguous seq received
@@ -65,7 +65,7 @@ func writeFrame(w *bufio.Writer, f frame) error {
 		return err
 	}
 	switch f.typ {
-	case frameAttack, frameAttachOK:
+	case frameAttach, frameAttachOK:
 		if _, err := w.Write(f.id[:]); err != nil {
 			return err
 		}
@@ -112,7 +112,7 @@ func readFrame(r *bufio.Reader) (frame, error) {
 	}
 	f := frame{typ: frameType(t)}
 	switch f.typ {
-	case frameAttack, frameAttachOK:
+	case frameAttach, frameAttachOK:
 		if _, err := io.ReadFull(r, f.id[:]); err != nil {
 			return frame{}, err
 		}

@@ -249,7 +249,7 @@ func (c *Client) handshake(ctx context.Context) (net.Conn, uint64, *bufio.Reader
 	_ = conn.SetDeadline(deadline)
 
 	w := bufio.NewWriter(conn)
-	if err := writeFrame(w, frame{typ: frameAttack, id: c.ep.id, seq: c.ep.recvCursor()}); err != nil {
+	if err := writeFrame(w, frame{typ: frameAttach, id: c.ep.id, seq: c.ep.recvCursor()}); err != nil {
 		conn.Close()
 		return nil, 0, nil, err
 	}
