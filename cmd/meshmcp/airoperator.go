@@ -235,23 +235,28 @@ func operatorNode(pubkey, fqdn string, roles []string) *yaml.Node {
 	return m
 }
 
-// marshalValidateWrite renders the mutated document, re-validates it through the
-// real loadConfig path (so a mutation can never write an invalid gateway config),
-// and only then replaces the file (0600).
+// marshalValidateWrite renders the mutated document, re-validates it through
+// the REAL loadConfig path (so a mutation can never write a gateway config that
+// would refuse to load — e.g. one that leaves an enabled control endpoint with
+// no allowed identity), and only then atomically replaces the file (0600).
 func marshalValidateWrite(path string, doc *yaml.Node) error {
 	out, err := yaml.Marshal(doc)
 	if err != nil {
 		return fmt.Errorf("render config: %w", err)
 	}
-	var probe Config
-	if err := yaml.Unmarshal(out, &probe); err != nil {
-		return fmt.Errorf("mutated config no longer parses: %w", err)
+	// Full validation via the real loader against a sibling temp file, so the
+	// canonical path never holds an invalid config even transiently.
+	tmp := path + ".tmp-validate"
+	if err := os.WriteFile(tmp, out, 0o600); err != nil {
+		return fmt.Errorf("write config %s: %w", tmp, err)
 	}
-	if err := validateOperators(probe.Operators); err != nil {
-		return err
+	if _, err := loadConfig(tmp); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("mutation would produce an invalid config (nothing written): %w", err)
 	}
-	if err := os.WriteFile(path, out, 0o600); err != nil {
-		return fmt.Errorf("write config %s: %w", path, err)
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("replace config %s: %w", path, err)
 	}
 	return nil
 }

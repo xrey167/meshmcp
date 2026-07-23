@@ -581,7 +581,7 @@ func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer, h
 			if err != nil {
 				log.Fatalf("backend %q: capability revocation store %s: %v", b.Name, b.Capabilities.RevocationStore, err)
 			}
-			v = v.WithRevocation(rev.IsRevoked)
+			v = v.WithRevocation(rev.IsRevoked).WithSubjectRevocation(rev.IsSubjectRevoked)
 			log.Printf("backend %q: capability revocation store: %s", b.Name, b.Capabilities.RevocationStore)
 		}
 		capVerifier = v

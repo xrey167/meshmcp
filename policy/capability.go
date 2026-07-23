@@ -89,9 +89,10 @@ func (s *Signer) IssueCapability(claims CapabilityClaims, now time.Time) (string
 // authority public keys. A token never supplies its own trust root: its
 // embedded pubkey must be in the pinned set.
 type CapabilityVerifier struct {
-	trusted map[string]ed25519.PublicKey
-	now     func() time.Time
-	revoked func(id string) bool
+	trusted        map[string]ed25519.PublicKey
+	now            func() time.Time
+	revoked        func(id string) bool
+	subjectRevoked func(sub string) bool
 }
 
 // NewCapabilityVerifier pins the given hex authority public keys.
@@ -116,6 +117,16 @@ func NewCapabilityVerifier(publicKeysHex []string, now func() time.Time) (*Capab
 // WithRevocation adds an optional revocation predicate (by token ID).
 func (v *CapabilityVerifier) WithRevocation(revoked func(id string) bool) *CapabilityVerifier {
 	v.revoked = revoked
+	return v
+}
+
+// WithSubjectRevocation adds an optional revocation predicate keyed by the
+// capability's Subject (the peer's WireGuard public key). It is the lost-device
+// kill-switch: revoking the subject invalidates every outstanding token minted
+// for that identity, which per-token-id revocation cannot express (there is no
+// registry of minted tokens to enumerate).
+func (v *CapabilityVerifier) WithSubjectRevocation(revoked func(sub string) bool) *CapabilityVerifier {
+	v.subjectRevoked = revoked
 	return v
 }
 
@@ -166,6 +177,9 @@ func (v *CapabilityVerifier) Verify(token, peerKey, backend, tool string) (Capab
 	}
 	if v.revoked != nil && v.revoked(c.ID) {
 		return CapabilityClaims{}, fmt.Errorf("capability has been revoked")
+	}
+	if v.subjectRevoked != nil && v.subjectRevoked(c.Subject) {
+		return CapabilityClaims{}, fmt.Errorf("capability subject (device) has been revoked")
 	}
 	return c, nil
 }

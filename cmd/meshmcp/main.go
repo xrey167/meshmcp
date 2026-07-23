@@ -114,6 +114,7 @@ Usage:
   meshmcp edge --config edge.yaml               public OAuth ingress for hosted MCP clients (e.g. claude.ai) — off by default, one tool-scoped path
   meshmcp profile <set|show|clear>              remember a default control-ip:port so commands can omit it ($MESHMCP_CONTROL overrides)
   meshmcp uninstall [--config <f>] [--yes] [--purge]   remove this gateway's local state (mesh identity, ledgers, stores); dry-run without --yes
+  meshmcp revoke-device [flags] <peer-pubkey>   lost-device kill-switch: revoke pairing, grants, capabilities, operator surface + NetBird peer in one audited pass
   meshmcp version
 
 Mesh credentials come from flags, config, or $NB_SETUP_KEY / $NB_MANAGEMENT_URL.
@@ -227,6 +228,8 @@ func main() {
 		err = cmdProfile(os.Args[2:])
 	case "uninstall":
 		err = cmdUninstall(os.Args[2:])
+	case "revoke-device":
+		err = cmdRevokeDevice(os.Args[2:])
 	case "version":
 		fmt.Println(version)
 	case "-h", "--help", "help":
