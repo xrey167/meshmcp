@@ -85,10 +85,15 @@ func New(cfg Config, opts Options) (*Server, error) {
 			return nil, err
 		}
 	}
+	rev, err := policy.NewFileRevocation(filepath.Join(cfg.StateDir, "revoked"))
+	if err != nil {
+		return nil, fmt.Errorf("edge: open revocation store: %w", err)
+	}
 	verify, err := policy.NewCapabilityVerifier([]string{signer.PubKeyHex()}, now)
 	if err != nil {
 		return nil, fmt.Errorf("edge: build capability verifier: %w", err)
 	}
+	verify = verify.WithRevocation(rev.IsRevoked)
 
 	audit, err := openAuditLedger(cfg.AuditLog, opts.AuditWriter, now)
 	if err != nil {

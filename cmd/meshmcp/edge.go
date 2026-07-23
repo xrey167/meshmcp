@@ -42,6 +42,8 @@ func cmdEdge(args []string) error {
 			return cmdEdgeClients(args[1:])
 		case "authz":
 			return cmdEdgeAuthz(args[1:])
+		case "tokens":
+			return cmdEdgeTokens(args[1:])
 		}
 	}
 

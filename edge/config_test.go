@@ -1,6 +1,8 @@
 package edge
 
 import (
+	"bytes"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -122,6 +124,24 @@ func TestConfigValidateACMEMode(t *testing.T) {
 	c3.TLS = TLSConfig{ACME: &ACMEConfig{Domains: []string{"mcp.example.com"}, Challenge: "dns-01"}}
 	if _, err := c3.Validate(); err == nil || !strings.Contains(err.Error(), "challenge must be") {
 		t.Fatalf("expected challenge error, got %v", err)
+	}
+}
+
+// TestExampleConfigValidates guards against drift between examples/edge.yaml and
+// the config schema: it must decode strictly (KnownFields) and pass Validate.
+func TestExampleConfigValidates(t *testing.T) {
+	data, err := os.ReadFile("../examples/edge.yaml")
+	if err != nil {
+		t.Skipf("example config not found: %v", err)
+	}
+	var cfg Config
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&cfg); err != nil {
+		t.Fatalf("examples/edge.yaml does not decode strictly: %v", err)
+	}
+	if _, err := cfg.Validate(); err != nil {
+		t.Fatalf("examples/edge.yaml does not validate: %v", err)
 	}
 }
 

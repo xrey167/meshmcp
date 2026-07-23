@@ -174,6 +174,62 @@ func (s *tokenStore) revokeFamily(familyID string) error {
 	return nil
 }
 
+// revokeClient deletes every access and refresh token for clientID and returns
+// the capability IDs the deleted access tokens carried, so the caller can add
+// them to the capability revocation store (defense in depth beyond the
+// per-request client-status recheck).
+func (s *tokenStore) revokeClient(clientID string) (capIDs []string, err error) {
+	entries, derr := os.ReadDir(s.dir)
+	if derr != nil {
+		if os.IsNotExist(derr) {
+			return nil, nil
+		}
+		return nil, derr
+	}
+	for _, e := range entries {
+		name := e.Name()
+		path := filepath.Join(s.dir, name)
+		switch {
+		case hasPrefixSuffix(name, "access-", ".json"):
+			var rec accessRecord
+			if readJSON(path, &rec) == nil && rec.ClientID == clientID {
+				if rec.CapID != "" {
+					capIDs = append(capIDs, rec.CapID)
+				}
+				_ = os.Remove(path)
+			}
+		case hasPrefixSuffix(name, "refresh-", ".json"):
+			var rec refreshRecord
+			if readJSON(path, &rec) == nil && rec.ClientID == clientID {
+				_ = os.Remove(path)
+			}
+		}
+	}
+	return capIDs, nil
+}
+
+// listAccess returns a summary of every live access token (never the raw token).
+func (s *tokenStore) listAccess() ([]accessRecord, error) {
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var out []accessRecord
+	for _, e := range entries {
+		if !hasPrefixSuffix(e.Name(), "access-", ".json") {
+			continue
+		}
+		var rec accessRecord
+		if readJSON(filepath.Join(s.dir, e.Name()), &rec) == nil {
+			out = append(out, rec)
+		}
+	}
+	return out, nil
+}
+
 // familyOf reads a token record's family id (best-effort; unreadable files are
 // skipped by returning "").
 func familyOf(path, name string) string {

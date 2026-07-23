@@ -1,0 +1,72 @@
+# examples/edge.yaml — the public OAuth ingress for hosted MCP clients.
+#
+# `meshmcp edge --config edge.yaml` is meshmcp's ONE deliberate public listener.
+# It is off unless you run it, binds only where you tell it to, and exposes
+# exactly one tool-scoped backend at /mcp. A hosted client (e.g. a claude.ai
+# custom connector) that cannot join the mesh authenticates here with OAuth 2.1
+# + PKCE, is mapped to an `oauth:<client_id>` identity, and passes through the
+# same default-deny policy, Ed25519 capability double-gate, and fail-closed
+# audit log as any mesh peer. See docs/spec/OAUTH-STANDARDS.md (the recorded
+# exposure-model decision) and docs/COOKBOOK.md recipe 13.
+
+listen: "0.0.0.0:8443"                 # REQUIRED — explicit bind, never a default
+public_url: "https://mcp.example.com"  # REQUIRED — the https base URL clients reach
+state_dir: /var/lib/meshmcp/edge       # REQUIRED — created 0700; holds all edge state
+audit_log: /var/lib/meshmcp/edge/audit.jsonl   # REQUIRED — always fail-closed
+signing_key: /var/lib/meshmcp/edge/edge-authority.key  # REQUIRED — Ed25519 capability authority
+signing_key_autogen: true              # generate the signing key on first run
+
+# --- TLS: exactly one of `cert_file`/`key_file` or `acme` ---
+tls:
+  # Automatic certificates via Let's Encrypt (claude.ai needs a trusted chain):
+  acme:
+    domains: [mcp.example.com]         # public_url host MUST be in this list
+    email: ops@example.com
+    challenge: tls-alpn-01             # default (no extra port); or http-01
+  # ...or operator-provided files instead of the acme block:
+  # cert_file: /etc/meshmcp/edge/fullchain.pem
+  # key_file:  /etc/meshmcp/edge/privkey.pem
+
+# --- Registration gating ---
+registration:
+  mode: open-approval                  # default; claude.ai-compatible. A newly
+                                       # registered client lands PENDING and can do
+                                       # nothing until you approve it. The other mode
+                                       # is `token` (RFC 7591 initial-access-token gate).
+  max_pending: 50                      # bound the pending backlog
+  pending_ttl: 168h                    # GC unapproved registrations
+
+# --- OAuth lifetimes ---
+oauth:
+  access_token_ttl: 15m                # <= 1h ceiling; the minted capability shares it
+  refresh_token_ttl: 720h              # refresh tokens rotate on every use
+  authz_pending_ttl: 15m               # how long an authorize request waits for approval
+  sessions: true                       # full Streamable HTTP (Mcp-Session-Id + GET SSE);
+                                       # set false for stateless POST-only mode
+
+# --- Mesh membership (the edge dials one backend over WireGuard) ---
+mesh:
+  setup_key_file: /etc/meshmcp/setup.key   # or setup_key_env / setup_key
+  # management_url: https://netbird.example.com
+
+# --- The single backend exposed at /mcp ---
+backend:
+  name: docs-tools                     # capability audience + audit label
+  addr: "gateway.internal.mesh:9101"   # a normal mesh MCP backend (stdio/resumable kind)
+  tools: ["search_*", "read_wiki"]     # the grant ceiling for minted capabilities
+  policy:
+    default_allow: false               # deny by default (true is a startup error)
+    rules:
+      - peers: ["oauth:*"]             # any approved hosted client …
+        tools: ["search_*"]           # … may call read-only search tools
+        allow: true
+
+# --- Abuse bounds (all optional; sensible defaults applied) ---
+limits:
+  register_per_ip_per_min: 5
+  preauth_per_ip_per_min: 60
+  per_client_rps: 5
+  per_client_burst: 20
+  max_sessions_per_client: 8
+  max_sse_buffer_msgs: 256
+  max_mcp_body_bytes: 1048576
