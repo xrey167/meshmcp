@@ -25,11 +25,14 @@ type Server struct {
 	verify *policy.CapabilityVerifier
 	audit  *auditLedger
 
-	clients *ClientStore
-	authz   *AuthzStore
-	codes   *codeStore
-	tokens  *tokenStore
-	iats    []resolvedIAT
+	clients  *ClientStore
+	authz    *AuthzStore
+	codes    *codeStore
+	tokens   *tokenStore
+	engine   *policy.Engine
+	sessions *sessionTable
+	dial     DialBackend
+	iats     []resolvedIAT
 
 	preauthLimit  *fixedWindowLimiter
 	registerLimit *fixedWindowLimiter
@@ -51,6 +54,10 @@ type Options struct {
 	AuditWriter interface {
 		Write([]byte) (int, error)
 	}
+	// DialBackend overrides how the one configured backend is reached. Production
+	// injects a WireGuard mesh dial (client.Dial); when nil, a plain TCP dial to
+	// cfg.Backend.Addr is used (same-host backends and tests).
+	DialBackend DialBackend
 }
 
 // New validates cfg and constructs a Server. It creates the state directory,
@@ -109,6 +116,13 @@ func New(cfg Config, opts Options) (*Server, error) {
 		return nil, err
 	}
 
+	pol := cfg.Backend.Policy
+	engine := policy.NewEngine(&pol, now, nil)
+	dial := opts.DialBackend
+	if dial == nil {
+		dial = defaultDial(cfg.Backend.Addr)
+	}
+
 	s := &Server{
 		cfg:           cfg,
 		signer:        signer,
@@ -118,6 +132,9 @@ func New(cfg Config, opts Options) (*Server, error) {
 		authz:         authz,
 		codes:         codes,
 		tokens:        tokens,
+		engine:        engine,
+		sessions:      newSessionTable(cfg.Limits.MaxSessionsPerClient, cfg.Limits.MaxSSEBufferMsgs, now),
+		dial:          dial,
 		iats:          iats,
 		preauthLimit:  newFixedWindowLimiter(cfg.Limits.PreauthPerIPPerMin, time.Minute, now),
 		registerLimit: newFixedWindowLimiter(cfg.Limits.RegisterPerIPPerMin, time.Minute, now),
@@ -181,14 +198,6 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain")
 	_, _ = w.Write([]byte("ok\n"))
-}
-
-// handleMCP is the public MCP endpoint. In the scaffold phase it always emits
-// the 401 Bearer challenge with the protected-resource-metadata pointer, which
-// is exactly what a hosted client needs to begin discovery. Later phases add
-// token validation, enforcement, and the backend bridge.
-func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
-	s.writeBearerChallenge(w, "")
 }
 
 // writeBearerChallenge writes a 401 with a spec-shaped WWW-Authenticate header

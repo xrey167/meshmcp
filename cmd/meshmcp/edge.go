@@ -5,8 +5,10 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"gopkg.in/yaml.v3"
@@ -56,7 +58,28 @@ func cmdEdge(args []string) error {
 		return err
 	}
 
-	srv, err := edge.New(cfg, edge.Options{})
+	// Join the mesh so the one configured backend (a mesh address) is reachable,
+	// exactly as `federate` does. When no setup key is configured, fall back to a
+	// plain TCP dial so an edge co-located with its backend (or a test) still
+	// works without a mesh.
+	var opts edge.Options
+	meshKey, err := resolveEdgeSetupKey(cfg.Mesh)
+	if err != nil {
+		return err
+	}
+	if meshKey != "" {
+		client, err := startMesh(edgeMeshOptions(cfg.Mesh, meshKey), os.Stderr)
+		if err != nil {
+			return fmt.Errorf("edge: join mesh: %w", err)
+		}
+		defer client.Stop(context.Background())
+		opts.DialBackend = func(ctx context.Context) (net.Conn, error) {
+			return client.Dial(ctx, "tcp", cfg.Backend.Addr)
+		}
+		fmt.Fprintf(os.Stderr, "meshmcp edge: joined mesh, backend %s reachable over WireGuard\n", cfg.Backend.Addr)
+	}
+
+	srv, err := edge.New(cfg, opts)
 	if err != nil {
 		return err
 	}
@@ -66,6 +89,48 @@ func cmdEdge(args []string) error {
 
 	fmt.Fprintf(os.Stderr, "meshmcp edge: serving %s on %s (backend %q)\n", cfg.PublicURL, cfg.Listen, cfg.Backend.Name)
 	return srv.Run(ctx)
+}
+
+// resolveEdgeSetupKey resolves the NetBird setup key from a file, env var, or
+// literal (in that order of preference for keeping the secret out of config).
+func resolveEdgeSetupKey(m edge.MeshConfig) (string, error) {
+	if m.SetupKeyFile != "" {
+		b, err := os.ReadFile(m.SetupKeyFile)
+		if err != nil {
+			return "", fmt.Errorf("edge: read mesh setup_key_file: %w", err)
+		}
+		return strings.TrimSpace(string(b)), nil
+	}
+	if m.SetupKey != "" {
+		return m.SetupKey, nil
+	}
+	env := m.SetupKeyEnv
+	if env == "" {
+		env = "NB_SETUP_KEY"
+	}
+	return os.Getenv(env), nil
+}
+
+// edgeMeshOptions maps the edge MeshConfig onto the shared meshOptions. The edge
+// blocks inbound mesh connections — it only dials out to its one backend.
+func edgeMeshOptions(m edge.MeshConfig, key string) *meshOptions {
+	mgmt := m.ManagementURL
+	if mgmt == "" {
+		mgmt = os.Getenv("NB_MANAGEMENT_URL")
+	}
+	logLevel := m.LogLevel
+	if logLevel == "" {
+		logLevel = "warn"
+	}
+	return &meshOptions{
+		DeviceName:    m.DeviceName,
+		ManagementURL: mgmt,
+		SetupKey:      key,
+		ConfigPath:    m.ConfigPath,
+		LogLevel:      logLevel,
+		BlockInbound:  true,
+		WireguardPort: m.WireguardPort,
+	}
 }
 
 // loadEdgeConfig reads edge.yaml with strict decoding — an unknown or misspelled
