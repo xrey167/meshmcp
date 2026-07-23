@@ -372,17 +372,25 @@ caveat 4), and not run under `-race` (global caveat 1).
 
 ---
 
-## Feature C3 — Wire into `federate.go`
+## Feature C3 — Wire into a live listener
 
-**Overall: 🚫 Blocked — not attempted, correctly.** Per the task framing,
-this was deliberately skipped: it depends on the exposure-model product
-decision in `docs/spec/OAUTH-STANDARDS.md` ("The exposure-model question"),
-which remains unresolved (confirmed — see global caveat 4; the doc still
-reads "requires explicit operator/product sign-off," not a recorded
-decision). This is not a defect — building C3 without that sign-off would
-mean standing up a second, non-mesh-gated HTTP ingress on a product whose
-core positioning is "no public application ingress," which is exactly the
-decision the design doc says must not be made silently.
+**Overall: ✅ Shipped — 2026-07-23.** The exposure-model decision was recorded
+(extended Option A; see the decision block in `docs/spec/OAUTH-STANDARDS.md`),
+which unblocked C3. The wiring did NOT go into `federate.go` (the partner-org
+boundary): the recorded decision extended the scope to **hosted MCP clients**
+(claude.ai custom connectors), which the issuer-pinned federation-exchange
+model does not fit. It ships instead as a dedicated, off-by-default public
+ingress — the **`meshmcp edge`** subcommand and the `edge/` package — that
+terminates OAuth 2.1 + PKCE with operator-in-the-loop consent, DCR (open-
+approval or IAT-gated), and a single tool-scoped Streamable-HTTP `/mcp` path
+(POST + GET/SSE + sessions). Each hosted client is mapped to an
+`oauth:<client_id>` identity that passes the same default-deny policy, an
+Ed25519 capability double-gate, and the fail-closed audit log. A full-handshake
+conformance harness (`edge/conformance_test.go`) exercises the whole flow
+against a live TLS server for both registration modes, green under `-race`.
+`federate.go`, `serve.go`, the policy engine, and `federation/` are unchanged —
+the earlier standalone DCR/exchange handlers there remain the partner-org path
+for a future, separate wiring.
 
 - ❌ `federate.go`'s `buildBoundaryServer` — not touched (confirmed no
   façade wiring; existing `OrgFor` path is exactly as it was).
@@ -404,7 +412,7 @@ exactly the intended state pending the product decision.
 | C0 — DPoP verifier | ✅ Done (modulo `-race`) | ✅ Yes (all 14 named tests + interop test pass) | ✅ Yes | 2 |
 | C1 — DCR store | 🟡 Partial (code solid; docs + fuzz target missing) | ✅ Yes (all 13 named tests pass) | ✅ Yes | 3 |
 | C2 — RFC 8693 exchange + RAR | 🟡 Partial (code solid; doc bookkeeping missing) | ✅ Yes (all 13 named tests + 2 regression suites pass) | ✅ Yes | 3 |
-| C3 — Wire into `federate.go` | 🚫 Blocked (correctly, pending exposure-model sign-off) | 🚫 N/A | 🚫 N/A | 1 (the blocking decision itself) |
+| C3 — Wire into a live listener (`meshmcp edge`) | ✅ Shipped (2026-07-23; hosted-client edge, not federate.go) | ✅ Yes (edge/*_test.go + full-handshake conformance) | ✅ Yes | 0 |
 
 **"Build+Vet Clean" columns** reflect the actual, just-run
 `CGO_ENABLED=1 go build ./... && CGO_ENABLED=1 go vet ./...` across the whole
