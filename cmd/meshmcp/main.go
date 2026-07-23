@@ -103,6 +103,7 @@ Usage:
   meshmcp insight <profile|recommend|simulate|detect>  turn the audit stream into policy (the firewall's read side)
   meshmcp replay [flags] <trace> <peer:port>    replay a traced session against a backend and diff
   meshmcp config validate --config <file>       validate a config (policy globs, windows, enums, DLP) without joining the mesh
+  meshmcp config lint --config <file> [--strict]  warn on suspicious-but-valid policy (allow-all rules, unapprovable co-sign, secret grants to globs, unrated egress tools)
   meshmcp status --audit <file> [--json]        roll up an audit ledger: per-peer/tool/backend calls + chain verdict
   meshmcp budget --audit <file> [--by-tool]     sum cost/quota units consumed per identity (FinOps for the fleet)
   meshmcp doctor --config <file>                pre-flight checks: config valid, commands present, dirs writable, secret perms

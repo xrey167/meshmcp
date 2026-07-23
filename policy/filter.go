@@ -379,8 +379,9 @@ func (f *Filter) handleToolCall(line []byte, tool string, id, args json.RawMessa
 	// require_cosign rule is satisfied only by a signed, single-use approval for
 	// precisely these arguments, which DecideToolCallBound consumes atomically.
 	dec := f.eng.DecideToolCallBound(f.caller.Peer, f.caller.PeerKey, f.caller.Backend, tool, args, f.labelSnapshot())
+	var pendingCap *CapabilityClaims
 	if f.capVerifier != nil {
-		dec = f.applyCapability(dec, capToken, tool)
+		dec, pendingCap = f.applyCapability(dec, capToken, tool)
 	}
 	// Router delegation runs AFTER the capability fold, so a capability held by
 	// the connecting router can never upgrade a delegation deny (a delegation
@@ -396,6 +397,15 @@ func (f *Filter) handleToolCall(line []byte, tool string, id, args json.RawMessa
 		dec = applyDecisionHooks(f.hooks, ToolCallInfo{
 			Caller: f.caller, Tool: tool, Arguments: args, Labels: f.labelSnapshot(),
 		}, dec)
+	}
+	// Consume a load-bearing single-use grant only now that the final outcome
+	// is known: a cosign hold or a delegation/hook deny must not burn it. A
+	// replayed jti surfaces here and turns the allow into a deny, so the audit
+	// record below reflects the true verdict.
+	if pendingCap != nil && dec.Outcome == OutcomeAllow {
+		if err := f.capVerifier.Consume(*pendingCap); err != nil {
+			dec = Decision{Outcome: OutcomeDeny, RuleID: dec.RuleID, Reason: "invalid capability: " + err.Error()}
+		}
 	}
 	rec := f.record("tools/call", tool, string(id), dec)
 	if da.relevant {

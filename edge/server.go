@@ -100,7 +100,9 @@ func New(cfg Config, opts Options) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("edge: build capability verifier: %w", err)
 	}
-	verify = verify.WithRevocation(rev.IsRevoked)
+	// jti replay cache so SingleUse grants are enforceable (in-memory,
+	// per-process; a shared pgstore-backed NonceStore is the HA follow-up).
+	verify = verify.WithRevocation(rev.IsRevoked).WithReplayCache(policy.NewMemNonceStore())
 
 	audit, err := openAuditLedger(cfg.AuditLog, opts.AuditWriter, now)
 	if err != nil {

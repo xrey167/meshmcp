@@ -5,16 +5,18 @@ import (
 	"fmt"
 )
 
-// cmdConfig implements "meshmcp config <validate>".
+// cmdConfig implements "meshmcp config <validate|lint>".
 func cmdConfig(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: meshmcp config validate --config <file>")
+		return fmt.Errorf("usage: meshmcp config <validate|lint> --config <file>")
 	}
 	switch args[0] {
 	case "validate":
 		return configValidate(args[1:])
+	case "lint":
+		return configLint(args[1:])
 	default:
-		return fmt.Errorf("meshmcp config: unknown subcommand %q (want: validate)", args[0])
+		return fmt.Errorf("meshmcp config: unknown subcommand %q (want: validate or lint)", args[0])
 	}
 }
 
