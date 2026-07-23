@@ -223,7 +223,16 @@ func cmdServe(args []string) error {
 				engines[b.Name] = eng
 			}
 		} else if b.Policy != nil {
-			httpEnf = newHTTPEnforcer(b, audit)
+			var enfErr error
+			httpEnf, enfErr = newHTTPEnforcer(b, audit)
+			if enfErr != nil {
+				close(shutdown)
+				for _, l := range listeners {
+					l.Close()
+				}
+				wg.Wait()
+				return enfErr
+			}
 			engines[b.Name] = httpEnf.eng
 			log.Printf("backend %q: HTTP policy enforcement on (%d rules)", b.Name, len(b.Policy.Rules))
 		}
