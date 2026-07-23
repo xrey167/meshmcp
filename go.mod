@@ -4,6 +4,7 @@ go 1.26.0
 
 require (
 	github.com/caddyserver/certmagic v0.21.3
+	github.com/jackc/pgx/v5 v5.10.0
 	github.com/netbirdio/netbird v0.72.2
 	golang.org/x/crypto v0.52.0
 	golang.org/x/sys v0.45.0
@@ -51,6 +52,9 @@ require (
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
 	github.com/hashicorp/go-version v1.7.0 // indirect
 	github.com/huin/goupnp v1.2.0 // indirect
+	github.com/jackc/pgpassfile v1.0.0 // indirect
+	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
+	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/jackpal/go-nat-pmp v1.0.2 // indirect
 	github.com/jmespath/go-jmespath v0.4.0 // indirect
 	github.com/klauspost/compress v1.18.0 // indirect

@@ -25,7 +25,7 @@ production recommendation. Guarantees are bounded by
 | Control-plane RBAC | Stable | mesh HTTP | Default-deny, transport-derived roles; ordinary peers cannot administer; fail-closed startup | Bootstrap credential redesign + policy optimistic-concurrency are follow-ups | registry/policy dirs | files | control RBAC tests | Recommended |
 | Request-specific human approval | Beta | mesh HTTP | Mandatory approver ACL; approver identity from transport | Per-(peer,tool) ambient grant, not yet request-bound/single-use (Phase 3) | approver store dir | files | approvals tests | Use with a tight TTL |
 | Gateway-signed tamper-evident audit | Stable | n/a | Four-state signed verification; only *sealed* + pinned key is complete & trusted | Not caller non-repudiation; insider rollback needs external anchoring | optional anchor | JSONL + checkpoints | signed-verify + state tests | Recommended; pin `--pubkey`, seal + anchor |
-| Scoped session resumption | Beta | stdio, HTTP | In-order delivery + duplicate suppression on reconnect | Single-node; not cross-gateway HA; no exactly-once execution | shared dir (dev) | files | session tests | Single-node only |
+| Scoped session resumption | Beta | stdio, HTTP | In-order delivery + duplicate suppression on reconnect | Not cross-gateway HA until the Phase-6 failover wiring lands; no exactly-once execution | optional PostgreSQL (`pgstore`) | files or PostgreSQL (`session_store` DSN) | session + storetest conformance (both backends) | Single-node only (failover path unwired) |
 | Signed capabilities | Beta | stdio, HTTP | Short-lived Ed25519 grants upgrade a default-deny; pinned roots; fail-closed | Revocation-store failure handling hardening ongoing (Phase 9) | none | files | capability tests | Recommended with pinned roots |
 
 ## Experimental / Labs
@@ -60,7 +60,7 @@ continuously tested.
 | Wire the signed delegation-token primitive (done + tested) into the router/upstream proxy path + caller ACL | 4 |
 | Restart-safe audit append (seed from verified tail; refuse unverifiable) | 5 |
 | External audit anchoring interface (witnessed) | 5 |
-| Wire the CAS/fencing session-lease primitive (done at store layer) into the server failover path | 6 |
+| Wire the CAS/fencing session-lease primitive (done at store layer, incl. distributed PostgreSQL `pgstore`) into the server failover path | 6 |
 | Explicit tool retry classification + enforced idempotency keys | 6 |
 | Extend stdio/HTTP parity to per-session controls (taint/secrets/capabilities); classification + tool/method decisions are done + conformance-tested | 7 |
 | Backend egress restriction for secrets (response-side redaction is done) | 8 |

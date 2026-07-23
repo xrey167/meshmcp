@@ -148,9 +148,13 @@ An adversary who can write the audit file (but lacks the signing key).
   lease API (it still checkpoints via unconditional `Save`); wiring
   lease-expiry-driven takeover + per-write fencing into the server is the
   remaining step. `FileStore` provides CAS only for a single host / lock-correct
-  shared filesystem and is **not** cross-gateway HA — production needs a real
-  CAS backend (PostgreSQL, etcd, or Redis). Until the server wiring lands, do
-  not run two gateways over one shared session store in production.
+  shared filesystem and is **not** cross-gateway HA. A distributed CAS backend
+  now ships: `pgstore` implements the same lease store on PostgreSQL
+  (row-locked transactions; enabled via `session_store: postgres://...`),
+  conformance-proven by the shared store harness. Until the server failover
+  wiring lands (Phase 6), do not run two gateways over one shared session store
+  in production — the store guarantees exist, the server path does not yet use
+  them for takeover.
 
 ### 10. Malformed / adversarial JSON-RPC
 
