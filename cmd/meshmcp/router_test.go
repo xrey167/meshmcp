@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/xrey167/meshmcp/mcp"
 	"github.com/xrey167/meshmcp/policy"
 )
@@ -31,7 +33,7 @@ func TestRouterAggregatesAndRoutes(t *testing.T) {
 	defer stopB()
 
 	agg, cleanup := buildAggregate(context.Background(), loopbackDial,
-		map[string][]string{"svca": {addrA}, "svcb": {addrB}}, nil, nil)
+		map[string]Upstream{"svca": {Addrs: []string{addrA}}, "svcb": {Addrs: []string{addrB}}}, nil, nil)
 	defer cleanup()
 
 	mc := clientTo(agg)
@@ -99,7 +101,7 @@ func TestRouterFailsOverToHealthyReplica(t *testing.T) {
 	dl.Close()
 
 	agg, cleanup := buildAggregate(context.Background(), loopbackDial,
-		map[string][]string{"svc": {deadAddr, addrGood}}, nil, nil)
+		map[string]Upstream{"svc": {Addrs: []string{deadAddr, addrGood}}}, nil, nil)
 	defer cleanup()
 
 	mc := clientTo(agg)
@@ -133,7 +135,7 @@ func TestPoolHealthCheckRecoversReplica(t *testing.T) {
 	})
 	defer stop()
 
-	pool := newUpstreamPool("svc", []string{addr}, loopbackDial, nil,
+	pool := newUpstreamPool("svc", Upstream{Addrs: []string{addr}}, loopbackDial, nil,
 		func(string, json.RawMessage) {}, nil)
 	defer pool.closeAll()
 
@@ -203,7 +205,7 @@ func TestRouterDoesNotRetryMutatingCallAfterAmbiguousFailure(t *testing.T) {
 		}
 		return c, nil
 	}
-	pool := newUpstreamPool("svc", []string{addrFlaky, addrGood}, dial, nil,
+	pool := newUpstreamPool("svc", Upstream{Addrs: []string{addrFlaky, addrGood}}, dial, nil,
 		func(string, json.RawMessage) {}, nil)
 	defer pool.closeAll()
 
@@ -252,7 +254,7 @@ func TestRouterFailsOverReadOnlyAfterDispatch(t *testing.T) {
 		}
 		return c, nil
 	}
-	pool := newUpstreamPool("svc", []string{addrFlaky, addrGood}, dial, nil,
+	pool := newUpstreamPool("svc", Upstream{Addrs: []string{addrFlaky, addrGood}}, dial, nil,
 		func(string, json.RawMessage) {}, nil)
 	defer pool.closeAll()
 
@@ -351,7 +353,7 @@ func TestRouterEnforcesToolPolicy(t *testing.T) {
 	}
 
 	agg, cleanup := buildAggregate(context.Background(), loopbackDial,
-		map[string][]string{"svc": {addr}}, nil, enforce)
+		map[string]Upstream{"svc": {Addrs: []string{addr}}}, nil, enforce)
 	defer cleanup()
 
 	mc := clientTo(agg)
@@ -398,5 +400,173 @@ func TestRouterExampleConfigsLoad(t *testing.T) {
 		if _, err := loadRouterConfig(f); err != nil {
 			t.Errorf("%s should load: %v", f, err)
 		}
+	}
+}
+
+// captureConn records everything written through it so a test can inspect the
+// wire (e.g. extract the idempotency key a dispatch carried).
+type captureConn struct {
+	net.Conn
+	mu  *sync.Mutex
+	buf *bytes.Buffer
+}
+
+func (c *captureConn) Write(b []byte) (int, error) {
+	c.mu.Lock()
+	c.buf.Write(b)
+	c.mu.Unlock()
+	return c.Conn.Write(b)
+}
+
+// TestRouterRetriesOperatorClassifiedTool proves the retry_tools contract: a
+// tools/call for an operator-classified tool IS re-dispatched after an
+// ambiguous transport failure, and both dispatches carry the SAME
+// _meta idempotency key so the backend can deduplicate.
+func TestRouterRetriesOperatorClassifiedTool(t *testing.T) {
+	var mu sync.Mutex
+	healthyCalls := 0
+	addrGood, stopGood := startLoopbackServer(t, func(s *mcp.Server) {
+		s.AddTool(mcp.Tool{Name: "search", Handler: func(_ context.Context, _ json.RawMessage) (mcp.ToolResult, error) {
+			mu.Lock()
+			healthyCalls++
+			mu.Unlock()
+			return mcp.ToolResult{Content: []mcp.Content{mcp.Text("hits")}}, nil
+		}})
+	})
+	defer stopGood()
+	addrFlaky, stopFlaky := startLoopbackServer(t, func(s *mcp.Server) {
+		s.AddTool(mcp.Tool{Name: "search", Handler: func(_ context.Context, _ json.RawMessage) (mcp.ToolResult, error) {
+			return mcp.ToolResult{Content: []mcp.Content{mcp.Text("hits")}}, nil
+		}})
+	})
+	defer stopFlaky()
+
+	var wireMu sync.Mutex
+	var wire bytes.Buffer
+	dial := func(ctx context.Context, addr string) (net.Conn, error) {
+		c, err := loopbackDial(ctx, addr)
+		if err != nil {
+			return nil, err
+		}
+		c = &captureConn{Conn: c, mu: &wireMu, buf: &wire}
+		if addr == addrFlaky {
+			return &flakyConn{Conn: c}, nil
+		}
+		return c, nil
+	}
+	pool := newUpstreamPool("svc", Upstream{Addrs: []string{addrFlaky, addrGood}, RetryTools: []string{"sea*"}}, dial, nil,
+		func(string, json.RawMessage) {}, nil)
+	defer pool.closeAll()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	res, err := pool.call(ctx, "tools/call", map[string]any{"name": "search", "arguments": map[string]any{}})
+	if err != nil {
+		t.Fatalf("classified tool was not retried: %v", err)
+	}
+	if res == nil {
+		t.Fatal("no result after failover")
+	}
+	mu.Lock()
+	n := healthyCalls
+	mu.Unlock()
+	if n != 1 {
+		t.Fatalf("healthy replica executed %d times, want 1", n)
+	}
+
+	// Both dispatches must have carried the same idempotency key.
+	wireMu.Lock()
+	captured := wire.String()
+	wireMu.Unlock()
+	const marker = `"meshmcp.io/idempotency-key":"`
+	first := strings.Index(captured, marker)
+	if first < 0 {
+		t.Fatalf("no idempotency key on the wire:\n%s", captured)
+	}
+	rest := captured[first+len(marker):]
+	key := rest[:strings.Index(rest, `"`)]
+	if len(key) != 32 {
+		t.Fatalf("unexpected key %q", key)
+	}
+	if got := strings.Count(captured, marker+key); got != 2 {
+		t.Fatalf("idempotency key %q appeared in %d dispatch(es), want 2", key, got)
+	}
+}
+
+// TestRouterUnclassifiedToolStillNotRetried pins the deny-default: a tool NOT
+// in retry_tools keeps the ambiguous-outcome error even when others are listed.
+func TestRouterUnclassifiedToolStillNotRetried(t *testing.T) {
+	var mu sync.Mutex
+	healthyCalls := 0
+	addrGood, stopGood := startLoopbackServer(t, func(s *mcp.Server) {
+		s.AddTool(mcp.Tool{Name: "pay", Handler: func(_ context.Context, _ json.RawMessage) (mcp.ToolResult, error) {
+			mu.Lock()
+			healthyCalls++
+			mu.Unlock()
+			return mcp.ToolResult{Content: []mcp.Content{mcp.Text("charged")}}, nil
+		}})
+	})
+	defer stopGood()
+	addrFlaky, stopFlaky := startLoopbackServer(t, func(s *mcp.Server) {
+		s.AddTool(mcp.Tool{Name: "pay", Handler: func(_ context.Context, _ json.RawMessage) (mcp.ToolResult, error) {
+			return mcp.ToolResult{Content: []mcp.Content{mcp.Text("charged")}}, nil
+		}})
+	})
+	defer stopFlaky()
+
+	dial := func(ctx context.Context, addr string) (net.Conn, error) {
+		c, err := loopbackDial(ctx, addr)
+		if err != nil {
+			return nil, err
+		}
+		if addr == addrFlaky {
+			return &flakyConn{Conn: c}, nil
+		}
+		return c, nil
+	}
+	pool := newUpstreamPool("svc", Upstream{Addrs: []string{addrFlaky, addrGood}, RetryTools: []string{"search", "read_*"}}, dial, nil,
+		func(string, json.RawMessage) {}, nil)
+	defer pool.closeAll()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := pool.call(ctx, "tools/call", map[string]any{"name": "pay", "arguments": map[string]any{}}); err == nil {
+		t.Fatal("unclassified mutating tool was silently retried")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if healthyCalls != 0 {
+		t.Fatalf("unclassified tool executed %d extra time(s) on the healthy replica", healthyCalls)
+	}
+}
+
+// TestUpstreamYAMLForms pins the three accepted upstream config shapes.
+func TestUpstreamYAMLForms(t *testing.T) {
+	var cfg struct {
+		Upstreams map[string]Upstream `yaml:"upstreams"`
+	}
+	doc := `
+upstreams:
+  one: "10.0.0.1:9101"
+  two: ["10.0.0.1:9101", "10.0.0.2:9101"]
+  three:
+    addrs: ["10.0.0.3:9101"]
+    retry_tools: ["read_*", "search"]
+`
+	if err := yaml.Unmarshal([]byte(doc), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Upstreams["one"].Addrs; len(got) != 1 || got[0] != "10.0.0.1:9101" {
+		t.Fatalf("string form: %v", got)
+	}
+	if got := cfg.Upstreams["two"].Addrs; len(got) != 2 {
+		t.Fatalf("list form: %v", got)
+	}
+	three := cfg.Upstreams["three"]
+	if len(three.Addrs) != 1 || len(three.RetryTools) != 2 {
+		t.Fatalf("mapping form: %+v", three)
+	}
+	if cfg.Upstreams["one"].RetryTools != nil || cfg.Upstreams["two"].RetryTools != nil {
+		t.Fatal("retry_tools must default to empty (never retried)")
 	}
 }
