@@ -213,8 +213,15 @@ type Backend struct {
 	// AuditCheckpointEvery is how many records per checkpoint (default 128).
 	AuditCheckpointEvery int `yaml:"audit_checkpoint_every"`
 	// AuditAnchor is an append-only file where each checkpoint is also written
-	// as an external witness (the transparency-log seam).
+	// as an external witness (the transparency-log seam). Records are
+	// self-linked (prev_anchor), so the anchor file is itself tamper-evident.
 	AuditAnchor string `yaml:"audit_anchor"`
+	// AuditAnchorURL POSTs each checkpoint to a peer gateway's witness endpoint
+	// (the control plane's /v1/anchor, run with --anchor-witness). Best-effort
+	// with a bounded retry queue: a witness outage never blocks a checkpoint,
+	// and `meshmcp audit anchor` replays the checkpoints file idempotently
+	// after an outage. May be combined with audit_anchor (both fire).
+	AuditAnchorURL string `yaml:"audit_anchor_url"`
 	// AuditFailClosed makes this backend's audit sink a hard control: when a
 	// record cannot be written (full disk, I/O error), the call is denied
 	// rather than proceeding unrecorded. Off by default (best-effort).
@@ -463,6 +470,15 @@ func loadConfig(path string) (*Config, error) {
 		}
 		if b.AuditCheckpoints != "" && b.Policy == nil {
 			return nil, fmt.Errorf("backend %q: audit_checkpoints requires a policy (nothing to audit otherwise)", b.Name)
+		}
+		if (b.AuditAnchor != "" || b.AuditAnchorURL != "") && b.AuditCheckpoints == "" {
+			return nil, fmt.Errorf("backend %q: audit_anchor/audit_anchor_url require audit_checkpoints (anchoring witnesses signed checkpoints)", b.Name)
+		}
+		if b.AuditAnchorURL != "" {
+			u, err := url.Parse(b.AuditAnchorURL)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+				return nil, fmt.Errorf("backend %q: invalid audit_anchor_url %q (want http(s)://host[:port]/v1/anchor)", b.Name, b.AuditAnchorURL)
+			}
 		}
 		if b.Capabilities != nil {
 			if !hasStdio {

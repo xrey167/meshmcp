@@ -88,6 +88,10 @@ type Server struct {
 	Auth     Authorizer
 	Identify IdentityResolver
 	Audit    AuditSink
+	// Witness accepts peer gateways' signed audit checkpoints on /v1/anchor and
+	// records them in this host's own append-only anchor file (external audit
+	// anchoring). Nil ⇒ the route reports 501.
+	Witness *AnchorWitness
 }
 
 // Handler returns the control-plane HTTP handler.
@@ -97,6 +101,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/registry", s.handleRegistry)
 	mux.HandleFunc("/v1/policy/", s.handlePolicy)
 	mux.HandleFunc("/v1/policies", s.handlePolicyList)
+	mux.HandleFunc("/v1/anchor", s.handleAnchor)
 	// healthz is an unauthenticated liveness probe: it reveals no state.
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { fmt.Fprintln(w, "ok") })
 	return mux

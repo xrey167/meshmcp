@@ -795,6 +795,45 @@ func seedCheckpointFromExisting(path string) (cpSeq int, prevCPHash string, err 
 	return cp.Seq, cp.Hash(), nil
 }
 
+// seedAnchorFromExisting returns the AnchorLineHash of an existing anchor
+// file's last line (the seed for continuing the self-linked witness chain
+// across restarts, mirroring seedCheckpointFromExisting). Absent/empty file ⇒
+// "". An unreadable record is fatal: appending past it would hide whatever the
+// bad line replaced.
+func seedAnchorFromExisting(path string) (prevHash string, err error) {
+	if path == "" {
+		return "", nil
+	}
+	f, oerr := os.Open(path)
+	if os.IsNotExist(oerr) {
+		return "", nil
+	}
+	if oerr != nil {
+		return "", oerr
+	}
+	defer f.Close()
+	_, lastHash, rerr := policy.ReadAnchorRecords(f)
+	if rerr != nil {
+		return "", fmt.Errorf("anchor file %s: %w", path, rerr)
+	}
+	return lastHash, nil
+}
+
+// multiAnchor fans one checkpoint out to several witnesses; every witness
+// fires and all failures are reported together (anchoring is evidence, so a
+// partial failure must still surface).
+type multiAnchor []policy.Anchor
+
+func (m multiAnchor) Anchor(c policy.Checkpoint) error {
+	var errs []error
+	for _, a := range m {
+		if err := a.Anchor(c); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
 func auditSink(b *Backend) (*policy.AuditLog, error) {
 	if b.Policy == nil {
 		return nil, nil
@@ -877,15 +916,36 @@ func checkpointer(b *Backend, now func() string) (*policy.Checkpointer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("backend %q: open checkpoints %s: %w", b.Name, b.AuditCheckpoints, err)
 	}
-	var anchor policy.Anchor
+	name := b.Name
+	var anchors []policy.Anchor
 	if b.AuditAnchor != "" {
+		prevAnchor, aerr := seedAnchorFromExisting(b.AuditAnchor)
+		if aerr != nil {
+			return nil, fmt.Errorf("backend %q: %w", b.Name, aerr)
+		}
 		af, err := os.OpenFile(b.AuditAnchor, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 		if err != nil {
 			return nil, fmt.Errorf("backend %q: open anchor %s: %w", b.Name, b.AuditAnchor, err)
 		}
-		anchor = &policy.FileAnchor{W: af}
+		anchors = append(anchors, policy.NewFileAnchor(af, prevAnchor))
 	}
-	name := b.Name
+	if b.AuditAnchorURL != "" {
+		// Peer delivery is asynchronous (a slow witness must never stall the
+		// audit write path), so its post failures surface through the anchor's
+		// own handler rather than the Checkpointer's returned error.
+		anchors = append(anchors, policy.NewPeerAnchor(b.AuditAnchorURL).
+			WithErrorHandler(func(err error) {
+				log.Printf("backend %q: AUDIT CHECKPOINT ERROR: checkpoint anchor: %v", name, err)
+			}))
+	}
+	var anchor policy.Anchor
+	switch len(anchors) {
+	case 0:
+	case 1:
+		anchor = anchors[0]
+	default:
+		anchor = multiAnchor(anchors)
+	}
 	cp := policy.NewCheckpointer(signer, f, b.AuditCheckpointEvery, now, anchor)
 	if cpSeq > 0 {
 		cp.SeedFrom(cpSeq, prevCPHash) // continue the checkpoint chain across restart

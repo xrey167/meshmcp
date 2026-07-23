@@ -85,11 +85,12 @@ Usage:
   meshmcp call [flags] <peer:port> <tool>       call a tool (--arg k=v, --json, --task, --capability @file)
   meshmcp read [flags] <peer:port> <uri>        read a resource
   meshmcp prompt [flags] <peer:port> <name>     render a prompt (--arg k=v)
-  meshmcp audit verify <file> [--checkpoints f] verify an audit log (hash chain; +signatures with --checkpoints)
+  meshmcp audit verify <file> [--checkpoints f] verify an audit log (hash chain; +signatures with --checkpoints; +witness cross-check with --anchors)
   meshmcp audit keygen [--out f]                generate a gateway signing key for audit checkpoints
   meshmcp audit export --in <file>              export an audit ledger to CSV on stdout (for BI/spreadsheets)
   meshmcp audit receipt --in <file> [--peer]    emit a verifiable provenance receipt (what a session's tools produced)
-  meshmcp audit attest --audit <f> [--checkpoints --pubkey --policy]  build a verifiable compliance/attestation bundle
+  meshmcp audit attest --audit <f> [--checkpoints --pubkey --anchors --policy]  build a verifiable compliance/attestation bundle
+  meshmcp audit anchor --checkpoints <f> (--out f | --url u)  replay checkpoints to an external witness (recovery after witness outage)
   meshmcp capability keygen [--out f]           generate an Ed25519 authority key backends pin as a trust root
   meshmcp capability issue [flags]              sign a short-lived, subject-bound tool grant (--subject/--audience/--tool)
   meshmcp capability revoke --store <d> <id>    revoke a capability id (fails closed at every gateway sharing the store)
