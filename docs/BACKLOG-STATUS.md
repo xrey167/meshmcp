@@ -38,7 +38,7 @@ content lands in BACKLOG.md.
 | 26 | Steer close/resume race fix | todo | Local fix + re-enable; cross-OS confirm rides 1 |
 | 27 | Manifest gating decision | **done** | Decided (b): distribution-only; boundary documented in MARKETPLACE.md |
 | 28 | SpiffeLabel schema/doc pairing | todo | |
-| 29 | `air stream` over the mesh | todo | |
+| 29 | `air stream` over the mesh | **done** | Shipped 2026-07-23; review fixed escape-injection + inbound-line cap |
 | 30 | `frameAttack` rename | **done** | Shipped 2026-07-23 |
 
 ## Execution order
