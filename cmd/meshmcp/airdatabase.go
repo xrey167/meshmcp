@@ -23,9 +23,10 @@ import (
 // validates the SQL through the pure read-only guard (air/sqlguard), gates every
 // referenced table against a per-identity grant, forwards the VALIDATED query to a
 // pluggable executor seam, caps and redacts the result, and notarizes every query
-// — allowed or denied — in the shared hash-chained audit ledger. It executes no
-// SQL itself and adds no database driver dependency: in production the executor
-// forwards to a database exposed on the mesh; in tests a fake returns canned rows.
+// — allowed or denied — in the shared hash-chained audit ledger. The guard layer
+// executes no SQL itself: the pluggable executor does — in production the
+// PostgreSQL executor (`--db name=postgres://...`) forwards the validated read
+// with bound parameters; in tests a fake returns canned rows.
 //
 //	meshmcp air database query <host:port> --db <name> [--param v] [--limit N] [--json] "SELECT ..."
 //	meshmcp air database serve --allow <id> [--grant id=db.table,...] [--redact col] [--audit f] [--max-rows N] [--max-bytes N]
@@ -78,14 +79,11 @@ type dbRows struct {
 	Rows    [][]any
 }
 
-// meshDBExecutor is the production executor seam — DEFERRED in v1. In production
-// it would forward the validated statement to a database exposed on the mesh (a
-// DB-as-MCP-tool / mesh DB endpoint) over the same governed transport the other
-// Air verbs dial, and return its rows. Wiring that requires a concrete mesh
-// database backend to target (and the corresponding bind-parameter contract),
-// which cannot be exercised from here, so v1 ships the seam plus this documented
-// stub that refuses cleanly. Tests inject a fake executor; a real deployment
-// swaps this for the mesh-forwarding implementation.
+// meshDBExecutor is the no-configuration default: it refuses cleanly so a
+// firewall started without any --db backend can never silently pretend to
+// serve data. The production executor is pgDBExecutor (airdatabase_pg.go),
+// selected by `air database serve --db name=postgres://...`; tests inject
+// fakes through the same dbExecutor seam.
 type meshDBExecutor struct{ backend string }
 
 func (m meshDBExecutor) Exec(context.Context, string, string, []any) (dbRows, error) {
