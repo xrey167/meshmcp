@@ -679,4 +679,3 @@ func (k *driveKeyedLocks) lock(key string) func() {
 	m.Lock()
 	return m.Unlock
 }
-

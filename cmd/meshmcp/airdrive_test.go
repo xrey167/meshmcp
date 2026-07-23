@@ -17,10 +17,10 @@ import (
 
 // Identities used throughout the drive tests.
 const (
-	readerFQDN = "ana-laptop.netbird.cloud"
-	readerKey  = "READERKEY0001"
-	writerFQDN = "ana-phone.netbird.cloud"
-	writerKey  = "WRITERKEY0001"
+	readerFQDN   = "ana-laptop.netbird.cloud"
+	readerKey    = "READERKEY0001"
+	writerFQDN   = "ana-phone.netbird.cloud"
+	writerKey    = "WRITERKEY0001"
 	strangerFQDN = "eve.netbird.cloud"
 	strangerKey  = "STRANGERKEY01"
 )

@@ -238,7 +238,7 @@ func nonNilPaired(p []air.PairedPeer) []air.PairedPeer {
 // revoked, empty for a request (the requester IS the subject).
 type pairAudit struct {
 	Method, Peer, PeerKey, Subject, Reason string
-	OK                                      bool
+	OK                                     bool
 }
 
 func emitPairAudit(audit func(pairAudit), rec pairAudit) {

@@ -283,16 +283,16 @@ func Analyze(m MeshExposure) []Finding {
 		if wild := wildcardEntries(m.Control.Allow); len(wild) > 0 {
 			f = append(f, Finding{
 				Rule: "control-wildcard", Severity: SevCritical,
-				Title:  "control endpoint open to any mesh peer",
-				Detail: "the Air control endpoint (list/steer live sessions) admits any peer via a wildcard allow",
+				Title:    "control endpoint open to any mesh peer",
+				Detail:   "the Air control endpoint (list/steer live sessions) admits any peer via a wildcard allow",
 				Evidence: wild,
 			})
 		}
 		if g := groupEntries(m.Control.Allow); len(g) > 0 {
 			f = append(f, Finding{
 				Rule: "group-in-acl", Severity: SevMedium,
-				Title:  "control allow uses a group: token the ACL layer ignores",
-				Detail: "the control endpoint ACL matches only pubkey:/FQDN; a group: entry never matches a caller and grants nothing",
+				Title:    "control allow uses a group: token the ACL layer ignores",
+				Detail:   "the control endpoint ACL matches only pubkey:/FQDN; a group: entry never matches a caller and grants nothing",
 				Evidence: g,
 			})
 		}
@@ -305,24 +305,24 @@ func Analyze(m MeshExposure) []Finding {
 		if (injectsSecrets || b.Transport == "remote") && openAllow {
 			f = append(f, Finding{
 				Rule: "open-secrets-backend", Severity: SevCritical, Backend: b.Name,
-				Title:  "sensitive backend reachable by any mesh peer",
-				Detail: "a secret-injecting or remote-egress backend has an empty/wildcard allow — any identified mesh peer can drive it",
+				Title:    "sensitive backend reachable by any mesh peer",
+				Detail:   "a secret-injecting or remote-egress backend has an empty/wildcard allow — any identified mesh peer can drive it",
 				Evidence: allowEvidence(b.Allow),
 			})
 		}
 		if injectsSecrets && !allGrantsCosigned(b.SecretGrants) {
 			f = append(f, Finding{
 				Rule: "secrets-no-cosign", Severity: SevCritical, Backend: b.Name,
-				Title:  "secrets injected without co-sign",
-				Detail: "no policy rule authorizing the secret-injecting tool requires co-sign — an allowed identity pulls credentials unattended",
+				Title:    "secrets injected without co-sign",
+				Detail:   "no policy rule authorizing the secret-injecting tool requires co-sign — an allowed identity pulls credentials unattended",
 				Evidence: uncosignedSecrets(b.SecretGrants),
 			})
 		}
 		if broad := broadGrants(b.SecretGrants); len(broad) > 0 {
 			f = append(f, Finding{
 				Rule: "secrets-broad-grant", Severity: SevHigh, Backend: b.Name,
-				Title:  "secret granted to any mesh peer",
-				Detail: "a secret grant lists a wildcard peer — the credential is exposed to every mesh peer, not a scoped identity",
+				Title:    "secret granted to any mesh peer",
+				Detail:   "a secret grant lists a wildcard peer — the credential is exposed to every mesh peer, not a scoped identity",
 				Evidence: broad,
 			})
 		}
@@ -343,24 +343,24 @@ func Analyze(m MeshExposure) []Finding {
 		if wild := wildcardEntries(b.Allow); len(wild) > 0 || len(b.Allow) == 0 {
 			f = append(f, Finding{
 				Rule: "wildcard-allow", Severity: SevHigh, Backend: b.Name,
-				Title:  "backend allows any mesh peer",
-				Detail: "an empty or wildcard allow list admits every identified mesh peer",
+				Title:    "backend allows any mesh peer",
+				Detail:   "an empty or wildcard allow list admits every identified mesh peer",
 				Evidence: allowEvidence(b.Allow),
 			})
 		}
 		if g := groupEntries(b.Allow); len(g) > 0 {
 			f = append(f, Finding{
 				Rule: "group-in-acl", Severity: SevMedium, Backend: b.Name,
-				Title:  "allow uses a group: token the ACL layer ignores",
-				Detail: "backend ACL matches only pubkey:/FQDN; a group: entry never matches a caller (likely a silent misconfiguration)",
+				Title:    "allow uses a group: token the ACL layer ignores",
+				Detail:   "backend ACL matches only pubkey:/FQDN; a group: entry never matches a caller (likely a silent misconfiguration)",
 				Evidence: g,
 			})
 		}
 		if b.Transport == "remote" && b.RemoteEndpoint != "" {
 			f = append(f, Finding{
 				Rule: "remote-egress", Severity: SevMedium, Backend: b.Name,
-				Title:  "data leaves the mesh to a third party",
-				Detail: "a remote backend forwards calls out to an external endpoint",
+				Title:    "data leaves the mesh to a third party",
+				Detail:   "a remote backend forwards calls out to an external endpoint",
 				Evidence: []string{b.RemoteEndpoint},
 			})
 		}
