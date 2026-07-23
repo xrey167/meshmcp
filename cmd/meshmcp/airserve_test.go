@@ -34,7 +34,11 @@ func TestAirServePageBindsNodeSteerToTransportIdentity(t *testing.T) {
 		`var key=fullNodeKey(n);`,
 		`String(s.peer_key||"")===key`,
 		`return matches.length===1?matches[0]:null;`,
-		`No identity-bound live session`,
+		// The Steer action is only ever offered when a session matched the
+		// node's transport identity; a node with no identity-bound session
+		// simply exposes no Steer action (the former "No identity-bound live
+		// session" copy string became this upstream gate).
+		`if(session)actions.push({id:"steer"`,
 	} {
 		if !strings.Contains(page, contract) {
 			t.Fatalf("Air page lost identity-bound Steer contract %q", contract)
