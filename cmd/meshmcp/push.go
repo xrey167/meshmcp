@@ -14,6 +14,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/xrey167/meshmcp/air"
 	"github.com/xrey167/meshmcp/session"
 )
 
@@ -49,15 +50,16 @@ func sendData(w io.Writer, name string, data []byte) error {
 func cmdPush(args []string) error {
 	fs := flag.NewFlagSet("push", flag.ExitOnError)
 	o := meshFlags(fs)
+	control := fs.String("control", "", "Air control gateway used to resolve a Nearby name, FQDN, or full public key")
 	name := fs.String("name", "", "name for the pushed payload (default: clip-<unix>.txt)")
 	maxBytes := fs.Int64("max-bytes", 16<<20, "reject a stdin payload larger than this")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: <stdin> | meshmcp push [flags] <peer-ip:port>")
+		return errors.New("usage: <stdin> | meshmcp push [flags] <target>  (use --control <gateway> for a Nearby selector)")
 	}
-	target := fs.Arg(0)
+	targetRef := fs.Arg(0)
 
 	data, err := io.ReadAll(io.LimitReader(os.Stdin, *maxBytes+1))
 	if err != nil {
@@ -80,6 +82,10 @@ func cmdPush(args []string) error {
 		return err
 	}
 	defer stopMesh(client)
+	target, err := resolveAirTargetOverMesh(context.Background(), client, targetRef, *control, air.ServiceInbox)
+	if err != nil {
+		return fmt.Errorf("push: %w", err)
+	}
 
 	pr, pw := io.Pipe()
 	go func() { pw.CloseWithError(sendData(pw, payloadName, data)) }()

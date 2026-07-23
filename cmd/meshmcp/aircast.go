@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/xrey167/meshmcp/air"
 	"github.com/xrey167/meshmcp/session"
 )
 
@@ -23,17 +24,18 @@ import (
 // `air serve --cast <dir>` renders the newest one in a single prominent "Now
 // Showing" slot. The peer runs a drop receiver pointed at that dir.
 //
-//	meshmcp air cast <peer-ip:port> <image>
+//	meshmcp air cast [--control <gateway>] <target> <image>
 func cmdAirCast(args []string) error {
 	fs := flag.NewFlagSet("air cast", flag.ExitOnError)
 	o := meshFlags(fs)
+	control := fs.String("control", "", "Air control gateway used to resolve a Nearby name, FQDN, or full public key")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 2 {
-		return errors.New("usage: meshmcp air cast [flags] <peer-ip:port> <image>")
+		return errors.New("usage: meshmcp air cast [flags] <target> <image>  (use --control <gateway> for a Nearby selector)")
 	}
-	peer := fs.Arg(0)
+	peerRef := fs.Arg(0)
 	imagePath := fs.Arg(1)
 
 	// Cast is for visual context: refuse a non-image up front (the receiver would
@@ -55,6 +57,10 @@ func cmdAirCast(args []string) error {
 		return err
 	}
 	defer stopMesh(client)
+	peer, err := resolveAirTargetOverMesh(context.Background(), client, peerRef, *control, air.ServiceCast)
+	if err != nil {
+		return fmt.Errorf("air cast: %w", err)
+	}
 
 	pr, pw := io.Pipe()
 	go func() { pw.CloseWithError(sendFiles(pw, []string{imagePath})) }()

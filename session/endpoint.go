@@ -311,6 +311,12 @@ func (e *endpoint) isClosed() bool {
 	return e.closed
 }
 
+func (e *endpoint) closeError() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.closeErr
+}
+
 // closeWith permanently closes the endpoint. It closes closeC exactly once
 // and never closes inbound: a pump goroutine may be parked on a send to
 // inbound, and closing it would let select choose the send arm and panic.

@@ -300,3 +300,57 @@ func TestAirLivePresenceWiring(t *testing.T) {
 		t.Fatal("/api/home Presence cards are not wired into the served Nearby renderer")
 	}
 }
+
+// TestAirLiveUniversalActionsWiring protects the trust-sensitive final hop
+// from a verified Presence card to the browser action payload. In particular,
+// client-authored names and Activity targets must never select a session to
+// steer, and logical delivery must keep using the durable public-key selector.
+func TestAirLiveUniversalActionsWiring(t *testing.T) {
+	html := string(airLiveHTML)
+	section := func(start, end string) string {
+		t.Helper()
+		startAt := strings.Index(html, start)
+		if startAt < 0 {
+			t.Fatalf("embedded Air page is missing %q", start)
+		}
+		endAt := strings.Index(html[startAt:], end)
+		if endAt < 0 {
+			t.Fatalf("embedded Air page has no %q after %q", end, start)
+		}
+		return html[startAt : startAt+endAt]
+	}
+
+	for _, want := range []string{
+		`id="actionDlg"`,
+		`id="commandDlg"`,
+		`Search agents, sessions, and actions`,
+		`Verified destinations · actions remain policy governed`,
+		`fetch("api/ring"`,
+		`payload.recipient=recipient`,
+		`form.append("recipient",recipient)`,
+		`title:"Browse reachable services"`,
+		`tabindex="-1"`,
+		`maxlength="500"`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("Universal Actions page is missing %q", want)
+		}
+	}
+
+	selector := section("function selectorForNode", "function sameVerifiedNode")
+	if !strings.Contains(selector, `return "pubkey:"+String(key)`) {
+		t.Fatal("logical actions no longer prefer the durable full public-key selector")
+	}
+
+	for name, body := range map[string]string{
+		"sessionForNode":  section("function sessionForNode", "function actionsForNode"),
+		"matchingSession": section("function matchingSession", "function updateSummary"),
+	} {
+		if strings.Contains(body, "n.name") || strings.Contains(body, "activity.target") || strings.Contains(body, `"session:"`) {
+			t.Errorf("%s uses client-authored Presence metadata to select a steerable session", name)
+		}
+		if !strings.Contains(body, "n.fqdn") || !strings.Contains(body, "n.public_key") || !strings.Contains(body, "n.ip") {
+			t.Errorf("%s no longer associates sessions through transport-stamped identities", name)
+		}
+	}
+}

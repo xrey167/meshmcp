@@ -25,10 +25,11 @@ import (
 // receiver gates senders deny-by-default, rate-limits per identity, and audits
 // every ring into the hash-chained ledger. `air listen` is the receiving end.
 //
-//	meshmcp air ring <peer-ip:port> --message "build is red, need eyes" [--priority urgent]
+//	meshmcp air ring --message "build is red, need eyes" [--control <gateway>] <target>
 func cmdAirRing(args []string) error {
 	fs := flag.NewFlagSet("air ring", flag.ExitOnError)
 	o := meshFlags(fs)
+	control := fs.String("control", "", "Air control gateway used to resolve a Nearby name, FQDN, or full public key")
 	message := fs.String("message", "", "the human-readable message to ring with (required)")
 	priority := fs.String("priority", "normal", "priority: normal | urgent")
 	approval := fs.String("approval", "", "optional approvals server (mesh-ip:port) for a ring-for-approval link-out")
@@ -38,9 +39,9 @@ func cmdAirRing(args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: meshmcp air ring [flags] <peer-ip:port> --message <text>")
+		return errors.New("usage: meshmcp air ring --message <text> [--control <gateway>] [mesh-flags] <target>")
 	}
-	peer := fs.Arg(0)
+	peerRef := fs.Arg(0)
 
 	n := air.Notice{
 		Kind: air.NoticeRing, Message: *message, Priority: *priority,
@@ -56,6 +57,10 @@ func cmdAirRing(args []string) error {
 		return err
 	}
 	defer stopMesh(client)
+	peer, err := resolveAirTargetOverMesh(context.Background(), client, peerRef, *control, air.ServiceRing)
+	if err != nil {
+		return fmt.Errorf("air ring: %w", err)
+	}
 
 	if err := sendNotice(context.Background(), client, peer, n); err != nil {
 		return fmt.Errorf("air ring: %w", err)

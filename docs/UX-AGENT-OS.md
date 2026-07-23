@@ -1,6 +1,7 @@
 # MeshMCP Agent OS — UX/UI system
 
-> **Status:** living product specification · Phase 1 implemented in Air Home
+> **Status:** living product specification · Phase 1, the core Phase 4
+> logical-action path in Air Home, and the CLI portion of Phase 5 are implemented
 
 MeshMCP is the secure agent platform. **Air is its user-facing operating
 system.** The UX goal is not to imitate another company's pixels; it is to
@@ -10,7 +11,10 @@ feedback after every action.
 
 The reference screens for the first implementation are the
 [desktop Home](design/agent-os-home-desktop.png) and
-[mobile Home](design/agent-os-home-mobile.png).
+[mobile Home](design/agent-os-home-mobile.png). The shipped Universal Actions
+slice is specified by the
+[desktop command palette](design/air-universal-actions-desktop.png) and
+[mobile agent action sheet](design/air-universal-actions-mobile.png).
 
 ## Product principles
 
@@ -103,8 +107,9 @@ or fabricate a capability.
   a Presence announcement remain visible as fallback cards, without duplicating
   peers that do have a verified card.
 - `AttentionRow`: a single held/blocked summary with direct review path.
-- `QuickActions`: Send, Drop, Steer, and Browse tools; each enables only when
-  its corresponding relay, live session, or catalog surface is connected.
+- `QuickActions`: Send, Drop file, Ring, and Actions; each delivery shortcut
+  enables only when a verified destination advertises the required service.
+  Actions opens the keyboard-searchable universal palette.
 - `SessionList` and `ActivityTimeline`: open lists with thin separators, not a
   nested card grid.
 - `ActionSheet`: exact target and action, state-specific fields, result as an
@@ -134,7 +139,7 @@ or fabricate a capability.
 | **1 · Agent OS spine** | Unified Air Home shell + responsive nav; Presence/Activity drive Continue and Nearby. | `air-live.html`, `air home`, `air_nearby` |
 | **2 · Governance** | Approvals uses the same tokens/components while retaining direct browser-to-approver identity. | `approvals.go`, Security area |
 | **3 · Observation** | Dashboard and Control Room become Activity/Operator views in the shared shell; raw shell stays explicit developer mode. | `dash.go`, `room.go` |
-| **4 · Logical actions** | Select a verified agent/service everywhere; raw `host:port` remains an advanced compatible input. | Share, Steer, Ring, Cast, CLI |
+| **4 · Logical actions** | **Core shipped:** Universal Actions, verified Send/Drop/Ring recipients, and CLI logical targets; raw `host:port` remains an advanced compatible input. Cast/Screen use the same CLI resolver. | Share, Steer, Ring, Cast, CLI |
 | **5 · Continuity** | Handoff v1 ships explicit offer/accept/governed continuation in the CLI; next, surface its inbox and receipts in Activities/Home, then add checkpoint-capable prepare/ready/commit as a separate transactional v2. | `air handoff`, Activities, Home action sheet |
 | **6 · Native shells** | The same objects, states, and navigation map to iOS/macOS/Android without redefining behavior. | `mobile/`, native apps |
 
@@ -142,8 +147,10 @@ or fabricate a capability.
 
 - **Focus policy:** a node in `focus` can advertise which attention classes it
   accepts; Ring and notifications explain suppression rather than disappearing.
-- **Universal command palette:** search agents, Activities, services, and safe
-  actions by name; results resolve through the same Presence directory.
+- **Universal command palette (shipped):** search Nearby identities, live
+  sessions, and available actions by name. Destination actions carry a full
+  verified-key selector and resolve again through the current Presence
+  directory immediately before delivery.
 - **Activity deep links:** a stable Activity reference opens the same object in
   web/CLI/assistant and never embeds a bearer credential.
 - **Spaces:** user-owned groups collect selected nodes and Activities; group
