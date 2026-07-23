@@ -82,6 +82,12 @@ func TestConfigValidateRejections(t *testing.T) {
 			c.OAuth.AccessTokenTTL = Duration(30 * time.Minute)
 			c.OAuth.RefreshTokenTTL = Duration(time.Minute)
 		}, "refresh_token_ttl must be >= access_token_ttl"},
+		{"replay store plain path", func(c *Config) {
+			c.OAuth.DPoPReplayStore = "/var/lib/replay"
+		}, "dpop_replay_store must be a postgres"},
+		{"replay store wrong scheme", func(c *Config) {
+			c.OAuth.DPoPReplayStore = "mysql://u:p@db/x"
+		}, "dpop_replay_store must be a postgres"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -95,6 +101,26 @@ func TestConfigValidateRejections(t *testing.T) {
 				t.Fatalf("error %q does not contain %q", err.Error(), tc.want)
 			}
 		})
+	}
+}
+
+func TestConfigValidateDPoPReplayStoreDSN(t *testing.T) {
+	// A DSN error must never echo the value — it may carry credentials.
+	c := validConfig()
+	c.OAuth.DPoPReplayStore = "mysql://user:hunter2@db/x"
+	if _, err := c.Validate(); err == nil || strings.Contains(err.Error(), "hunter2") {
+		t.Fatalf("want scheme error without the DSN echoed, got %v", err)
+	}
+
+	for _, dsn := range []string{
+		"postgres://meshmcp@db.internal:5432/meshmcp",
+		"postgresql://meshmcp@db.internal/meshmcp",
+	} {
+		c := validConfig()
+		c.OAuth.DPoPReplayStore = dsn
+		if _, err := c.Validate(); err != nil {
+			t.Errorf("dsn %q rejected: %v", dsn, err)
+		}
 	}
 }
 

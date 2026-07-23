@@ -134,11 +134,15 @@ func readJSON(path string, out any) error {
 	return nil
 }
 
-// claimByRename atomically consumes a single-use record (an authorization code
-// or a rotated refresh token): the first caller to rename it wins, and every
-// later caller observes os.IsNotExist. This works across processes (the CLI and
-// the daemon share the directory), which per-process locks cannot guarantee.
+// claimByRename consumes a single-use record (an authorization code or a
+// rotated refresh token): the caller that renames it wins, and every later
+// caller observes os.IsNotExist. This works across processes (the CLI and the
+// daemon share the directory), which per-process locks cannot guarantee.
 // It returns the claimed record decoded into out.
+//
+// NOT a mutual-exclusion primitive on its own: Windows renames by handle, so
+// concurrent racing claims of the same path can all succeed. Callers must
+// serialize concurrent claims of one key in-process (codeStore.consume does).
 func claimByRename(path string, out any) error {
 	if err := readJSON(path, out); err != nil {
 		return err

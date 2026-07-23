@@ -225,7 +225,9 @@ alongside the Feature B signer, per design) and running the test file:
   `TestVerify_ErrorResponseShapeIsSpecCompliant` passes.
 - ✅ Replay-store durability decision recorded (in-memory, documented,
   restart-window residual risk explicit) — `TestVerify_RestartReplayWindow`
-  passes and asserts exactly this behavior.
+  passes and asserts exactly this behavior. The documented durable-backing
+  option now exists: `pgstore` implements `DPoPReplayStore`, and the edge
+  accepts it via `oauth.dpop_replay_store` (fail-closed, cross-instance).
 - ✅ Structural domain separation from `policy/sign.go`'s Ed25519 path — no
   shared verify function/type (confirmed by reading the file: distinct types,
   distinct key-file discriminator).

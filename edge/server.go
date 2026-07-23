@@ -33,6 +33,7 @@ type Server struct {
 	sessions *sessionTable
 	dial     DialBackend
 	iats     []resolvedIAT
+	dpop     *policy.DPoPVerifier
 
 	preauthLimit  *fixedWindowLimiter
 	registerLimit *fixedWindowLimiter
@@ -58,6 +59,12 @@ type Options struct {
 	// injects a WireGuard mesh dial (client.Dial); when nil, a plain TCP dial to
 	// cfg.Backend.Addr is used (same-host backends and tests).
 	DialBackend DialBackend
+	// DPoPReplay backs the edge's DPoP verifier. Production wiring (cmd/meshmcp)
+	// injects the shared PostgreSQL store when oauth.dpop_replay_store is set;
+	// nil selects the in-process store — but ONLY when no shared store is
+	// configured. A configured store that is not supplied is a construction
+	// error (fail closed), never a silent downgrade to per-process tracking.
+	DPoPReplay policy.DPoPReplayStore
 }
 
 // New validates cfg and constructs a Server. It creates the state directory,
@@ -121,6 +128,16 @@ func New(cfg Config, opts Options) (*Server, error) {
 		return nil, err
 	}
 
+	replay := opts.DPoPReplay
+	if replay == nil {
+		if cfg.OAuth.DPoPReplayStore != "" {
+			// Fail closed: starting anyway would silently degrade the configured
+			// cross-instance replay protection to per-process tracking.
+			return nil, fmt.Errorf("edge: oauth.dpop_replay_store is configured but no replay store was supplied at construction (cmd/meshmcp wires it via pgstore.Open)")
+		}
+		replay = policy.NewMemDPoPReplayStore()
+	}
+
 	pol := cfg.Backend.Policy
 	engine := policy.NewEngine(&pol, now, nil)
 	dial := opts.DialBackend
@@ -141,6 +158,7 @@ func New(cfg Config, opts Options) (*Server, error) {
 		sessions:      newSessionTable(cfg.Limits.MaxSessionsPerClient, cfg.Limits.MaxSSEBufferMsgs, now),
 		dial:          dial,
 		iats:          iats,
+		dpop:          &policy.DPoPVerifier{Replay: replay},
 		preauthLimit:  newFixedWindowLimiter(cfg.Limits.PreauthPerIPPerMin, time.Minute, now),
 		registerLimit: newFixedWindowLimiter(cfg.Limits.RegisterPerIPPerMin, time.Minute, now),
 		clientLimit:   newTokenBucket(cfg.Limits.PerClientRPS, cfg.Limits.PerClientBurst, now),
@@ -148,6 +166,14 @@ func New(cfg Config, opts Options) (*Server, error) {
 	}
 	return s, nil
 }
+
+// DPoPVerifier exposes the edge's RFC 9449 proof verifier. The public surface
+// is bearer-only today (the recorded exposure-model decision — hosted clients
+// such as claude.ai present no DPoP), so no edge handler enforces proofs yet;
+// this is the seam DPoP-bound flows verify through, and its replay store is
+// construction-time state: shared (PostgreSQL) when oauth.dpop_replay_store is
+// set, in-process otherwise.
+func (s *Server) DPoPVerifier() *policy.DPoPVerifier { return s.dpop }
 
 // loadOrGenerateSigner loads the Ed25519 capability authority from path, or —
 // only when autogen is set — generates and saves one. A missing key without

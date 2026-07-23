@@ -9,6 +9,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"regexp"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -39,6 +40,23 @@ type Store struct {
 	sessions, nonces, dpopNonces, dpopJTIs string
 }
 
+// Driver errors can echo the raw connection string: pgx's ParseConfigError
+// redacts a userinfo password but NOT password/sslpassword URL query
+// parameters (both pgx-supported forms). Every error returned by Open/Check is
+// scrubbed so a DSN credential never reaches logs, however it was written.
+var (
+	errPasswordKV  = regexp.MustCompile("((?:ssl)?password=)[^ &`'\"]*")
+	errURLUserinfo = regexp.MustCompile(`(://[^/?#@\s]*:)[^@\s]*@`)
+)
+
+// redactErr rebuilds err with credential material masked. The error chain is
+// deliberately flattened: a wrapped driver error would re-expose the raw text.
+func redactErr(op string, err error) error {
+	msg := errURLUserinfo.ReplaceAllString(err.Error(), "${1}xxxxx@")
+	msg = errPasswordKV.ReplaceAllString(msg, "${1}xxxxx")
+	return fmt.Errorf("pgstore: %s: %s", op, msg)
+}
+
 // Open connects to PostgreSQL, verifies the connection, and applies the
 // idempotent embedded schema (CREATE TABLE IF NOT EXISTS).
 func Open(dsn string) (*Store, error) {
@@ -52,7 +70,7 @@ func open(dsn, prefix string) (*Store, error) {
 	}
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
-		return nil, fmt.Errorf("pgstore: open: %w", err)
+		return nil, redactErr("open", err)
 	}
 	s := &Store{
 		db:         db,
@@ -65,7 +83,7 @@ func open(dsn, prefix string) (*Store, error) {
 	defer cancel()
 	if err := db.PingContext(ctx); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("pgstore: ping: %w", err)
+		return nil, redactErr("ping", err)
 	}
 	for _, ddl := range []string{
 		fmt.Sprintf(ddlSessions, s.sessions),
@@ -87,13 +105,13 @@ func open(dsn, prefix string) (*Store, error) {
 func Check(dsn string) error {
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
-		return fmt.Errorf("pgstore: open: %w", err)
+		return redactErr("open", err)
 	}
 	defer db.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), openTimeout)
 	defer cancel()
 	if err := db.PingContext(ctx); err != nil {
-		return fmt.Errorf("pgstore: ping: %w", err)
+		return redactErr("ping", err)
 	}
 	return nil
 }

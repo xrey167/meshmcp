@@ -25,7 +25,8 @@ type codeRecord struct {
 // codeStore persists authorization codes. Consumption is claim-by-rename so
 // exactly one token exchange can redeem a code even across processes.
 type codeStore struct {
-	dir string
+	dir   string
+	claim keyedLocks // serializes concurrent claims of one code (see consume)
 }
 
 func newCodeStore(dir string) (*codeStore, error) {
@@ -58,7 +59,15 @@ func (s *codeStore) issue(authz authzRecord, now time.Time) (string, error) {
 
 // consume atomically claims a code, returning its record. A second attempt to
 // consume the same code observes os.ErrNotExist.
+//
+// The per-code lock is load-bearing: on Windows, MoveFileEx renames by handle,
+// so two goroutines racing os.Rename on the same source can BOTH succeed (the
+// loser renames the already-claimed file again). Serializing in-process makes
+// exactly one redemption win; the rename still leaves later callers observing
+// os.ErrNotExist.
 func (s *codeStore) consume(code string) (codeRecord, error) {
+	unlock := s.claim.lock(sha256Hex(code))
+	defer unlock()
 	var rec codeRecord
 	if err := claimByRename(s.file(code), &rec); err != nil {
 		return codeRecord{}, err

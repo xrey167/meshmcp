@@ -43,6 +43,10 @@ oauth:
   authz_pending_ttl: 15m               # how long an authorize request waits for approval
   sessions: true                       # full Streamable HTTP (Mcp-Session-Id + GET SSE);
                                        # set false for stateless POST-only mode
+  # Shared DPoP replay store (multi-instance / restart-surviving replay
+  # protection). Empty keeps the in-process store. Must be a postgres:// DSN;
+  # if it cannot be opened at startup the edge refuses to start (fail closed).
+  # dpop_replay_store: "postgres://meshmcp@db.internal:5432/meshmcp?sslmode=verify-full"
 
 # --- Mesh membership (the edge dials one backend over WireGuard) ---
 mesh:

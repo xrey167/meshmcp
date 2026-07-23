@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/xrey167/meshmcp/policy"
@@ -65,6 +66,35 @@ func TestPGNonceStoreConformance(t *testing.T) {
 func TestPGDPoPReplayStoreConformance(t *testing.T) {
 	requireDSN(t)
 	replaytest.RunDPoPReplayStoreConformance(t, func(t *testing.T) policy.DPoPReplayStore { return openTestStore(t) })
+}
+
+// TestOpenErrorNeverEchoesCredentials: pgx's ParseConfigError embeds the raw
+// connection string (its own redaction misses password/sslpassword query
+// parameters), so Open/Check must scrub every error they return. The bogus
+// sslmode forces a parse failure before any connection, so no database is
+// needed.
+func TestOpenErrorNeverEchoesCredentials(t *testing.T) {
+	for _, tc := range []struct {
+		name, dsn, secret string
+	}{
+		{"query password", "postgres://u@127.0.0.1:1/db?password=S3cretQP&sslmode=bogus", "S3cretQP"},
+		{"query sslpassword", "postgres://u@127.0.0.1:1/db?sslpassword=S3cretSSL&sslmode=bogus", "S3cretSSL"},
+		{"userinfo password", "postgres://u:S3cretUI@127.0.0.1:1/db?sslmode=bogus", "S3cretUI"},
+		{"keyword password", "host=127.0.0.1 port=1 password=S3cretKV sslmode=bogus", "S3cretKV"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Open(tc.dsn)
+			if err == nil {
+				t.Fatal("want open failure, got nil")
+			}
+			if strings.Contains(err.Error(), tc.secret) {
+				t.Fatalf("Open error leaks the password: %v", err)
+			}
+			if cerr := Check(tc.dsn); cerr == nil || strings.Contains(cerr.Error(), tc.secret) {
+				t.Fatalf("Check error leaks the password: %v", cerr)
+			}
+		})
+	}
 }
 
 func TestOpenRejectsBadPrefix(t *testing.T) {
