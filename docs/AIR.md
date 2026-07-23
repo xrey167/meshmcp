@@ -232,14 +232,39 @@ meshmcp air task-steer 100.64.0.2:9101 --task 7b1c --text "focus on the API"
 meshmcp air task-steer 100.64.0.2:9101 --task 9f2a --cancel
 ```
 
-*(A `group:<name>` broadcast — one steer fanned out as N audited records — is a
-roadmap idea, not shipped; see [§7](#7--roadmap).)*
+**Group fan-out (Spaces v1).** The destination selector accepts a fourth form:
+`name | fqdn | pubkey:<key> | group:<name>`. A group is an operator-defined roster in
+the gateway config's top-level `groups:` map (the same map policy `group:` peers
+resolve against, F17) — patterns are `pubkey:<key>` exact or FQDN globs, resolved
+against the live Presence directory **server-side** via `GET /v1/groups`
+(control-allow gated, audited as `air/groups`). A group is **name resolution, never
+authorization**: the fan-out runs the unchanged single-target call once per present
+member, so every delivery independently enters that destination's own ACL/policy and
+appends its own audit record — a broadcast is literally N audited records. The
+per-member outcome returns as an `air.fanout-result/v1` envelope
+(`delivered | denied | skipped | failed`, each non-delivery with its reason, plus an
+`unmatched_patterns` echo of configured patterns that matched no present member) with
+deliberately **no aggregate verdict**; exit codes: 0 all delivered, 1 hard error
+before any delivery (unknown/empty group is loud, never a silent no-op), 2 partial,
+3 none delivered. The roster reply is a client-side trust boundary too: an over-wide
+or malformed roster is refused **before any delivery** (a compliant gateway 422s an
+over-wide group; the unfiltered `GET /v1/groups` listing reports such a group as its
+own zero-member error entry instead of silencing the others). The `group:` prefix is
+reserved in every selector, so a presence card literally named `group:x` can never
+shadow the grammar.
+
+```bash
+meshmcp air steer 100.64.0.2:9600 --to group:oncall \
+    --param text="build is red, need eyes" [--json]  # one steer per bound member
+meshmcp air ring --control 100.64.0.2:9600 \
+    --message "eyes please" group:oncall [--json]    # one ring per present member
+```
 
 The addressing (`peers`, registry, `<name>.<tool>` namespacing, origin `_meta`) and the
 transports (bidirectional MCP `Server.Request`, MCP Tasks) **already exist**. **Shipped:** the
 `tasks/steer` method + `Client.SteerTask` (task augment, the counterpart to `tasks/cancel`),
 the **session core** (`SessionStore.List`, `Server.Sessions`, line-safe `Server.Steer`), the
-**gateway control endpoint** (`/v1/sessions`+`/v1/steer`, identity-gated + audited), the
+**gateway control endpoint** (`/v1/sessions`+`/v1/groups`+`/v1/steer`, identity-gated + audited), the
 `air_*` assistant tools, and the **`meshmcp air` CLI** (`sessions` · `steer` · `launch`).
 All of this ships today. Every steer is deny-by-default, identity-attributed, and audited —
 it cannot bypass the firewall. See [AIR-STEER.md](AIR-STEER.md) for the spec.
@@ -471,6 +496,7 @@ Honesty about the seam, so nobody mistakes the mockup for shipped product:
 | **Steer** — gateway `/v1/sessions`+`/v1/steer` endpoint · `air_sessions`/`air_steer`/`air_tasks`/`air_task_steer` tools | **Ships now** | `config.go` · `serve.go` · `aircontrol.go` · `mcpapp.go` · `aircontrol_test.go` |
 | **Steer** — control endpoint hardening: per-backend ACL re-check · steer-method allowlist · relay-attested web attribution (`X-Air-On-Behalf`) | **Ships now** | `aircontrol.go` · `serve.go` · `airserve.go` · `aircontrol_test.go` |
 | **Steer/Launch** — the `meshmcp air` CLI (`sessions --json` · `steer` · `launch` · `agent-steer --target/--id` · `tasks` · `task-steer` · `workflow`) + P4 runner | **Ships now** | `air.go` · `airworkflow.go` · `examples/air-workflow.yaml` |
+| **Spaces v1** — `group:<name>` fan-out for `steer` + `ring` · server-side roster resolution (`GET /v1/groups`, control-gated + audited) · per-member `air.fanout-result/v1` receipts, no aggregate verdict | **Ships now** | `air/fanout.go` · `airgroups.go` · `aircontrol.go` · `air.go` · `airring.go` · `airtarget.go` · `air_steer_group_test.go` |
 | **Workflow** — variables between steps (`as:` + `${var.field}`) · `parallel:` blocks · `on_error` · per-step `timeout` · `--json` summary · launch-race retry | **Ships now** | `airworkflow.go` · `airworkflow_test.go` |
 | **Handoff / Continuity v1** — exact-key-pinned device + agent hops · target-bound Context Capsule · deny-by-default receiver ACL · bounded application ACK/NACK · durable inbox · explicit accept/decline · atomic dispatch claim · destination-selected continuation · durable attempt receipts | **Ships now** | `air/handoff.go` · `airhandoff.go` · `airhandoff_store.go` · [AIR-CONTINUITY.md](AIR-CONTINUITY.md) |
 | Assistant tools `air_peers` · `air_send` · `air_push` · `air_fetch` · `air_launch` (opt-in) | **Ships now** | `mcpapp.go` · `mcpapp_air_test.go` |
@@ -522,9 +548,15 @@ where they require vendor credentials or a physical device the repository cannot
 5. **External — the shipped mobile app.** `gomobile bind ./mobile` → an iOS `.xcframework` /
    Android `.aar`, then a thin native shell (Face-ID approve, receive/share sheets). Needs the
    mobile toolchain + a device ([MOBILE.md §3](MOBILE.md)).
-6. **Proposed — Spaces / `group:<name>`.** Resolve a user-owned group to its members and
-   fan one steer out as one governed, audited call per member ("broadcast = N audited
-   records"). Not implemented; nothing resolves a `group:` target today.
+6. **Done — Spaces v1 / `group:<name>` fan-out.** `air steer --to group:<name>` and
+   `air ring … group:<name>` resolve an operator-defined config group (the top-level
+   `groups:` map) to its present members server-side (`GET /v1/groups`, control-gated,
+   audited) and fan the action out as one *existing* single-target call per member —
+   each delivery independently enters its destination's own ACL/policy, so a broadcast
+   is literally N audited records, and the per-member outcome ships as
+   `air.fanout-result/v1` with no aggregate verdict. Membership is name resolution,
+   never authorization; unknown/empty groups fail loudly before any delivery. Shared
+   Activity boards, focus policy, and further verbs remain item 7's wider ecosystem.
 7. **Proposed — the wider Continuity ecosystem.** Add signed availability manifests,
    short-lived presence, exact-key smart targeting, scoped Spaces, unified Shortcuts,
    destination-bound grant re-issuance, and Find Work. True live migration remains a

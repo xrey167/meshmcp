@@ -631,6 +631,16 @@ func validatedPresenceSelector(selector string) (string, error) {
 	if selector == "" {
 		return "", errors.New("presence selector is required")
 	}
+	if strings.HasPrefix(selector, "group:") {
+		// The `group:<name>` grammar is a DESTINATION fan-out selector, never a
+		// single node. Reserving the prefix here — below every resolver — means
+		// a presence card literally named "group:x" can never shadow it through
+		// ResolvePresence, ResolvePresenceIdentity, or Registry.Resolve (fail
+		// closed, matching the explicit pubkey: carve-out). The message
+		// deliberately does not reflect the selector: this resolver never
+		// echoes untrusted selectors into errors.
+		return "", errors.New(`presence selector prefix "group:" is reserved for group fan-out`)
+	}
 	return selector, nil
 }
 

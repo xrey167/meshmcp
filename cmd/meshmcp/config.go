@@ -68,7 +68,7 @@ type Config struct {
 	// shared ledger). See AuditOTLPConfig in otlpsink.go.
 	AuditOTLP *AuditOTLPConfig `yaml:"audit_otlp"`
 	Trace     *TraceConfig     `yaml:"trace"`
-	Registry      string       `yaml:"registry"` // dir: register backends for router discovery
+	Registry  string           `yaml:"registry"` // dir: register backends for router discovery
 	// TrustDomain is this gateway's SPIFFE trust domain (Feature A). When set,
 	// every local audit record is additively labeled with the caller's derived
 	// identity, spiffe://<trust_domain>/peer/<key>, in peer_spiffe_id. A label
@@ -90,6 +90,47 @@ type Config struct {
 	Control   *ControlConfig   `yaml:"control"` // optional: Air session-control endpoint
 	Hooks     *HooksConfig     `yaml:"hooks"`   // publish policy decisions to the event bus and/or a webhook
 	Backends  []*Backend       `yaml:"backends"`
+}
+
+// Group bounds (F17 policy groups + `group:` fan-out). maxGroupMembers caps
+// both the patterns per group AND the members one fan-out may resolve to;
+// both it and the per-pattern byte bound alias the air envelope bounds so
+// config and wire can never skew.
+const (
+	maxGroups            = 256
+	maxGroupMembers      = air.MaxFanoutMembers
+	maxGroupPatternBytes = air.MaxGroupPatternBytes
+)
+
+// validateGroups rejects a malformed top-level groups map at load time, so a
+// group name always fits the `group:<name>` selector grammar (no ":", bounded,
+// control-free — see air.ValidateGroupName) and every member pattern is a
+// usable acl pattern. An EMPTY pattern list stays legal: a defined-but-empty
+// group is a loud no-op at fan-out time, never a silent one.
+func validateGroups(groups map[string][]string) error {
+	if len(groups) > maxGroups {
+		return fmt.Errorf("groups: %d groups defined; max is %d", len(groups), maxGroups)
+	}
+	for name, patterns := range groups {
+		if err := air.ValidateGroupName(name); err != nil {
+			return fmt.Errorf("groups: %q: %w", name, err)
+		}
+		if len(patterns) > maxGroupMembers {
+			return fmt.Errorf("groups: %q has %d member patterns; max is %d", name, len(patterns), maxGroupMembers)
+		}
+		for i, p := range patterns {
+			// The SAME rule the fan-out envelope applies to its unmatched echo
+			// (air.ValidateGroupPattern), so a pattern this loader accepts can
+			// never invalidate a result envelope after deliveries ran.
+			if err := air.ValidateGroupPattern(p); err != nil {
+				return fmt.Errorf("groups: %q member pattern #%d: %w", name, i+1, err)
+			}
+			if key, ok := strings.CutPrefix(p, "pubkey:"); ok && strings.TrimSpace(key) == "" {
+				return fmt.Errorf("groups: %q member pattern #%d: the pubkey: form requires a key", name, i+1)
+			}
+		}
+	}
+	return nil
 }
 
 // OperatorConfig names one person permitted to operate this gateway. Identity is
@@ -462,6 +503,11 @@ func loadConfig(path string) (*Config, error) {
 		if err := cfg.AuditOTLP.validate(); err != nil {
 			return nil, fmt.Errorf("config %s: %w", path, err)
 		}
+	}
+	// Groups feed both policy `group:` peers (F17) and the `/v1/groups` fan-out
+	// roster, so the map itself is validated before anything references it.
+	if err := validateGroups(cfg.Groups); err != nil {
+		return nil, fmt.Errorf("config %s: %w", path, err)
 	}
 	seen := map[int]string{}
 	seenNames := map[string]bool{}
