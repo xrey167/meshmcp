@@ -33,7 +33,7 @@ content lands in BACKLOG.md.
 | 21 | Router delegation wiring | todo | **Security priority — first meaty task** |
 | 22 | Postgres CAS in CI | **blocked-CI** | Workflow YAML can be pre-staged; unverifiable until 1 |
 | 23 | Fenced-dispatch regression test | todo | |
-| 24 | FileStore lock-steal hardening | todo | |
+| 24 | FileStore lock-steal hardening | **done** | Owner-token release; steal contract preserved |
 | 25 | Thin policy test spots | todo | |
 | 26 | Steer close/resume race fix | todo | Local fix + re-enable; cross-OS confirm rides 1 |
 | 27 | Manifest gating decision | **done** | Decided (b): distribution-only; boundary documented in MARKETPLACE.md |
