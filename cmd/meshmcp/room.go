@@ -15,8 +15,10 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/netbirdio/netbird/client/embed"
 
@@ -66,6 +68,103 @@ type roomServer struct {
 
 	mu   sync.Mutex
 	pool map[string]*mcpclient.Client // target -> reused MCP client over the mesh
+
+	// Multiplayer presence (S60): who else has this room open. Sessions
+	// heartbeat via POST /api/presence (token-gated, piggybacked on the live
+	// poll); entries expire after presenceTTL and the roster rides back on the
+	// /api/room feed as `viewers`.
+	vmu     sync.Mutex
+	viewers map[string]*roomViewer // viewer id -> name + last heartbeat
+}
+
+// roomViewer is one live browser session in the room.
+type roomViewer struct {
+	name     string
+	lastSeen time.Time
+}
+
+// viewerInfo is the wire form of one roster entry on the /api/room response.
+type viewerInfo struct {
+	Name string `json:"name"`
+	Idle int    `json:"idle"` // seconds since the last heartbeat
+}
+
+// presenceTTL is how long a viewer stays on the roster without a heartbeat;
+// the page heartbeats every poll (1.5s), so 15s tolerates blips, not tabs
+// that were closed.
+const presenceTTL = 15 * time.Second
+
+// maxViewers bounds the roster so a heartbeat flood cannot grow it unbounded.
+const maxViewers = 64
+
+// handlePresence upserts a viewer heartbeat. Token-gated: only sessions
+// holding the room token appear on the roster, so the roster itself never
+// leaks to a blind local caller.
+func (rs *roomServer) handlePresence(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct{ ID, Name string }
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body) != nil || strings.TrimSpace(body.ID) == "" {
+		http.Error(w, "id is required", http.StatusBadRequest)
+		return
+	}
+	name := strings.TrimSpace(body.Name)
+	if name == "" {
+		name = "operator"
+	}
+	if len(name) > 32 {
+		name = name[:32]
+	}
+	now := time.Now()
+	rs.vmu.Lock()
+	if rs.viewers == nil {
+		rs.viewers = map[string]*roomViewer{}
+	}
+	rs.sweepViewersLocked(now)
+	if _, ok := rs.viewers[body.ID]; !ok && len(rs.viewers) >= maxViewers {
+		rs.vmu.Unlock()
+		http.Error(w, "viewer roster is full", http.StatusTooManyRequests)
+		return
+	}
+	rs.viewers[body.ID] = &roomViewer{name: name, lastSeen: now}
+	rs.vmu.Unlock()
+	writeJSONResp(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// sweepViewersLocked drops entries whose heartbeat is older than presenceTTL.
+// Callers hold vmu.
+func (rs *roomServer) sweepViewersLocked(now time.Time) {
+	for id, v := range rs.viewers {
+		if now.Sub(v.lastSeen) > presenceTTL {
+			delete(rs.viewers, id)
+		}
+	}
+}
+
+// viewerRoster returns the live viewers, expired entries swept, stable order.
+func (rs *roomServer) viewerRoster(now time.Time) []viewerInfo {
+	rs.vmu.Lock()
+	defer rs.vmu.Unlock()
+	rs.sweepViewersLocked(now)
+	out := make([]viewerInfo, 0, len(rs.viewers))
+	for _, v := range rs.viewers {
+		out = append(out, viewerInfo{Name: v.name, Idle: int(now.Sub(v.lastSeen) / time.Second)})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
+		}
+		return out[i].Idle < out[j].Idle
+	})
+	return out
+}
+
+// roomFeed is the /api/room response: the audit rollup plus the live roster.
+type roomFeed struct {
+	policy.Summary
+	Viewers []viewerInfo `json:"viewers"`
 }
 
 // cmdRoom serves the interactive Control Room on a local address. With mesh
@@ -126,6 +225,9 @@ func cmdRoom(args []string) error {
 	// the operator was handed. /api/ls is included: it makes an outbound mesh
 	// dial under the room's identity, so an unauthenticated caller could
 	// enumerate any reachable backend through the room (a confused deputy).
+	// Presence heartbeats are token-gated too: only sessions the operator
+	// opened with the token appear on the multiplayer roster.
+	mux.HandleFunc("/api/presence", rs.requireToken(rs.handlePresence))
 	mux.HandleFunc("/api/ls", rs.requireToken(rs.handleLs))
 	mux.HandleFunc("/api/call", rs.requireToken(rs.handleCall))
 	mux.HandleFunc("/api/shell", rs.requireToken(rs.handleShell))
@@ -217,9 +319,10 @@ func originAllowed(origin, addr string) bool {
 const maxTargets = 64
 
 func (rs *roomServer) handleRoom(w http.ResponseWriter, r *http.Request) {
+	viewers := rs.viewerRoster(time.Now())
 	f, err := os.Open(rs.auditPath)
 	if err != nil {
-		writeJSONResp(w, http.StatusOK, policy.Summary{}) // no log yet is normal
+		writeJSONResp(w, http.StatusOK, roomFeed{Viewers: viewers}) // no log yet is normal
 		return
 	}
 	defer f.Close()
@@ -228,7 +331,7 @@ func (rs *roomServer) handleRoom(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSONResp(w, http.StatusOK, sum)
+	writeJSONResp(w, http.StatusOK, roomFeed{Summary: sum, Viewers: viewers})
 }
 
 func (rs *roomServer) handleCaps(w http.ResponseWriter, r *http.Request) {
@@ -386,6 +489,10 @@ h1 .dot{width:9px;height:9px;border-radius:50%;background:var(--ok);box-shadow:0
 .chain{padding:5px 11px;border-radius:6px;font-size:12px;font-weight:600}
 .chain.ok{color:var(--ok);background:color-mix(in srgb,var(--ok) 12%,transparent);border:1px solid color-mix(in srgb,var(--ok) 30%,transparent)}
 .chain.bad{color:var(--deny);background:color-mix(in srgb,var(--deny) 12%,transparent);border:1px solid color-mix(in srgb,var(--deny) 35%,transparent)}
+.viewers{display:flex;align-items:center;gap:4px}
+.viewers .vav{width:22px;height:22px;border-radius:50%;display:grid;place-items:center;font-size:10px;font-weight:700;color:#fff;border:1px solid var(--line)}
+.viewers .vav.idle{opacity:.45}
+.viewers .vcount{font-size:11px;color:var(--faint);margin-left:3px}
 .spacer{margin-left:auto}.caps{font-size:11px;color:var(--faint);display:flex;gap:10px}
 .caps b{color:var(--fg)}.caps .on{color:var(--ok)}.caps .off{color:var(--faint)}
 .kpis{display:flex;gap:22px}.kpi{display:flex;flex-direction:column;align-items:flex-end}
@@ -432,6 +539,7 @@ main{display:grid;grid-template-columns:1.5fr 1fr;gap:14px;padding:16px 20px}
 <header>
   <h1><span class="dot"></span> meshmcp <span style="color:var(--dim)">· control room</span></h1>
   <span id="chain" class="chain" role="status" aria-live="polite">…</span>
+  <span class="viewers" id="viewers" aria-label="operators watching this room"></span>
   <span class="caps" id="caps"></span>
   <div class="spacer"></div>
   <div class="kpis">
@@ -475,8 +583,21 @@ function hhmmss(ts){var d=new Date(ts);return isNaN(d)?'':d.toTimeString().slice
 /* ---- live view ---- */
 var seenSeq=0,firstLoad=true,caps={mesh:false,local_shell:false};
 function el(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e}
+/* multiplayer presence: a per-tab id + name heartbeat, rendered as avatars */
+var viewerId=(function(){try{var k=sessionStorage.getItem('roomViewerId');if(!k){k=Math.random().toString(36).slice(2,10);sessionStorage.setItem('roomViewerId',k)}return k}catch(e){return Math.random().toString(36).slice(2,10)}})();
+var viewerName=(function(){try{return localStorage.getItem('roomViewerName')||('operator-'+viewerId.slice(0,4))}catch(e){return 'operator-'+viewerId.slice(0,4)}})();
+function renderViewers(list){
+  var vs=$('viewers');if(!vs)return;vs.textContent='';
+  (list||[]).forEach(function(v){
+    var nm=v.name||'operator';var a=el('span','vav'+(v.idle>5?' idle':''),(nm[0]||'?').toUpperCase());
+    a.title=nm+(v.idle>5?' · idle '+v.idle+'s':'');a.style.background='hsl('+hue(nm)+',55%,45%)';vs.appendChild(a);
+  });
+  if((list||[]).length>1)vs.appendChild(el('span','vcount',list.length+' watching'));
+}
 function tick(){
+  if(window.__ROOM_TOKEN){post('/api/presence',{id:viewerId,name:viewerName}).catch(function(){})}
   fetch('/api/room').then(function(r){return r.json()}).then(function(s){
+    renderViewers(s.viewers);
     var c=$('chain');
     if(!s.records){c.className='chain';c.textContent='no records yet';}
     else if(s.chain&&s.chain.OK){c.className='chain ok';c.textContent='✓ chain intact · '+s.chain.Count;}
