@@ -317,9 +317,12 @@ func (e *Engine) decideTool(peerFQDN, peerKey, backend, tool string, args []byte
 			}
 			return Decision{RuleID: i, Outcome: OutcomeDeny, Reason: reason}
 		}
-		if r.Rate != nil && !e.allowRate(i, peerKey, *r.Rate, now) {
-			return Decision{RuleID: i, Outcome: OutcomeDeny,
-				Reason: fmt.Sprintf("rate limit exceeded (max %d per %s)", r.Rate.Max, r.Rate.window())}
+		if r.Rate != nil {
+			if ok, retryAfter := e.allowRate(i, peerKey, *r.Rate, now); !ok {
+				return Decision{RuleID: i, Outcome: OutcomeDeny,
+					Reason:     fmt.Sprintf("rate limit exceeded (max %d per %s)", r.Rate.Max, r.Rate.window()),
+					RetryAfter: retryAfter}
+			}
 		}
 		if r.RequireCosign {
 			// Request-bound approvals (preferred): a signed, single-use approval
@@ -370,10 +373,14 @@ func firstPresent(want []string, have map[string]bool) string {
 }
 
 // allowRate consumes one token from the (rule, identity) bucket, refilling by
-// elapsed time. Returns false when the bucket is empty.
-func (e *Engine) allowRate(ruleID int, peerKey string, rl RateLimit, now time.Time) bool {
+// elapsed time. On an empty bucket it returns ok=false plus the time until the
+// bucket will have refilled enough tokens for this call's cost — derived from
+// the bucket's actual deficit and refill rate, so callers can surface an
+// honest Retry-After. A cost the bucket can never hold (cost > max) denies
+// with a zero retryAfter: no hint is honest when no wait can ever admit it.
+func (e *Engine) allowRate(ruleID int, peerKey string, rl RateLimit, now time.Time) (ok bool, retryAfter time.Duration) {
 	if rl.Max <= 0 {
-		return true
+		return true, 0
 	}
 	key := strconv.Itoa(ruleID) + "|" + peerKey
 	perSec := float64(rl.Max) / e.perSeconds(rl)
@@ -400,9 +407,23 @@ func (e *Engine) allowRate(ruleID int, peerKey string, rl RateLimit, now time.Ti
 	}
 	if b.tokens >= cost {
 		b.tokens -= cost
-		return true
+		return true, 0
 	}
-	return false
+	// A cost larger than the bucket's capacity (cost > max, a misconfigured
+	// rule) can never be admitted: tokens cap at max < cost no matter how long
+	// the caller waits. Suppress the hint — a finite retryAfter here would
+	// promise an admission that will never happen and send an honoring client
+	// into an infinite back-off/retry loop.
+	if cost > float64(rl.Max) {
+		return false, 0
+	}
+	// Deficit / refill-rate = seconds until the call would be admitted. Clamp
+	// to at least 1ms so rounding never reports "retry now" on a deny.
+	retryAfter = time.Duration((cost - b.tokens) / perSec * float64(time.Second))
+	if retryAfter < time.Millisecond {
+		retryAfter = time.Millisecond
+	}
+	return false, retryAfter
 }
 
 func (e *Engine) perSeconds(rl RateLimit) float64 {

@@ -129,7 +129,7 @@ func (e *httpEnforcer) decide(peer, peerKey string, r *http.Request) (ok bool, s
 		if reason == "" {
 			reason = "denied by mesh policy"
 		}
-		return false, http.StatusOK, jsonRPCError(class.ID, fmt.Sprintf("tool %q blocked for peer %s: %s", class.Tool, peer, reason))
+		return false, http.StatusOK, policy.DenialBody(class.ID, fmt.Sprintf("tool %q blocked for peer %s: %s", class.Tool, peer, reason), dec.RetryAfter)
 	}
 }
 

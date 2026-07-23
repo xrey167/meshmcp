@@ -60,10 +60,33 @@ func dialMCP(o *meshOptions, target string) (*mcpclient.Client, func(), error) {
 	return mc, cleanup, nil
 }
 
+// lsOutput is the machine-readable form of `ls --json`. Resources/prompts are
+// optional MCP capabilities; a backend without them lists as empty slices.
+type lsOutput struct {
+	Tools     []mcpclient.Tool     `json:"tools"`
+	Resources []mcpclient.Resource `json:"resources"`
+	Prompts   []mcpclient.Prompt   `json:"prompts"`
+}
+
+// marshalLsOutput renders the listing as indented JSON with no null slices.
+func marshalLsOutput(out lsOutput) ([]byte, error) {
+	if out.Tools == nil {
+		out.Tools = []mcpclient.Tool{}
+	}
+	if out.Resources == nil {
+		out.Resources = []mcpclient.Resource{}
+	}
+	if out.Prompts == nil {
+		out.Prompts = []mcpclient.Prompt{}
+	}
+	return json.MarshalIndent(out, "", "  ")
+}
+
 // cmdLs lists a backend's tools, resources, and prompts.
 func cmdLs(args []string) error {
 	fs := flag.NewFlagSet("ls", flag.ExitOnError)
 	o := meshFlags(fs)
+	jsonOut := fs.Bool("json", false, "emit the listing as JSON on stdout")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -81,17 +104,38 @@ func cmdLs(args []string) error {
 	if err != nil {
 		return err
 	}
+	// Resources/prompts are optional capabilities: a backend that lacks them
+	// errors here, which lists as absent (text) / empty (json).
+	res, resErr := mc.ListResources(ctx)
+	pr, prErr := mc.ListPrompts(ctx)
+
+	if *jsonOut {
+		out := lsOutput{Tools: tools}
+		if resErr == nil {
+			out.Resources = res
+		}
+		if prErr == nil {
+			out.Prompts = pr
+		}
+		b, err := marshalLsOutput(out)
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(b))
+		return nil
+	}
+
 	fmt.Println("TOOLS:")
 	for _, t := range tools {
 		fmt.Printf("  %-20s %s\n", t.Name, t.Description)
 	}
-	if res, err := mc.ListResources(ctx); err == nil {
+	if resErr == nil {
 		fmt.Println("RESOURCES:")
 		for _, r := range res {
 			fmt.Printf("  %-28s %s\n", r.URI, r.Description)
 		}
 	}
-	if pr, err := mc.ListPrompts(ctx); err == nil {
+	if prErr == nil {
 		fmt.Println("PROMPTS:")
 		for _, p := range pr {
 			fmt.Printf("  %-20s %s\n", p.Name, p.Description)
