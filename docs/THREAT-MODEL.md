@@ -131,9 +131,15 @@ An adversary who can write the audit file (but lacks the signing key).
 
 - **Honest guarantee:** meshmcp guarantees in-order frame **delivery** and
   duplicate suppression on reconnect. It does **not** guarantee exactly-once
-  tool **execution**. After an ambiguous side effect, a non-idempotent tool call
-  is not automatically retried (Phase 6, in progress). Do not retry an
-  unknown-outcome mutating call without an enforced idempotency key.
+  tool **execution**. By default an unknown-outcome `tools/call` is never
+  auto-retried after dispatch. The router's per-upstream `retry_tools` globs
+  let the OPERATOR classify specific tools as idempotent/read-only: a matching
+  call is re-dispatched to another replica after an ambiguous transport
+  failure, and every dispatch carries the same
+  `_meta["meshmcp.io/idempotency-key"]` so a cooperating backend can
+  deduplicate. The key is conveyed, not enforced — a backend that ignores it
+  executes a retried call twice, so classify only tools where that is safe.
+  Unlisted tools keep the deny-default.
 
 ### 9. Concurrent gateways restoring the same session (split-brain)
 
