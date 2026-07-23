@@ -75,7 +75,7 @@ func cmdOrchestrate(args []string) error {
 	}
 
 	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt)
+	signal.Notify(sig, shutdownSignals...)
 	go func() { <-sig; ln.Close() }()
 
 	for {

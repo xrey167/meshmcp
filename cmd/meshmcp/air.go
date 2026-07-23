@@ -550,7 +550,7 @@ func cmdAirAgentSteer(args []string) error {
 	}
 	defer stopMesh(client)
 
-	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	signalCtx, stop := signal.NotifyContext(context.Background(), shutdownSignals...)
 	defer stop()
 	deliveryCtx, cancel := context.WithTimeout(signalCtx, *deliveryTimeout)
 	defer cancel()

@@ -74,7 +74,7 @@ func cmdGraphRAG(args []string) error {
 		return fmt.Errorf("listen on mesh port %d: %w", cfg.ListenPort, err)
 	}
 	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt)
+	signal.Notify(sig, shutdownSignals...)
 	go func() { <-sig; ln.Close() }()
 
 	dial := func(ctx context.Context, addr string) (net.Conn, error) { return client.Dial(ctx, "tcp", addr) }

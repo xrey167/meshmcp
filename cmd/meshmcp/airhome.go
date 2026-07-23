@@ -80,7 +80,7 @@ func cmdAirHome(args []string) error {
 	}
 
 	if *watch {
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+		ctx, stop := signal.NotifyContext(context.Background(), shutdownSignals...)
 		defer stop()
 		fmt.Fprintln(os.Stderr, dim("watching ")+bold(control)+dim(" · Ctrl-C to stop"))
 		ticker := time.NewTicker(*interval)

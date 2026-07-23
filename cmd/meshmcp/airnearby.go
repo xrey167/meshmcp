@@ -102,7 +102,7 @@ func cmdAirNearby(args []string) error {
 		return render(out)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), shutdownSignals...)
 	defer stop()
 	ticker := time.NewTicker(*interval)
 	defer ticker.Stop()
@@ -189,7 +189,7 @@ func cmdAirNode(args []string) error {
 	}
 	defer cleanup()
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), shutdownSignals...)
 	defer stop()
 	first, err := postPresence(ctx, hc, announcement)
 	if err != nil {

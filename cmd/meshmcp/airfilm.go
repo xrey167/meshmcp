@@ -223,7 +223,7 @@ func filmPlay(args []string) error {
 		fmt.Fprintln(os.Stderr, filmStatusLine(man))
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), shutdownSignals...)
 	defer stop()
 
 	var prev time.Time
