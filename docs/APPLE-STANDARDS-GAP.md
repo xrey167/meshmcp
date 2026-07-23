@@ -20,7 +20,7 @@ with an accessibility contract, and a served Air app that actually implements mu
 What is missing is almost everything that surrounds engineering in an Apple launch: **the
 product is not legally runnable (license unresolved), has never been released (zero git
 tags), cannot be installed without a Go toolchain and a third-party SaaS account, and
-ships ~40 CLI verbs and 10 side binaries where Apple would ship five polished surfaces.**
+ships ~40 CLI verbs and 9 side binaries where Apple would ship five polished surfaces.**
 The gap is not "build more features" — it is *finish the shell around the core*: legality,
 distribution, focus, native surfaces, quality gates, and the support/business scaffolding.
 
@@ -171,12 +171,17 @@ retire the concept-mockup pages; align the marketing site to the product tokens.
 ### 7. No structured logging, no support bundle, no guided recovery
 
 `doctor` (pre-flight), `status` (ledger rollup), and `probe` (live handshake) are real and
-good. But: there is no logging framework at all (stdlib `log` + **242** raw
-`fmt.Fprintln(os.Stderr, …)` calls in `cmd/meshmcp` alone), no log levels or documented log
-locations for the CLI itself, no `sysdiagnose`-style support bundle, and no guided recovery
-when the mesh is unreachable or pairing fails — a declined pairing surfaces as
-`air join: request declined` with the remote reason *intentionally dropped*
-(`airnearby.go:447`) and nothing telling the user what to do next.
+good. But: there is no structured-logging framework at all (stdlib `log` + **~242** raw
+stderr writes — 216 `fmt.Fprintln` + 26 `fmt.Fprintf(os.Stderr, …)` — in `cmd/meshmcp`
+alone), no log levels for meshmcp's *own* output (the `--log-level` flag and `mesh.log_level`
+config key exist but feed only NetBird's embedded client, not the CLI's own writes), no
+documented log locations, no `sysdiagnose`-style support bundle, and no guided recovery when
+the mesh is unreachable or pairing fails — a declined pairing surfaces only as
+`✗ your request was declined.` / `air join: request declined` (`airpaircli.go:107-108`) with
+nothing telling the user what to do next. (The pairing protocol carries no reason field at
+all — `Deny` takes only a public key, `air/pairing.go:217` — so no reason *could* be shown;
+an earlier draft misattributed this to `airnearby.go:447`, which is unrelated presence-error
+sanitization.)
 
 **Fix:** adopt `log/slog` with levels behind `--verbose`/`MESHMCP_LOG`; add
 `meshmcp diag --bundle` (config-sanitized, audit tail, doctor output, versions, mesh
@@ -218,14 +223,23 @@ The primitives exist (pairing store with `air pair revoke`, capability revocatio
 approver ACLs) — but there is no human-facing lifecycle: no documented or guided **"my
 laptop was stolen"** flow (revoke the peer everywhere: paired store + policy + NetBird +
 capabilities, in one command), no key rotation UX, no identity backup/escrow story
-(Apple: iCloud Keychain, Find My revocation), and approvals are still ambient per
-(peer, tool) rather than request-bound — the project's own Phase 3. No external security
-audit or pentest is referenced anywhere; for a security product approaching 1.0, a
-third-party audit is table stakes.
+(Apple: iCloud Keychain, Find My revocation). No external security audit or pentest is
+referenced anywhere; for a security product approaching 1.0, a third-party audit is table
+stakes.
+
+> **Correction (post-audit verification).** An earlier draft here claimed "approvals are
+> still ambient per (peer, tool) rather than request-bound." That is **wrong** — it echoed
+> the stale limits column of `docs/CAPABILITY-MATRIX.md:26` instead of the code.
+> Request-bound, signed, single-use approval tokens **are** implemented and wired into the
+> live co-sign path for stdio backends (filter → `DecideToolCallBound` → atomic
+> `ConsumeApproval`; the approver mints argument-bound tokens via
+> `meshmcp approvals --approval-key`; the gateway enforces when a backend sets
+> `approval_signing_key` — see `docs/spec/SECURITY-CLOSURE.md` F-P3.2). The real gap is
+> the stale documentation, and that HTTP-backend parity remains a follow-up.
 
 **Fix:** `meshmcp revoke-device <name>` as one atomic, audited operation + a RUNBOOK doc;
-implement Phase 3 request-bound approvals before any 1.0 claim; document identity
-backup/rotation; budget for an external audit and say so in SECURITY.md.
+reconcile the stale approvals docs with the shipped request-bound implementation; document
+identity backup/rotation; budget for an external audit and say so in SECURITY.md.
 
 ### 11. Internationalization does not exist
 
@@ -241,9 +255,11 @@ German as the proving second locale.
 ### 12. There is no company behind the curtain
 
 No issue/PR templates, no CODEOWNERS, no code of conduct, no support doc or channel beyond
-"contact the maintainer through their GitHub profile" (SECURITY.md), no privacy policy for
-the GitHub Pages demo (which requests **camera, screen, and mic** in-browser — even if
-processing is local, Apple would ship a privacy sheet saying so), no pricing/edition
+"contact the maintainer through their GitHub profile" (SECURITY.md), no privacy note for
+the GitHub Pages demo (which is in fact media-free — **no** `getUserMedia`/`getDisplayMedia`
+call exists anywhere, so an earlier "requests camera, screen, and mic" claim here was wrong;
+the pages only take drag-and-drop file input over locally-simulated data, and a one-line
+"everything runs locally in your browser" note would be cheap and true), no pricing/edition
 model (the license decision blocks this too), no crash reporting or opt-in analytics of
 any kind (privacy-pure, but it means zero field-quality signal), and a bus factor of one.
 The name **"Air"** with explicit AirDrop analogies carries real trademark exposure — the
@@ -261,8 +277,10 @@ marketing hardens around it; and a written support/pricing intention even if it 
 ## Polish gaps — the last 10% that Apple actually does
 
 - **Static pages break the a11y contract the served app keeps.** `site/air.html` and
-  `site/knowledge-canvas.html`: zero ARIA, zero `prefers-reduced-motion`, dark-only.
-  `dash`/`approvals`/`room`: no focus styles. The marketing site's skip link uses
+  `site/knowledge-canvas.html`: zero ARIA, zero `prefers-reduced-motion`, dark-only. (The
+  served admin pages `dash`/`approvals`/`room` are *not* in this bucket — an earlier draft
+  said they "lack focus styles," but all three link the shared `agent-os.css`, which defines
+  a global `:focus-visible` outline with `!important`.) The marketing site's skip link uses
   `left:-9999px` instead of visible-on-focus.
 - **Docs are for engineers, not users.** Thirty-plus excellent specs, but no task-oriented
   user manual ("Share a folder with your other laptop", "Approve from your phone") and the
@@ -276,6 +294,57 @@ marketing hardens around it; and a written support/pricing intention even if it 
   regressions as release blockers — that requires baselines first (see gap 9).
 - **Version surfacing.** `-X main.version` is wired in release.yml, but with no releases,
   `meshmcp --version` semantics, update checks, and "what's new" surfaces are all unproven.
+
+---
+
+## Post-audit verification: corrections and newly-confirmed gaps
+
+This report was re-checked by an adversarial verification pass (skeptics attacking each
+load-bearing claim against the code, plus a hostile QA read of the report itself and a
+missed-gap hunt). Corrections are folded inline above (approvals-are-request-bound in gap
+10, the pairing-decline file/mechanism and stderr-count in gap 7, the demo-media claim and
+focus-styles claim in gap 12/polish, the side-binary count in the verdict). The verification
+also **confirmed nine gaps this report had missed** — mostly day-2 operability, exactly the
+unglamorous surface Apple gets right and prototypes skip:
+
+- **A crash can brick the gateway.** Audit appends are never `fsync`ed (`policy/audit.go`
+  `write()` is a bare `w.Write`), so power loss mid-append can leave a torn tail; the next
+  start re-reads and refuses to append to an unverifiable log, with no repair/rotate path
+  and an O(n) full re-verify every boot. *Major.*
+- **No schema versioning or migration for any durable store** — audit records, paired-peer
+  store, grant store, session checkpoints, handoff store, and the YAML config all lack a
+  format/version marker, so an upgrade or downgrade can silently lose or reject data. *Major.*
+- **All state is CWD-relative.** No `os.UserConfigDir`/XDG use and no config discovery;
+  `air init`/`air up` scaffold `meshmcp.yaml`, `./audit.jsonl`, and the WireGuard key
+  relative to the current directory — so running from a different folder silently forks a
+  second mesh identity and a second (empty) ledger. *Major.*
+- **SIGTERM is never handled** by the long-running commands (`serve` and ~20 others trap
+  only `os.Interrupt`), so under systemd/Docker every stop is an ungraceful kill — no clean
+  audit flush, no session drain. (The new `meshmcp edge` is the one exception; it traps
+  SIGTERM.) *Major.*
+- **No day-2 config lifecycle.** Every policy/ACL change — add a backend, open a tool rule
+  for a newly paired agent, widen `control.allow` — is hand-edited YAML plus a full gateway
+  restart. No hot reload, no CLI that writes config. *Major.*
+- **The CLI remembers nothing between runs** — no profile, no default gateway, no
+  `MESHMCP_*` fallback beyond `MESHMCP_NO_COLOR`; every command re-types `--control`. *Major.*
+- **No second-human-operator onboarding.** There is a polished flow for a second *device/
+  agent* (`air join` → `air pair approve` → `air grant`) but none for a second *operator*
+  who should also approve pairings and co-sign calls; the co-sign approver identity is
+  self-asserted `$USER`. *Major.*
+- **No uninstall / leave-the-mesh story.** The word "uninstall" appears nowhere; deleting
+  the binary leaves a live NetBird-enrolled identity and a WireGuard private key on disk
+  (`./meshmcp-nb.json`). Apple always ships a clean removal path. *Major.*
+- **The marketing page's quick start is broken and its "19 commands" claim is stale** — the
+  root `index.html` still headlines "19 commands" while the CLI ships ~40 verbs, and none of
+  the Air surface appears in it. *Polish.*
+
+**Resolved this session.** One ecosystem gap the report implied — *no way for a hosted MCP
+client that cannot join the mesh (e.g. claude.ai custom connectors) to connect* — is now
+addressed: `meshmcp edge` ships an off-by-default, tool-scoped public OAuth ingress (see
+`docs/COOKBOOK.md` recipe 13 and the recorded decision in
+`docs/spec/OAUTH-STANDARDS.md`). It does, however, introduce the project's first public
+ingress, softening the headline invariant to "no public ingress **by default**" — a
+deliberate, documented trade recorded in the threat model (adversaries 12–13).
 
 ---
 
