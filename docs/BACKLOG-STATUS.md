@@ -16,7 +16,7 @@ content lands in BACKLOG.md.
 | 4 | Steer hosting decision | **done** | Decided (a): agent-runtime concern; rationale in AIR-ECOSYSTEM.md (shipped with task 3) |
 | 5 | Transactional Handoff v2 | todo | After 7+8; the flagship |
 | 6 | Spaces / `group:` fan-out | todo | |
-| 7 | Idempotency-key enforcement | todo | mcp framework middleware + pgstore table |
+| 7 | Idempotency-key enforcement | **done** | mcp.Idempotency middleware + Mem/PG claim stores; review fixed (tool,key) scoping |
 | 8 | Lease renewal + standby sweep | todo | |
 | 9 | HTTP per-session policy parity | todo | |
 | 10 | AKS pillars 1–3 | todo | Phase 4 stays deferred by design |

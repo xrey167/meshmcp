@@ -36,4 +36,14 @@ const (
 	jti    TEXT PRIMARY KEY,
 	expiry TIMESTAMPTZ NOT NULL
 )`
+
+	// Idempotency claims (mcp.ClaimStore): the primary-key insert is the
+	// atomic claim; done/result record the terminal outcome (result NULL =
+	// executed but uncacheable). Rows expire at expiry — the dedup horizon.
+	ddlIdemClaims = `CREATE TABLE IF NOT EXISTS %s (
+	key    TEXT PRIMARY KEY,
+	expiry TIMESTAMPTZ NOT NULL,
+	done   BOOLEAN NOT NULL DEFAULT FALSE,
+	result BYTEA
+)`
 )
