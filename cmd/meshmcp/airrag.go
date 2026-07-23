@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/xrey167/meshmcp/air/know"
+	"github.com/xrey167/meshmcp/embed"
 	"github.com/xrey167/meshmcp/policy"
 )
 
@@ -54,7 +56,7 @@ func cmdAirRag(args []string) error {
 
 func ragUsage() error {
 	fmt.Fprintln(os.Stderr, bold("meshmcp air rag")+dim(" — governed hybrid retrieval over the mesh"))
-	fmt.Fprintln(os.Stderr, "  "+bold("air rag serve")+"   --port N --index f [--corpus c] [--allow id] [--grant id=c,c] [--audit f]")
+	fmt.Fprintln(os.Stderr, "  "+bold("air rag serve")+"   --port N --index f [--allow id] [--grant id=c,c] [--audit f] [--embed-url u --embed-model m [--embed-key-env E]]")
 	fmt.Fprintln(os.Stderr, "  "+bold("air rag ingest")+"  <backend-ip:port> --corpus c [PATH ...]   "+dim("chunk + index documents (stdin if no PATH)"))
 	fmt.Fprintln(os.Stderr, "  "+bold("air rag search")+"  <backend-ip:port> --corpus c [--k N] [--json] \"query\"")
 	fmt.Fprintln(os.Stderr, dim("  v1 = governed hybrid RETRIEVAL (dense + BM25 + RRF). Answer generation is deferred (requires an LLM backend)."))
@@ -251,6 +253,9 @@ func cmdAirRagServe(args []string) error {
 	grantFlags := multiFlag{}
 	fs.Var(&grantFlags, "grant", "corpus grant id=corpus[,corpus] (id is an FQDN glob or pubkey:<key>); repeatable")
 	auditPath := fs.String("audit", "", "append every retrieval/ingest to this hash-chained JSONL ledger")
+	embedURL := fs.String("embed-url", "", "OpenAI-compatible embeddings endpoint (e.g. http://127.0.0.1:11434/v1/embeddings); empty keeps the local hashing embedder")
+	embedModel := fs.String("embed-model", "", "embedding model name (required with --embed-url)")
+	embedKeyEnv := fs.String("embed-key-env", "", "environment variable holding the endpoint's bearer token (optional; fail-closed if named but empty)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -275,7 +280,20 @@ func cmdAirRagServe(args []string) error {
 	if st, err := client.Status(); err == nil {
 		peer = st.LocalPeerState.FQDN
 	}
-	store, err := newRagStore(*index, peer, *chunk, *overlap)
+	var embedder embed.Embedder
+	if *embedURL != "" {
+		if *embedModel == "" {
+			return errors.New("air rag serve: --embed-model is required with --embed-url")
+		}
+		embedder, err = embed.NewHTTP(*embedURL, *embedModel, *embedKeyEnv, log.Printf)
+		if err != nil {
+			return fmt.Errorf("air rag serve: %w", err)
+		}
+		fmt.Fprintln(os.Stderr, okLine("semantic embeddings via %s (model %s, %d dims)", *embedURL, *embedModel, embedder.Dim()))
+	} else if *embedModel != "" || *embedKeyEnv != "" {
+		return errors.New("air rag serve: --embed-model/--embed-key-env require --embed-url")
+	}
+	store, err := newRagStore(*index, peer, *chunk, *overlap, embedder)
 	if err != nil {
 		return fmt.Errorf("air rag serve: open store: %w", err)
 	}

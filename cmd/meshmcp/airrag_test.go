@@ -15,7 +15,7 @@ import (
 // documents across two corpora.
 func newTestRagStore(t *testing.T) *ragStore {
 	t.Helper()
-	s, err := newRagStore("", "backend.mesh", 40, 8)
+	s, err := newRagStore("", "backend.mesh", 40, 8, nil)
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestRagIngest_RequiresExactWriteGrant(t *testing.T) {
 // TestRagRoundTrip_IngestThenSearch is the client-shape round trip: ingest a doc
 // with an exact grant, then retrieve it, over one handler.
 func TestRagRoundTrip_IngestThenSearch(t *testing.T) {
-	store, err := newRagStore("", "backend.mesh", 40, 8)
+	store, err := newRagStore("", "backend.mesh", 40, 8, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
