@@ -233,12 +233,120 @@ The next useful additions are shared layers, not more unrelated verbs:
 | **Air Keychain UX** | Reuse authority safely | Synchronize logical references and re-issue destination-bound grants; never synchronize raw secrets or source-bound tokens. |
 | **Find Work** | Locate task/session/artifact | Search identity-stamped presence, catalogs, receipts, CAS, and task/session views from Air Home. |
 
-True live session movement is a later protocol, not a UI toggle. It requires a
-session v2 with client cursor snapshot/restore, an exact-target single-use
-handoff token, owner epochs and fencing, atomic freeze/drain, and backend
-context export/import. Exactly-once byte delivery must remain distinct from
-exactly-once tool execution.
+True live session movement is a distinct protocol, not a UI toggle. Its first
+slice now ships (next section): owner epochs and fencing, an exact-target
+single-use grant, and atomic freeze/commit. Exactly-once byte delivery remains
+distinct from exactly-once tool execution.
 
 The product rule remains simple: every new experience uses **a transport-derived
 identity, destination-side authority, and one correlation ID across every
 receipt-producing boundary**.
+
+## Live session move (v2 — first slice)
+
+Where Handoff v1 moves an inert Context Capsule for continuation in a *fresh*
+session, **Live Session Move** relocates the OWNERSHIP of one already-running
+session from a source gateway to a destination gateway — the backend's live
+state travels, and the same creator reattaches to the destination and keeps
+going. This is the hardest correctness surface in the repo (two runtimes must
+NEVER both process one session's traffic), so v1 is scoped honestly and every
+edge is tested.
+
+### What v1 does
+
+A deliberate, operator/creator-initiated **prepare → ready → commit** move of one
+live session, driven gateway-to-gateway by `session.Server`:
+
+```text
+source gateway (owns @G, serving)        destination gateway
+       │                                        │
+       │  PREPARE {session, gen G, mode}        │
+       ├───────────────────────────────────────►│  spawn + (replay) backend into a
+       │                                        │  warming map — NO lease, NO client
+       │◄───────────────────────────────────────┤  READY   (still source@G everywhere)
+       │  freeze: detach client + final ckpt @G │
+       │  COMMIT {session, gen G}               │
+       ├───────────────────────────────────────►│  consume single-use grant, then the
+       │                                        │  ONE TakeoverLease CAS  G → G+1,
+       │                                        │  promote warm backend to serving
+       │◄───────────────────────────────────────┤  COMMITTED {gen G+1}
+       │  yield (fenced; DeleteIfOwner no-op)   │
+```
+
+- The **source keeps owning and serving** at generation G through PREPARE and
+  READY. It freezes (detaches the client, drains to a quiescent boundary, writes
+  a final checkpoint at G) only after READY, and it does **not** release its
+  lease — quiesce ≠ release.
+- The **destination only pre-warms**: it spawns (and, for the replay mode,
+  handshake-replays) the backend into a separate `warming` map, taking **no
+  lease**, registering **no** live session, pumping **no** client.
+- **Commit is one generation-fenced CAS** — the same `TakeoverLease` G→G+1 the
+  reactive failover paths already use. The destination promotes its warm backend
+  to serving **only after** that CAS wins; the source's next `SaveIfOwned`/renew
+  then fails (fenced) and it yields.
+
+### Supported backend modes
+
+| Mode | v1 | How the move handles it |
+|---|---|---|
+| `MigrateBackend` (checkpoint-capable / EventStore) | **Supported** | Warm spawn restores from `MESHMCP_SESSION_ID`; no replay; the backend is authoritative and dedups any residual, so no source drain is required. The warm backend takes no input while parked, so there is never a double-writer to the shared store during the warm window. |
+| `MigrateHandshake` (stateless) | **Supported** | Warm spawn replays and discards the captured handshake; the source detaches and drains to a quiescent request/response boundary before the final checkpoint, or **refuses** the move if it cannot be shown quiescent (deny-by-default). |
+| `MigrateFull` (re-executes the whole input log) | **Refused** at prepare | Re-execution would duplicate external side effects. |
+| stateful with no checkpoint / no EventStore | **Refused** at prepare | No safe reconstruction: replay duplicates side effects and there is no state to restore. |
+| degraded generation-0 (never held a lease) | **Refused** | Unfenceable, so a move could split-brain. |
+
+### The invariants it preserves
+
+1. **Single-writer.** Commit is ONE `TakeoverLease` CAS; the destination serves
+   only after it owns; the source freezes its client before the final checkpoint
+   and is hard-fenced by the generation bump. At no instant do two runtimes
+   process the session's traffic.
+2. **Resumable by exactly one.** The source holds the live lease at G through
+   every pre-commit step, and the CAS is a single indivisible flip: a crash
+   before it leaves the source resumable at G; a crash after it leaves the
+   destination resumable at G+1 — never both, never neither. The full
+   crash-recovery matrix is proven deterministically (`session/move_test.go`,
+   `-count=20`).
+3. **Identity untouched.** `TakeoverLease` stays reserved for the
+   verified-creator reattach. The operator move instead gates commit on a
+   **consumed single-use grant** — "this destination may receive this one
+   session, once" (`air move grant`, consumed exactly once at commit via
+   `air.ConsumeMoveGrant`) — never an arbitrary peer. The client that later
+   attaches to the moved session is still the creator (`CreatorKey` unchanged).
+4. **Additive.** New `session/move.go` + a `warming` map + an inert
+   `endpoint.detach()` + a control verb. No new `MigrationMode`; v1 Handoff, the
+   reactive rehydrate, the standby sweep, and clean shutdown are all unchanged.
+
+### What v1 is NOT (scope boundary)
+
+- It does **not** redirect the client. The move relocates ownership and
+  pre-warms the destination; the creator lands on the destination by the same
+  client-driven reattach + mesh discovery that crash-failover already uses (an
+  operator draining a gateway redirects discovery to the destination). Do not
+  point the client at the destination before commit succeeds. A creator that
+  instead reattaches to the source after commit is a normal, allowed creator
+  reattach (the source re-takes via `TakeoverLease` at the new generation).
+- It is **not** exactly-once tool execution — exactly-once *byte* delivery
+  across the move stays distinct from exactly-once *tool* execution.
+- The prepare/ready/commit transfer is a **gateway-to-gateway** operation
+  (`session.Server.MoveSessionTo` / `ServeMoveControl`), pinned to the exact
+  destination key like Handoff. The CLI ships the one discrete operator action —
+  `air move grant` (the single-use destination authorization); wiring the
+  transfer trigger into the long-running gateway's control plane is the next
+  step.
+
+### Tested
+
+- `session/move_test.go`: the full crash-recovery matrix (crash at prepare,
+  after ready, pre-commit, mid-commit, after-CAS-before-promote, post-commit,
+  dest-mid-prepare), abort at every pre-commit step, idempotent commit,
+  single-use/unauthorized/unsupported-mode refusals, and the end-to-end happy
+  path for both supported modes (client reattaches to the destination on the
+  pre-warmed backend, source fenced) — deterministic under `-count=20`.
+- `session/storetest.RunSessionLiveMove`: the public-API move proven against
+  `MemStore` on every run and live PostgreSQL (`pgstore`) when
+  `MESHMCP_TEST_PG_DSN` is set — the store-observable ownership swap and source
+  fence across what would be separate hosts.
+- `air/move_grant_test.go`: the single-use grant is consumed exactly once,
+  scoped to the exact (destination, session), deny-by-default, revocable, and
+  durable.

@@ -221,15 +221,46 @@ An adversary who can write the audit file (but lacks the signing key).
   reattach-driven path that remains supported there). Proven by renew/sweep
   race tests (`session/sweep_race_test.go`) plus the end-to-end
   paused-gateway flow.
-- **Limit:** there is no exactly-once tool execution across a failover (§8),
-  and adoption resumes from the owner's last checkpoint — a failover taken
-  mid-request keeps handshake-mode's existing in-flight-response window.
-  `FileStore`'s CAS holds only on a single host / lock-correct shared
-  filesystem, and only for crash-or-alive holders (a process paused past the
-  10s lock-staleness window has its lock stolen; the pre-commit token check
-  shrinks, but cannot close, the resulting write-back window) — cross-host
-  deployments and the standby sweep need the PostgreSQL store
-  (`session_store: postgres://...`).
+- **Defended (deliberate live move, v2 first slice):** ownership of ONE live
+  session can be moved from a source gateway to a destination gateway on operator
+  command, in a two-phase prepare → ready → commit protocol
+  (`session.Server.MoveSessionTo` / `ServeMoveControl`), WITHOUT reopening the
+  split-brain window. The source keeps owning and serving at generation G through
+  prepare and ready; the destination only PRE-WARMS (spawns/restores its backend
+  in a `warming` map, takes NO lease, pumps NO client). Commit is the SAME single
+  `TakeoverLease` generation-CAS the reactive paths use — the one indivisible flip
+  G→G+1 — and the destination promotes its warm backend to serving ONLY after that
+  CAS wins; the source freezes its client (detach + final checkpoint at G) BEFORE
+  commit and is hard-fenced by the generation bump (its next `SaveIfOwned`/renew
+  fails → yields). So at no instant do two runtimes process the session's traffic,
+  and a crash at ANY step leaves exactly one resumable owner: before the CAS the
+  source holds the live lease at G (quiesce ≠ release) and resumes; after the CAS
+  the destination owns G+1 and resumes; never both, never neither. This is
+  additive — no new `MigrationMode`, and reactive rehydrate/adopt/sweep are
+  unchanged. Identity is untouched: `TakeoverLease` stays reserved for the
+  verified-creator reattach, and the operator move instead gates commit on a
+  CONSUMED single-use grant ("this destination may receive this one session, once"
+  — `air move grant` / `air.ConsumeMoveGrant`), never an arbitrary peer. v1
+  supports only `MigrateHandshake` (stateless; source drains to a quiescent
+  request boundary or refuses) and `MigrateBackend` (checkpoint-capable; the
+  backend is authoritative and dedups any residual); `MigrateFull` and
+  no-checkpoint stateful backends are refused at prepare (deny-by-default), as are
+  degraded generation-0 (unfenceable) sessions. Proven by the full crash-recovery
+  matrix in `session/move_test.go` (deterministic, `-count=20`) and the
+  public-API `storetest.RunSessionLiveMove` conformance against `MemStore` and
+  live PostgreSQL.
+- **Limit:** there is no exactly-once tool execution across a failover (§8) OR a
+  move, and adoption/move resumes from the owner's last checkpoint — a failover
+  taken mid-request keeps handshake-mode's existing in-flight-response window, and
+  the live move does not itself redirect the client (the creator lands on the
+  destination by the same client-driven reattach + mesh discovery, so the operator
+  redirects discovery as part of the drain; a creator that reattaches to the
+  source post-commit is a normal, allowed creator reattach). `FileStore`'s CAS
+  holds only on a single host / lock-correct shared filesystem, and only for
+  crash-or-alive holders (a process paused past the 10s lock-staleness window has
+  its lock stolen; the pre-commit token check shrinks, but cannot close, the
+  resulting write-back window) — cross-host deployments, the standby sweep, and
+  cross-host live moves need the PostgreSQL store (`session_store: postgres://...`).
 
 ### 10. Malformed / adversarial JSON-RPC
 
