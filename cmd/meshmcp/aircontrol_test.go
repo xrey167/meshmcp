@@ -239,9 +239,10 @@ func TestAirControlPresenceRequiresDirectKeyAndKnownMethod(t *testing.T) {
 // an audit collector, so per-backend ACL and on-behalf attribution are testable.
 func handlerWithIdentity(c airController, pubKey, fqdn string, audit func(airSteerAudit)) http.Handler {
 	id := func(*http.Request) (string, string) { return pubKey, fqdn }
-	// Trust the connecting peer as an on-behalf proxy so the on-behalf tests
-	// that use this helper exercise attribution; the general allow is open.
-	return airControlHandler(c, id, newACL(nil), newACL([]string{"pubkey:" + pubKey}), audit)
+	// The control surface is default-deny (an empty allow admits no one), so the
+	// caller is granted explicitly; it is ALSO trusted as an on-behalf proxy so the
+	// on-behalf tests that use this helper exercise attribution.
+	return airControlHandler(c, id, newACL([]string{"pubkey:" + pubKey}), newACL([]string{"pubkey:" + pubKey}), audit)
 }
 
 func TestAirControlPerBackendACL(t *testing.T) {
@@ -389,8 +390,8 @@ func TestAirControlOnBehalfRequiresProxyAllow(t *testing.T) {
 	var recs []airSteerAudit
 	h := airControlHandler(c,
 		func(*http.Request) (string, string) { return "relaykey", "relay.mesh" },
-		newACL(nil), // general allow: open (any identified peer)
-		newACL(nil), // on-behalf proxies: none → fail closed
+		newACL([]string{"pubkey:relaykey"}), // general allow: this peer may reach the endpoint
+		newACL(nil),                         // on-behalf proxies: none → fail closed
 		func(r airSteerAudit) { recs = append(recs, r) })
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/steer", strings.NewReader(steerBody))
@@ -411,7 +412,7 @@ func TestAirControlOnBehalfRequiresProxyAllow(t *testing.T) {
 	recs = nil
 	h = airControlHandler(c,
 		func(*http.Request) (string, string) { return "relaykey", "relay.mesh" },
-		newACL(nil),
+		newACL([]string{"pubkey:relaykey"}),
 		newACL([]string{"pubkey:relaykey"}), // this relay may attest
 		func(r airSteerAudit) { recs = append(recs, r) })
 	rr = httptest.NewRecorder()
@@ -577,5 +578,58 @@ func TestBuildCatalogBackendsRejectsExplicitDerivedIDCollision(t *testing.T) {
 	}, "100.64.0.2", owner)
 	if err == nil || !strings.Contains(err.Error(), "collides") {
 		t.Fatalf("explicit/derived component id collision accepted: %v", err)
+	}
+}
+
+// TestAirControlEmptyACLFailsClosed is the regression test for the
+// control-endpoint fail-open: acl.allows returns true for an EMPTY pattern list,
+// so a privileged surface that gated only on allow.allows() would admit every
+// identified mesh peer once its ACL was emptied. The control gates must also
+// check allow.empty() → deny. Every privileged route must 403 under an empty
+// control ACL, even for an otherwise-identified caller.
+func TestAirControlEmptyACLFailsClosed(t *testing.T) {
+	c := &fakeAirControl{list: []AirSession{{Backend: "fs", ID: "9f2a"}}}
+	id := func(*http.Request) (string, string) { return "key1", "caller.mesh" }
+	h := airControlHandler(c, id, newACL(nil), newACL(nil), nil)
+
+	privileged := []struct{ method, path, body string }{
+		{http.MethodGet, "/v1/sessions", ""},
+		{http.MethodGet, "/v1/presence", ""},
+		{http.MethodPost, "/v1/presence", `{"name":"x"}`},
+		{http.MethodPost, "/v1/steer", `{"backend":"fs","id":"1","method":"tools/list"}`},
+	}
+	for _, tc := range privileged {
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body)))
+		if rr.Code != http.StatusForbidden {
+			t.Errorf("%s %s with empty control ACL: status = %d, want 403 (fail-closed); body=%s",
+				tc.method, tc.path, rr.Code, rr.Body)
+		}
+	}
+}
+
+// TestAirControlReloadToEmptyFailsClosed reproduces the exact SIGHUP scenario: a
+// control endpoint that started with a non-empty allow, whose ACL is later
+// swapped to empty (a reload that set control.port to 0 with an emptied allow).
+// Handlers share the acl's atomic pointer, so the swap is observed live — and the
+// surface must then DENY, not admit every mesh peer through the fail-open window.
+func TestAirControlReloadToEmptyFailsClosed(t *testing.T) {
+	c := &fakeAirControl{list: []AirSession{{Backend: "fs", ID: "9f2a"}}}
+	id := func(*http.Request) (string, string) { return "key1", "caller.mesh" }
+	allow := newACL([]string{"pubkey:key1"}) // admitted at startup
+	h := airControlHandler(c, id, allow, newACL(nil), nil)
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/v1/sessions", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("pre-swap: status = %d, want 200: %s", rr.Code, rr.Body)
+	}
+
+	allow.swap(nil) // a reload empties the ACL — the fail-open window
+
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/v1/sessions", nil))
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("post-empty-swap: status = %d, want 403 (fail-closed): %s", rr.Code, rr.Body)
 	}
 }

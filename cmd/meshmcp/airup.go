@@ -41,7 +41,7 @@ func cmdAirUp(args []string) error {
 	// forking a new one.
 	if _, statErr := os.Stat(cfgPath); errors.Is(statErr, os.ErrNotExist) {
 		if !*asJSON {
-			fmt.Println(dim("no config at " + cfgPath + " — scaffolding a safe default"))
+			fmt.Println(dim(fmt.Sprintf(tr("no config at %s — scaffolding a safe default"), cfgPath)))
 		}
 		cfg, summary, err := buildScaffoldConfig(scaffoldOptions{OutPath: cfgPath, DeviceName: *name, BaseDir: scaffoldBaseDir()})
 		if err != nil {
@@ -146,7 +146,7 @@ func setupKeyEnvName(m MeshConfig) string {
 // printUpStatus prints the calm "your mesh is coming up" header before serve
 // takes over the terminal.
 func printUpStatus(s air.ScaffoldSummary) {
-	fmt.Println(okLine("bringing up %s", bold(s.DeviceName)))
+	fmt.Println(okLine(tr("bringing up %s"), bold(s.DeviceName)))
 	audit := "off"
 	if s.AuditLog != "" {
 		audit = "on (" + s.AuditLog + ")"
@@ -159,15 +159,15 @@ func printUpStatus(s air.ScaffoldSummary) {
 	if s.PairAddress != "" {
 		fmt.Println("  pair at  " + cyan(s.PairAddress) + dim("  — peers can request access with `air join` (coming)"))
 	}
-	fmt.Println(dim("  joining the mesh…"))
+	fmt.Println("  " + dim(tr("joining the mesh…")))
 }
 
 // printSetupKeyGuidance prints the single next step when the setup key is
 // absent — friendly, done-for-you tone, not a stack trace.
 func printSetupKeyGuidance(s air.ScaffoldSummary) {
-	fmt.Fprintln(os.Stderr, amber("!")+" one step left — your mesh setup key isn't set.")
+	fmt.Fprintln(os.Stderr, amber("!")+" "+tr("one step left — your mesh setup key isn't set."))
 	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, "  Get a key from your NetBird dashboard, then:")
+	fmt.Fprintln(os.Stderr, "  "+tr("Get a key from your NetBird dashboard, then:"))
 	fmt.Fprintln(os.Stderr, "      "+bold("export "+s.SetupKeyEnv+"=<key>"))
 	fmt.Fprintln(os.Stderr, "      "+bold("air up"))
 }

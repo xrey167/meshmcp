@@ -255,16 +255,16 @@ func printJSONValue(v any) error {
 // created is false it is the `air up` status header for an existing config.
 func printScaffoldSummary(s air.ScaffoldSummary, created bool) {
 	if created {
-		fmt.Println(okLine("wrote %s", bold(s.ConfigPath)))
+		fmt.Println(okLine(tr("wrote %s"), bold(s.ConfigPath)))
 	} else {
-		fmt.Println(okLine("using %s", bold(s.ConfigPath)))
+		fmt.Println(okLine(tr("using %s"), bold(s.ConfigPath)))
 	}
 	fmt.Println()
-	fmt.Println(bold("  Safe by default"))
-	fmt.Println("    " + green("●") + " deny-by-default — no tool is reachable until you grant it")
-	fmt.Println("    " + green("●") + " audit on — " + dim(s.AuditLog))
+	fmt.Println(bold("  " + tr("Safe by default")))
+	fmt.Println("    " + green("●") + " " + tr("deny-by-default — no tool is reachable until you grant it"))
+	fmt.Println("    " + green("●") + " " + tr("audit on — ") + dim(s.AuditLog))
 	fmt.Println()
-	fmt.Println(bold("  Identity"))
+	fmt.Println(bold("  " + tr("Identity")))
 	fmt.Println("    device   " + cyan(s.DeviceName))
 	for _, b := range s.Backends {
 		fmt.Printf("    backend  %s %s\n", b.Name, dim(fmt.Sprintf("(%s, port %d)", b.Transport, b.Port)))
@@ -272,11 +272,11 @@ func printScaffoldSummary(s air.ScaffoldSummary, created bool) {
 	fmt.Println("    pair at  " + cyan(s.PairAddress) + dim("  — peers request access with `air join`; you approve with `air pair approve`"))
 	fmt.Println()
 	if s.SetupKeyFound {
-		fmt.Println("  " + green("✓") + " mesh key detected " + dim("($"+s.SetupKeyEnv+")"))
+		fmt.Println("  " + green("✓") + " " + tr("mesh key detected") + " " + dim("($"+s.SetupKeyEnv+")"))
 		fmt.Println()
-		fmt.Println("  Next:  " + bold("air up"))
+		fmt.Println("  " + tr("Next:") + "  " + bold("air up"))
 	} else {
-		fmt.Println("  " + amber("!") + " one step left — set your mesh setup key:")
+		fmt.Println("  " + amber("!") + " " + tr("one step left — set your mesh setup key:"))
 		fmt.Println("      " + bold("export "+s.SetupKeyEnv+"=<key from your NetBird dashboard>"))
 		fmt.Println("      " + bold("air up"))
 	}

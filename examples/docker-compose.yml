@@ -1,0 +1,27 @@
+# meshmcp gateway in one compose file. The mesh is userspace WireGuard, so no
+# capabilities, devices, or host networking are needed — the container runs
+# fully unprivileged. State (mesh identity, config, audit ledger) persists in
+# the named volume; without it the peer would re-enroll fresh on every
+# replacement.
+#
+#   NB_SETUP_KEY=<key from app.netbird.io> docker compose up -d
+#
+# First run scaffolds a safe-by-default config (deny-by-default, audit on)
+# into the volume; edit /data/meshmcp.yaml inside the volume to add your real
+# backends, then `docker compose kill -s HUP meshmcp` hot-reloads policy and
+# ACL changes without a restart.
+services:
+  meshmcp:
+    build: ..            # or: image: ghcr.io/xrey167/meshmcp:latest once published
+    container_name: meshmcp
+    restart: unless-stopped
+    environment:
+      NB_SETUP_KEY: ${NB_SETUP_KEY:?set NB_SETUP_KEY to your NetBird setup key}
+      # MESHMCP_LOG: debug         # leveled logging (debug|info|warn|error)
+    volumes:
+      - meshmcp-data:/data
+    # `docker compose stop` sends SIGTERM: the gateway drains sessions and
+    # flushes the audit ledger before exiting (10s default grace is plenty).
+
+volumes:
+  meshmcp-data:
