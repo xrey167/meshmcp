@@ -102,7 +102,8 @@ func cmdServe(args []string) error {
 			return fmt.Errorf("open shared audit log %s: %w", cfg.AuditLog, err)
 		}
 		sharedAudit = policy.NewAuditLog(f, func() string { return time.Now().UTC().Format(time.RFC3339) }).
-			WithFailClosed(cfg.AuditFailClosed)
+			WithFailClosed(cfg.AuditFailClosed).
+			WithSync(auditFsyncEnabled(cfg.AuditFsync))
 		if seq > 0 {
 			sharedAudit.SeedFrom(seq, lastHash) // continue the chain across restart
 			log.Printf("shared audit ledger: resumed from seq %d", seq)
@@ -633,14 +634,23 @@ func seedAuditFromExisting(path string) (seq int, lastHash string, err error) {
 	if len(bytes.TrimSpace(data)) == 0 {
 		return 0, "", nil
 	}
-	res, verr := policy.VerifyChain(bytes.NewReader(data))
-	if verr != nil {
-		return 0, "", verr
+	res, truncateTo, torn := policy.VerifyForRepair(data)
+	if res.OK {
+		return res.Count, res.LastHash, nil
 	}
-	if !res.OK {
-		return 0, "", fmt.Errorf("existing audit log %s is unverifiable (break at seq %d: %s); refusing to append and reset the chain", path, res.BreakSeq, res.Reason)
+	if torn {
+		// A crash/power-loss left an incomplete trailing record. Everything
+		// before it verified, so recover by truncating the torn line — never a
+		// complete record — and continue the same chain. A mid-chain tamper is
+		// NOT torn and falls through to the hard refusal below.
+		if err := os.Truncate(path, truncateTo); err != nil {
+			return 0, "", fmt.Errorf("audit log %s: repairing torn tail: %w", path, err)
+		}
+		log.Printf("audit log %s: recovered an incomplete trailing record (%s); truncated to %d bytes, resuming from seq %d",
+			path, res.Reason, truncateTo, res.Count)
+		return res.Count, res.LastHash, nil
 	}
-	return res.Count, res.LastHash, nil
+	return 0, "", fmt.Errorf("existing audit log %s is unverifiable (break at seq %d: %s); refusing to append and reset the chain", path, res.BreakSeq, res.Reason)
 }
 
 // seedCheckpointFromExisting returns the last checkpoint's ordinal and hash from
@@ -689,7 +699,11 @@ func auditSink(b *Backend) (*policy.AuditLog, error) {
 		w = f
 	}
 	now := func() string { return time.Now().UTC().Format(time.RFC3339) }
-	audit := policy.NewAuditLog(w, now).WithFailClosed(b.AuditFailClosed)
+	// Sync only a real file sink — fsyncing the stderr fallback (a terminal or
+	// pipe) can error and would wrongly deny calls under fail-closed.
+	audit := policy.NewAuditLog(w, now).
+		WithFailClosed(b.AuditFailClosed).
+		WithSync(b.AuditLog != "" && auditFsyncEnabled(b.AuditFsync))
 	if seedSeq > 0 {
 		audit.SeedFrom(seedSeq, seedHash) // continue the chain across restart
 		log.Printf("backend %q: audit resumed from seq %d", b.Name, seedSeq)

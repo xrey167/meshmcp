@@ -40,6 +40,11 @@ type Config struct {
 	// AuditFailClosed makes the gateway-wide shared ledger a hard control:
 	// a record that cannot be written denies the call. Off by default.
 	AuditFailClosed bool `yaml:"audit_fail_closed"`
+	// AuditFsync fsyncs each committed audit record so the tamper-evident ledger
+	// survives power loss (not just a process crash). ON BY DEFAULT — a nil value
+	// means true; set `audit_fsync: false` to opt out on throughput-sensitive
+	// deployments (one fsync per audited decision has a real hot-path cost).
+	AuditFsync *bool `yaml:"audit_fsync"`
 	// AuditWebhook POSTs audit records to an external URL (SIEM / Slack /
 	// PagerDuty) via a best-effort observer sink. AuditWebhookAll forwards every
 	// record; by default only deny/cosign records are sent.
@@ -152,6 +157,9 @@ type Backend struct {
 	// sends audit records to stderr. The log is a tamper-evident hash chain
 	// (verify it with "meshmcp audit verify").
 	AuditLog string `yaml:"audit_log"`
+	// AuditFsync fsyncs each committed record (power-loss durability). On by
+	// default (nil = true); set audit_fsync: false to opt out.
+	AuditFsync *bool `yaml:"audit_fsync"`
 	// AuditCheckpoints is a file for signed Merkle checkpoints over the audit
 	// log, making it non-repudiable and externally verifiable. Requires a
 	// signing key (audit_signing_key). Verify with
@@ -273,6 +281,10 @@ func (b *Backend) kind() string {
 // input, template them into a fixed schema rather than unmarshalling them
 // directly. Everything the config *governs* (peers, tool calls) remains
 // untrusted and is enforced at request time.
+// auditFsyncEnabled resolves the tri-state audit_fsync setting: a nil pointer
+// means the default (on), matching the "durable by default, opt out" posture.
+func auditFsyncEnabled(p *bool) bool { return p == nil || *p }
+
 func loadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

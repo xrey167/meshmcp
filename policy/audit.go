@@ -67,6 +67,7 @@ type AuditLog struct {
 	lastHash string
 
 	failClosed bool        // when set, a failed write is surfaced to deny the call
+	sync       bool        // when set, fsync each record so it survives power loss
 	secondary  []AuditSink // observer sinks (SIEM, webhook, OTel) — best-effort
 }
 
@@ -99,6 +100,22 @@ func (a *AuditLog) WithFailClosed(on bool) *AuditLog {
 
 // FailClosed reports whether a write failure should deny the call.
 func (a *AuditLog) FailClosed() bool { return a != nil && a.failClosed }
+
+// WithSync makes each committed record durable before write returns: after the
+// record is written and the chain cursor advances, the underlying sink is
+// fsync'd (when it supports Sync — a real *os.File does; test buffers/pipes do
+// not, and are silently skipped). Without it, a committed record survives a
+// process crash (it is in the page cache) but not power loss. A sink whose
+// Sync fails is surfaced like a write failure, so a fail-closed enforcement
+// point denies the call rather than proceed on a record it could not make
+// durable. On by default at the production call sites (opt out via config);
+// off for the raw NewAuditLog constructor so tests and in-memory sinks are
+// unaffected. It costs one fsync per audited decision — see the throughput note
+// where it is wired.
+func (a *AuditLog) WithSync(on bool) *AuditLog {
+	a.sync = on
+	return a
+}
 
 // WithCheckpointer attaches a signed-checkpoint sink: the log periodically
 // emits an Ed25519-signed Merkle commitment over its records, making it
@@ -225,12 +242,25 @@ func (a *AuditLog) write(rec AuditRecord) error {
 		return fmt.Errorf("audit: write record: %w", err)
 	}
 
-	// Commit: the record is durably queued, so advance the chain cursor.
+	// Commit: the record is written, so advance the chain cursor. (The cursor
+	// advances BEFORE the fsync below so a fsync failure cannot desync the
+	// in-memory cursor from the record already on disk — the record is part of
+	// the chain; fsync only concerns its power-loss durability.)
 	a.seq = nextSeq
 	a.prev = h
 	a.lastSeq, a.lastHash = rec.Seq, h
 	if a.cp != nil {
 		a.cp.add(rec.Seq, h)
+	}
+	// Durability: fsync the committed record when enabled and the sink supports
+	// it. A Sync failure is surfaced (fail-closed denies the call) rather than
+	// silently accepting a record we could not make durable.
+	if a.sync {
+		if f, ok := a.w.(interface{ Sync() error }); ok {
+			if err := f.Sync(); err != nil {
+				return fmt.Errorf("audit: fsync record: %w", err)
+			}
+		}
 	}
 	// Fan out to observer sinks (best-effort — the chain above is the control).
 	for _, s := range a.secondary {
