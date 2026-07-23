@@ -243,8 +243,8 @@ func main() {
 		err = cmdUninstall(os.Args[2:])
 	case "revoke-device":
 		err = cmdRevokeDevice(os.Args[2:])
-	case "version":
-		fmt.Println(version)
+	case "version", "--version":
+		printVersion()
 	case "-h", "--help", "help":
 		if len(os.Args) > 2 && os.Args[2] == "all" {
 			usageAll()
