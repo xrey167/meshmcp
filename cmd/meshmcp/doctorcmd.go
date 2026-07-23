@@ -6,13 +6,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+
+	"github.com/xrey167/meshmcp/pgstore"
 )
 
 // cmdDoctor runs local pre-flight checks on a config without joining the mesh
 // (S47): it validates the config, confirms each stdio backend's command is
 // resolvable, and checks that audit / cosign / session-store directories are
-// writable and secrets files are owner-only. It reports every problem it finds
-// and exits non-zero if any are fatal — a CI-safe readiness gate.
+// writable (a postgres session_store is instead pinged: connectivity only, no
+// schema changes — doctor stays side-effect-free) and secrets files are
+// owner-only. It reports every problem it finds and exits non-zero if any are
+// fatal — a CI-safe readiness gate.
 func cmdDoctor(args []string) error {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	cfgPath := fs.String("config", "meshmcp.yaml", "config file to check")
@@ -42,9 +46,18 @@ func cmdDoctor(args []string) error {
 				ok("stdio command %q resolvable", cmd)
 			}
 		}
+		sessionStorePath := b.SessionStore
+		if isPostgresDSN(b.SessionStore) {
+			sessionStorePath = "" // checked below as a database, not a directory
+			if err := pgstore.Check(b.SessionStore); err != nil {
+				warn("session_store %s unreachable: %v", redactDSN(b.SessionStore), err)
+			} else {
+				ok("session_store %s reachable (schema is applied by serve)", redactDSN(b.SessionStore))
+			}
+		}
 		for label, path := range map[string]string{
 			"audit_log": b.AuditLog, "audit_checkpoints": b.AuditCheckpoints,
-			"cosign_store": b.CosignStore, "session_store": b.SessionStore,
+			"cosign_store": b.CosignStore, "session_store": sessionStorePath,
 		} {
 			if path == "" {
 				continue

@@ -20,6 +20,7 @@ import (
 	"github.com/netbirdio/netbird/client/embed"
 
 	"github.com/xrey167/meshmcp/air"
+	"github.com/xrey167/meshmcp/pgstore"
 	"github.com/xrey167/meshmcp/policy"
 	"github.com/xrey167/meshmcp/registry"
 	"github.com/xrey167/meshmcp/secrets"
@@ -386,9 +387,17 @@ func serveResumable(client *embed.Client, b *Backend, ln net.Listener, shutdown 
 		log.Printf("backend %q: "+format, append([]any{b.Name}, a...)...)
 	})
 	if b.SessionStore != "" {
-		store, err := session.NewFileStore(b.SessionStore)
+		var store session.SessionStore
+		var err error
+		display := b.SessionStore
+		if isPostgresDSN(b.SessionStore) {
+			display = redactDSN(b.SessionStore)
+			store, err = pgstore.Open(b.SessionStore)
+		} else {
+			store, err = session.NewFileStore(b.SessionStore)
+		}
 		if err != nil {
-			log.Printf("backend %q: session_store %s unusable: %v (migration disabled)", b.Name, b.SessionStore, err)
+			log.Printf("backend %q: session_store %s unusable: %v (migration disabled)", b.Name, display, err)
 		} else {
 			mode := session.MigrateHandshake
 			switch b.SessionStoreMode {
@@ -402,7 +411,7 @@ func serveResumable(client *embed.Client, b *Backend, ln net.Listener, shutdown 
 			if modeName == "" {
 				modeName = "handshake"
 			}
-			log.Printf("backend %q: session migration enabled via %s (mode=%s)", b.Name, b.SessionStore, modeName)
+			log.Printf("backend %q: session migration enabled via %s (mode=%s)", b.Name, display, modeName)
 		}
 	}
 	if register != nil {

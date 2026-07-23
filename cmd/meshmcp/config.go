@@ -134,9 +134,11 @@ type Backend struct {
 	SessionTTLSeconds int `yaml:"session_ttl_seconds"`
 	// SessionStore is a directory where resumable session state is
 	// checkpointed, so another gateway process sharing this directory can
-	// resume a session after a failover. Only valid for resumable stdio
-	// backends; migration replays the handshake against a fresh backend, so
-	// the backend must be stateless per request.
+	// resume a session after a failover. A postgres:// (or postgresql://)
+	// DSN checkpoints state in PostgreSQL instead, whose lease CAS is safe
+	// for multi-gateway HA. Only valid for resumable stdio backends;
+	// migration replays the handshake against a fresh backend, so the
+	// backend must be stateless per request.
 	SessionStore string `yaml:"session_store"`
 	// SessionStoreMode selects how a resumed backend is reconstructed:
 	// "handshake" (default, stateless backends), "full" (replay the whole
