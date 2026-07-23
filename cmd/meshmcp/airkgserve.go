@@ -13,6 +13,7 @@ import (
 	"github.com/xrey167/meshmcp/air"
 	"github.com/xrey167/meshmcp/air/know"
 	"github.com/xrey167/meshmcp/air/knowstore"
+	"github.com/xrey167/meshmcp/federation"
 	"github.com/xrey167/meshmcp/kg"
 	"github.com/xrey167/meshmcp/policy"
 )
@@ -88,8 +89,11 @@ func kgPatternMatches(pattern, pubKey, fqdn string) bool {
 // resolves the caller's (pubkey, fqdn); allow gates reachability; bridge maps the
 // caller to its corpora (static --grant map ∪ dynamic grant-on-request store);
 // audit records reachability refusals on the shared chain (the facade audits every
-// governed op itself, so the two land on one ledger).
-func kgControlHandler(f *knowstore.Facade, identify func(*http.Request) (pubkey, fqdn string), allow acl, bridge *kgGrantBridge, audit policy.AuditSink) http.Handler {
+// governed op itself, so the two land on one ledger). boundary (optional) is the
+// cross-org federation gate for delta sync: a delta request naming an org is
+// additionally checked against Boundary.CheckCorpus — deny-by-default, so with a
+// nil boundary every cross-org delta is refused.
+func kgControlHandler(f *knowstore.Facade, identify func(*http.Request) (pubkey, fqdn string), allow acl, bridge *kgGrantBridge, boundary *federation.Boundary, audit policy.AuditSink) http.Handler {
 	mux := http.NewServeMux()
 
 	// reach resolves and gates the caller. On refusal it writes the 403, audits a
@@ -138,6 +142,79 @@ func kgControlHandler(f *knowstore.Facade, identify func(*http.Request) (pubkey,
 			return
 		}
 		writeJSONResp(w, http.StatusOK, receipt)
+	})
+
+	mux.HandleFunc("/v1/kg/supersede", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		var body kgSupersedeBody
+		if !decodeJSONBody(w, r, &body) {
+			return
+		}
+		if body.Corpus == "" || body.OldID == "" || body.S == "" || body.P == "" || body.O == "" {
+			http.Error(w, "corpus, old_id, s, p and o are all required", http.StatusBadRequest)
+			return
+		}
+		pubKey, fqdn, ok := reach(w, r, body.Corpus)
+		if !ok {
+			return
+		}
+		caller := bridge.caller(pubKey, fqdn, body.Corpus, true)
+		receipt, err := f.Supersede(caller, body.OldID, knowstore.AssertRequest{
+			Corpus: body.Corpus, S: body.S, P: body.P, O: body.O,
+			Source: body.Source, ValidFrom: body.ValidFrom,
+		})
+		if err != nil {
+			writeKGError(w, err)
+			return
+		}
+		writeJSONResp(w, http.StatusOK, receipt)
+	})
+
+	mux.HandleFunc("/v1/kg/delta", func(w http.ResponseWriter, r *http.Request) {
+		if !getOnly(w, r) {
+			return
+		}
+		q := r.URL.Query()
+		corpus := q.Get("corpus")
+		if corpus == "" {
+			http.Error(w, "corpus is required", http.StatusBadRequest)
+			return
+		}
+		pubKey, fqdn, ok := reach(w, r, corpus)
+		if !ok {
+			return
+		}
+		// Cross-org narrowing: a request that claims an org must ALSO pass the
+		// federation corpus grant. Deny-by-default: naming an org with no
+		// boundary configured refuses (an empty grant shares nothing); the
+		// boundary self-audits its own decision when configured. The org claim
+		// can only narrow — the caller's own corpus grant is still enforced by
+		// the facade below.
+		if org := q.Get("org"); org != "" {
+			if boundary == nil {
+				if audit != nil {
+					_ = audit.Append(know.Retrieve(know.Event{
+						Peer: fqdnOr(fqdn), PeerKey: pubKey, Corpus: corpus,
+						Decision: "deny", Reason: "cross-org delta: no federation grants configured (deny-by-default)",
+					}))
+				}
+				http.Error(w, "cross-org delta not granted", http.StatusForbidden)
+				return
+			}
+			if allow, reason := boundary.CheckCorpus(org, corpus); !allow {
+				http.Error(w, "cross-org delta not granted: "+reason, http.StatusForbidden)
+				return
+			}
+		}
+		recs, err := f.Delta(bridge.caller(pubKey, fqdn, corpus, false), corpus, kgSince(q.Get("since")))
+		if err != nil {
+			writeKGError(w, err)
+			return
+		}
+		writeJSONResp(w, http.StatusOK, kgRecordsResp{Records: nonNilRecords(recs)})
 	})
 
 	mux.HandleFunc("/v1/kg/query", func(w http.ResponseWriter, r *http.Request) {
@@ -268,6 +345,14 @@ func kgAsOf(s string) int {
 	return 0
 }
 
+// kgSince parses a delta watermark; blank or malformed means 0 (the whole log).
+func kgSince(s string) int {
+	if n, err := strconv.Atoi(s); err == nil && n > 0 {
+		return n
+	}
+	return 0
+}
+
 // kgHops parses the subgraph depth, defaulting to 2 and clamping the ceiling so a
 // caller cannot request an unboundedly deep walk.
 func kgHops(s string) int {
@@ -316,6 +401,8 @@ func cmdAirKGServe(args []string) error {
 	pairStorePath := fs.String("pair-store", "", "recognized-peer store (air pairing); only a recognized peer's denied request records a grant opportunity")
 	operatorFlags := multiFlag{}
 	fs.Var(&operatorFlags, "operator", "identity permitted to administer grants (allow/deny/revoke/pending); FQDN glob or pubkey:<key>; repeatable; fail-closed if empty")
+	orgGrantFlags := multiFlag{}
+	fs.Var(&orgGrantFlags, "org-grant", "cross-org delta grant: <org>=<corpus-glob>[,<corpus-glob>...]; repeatable; empty = no org may pull deltas (deny-by-default)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -368,6 +455,20 @@ func cmdAirKGServe(args []string) error {
 
 	facade := knowstore.New(st, audit)
 
+	// Cross-org federation boundary for delta sync (S3's second gate). Built
+	// only from operator --org-grant flags; no flags = nil boundary = every
+	// cross-org delta refused. The boundary self-audits crossings onto the same
+	// ledger when the audit sink is the real AuditLog.
+	var boundary *federation.Boundary
+	if len(orgGrantFlags) > 0 {
+		fedGrants, err := parseOrgGrants(orgGrantFlags)
+		if err != nil {
+			return fmt.Errorf("air kg serve: %w", err)
+		}
+		auditLog, _ := audit.(*policy.AuditLog)
+		boundary = federation.NewBoundary(fedGrants, nil, auditLog)
+	}
+
 	o.BlockInbound = false // we listen for callers on the mesh
 	client, err := startMesh(o, os.Stderr)
 	if err != nil {
@@ -383,7 +484,7 @@ func cmdAirKGServe(args []string) error {
 		limiter: newRingLimiter(grantRecordRatePerMin),
 		audit:   audit,
 	}
-	h := kgControlHandler(facade, identify, newACL(allow), bridge, audit)
+	h := kgControlHandler(facade, identify, newACL(allow), bridge, boundary, audit)
 
 	// Optional grant-on-request admin surface, mounted on the SAME listener as the
 	// kg endpoint so the operator's approval and the served handler's grant
@@ -403,7 +504,7 @@ func cmdAirKGServe(args []string) error {
 		return fmt.Errorf("air kg serve: listen on mesh port %d: %w", *port, err)
 	}
 	defer ln.Close()
-	fmt.Fprintf(os.Stderr, "air-kg on mesh port %d (POST /v1/kg/assert · GET /v1/kg/query · /v1/kg/neighbors · /v1/kg/subgraph · /v1/kg/verify)\n", *port)
+	fmt.Fprintf(os.Stderr, "air-kg on mesh port %d (POST /v1/kg/assert · /v1/kg/supersede · GET /v1/kg/query · /v1/kg/neighbors · /v1/kg/subgraph · /v1/kg/delta · /v1/kg/verify)\n", *port)
 	fmt.Fprintf(os.Stderr, dim("store %s · %d grant(s) · allow %v\n"), *store, len(grants), []string(allow))
 	if grantStore != nil {
 		fmt.Fprintf(os.Stderr, dim("grant-on-request on (store %s · %d operator(s) · POST /v1/grant/allow|deny|revoke · GET /v1/grant/pending)\n"), *grantStorePath, len(operatorFlags))
@@ -417,6 +518,30 @@ func cmdAirKGServe(args []string) error {
 	// Read/header timeouts even on the mesh so an admitted peer cannot hold the
 	// listener open with a slow request (Slowloris), matching the control endpoint.
 	return serveGracefully(newLocalHTTPServer("", h), ln)
+}
+
+// parseOrgGrants parses --org-grant "<org>=<corpus-glob>[,...]" flags into
+// federation grants for the cross-org delta gate. Malformed entries are hard
+// errors, mirroring parseKGGrants.
+func parseOrgGrants(flags []string) ([]federation.Grant, error) {
+	var grants []federation.Grant
+	for _, raw := range flags {
+		org, list, ok := strings.Cut(raw, "=")
+		if !ok || org == "" {
+			return nil, fmt.Errorf("bad --org-grant %q: want <org>=<corpus-glob>[,<corpus-glob>...]", raw)
+		}
+		var corpora []string
+		for _, c := range strings.Split(list, ",") {
+			if c = strings.TrimSpace(c); c != "" {
+				corpora = append(corpora, c)
+			}
+		}
+		if len(corpora) == 0 {
+			return nil, fmt.Errorf("bad --org-grant %q: no corpora listed", raw)
+		}
+		grants = append(grants, federation.Grant{Org: org, Corpora: corpora})
+	}
+	return grants, nil
 }
 
 // parseKGGrants parses --grant "<id>=<corpus>[,<corpus>...]" flags into the

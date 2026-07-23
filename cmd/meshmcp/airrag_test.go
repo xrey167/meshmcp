@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/xrey167/meshmcp/air/rag"
 	"github.com/xrey167/meshmcp/policy"
 )
 
@@ -158,6 +159,119 @@ func TestRagSearch_RowCapEnforced(t *testing.T) {
 	_ = json.Unmarshal(rr.Body.Bytes(), &out)
 	if len(out.Results) > caps.MaxRows {
 		t.Fatalf("row cap not enforced: got %d, cap %d", len(out.Results), caps.MaxRows)
+	}
+}
+
+// TestRagSearch_ByteCapEnforced proves the total-byte cap on returned context:
+// with a tiny byte budget only the first (always-admitted) result returns, no
+// matter how many hits matched.
+func TestRagSearch_ByteCapEnforced(t *testing.T) {
+	store := newTestRagStore(t)
+	for i := 0; i < 6; i++ {
+		store.Ingest("handbook", "cap"+string(rune('a'+i))+".md", "byte cap policy filler "+strings.Repeat("word ", 80))
+	}
+	caps := ragCaps{MaxRows: 20, MaxBytes: 1} // one byte: only the guaranteed first result fits
+	h := ragHandler(store, idFunc("k1", "caller.mesh"), newACL([]string{"pubkey:k1"}), grantsFor("handbook"), caps, nil)
+	rr := postJSON(h, "/v1/rag/search", ragSearchReq{Corpus: "handbook", Query: "byte cap policy filler word", K: 20})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rr.Code, rr.Body)
+	}
+	var out struct {
+		Results []ragResult `json:"results"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &out)
+	if len(out.Results) != 1 {
+		t.Fatalf("byte cap not enforced: got %d results, want exactly the first", len(out.Results))
+	}
+}
+
+// evalBackend builds an in-process served rag backend and returns a search
+// func shaped exactly like the CLI's (real HTTP round trip through the real
+// handler), for driving runRagEval without a mesh.
+func evalBackend(t *testing.T, grants ragGrants) func(query string, k int) ([]string, error) {
+	t.Helper()
+	store := newTestRagStore(t)
+	h := ragHandler(store, idFunc("k1", "caller.mesh"), newACL([]string{"pubkey:k1"}), grants, defaultRagCaps(), nil)
+	return func(query string, k int) ([]string, error) {
+		rr := postJSON(h, "/v1/rag/search", ragSearchReq{Corpus: "handbook", Query: query, K: k})
+		if rr.Code != http.StatusOK {
+			return nil, errStatus(rr.Code, rr.Body.String())
+		}
+		var out struct {
+			Results []ragResult `json:"results"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+			return nil, err
+		}
+		ids := make([]string, 0, len(out.Results))
+		for _, r := range out.Results {
+			ids = append(ids, r.ID)
+		}
+		return ids, nil
+	}
+}
+
+func errStatus(code int, body string) error {
+	return &statusErr{code: code, body: body}
+}
+
+type statusErr struct {
+	code int
+	body string
+}
+
+func (e *statusErr) Error() string { return strings.TrimSpace(e.body) }
+
+// TestRagEval_ExitsNonZeroBelowThreshold proves the CI gate: a gold set the
+// backend cannot satisfy fails the threshold with a non-nil error, while an
+// achievable gold set passes.
+func TestRagEval_ExitsNonZeroBelowThreshold(t *testing.T) {
+	search := evalBackend(t, grantsFor("handbook"))
+
+	// Deliberately wrong gold: ids that no retrieval can return.
+	bad := []rag.EvalCase{{Question: "rotate a leaked api key", Gold: []string{"nonexistent#c0"}}}
+	var buf bytes.Buffer
+	err := runRagEval(bad, search, 3, 0.5, 0.5, false, &buf)
+	if err == nil {
+		t.Fatalf("below-threshold eval must fail; output:\n%s", buf.String())
+	}
+	if !strings.Contains(err.Error(), "below threshold") {
+		t.Fatalf("unexpected failure: %v", err)
+	}
+
+	// Achievable gold: whatever the search actually returns for the question.
+	ids, err := search("rotate a leaked api key", 3)
+	if err != nil || len(ids) == 0 {
+		t.Fatalf("seed search: ids=%v err=%v", ids, err)
+	}
+	good := []rag.EvalCase{{Question: "rotate a leaked api key", Gold: ids}}
+	buf.Reset()
+	if err := runRagEval(good, search, 3, 0.5, 0.5, false, &buf); err != nil {
+		t.Fatalf("achievable gold must pass: %v\n%s", err, buf.String())
+	}
+	if !strings.Contains(buf.String(), "mean precision") {
+		t.Fatalf("summary not printed:\n%s", buf.String())
+	}
+}
+
+// TestRagEval_DeniedCorpusFailsClosed proves an ungranted caller's eval is a
+// hard error — never a silent 0.0 score that a threshold of 0 would let pass.
+func TestRagEval_DeniedCorpusFailsClosed(t *testing.T) {
+	search := evalBackend(t, grantsFor() /* no grants */)
+	cases := []rag.EvalCase{{Question: "anything", Gold: []string{"x"}}}
+	err := runRagEval(cases, search, 3, 0, 0, false, &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("denied corpus must fail the eval closed, not score 0.0")
+	}
+	if !strings.Contains(err.Error(), "search") {
+		t.Fatalf("failure must surface the denied search: %v", err)
+	}
+}
+
+// TestRagEval_EmptyGoldSetRefused proves an empty suite cannot green-light CI.
+func TestRagEval_EmptyGoldSetRefused(t *testing.T) {
+	if err := runRagEval(nil, func(string, int) ([]string, error) { return nil, nil }, 3, 0, 0, false, &bytes.Buffer{}); err == nil {
+		t.Fatal("empty gold set must be an error")
 	}
 }
 
