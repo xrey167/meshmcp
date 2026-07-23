@@ -2,7 +2,7 @@
 
 The portable, mesh-independent core of meshmcp's Air layer: the domain types and
 pure logic for **Presence**, **Activities**, discovery, steering, **Continuity
-handoffs**, Home, and declarative workflows. It has
+handoffs**, **Action receipts**, Home, and declarative workflows. It has
 no dependency on the WireGuard mesh client, the policy engine, or the session
 layer — the command-line and HTTP wiring that binds these to a live mesh lives in
 the main package, which imports this one. So the Air model can be tested and
@@ -13,6 +13,7 @@ proven here.
 
 | File | Provides |
 |------|----------|
+| `action.go` | The bounded `air.action-receipt/v1` / `air.action-result/v1` delivery-metadata contracts for Resolved Send — `ActionRecipient` (transport-stamped identity or legacy raw address), per-payload `ActionReceipt`, the `ActionResult` envelope, payload/name/total bounds, and full validation; payloads, secrets, and capability tokens never belong in a receipt |
 | `catalog.go` | `Catalog` / `CatalogEntry` discovery model — builder (`NewCatalog`/`Add`/`Sorted`/`Names`), lookup (`Entry`), filters (`Steerable`/`Resumable`), and `Valid()` + `Transport*` constants |
 | `discovery.go` | ARD (Agentic Resource Discovery) legs 2–3: `DNSRecords` generation (with zone-injection-safe validation), `ParseCatalogTXT`, `ResolveCatalog` (TXT then SRV) over injectable lookups, and `FetchCatalog` (transport-agnostic fetch+parse over an injected `http.Client`, bounded body) |
 | `presence.go` | Versioned, bounded `Announcement` / `Presence` / `Activity` contracts; verified identity and observed-address stamping; concurrency-safe TTL registry; exact friendly-name/FQDN/full-key service resolver |
