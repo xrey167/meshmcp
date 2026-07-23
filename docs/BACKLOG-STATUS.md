@@ -24,14 +24,14 @@ content lands in BACKLOG.md.
 | 12 | F31 SSO/OIDC mapping | **done** | Verified OIDC claim -> transport-key-bound additive attribution; SSO groups drive policy group: rules; transport stays root; 0 review findings |
 | 13 | F30 drag-to-handoff | **done** | Operator-gated /v1/move trigger (steer-tier auth) + Control Room --control drag gesture; auth entirely destination-side (grant), source presents no credential; truthful delivered/refused/failed |
 | 14 | Native mobile shell + APNs/FCM | **blocked** | Needs mobile toolchain + physical device |
-| 15 | S33 govulncheck in CI | **blocked-CI** | Workflow YAML can be pre-staged; unverifiable until 1 |
+| 15 | S33 govulncheck in CI | **pre-staged** | govulncheck advisory step + fork-pin audit report in ci.yml; runs when Actions unblocks (item 1) |
 | 16 | Witnessed audit anchoring | **done** | Self-linked FileAnchor + governed PeerAnchor witness + verify cross-check; review fixed hot-path stall |
-| 17 | Backend secret-egress restriction | todo | Containment scope per threat model |
+| 17 | Backend secret-egress restriction | **done** | Config-driven egress_wrapper prepended fail-closed (config-load + spawn); OS jailer enforces; honest containment-not-crypto docs |
 | 18 | OTel/OTLP exporter | **done** | Zero-dep OTLP/HTTP logs sink; drop-not-block proven; bounded shutdown drain |
-| 19 | Wave-2 minors | in-progress | Batch A done (S19 jti replay, S21 bounded dash tail, S51 audit rotation, S49 config lint); batch B queued |
+| 19 | Wave-2 minors | **done** | A: S19/S21/S51/S49 (#103); B: S44/S45/S53/S54/S55/S56 (#109); C: S57/S58/S60, S59 already-shipped, S46 sim-covered (#112) |
 | 20 | Placeholder modules | **done (scoped)** | meshmcp-app: decided no purpose (WORKSPACE-MODULES.md); cross-store doctor scoped, blocked-external (meshmcp-service has no git remote to ship to) |
 | 21 | Router delegation wiring | **done** | Minted per-call, verified when pinned, caller from token; review fixed side-effecting caller-leg |
-| 22 | Postgres CAS in CI | **blocked-CI** | Workflow YAML can be pre-staged; unverifiable until 1 |
+| 22 | Postgres CAS in CI | **pre-staged** | Postgres service job in ci.yml runs the DSN-gated pgstore/session/mcp conformance; runs when Actions unblocks (item 1) |
 | 23 | Fenced-dispatch regression test | **done** | Bound proven in handshake + backend modes |
 | 24 | FileStore lock-steal hardening | **done** | Owner-token release; steal contract preserved |
 | 25 | Thin policy test spots | **done** | 8 new test files: cosign, pending, groups, shadow, cost/quota, windows, merkle, checkpoint |

@@ -751,7 +751,7 @@ func reloadPolicies(cfgPath string, engines map[string]*policy.Engine, backends 
 // ssoStore, when non-nil, is the gateway-wide SSO attribution store (F31): its
 // bindings feed group:<name> matching alongside the static config groups.
 func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer, hook policy.EventHook, meshPubKey string, ssoStore *policy.SSOGroups) (session.BackendFactory, *policy.Engine) {
-	exec := session.ExecBackendFactory(b.Stdio[0], b.Stdio[1:], os.Environ())
+	exec := session.ExecBackendFactoryWithWrapper(b.EgressWrapper, b.Stdio[0], b.Stdio[1:], os.Environ())
 	if b.Policy == nil && tracer == nil && b.Capabilities == nil {
 		return exec, nil
 	}

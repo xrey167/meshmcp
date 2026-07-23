@@ -106,9 +106,22 @@ The enforcement point itself is compromised.
   isolation**.
 - **Limit:** Redaction defeats the trivial echo, not a determined leak. A
   malicious backend that receives an injected secret is within the secret's
-  exposure boundary and can transform it (encode, split, exfiltrate out of band).
-  Egress restriction on the backend is Labs; prefer short-lived scoped
-  credentials so an escaped value is low-value.
+  exposure boundary and can transform it (encode, split, exfiltrate out of band
+  over its own outbound socket). Response-side redaction cannot touch that path.
+- **Defense-in-depth (operator-supplied):** A backend's `egress_wrapper`
+  prepends an operator-chosen OS jailer/launcher to the backend argv (e.g.
+  `["firejail","--net=none"]`, a bwrap sandbox, or a network-namespace
+  launcher). meshmcp only WIRES the wrapper into the spawn — `wrapper[0]` is
+  exec'd with `wrapper[1:]` + the stdio command as its arguments, and the
+  wrapper is expected to exec its tail after applying containment. **The OS
+  enforces the network containment; meshmcp does not, and pure Go cannot
+  restrict a child process's egress cross-platform.** This is **containment,
+  not cryptography.** It is **fail-closed**: a configured wrapper whose
+  `wrapper[0]` cannot be resolved fails gateway startup, so a silently-unwrapped
+  backend (full egress while the operator believes it is contained) never runs.
+  The netns/firejail enforcement itself is Linux-only. Short-lived scoped
+  credentials remain the **primary** mitigation (an escaped value is low-value);
+  the wrapper cuts the residual out-of-band exfil path as defense-in-depth.
 
 ### 6. Stolen approval credentials
 
