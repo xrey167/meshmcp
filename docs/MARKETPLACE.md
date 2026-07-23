@@ -17,6 +17,22 @@ The trust model is identical to signed capabilities ([capability.go](../policy/c
 a manifest is admissible only if signed by an authority key the consumer has
 **pinned**. An unpinned signer is refused even when its own signature is valid.
 
+## Trust boundary — decided: manifests govern distribution, never execution
+
+Manifests are deliberately **not** a runtime execution gate, and this is a
+decision, not an omission. Execution is gated once, at **compile time**: a
+plugin runs because it was compiled into the binary you built (the
+no-dynamic-loading stance in [EXTENSIONS.md](EXTENSIONS.md)), and
+`meshmcp plugins` lists exactly that set. A startup manifest check over
+compiled-in code would verify a claim about bytes that are already part of the
+binary's own provenance — the binary's signature/attestation
+(`docs/RELEASE-CHECKLIST.md`, cosign) is the correct place to prove those, and
+a runtime check could add only a false sense of a second gate. What a manifest
+proves is **distribution and attribution**: who published a bundle, what its
+content hash was, who installed it, under which metered, audited grant.
+Operators who want execution-side provenance should verify the *binary*
+(cosign) rather than expect the marketplace layer to re-check itself.
+
 ## Manifest kinds
 `policy-pack` · `tool-backend` · `decision-hook` · `audit-sink`. A manifest of
 any other kind is refused at issue time.
