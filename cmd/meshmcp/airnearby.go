@@ -177,6 +177,11 @@ func cmdAirNode(args []string) error {
 	var inboxAllow multiFlag
 	fs.Var(&inboxAllow, "inbox-allow", `hosted-inbox sender ACL: FQDN glob or pubkey:<key> (repeatable; required — pass "*" to allow any mesh peer)`)
 	inboxAudit := fs.String("inbox-audit", "", "hash-chained JSONL audit log for the hosted inbox (optional)")
+	ringPort := fs.Int("ring-port", 0, "host the ring receiver on this mesh port and announce it")
+	var ringAllow multiFlag
+	fs.Var(&ringAllow, "ring-allow", `hosted-ring sender ACL: FQDN glob or pubkey:<key> (repeatable; required — pass "*" to allow any mesh peer)`)
+	ringAudit := fs.String("ring-audit", "", "hash-chained JSONL audit log for the hosted ring (optional)")
+	ringRate := fs.Float64("ring-rate", 6, "max rings per identity per minute on the hosted ring")
 	control, err := parseAirControlFlags(fs, args)
 	if err != nil {
 		return err
@@ -188,8 +193,10 @@ func cmdAirNode(args []string) error {
 	if *interval <= 0 || *interval >= time.Duration(announcement.TTLSeconds)*time.Second {
 		return errors.New("air node: --interval must be positive and shorter than the effective --ttl")
 	}
-	hosting := *inboxPort != 0
-	if hosting {
+	hostingInbox := *inboxPort != 0
+	hostingRing := *ringPort != 0
+	hosting := hostingInbox || hostingRing
+	if hostingInbox {
 		if *inboxPort < 1 || *inboxPort > 65535 {
 			return errors.New("air node: --inbox-port must be 1-65535")
 		}
@@ -204,6 +211,21 @@ func cmdAirNode(args []string) error {
 			return fmt.Errorf("air node: %w", err)
 		}
 	}
+	if hostingRing {
+		if *ringPort < 1 || *ringPort > 65535 {
+			return errors.New("air node: --ring-port must be 1-65535")
+		}
+		if *ringPort == *inboxPort {
+			return errors.New("air node: --ring-port and --inbox-port must differ")
+		}
+		if len(ringAllow) == 0 {
+			return errors.New(`air node: --ring-allow is required with --ring-port (deny-by-default); pass --ring-allow "*" to allow any mesh peer`)
+		}
+		announcement, err = mergeHostedRing(announcement, *ringPort)
+		if err != nil {
+			return fmt.Errorf("air node: %w", err)
+		}
+	}
 	hc, meshClient, cleanup, err := airControlMesh(o, control, !hosting)
 	if err != nil {
 		return err
@@ -213,9 +235,9 @@ func cmdAirNode(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), shutdownSignals...)
 	defer stop()
 
-	// The listener is up before the card advertises it, so a resolved Send
-	// can never race an announced-but-absent inbox.
-	if hosting {
+	// Listeners are up before the card advertises them, so a resolved action
+	// can never race an announced-but-absent service.
+	if hostingInbox {
 		stopInbox, err := hostInboxService(meshClient, *inboxPort, *inboxDir, inboxAllow, *inboxAudit)
 		if err != nil {
 			return fmt.Errorf("air node: inbox: %w", err)
@@ -223,6 +245,16 @@ func cmdAirNode(args []string) error {
 		defer stopInbox()
 		if !*quiet {
 			fmt.Fprintln(os.Stderr, okLine("hosting inbox on mesh port %d", *inboxPort)+dim(" · dir "+*inboxDir))
+		}
+	}
+	if hostingRing {
+		stopRing, err := hostRingService(meshClient, *ringPort, ringAllow, *ringAudit, *ringRate)
+		if err != nil {
+			return fmt.Errorf("air node: ring: %w", err)
+		}
+		defer stopRing()
+		if !*quiet {
+			fmt.Fprintln(os.Stderr, okLine("hosting ring on mesh port %d", *ringPort))
 		}
 	}
 	first, err := postPresence(ctx, hc, announcement)

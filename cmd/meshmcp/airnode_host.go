@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -15,22 +14,30 @@ import (
 	"github.com/xrey167/meshmcp/session"
 )
 
-// mergeHostedInbox announces the hosted inbox on the node's card. The hosted
-// service owns the inbox slot: a manually announced --service inbox would
-// advertise a receiver this process does not run, so it is a conflict, not an
-// override.
-func mergeHostedInbox(ann air.Announcement, port int) (air.Announcement, error) {
-	for _, svc := range ann.Services {
-		if svc.Kind == air.ServiceInbox {
-			return air.Announcement{}, errors.New("--service inbox conflicts with --inbox-port; the hosted inbox is announced automatically")
+// mergeHostedService announces a hosted service on the node's card. The
+// hosted service owns its kind's slot: a manually announced --service of the
+// same kind would advertise a receiver this process does not run, so it is a
+// conflict, not an override.
+func mergeHostedService(ann air.Announcement, svc air.Service) (air.Announcement, error) {
+	for _, existing := range ann.Services {
+		if existing.Kind == svc.Kind {
+			return air.Announcement{}, fmt.Errorf("--service %s conflicts with --%s-port; the hosted %s is announced automatically", svc.Kind, svc.Kind, svc.Kind)
 		}
 	}
 	out := ann
-	out.Services = append(append([]air.Service(nil), ann.Services...), air.Service{
+	out.Services = append(append([]air.Service(nil), ann.Services...), svc)
+	return out, nil
+}
+
+func mergeHostedInbox(ann air.Announcement, port int) (air.Announcement, error) {
+	return mergeHostedService(ann, air.Service{
 		Kind: air.ServiceInbox, Port: port,
 		Capabilities: []string{air.InboxCompletionCapabilityV1},
 	})
-	return out, nil
+}
+
+func mergeHostedRing(ann air.Announcement, port int) (air.Announcement, error) {
+	return mergeHostedService(ann, air.Service{Kind: air.ServiceRing, Port: port})
 }
 
 // hostInboxService starts the drop/push inbox receiver on the node's own mesh
@@ -59,7 +66,8 @@ func hostInboxService(client *embed.Client, port int, dir string, allow []string
 	}
 	lim := (&DropConfig{}).limits()
 	identity := func(addr net.Addr) (string, string) { return peerIdentity(client, addr) }
-	go runDropAcceptLoop(ln, identity, newACL(allow), dirPlacer(dir), lim, audit, log.Printf)
+	factory := newDropFactory(dirPlacer(dir), lim, audit)
+	go runAirAcceptLoop(ln, identity, newACL(allow), factory, "drop", log.Printf)
 	return func() {
 		ln.Close()
 		if auditClose != nil {
@@ -68,20 +76,56 @@ func hostInboxService(client *embed.Client, port int, dir string, allow []string
 	}, nil
 }
 
-// runDropAcceptLoop is the shared receiver loop behind `drop --config` and a
-// hosting `air node`: gate each sender by the ACL, then hand the connection to
-// a resumable drop session.
-func runDropAcceptLoop(ln net.Listener, identity func(net.Addr) (string, string), checker acl, place placer, lim dropLimits, audit *policy.AuditLog, logf func(string, ...any)) {
-	srv := session.NewServer(newDropFactory(place, lim, audit), 2*time.Minute, logf)
+// hostRingService starts the ring receiver on the node's own mesh identity:
+// sender ACL, per-identity rate limit, escape-safe rendering to stdout, and
+// optional audit — the receiving half of `air ring`, in-process.
+func hostRingService(client *embed.Client, port int, allow []string, auditPath string, ratePerMin float64) (func(), error) {
+	var audit *policy.AuditLog
+	var auditClose func()
+	if auditPath != "" {
+		f, err := os.OpenFile(auditPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if err != nil {
+			return nil, fmt.Errorf("open audit log %s: %w", auditPath, err)
+		}
+		auditClose = func() { f.Close() }
+		audit = policy.NewAuditLog(f, func() string { return time.Now().UTC().Format(time.RFC3339) })
+	}
+	ln, err := client.ListenTCP(fmt.Sprintf(":%d", port))
+	if err != nil {
+		if auditClose != nil {
+			auditClose()
+		}
+		return nil, fmt.Errorf("listen on mesh port %d: %w", port, err)
+	}
+	limiter := newRingLimiter(ratePerMin)
+	handle := func(n air.Notice, meta session.Meta) {
+		onRing(n, meta, limiter, audit, false, false, os.Stdout)
+	}
+	identity := func(addr net.Addr) (string, string) { return peerIdentity(client, addr) }
+	go runAirAcceptLoop(ln, identity, newACL(allow), newListenFactory(handle), "ring", log.Printf)
+	return func() {
+		ln.Close()
+		if auditClose != nil {
+			auditClose()
+		}
+	}, nil
+}
+
+// runAirAcceptLoop is the shared receiver loop behind `drop --config`,
+// `air listen`, and a hosting `air node`: gate each sender by the ACL, then
+// hand the connection to a resumable session served by factory. verb names the
+// service in log lines.
+func runAirAcceptLoop(ln net.Listener, identity func(net.Addr) (string, string), checker acl, factory session.BackendFactory, verb string, logf func(string, ...any)) {
+	srv := session.NewServer(factory, 2*time.Minute, logf)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			logf("drop receiver shutting down")
+			logf("%s receiver shutting down", verb)
 			return
 		}
 		pubKey, fqdn := identity(conn.RemoteAddr())
 		if !checker.allows(pubKey, fqdn) {
-			logf("drop DENIED from %s (%s): not in allow list", fqdn, shortKey(pubKey))
+			logf("%s DENIED from %s (%s): not in allow list", verb, fqdn, shortKey(pubKey))
 			conn.Close()
 			continue
 		}

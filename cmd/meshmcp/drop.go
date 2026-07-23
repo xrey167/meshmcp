@@ -536,7 +536,7 @@ func dropReceive(cfgPath string) error {
 	lim := cfg.limits()
 	lim.NameIndependent = cfg.CAS
 	identity := func(addr net.Addr) (string, string) { return peerIdentity(client, addr) }
-	runDropAcceptLoop(ln, identity, checker, place, lim, audit, log.Printf)
+	runAirAcceptLoop(ln, identity, checker, newDropFactory(place, lim, audit), "drop", log.Printf)
 	return nil
 }
 
