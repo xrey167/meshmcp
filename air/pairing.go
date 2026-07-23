@@ -75,11 +75,17 @@ type PairedPeer struct {
 	Approver   string `json:"approver"`
 }
 
+// pairedSchemaVersion is the current on-disk format version of the paired store.
+const pairedSchemaVersion = 1
+
 // pairedState is the on-disk shape of the whole store: the two sets, written
 // together atomically so a reader never observes a torn half-update.
 type pairedState struct {
-	Pending []PendingRequest `json:"pending"`
-	Paired  []PairedPeer     `json:"paired"`
+	// SchemaVersion self-describes the file format; a store from a newer build is
+	// refused on load (fail closed) rather than silently forgetting peers.
+	SchemaVersion int              `json:"schema_version"`
+	Pending       []PendingRequest `json:"pending"`
+	Paired        []PairedPeer     `json:"paired"`
 }
 
 // PairedStore is an atomic, concurrency-safe store of pending pair requests and
@@ -118,6 +124,9 @@ func OpenPairedStore(path string) (*PairedStore, error) {
 	var st pairedState
 	if err := json.Unmarshal(b, &st); err != nil {
 		return nil, fmt.Errorf("pairing: parse store %s: %w", path, err)
+	}
+	if err := checkSchemaVersion("pairing", st.SchemaVersion, pairedSchemaVersion); err != nil {
+		return nil, err
 	}
 	for _, p := range st.Pending {
 		if p.PublicKey != "" {
@@ -300,7 +309,7 @@ func (s *PairedStore) Paired() []PairedPeer {
 // it, then rename it into place, so a reader (or a crash) never observes a
 // partially written store at the canonical path.
 func (s *PairedStore) persistLocked() error {
-	st := pairedState{Pending: sortedPending(s.pending), Paired: sortedPaired(s.paired)}
+	st := pairedState{SchemaVersion: pairedSchemaVersion, Pending: sortedPending(s.pending), Paired: sortedPaired(s.paired)}
 	b, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
 		return fmt.Errorf("pairing: marshal store: %w", err)

@@ -50,7 +50,23 @@ type AuditRecord struct {
 	// docs/spec/OAUTH-STANDARDS.md Feature A / docs/spec/AGENTS.md for the
 	// still-outstanding schema/doc pairing this field requires.
 	PeerSpiffeID SpiffeLabel `json:"peer_spiffe_id,omitempty"`
+
+	// SchemaVersion self-describes the record's on-disk format so a log written
+	// by a newer build (a future incompatible format) is refused by an older one
+	// rather than silently misread — VerifyChain/VerifyForRepair fail closed on a
+	// version they do not understand. Additive and omitempty: a record from before
+	// this field existed decodes as 0 (treated as the current version), so its
+	// bytes — and therefore its hash — are unchanged, and existing chains keep
+	// verifying. Written records carry the current version; the chain covers it
+	// like any other field.
+	SchemaVersion int `json:"schema_version,omitempty"`
 }
+
+// auditSchemaVersion is the current audit-record on-disk format version. A
+// record whose SchemaVersion exceeds this was written by a newer build and is
+// refused (fail closed) rather than misinterpreted. A record with version 0 (or
+// the field absent) predates versioning and is accepted as the current version.
+const auditSchemaVersion = 1
 
 // AuditLog writes audit records as newline-delimited JSON to a sink, chaining
 // each record's hash to the previous one.
@@ -216,6 +232,11 @@ func (a *AuditLog) write(rec AuditRecord) error {
 	rec.Tool = clipField(rec.Tool)
 	rec.Method = clipField(rec.Method)
 	rec.RPCID = clipField(rec.RPCID)
+
+	// Self-describe the record's format so a future incompatible format is
+	// refused by an older verifier rather than misread. Set before hashing so the
+	// chain covers it.
+	rec.SchemaVersion = auditSchemaVersion
 
 	a.mu.Lock()
 	defer a.mu.Unlock()

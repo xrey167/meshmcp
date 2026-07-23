@@ -44,6 +44,11 @@ func VerifyChain(r io.Reader) (VerifyResult, error) {
 			res.Reason = fmt.Sprintf("record %d is not valid JSON: %v", expectSeq, err)
 			return res, nil
 		}
+		if rec.SchemaVersion > auditSchemaVersion {
+			res.BreakSeq = expectSeq
+			res.Reason = fmt.Sprintf("record %d has schema version %d, newer than this build supports (%d) — upgrade meshmcp", expectSeq, rec.SchemaVersion, auditSchemaVersion)
+			return res, nil
+		}
 		if rec.Seq != expectSeq {
 			res.BreakSeq = rec.Seq
 			res.Reason = fmt.Sprintf("record #%d has seq %d (expected %d): a record was inserted or removed", res.Count, rec.Seq, expectSeq)
@@ -124,6 +129,13 @@ func VerifyForRepair(data []byte) (res VerifyResult, truncateTo int64, torn bool
 			}
 			res.BreakSeq = expectSeq
 			res.Reason = fmt.Sprintf("record %d is not valid JSON: %v", expectSeq, err)
+			return res, 0, false
+		}
+		// A record from a newer format is complete and well-formed — never a torn
+		// tail. Refuse it hard rather than truncating a valid future record.
+		if rec.SchemaVersion > auditSchemaVersion {
+			res.BreakSeq = rec.Seq
+			res.Reason = fmt.Sprintf("record %d has schema version %d, newer than this build supports (%d) — upgrade meshmcp", expectSeq, rec.SchemaVersion, auditSchemaVersion)
 			return res, 0, false
 		}
 		if rec.Seq != expectSeq {
