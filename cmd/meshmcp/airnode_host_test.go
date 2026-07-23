@@ -117,3 +117,32 @@ func TestDropAcceptLoopACLGate(t *testing.T) {
 		t.Fatalf("allowed peer: want an open (idle) connection awaiting ATTACH, got %v", err)
 	}
 }
+
+func TestMergeHostedScreenAndCast(t *testing.T) {
+	ann := air.Announcement{}
+	for _, step := range []struct {
+		merge func(air.Announcement, int) (air.Announcement, error)
+		port  int
+		kind  air.ServiceKind
+	}{
+		{mergeHostedInbox, 9110, air.ServiceInbox},
+		{mergeHostedRing, 9130, air.ServiceRing},
+		{mergeHostedScreen, 9121, air.ServiceScreen},
+		{mergeHostedCast, 9122, air.ServiceCast},
+	} {
+		var err error
+		ann, err = step.merge(ann, step.port)
+		if err != nil {
+			t.Fatalf("%s: %v", step.kind, err)
+		}
+	}
+	if len(ann.Services) != 4 {
+		t.Fatalf("all four hosted services must coexist on one card: %v", ann.Services)
+	}
+	if _, err := mergeHostedScreen(ann, 9999); err == nil {
+		t.Fatal("second screen must conflict")
+	}
+	if _, err := mergeHostedCast(ann, 9999); err == nil {
+		t.Fatal("second cast must conflict")
+	}
+}

@@ -182,6 +182,16 @@ func cmdAirNode(args []string) error {
 	fs.Var(&ringAllow, "ring-allow", `hosted-ring sender ACL: FQDN glob or pubkey:<key> (repeatable; required — pass "*" to allow any mesh peer)`)
 	ringAudit := fs.String("ring-audit", "", "hash-chained JSONL audit log for the hosted ring (optional)")
 	ringRate := fs.Float64("ring-rate", 6, "max rings per identity per minute on the hosted ring")
+	screenPort := fs.Int("screen-port", 0, "host the screen-frame receiver on this mesh port and announce it")
+	screenDir := fs.String("screen-dir", "", "directory for received screen frames (required with --screen-port)")
+	var screenAllow multiFlag
+	fs.Var(&screenAllow, "screen-allow", `hosted-screen sender ACL (repeatable; required — pass "*" to allow any mesh peer)`)
+	screenAudit := fs.String("screen-audit", "", "hash-chained JSONL audit log for the hosted screen (optional)")
+	castPort := fs.Int("cast-port", 0, "host the cast receiver on this mesh port and announce it")
+	castDir := fs.String("cast-dir", "", "directory for received cast images (required with --cast-port)")
+	var castAllow multiFlag
+	fs.Var(&castAllow, "cast-allow", `hosted-cast sender ACL (repeatable; required — pass "*" to allow any mesh peer)`)
+	castAudit := fs.String("cast-audit", "", "hash-chained JSONL audit log for the hosted cast (optional)")
 	control, err := parseAirControlFlags(fs, args)
 	if err != nil {
 		return err
@@ -195,16 +205,35 @@ func cmdAirNode(args []string) error {
 	}
 	hostingInbox := *inboxPort != 0
 	hostingRing := *ringPort != 0
-	hosting := hostingInbox || hostingRing
+	hostingScreen := *screenPort != 0
+	hostingCast := *castPort != 0
+	hosting := hostingInbox || hostingRing || hostingScreen || hostingCast
+	hostedPorts := map[int]string{}
+	claimPort := func(name string, port int) error {
+		if port < 1 || port > 65535 {
+			return fmt.Errorf("air node: --%s-port must be 1-65535", name)
+		}
+		if prior, taken := hostedPorts[port]; taken {
+			return fmt.Errorf("air node: --%s-port and --%s-port must differ", name, prior)
+		}
+		hostedPorts[port] = name
+		return nil
+	}
+	requireAllow := func(name string, allow multiFlag) error {
+		if len(allow) == 0 {
+			return fmt.Errorf(`air node: --%s-allow is required with --%s-port (deny-by-default); pass --%s-allow "*" to allow any mesh peer`, name, name, name)
+		}
+		return nil
+	}
 	if hostingInbox {
-		if *inboxPort < 1 || *inboxPort > 65535 {
-			return errors.New("air node: --inbox-port must be 1-65535")
+		if err := claimPort("inbox", *inboxPort); err != nil {
+			return err
 		}
 		if *inboxDir == "" {
 			return errors.New("air node: --inbox-dir is required with --inbox-port")
 		}
-		if len(inboxAllow) == 0 {
-			return errors.New(`air node: --inbox-allow is required with --inbox-port (deny-by-default); pass --inbox-allow "*" to allow any mesh peer`)
+		if err := requireAllow("inbox", inboxAllow); err != nil {
+			return err
 		}
 		announcement, err = mergeHostedInbox(announcement, *inboxPort)
 		if err != nil {
@@ -212,16 +241,43 @@ func cmdAirNode(args []string) error {
 		}
 	}
 	if hostingRing {
-		if *ringPort < 1 || *ringPort > 65535 {
-			return errors.New("air node: --ring-port must be 1-65535")
+		if err := claimPort("ring", *ringPort); err != nil {
+			return err
 		}
-		if *ringPort == *inboxPort {
-			return errors.New("air node: --ring-port and --inbox-port must differ")
-		}
-		if len(ringAllow) == 0 {
-			return errors.New(`air node: --ring-allow is required with --ring-port (deny-by-default); pass --ring-allow "*" to allow any mesh peer`)
+		if err := requireAllow("ring", ringAllow); err != nil {
+			return err
 		}
 		announcement, err = mergeHostedRing(announcement, *ringPort)
+		if err != nil {
+			return fmt.Errorf("air node: %w", err)
+		}
+	}
+	if hostingScreen {
+		if err := claimPort("screen", *screenPort); err != nil {
+			return err
+		}
+		if *screenDir == "" {
+			return errors.New("air node: --screen-dir is required with --screen-port")
+		}
+		if err := requireAllow("screen", screenAllow); err != nil {
+			return err
+		}
+		announcement, err = mergeHostedScreen(announcement, *screenPort)
+		if err != nil {
+			return fmt.Errorf("air node: %w", err)
+		}
+	}
+	if hostingCast {
+		if err := claimPort("cast", *castPort); err != nil {
+			return err
+		}
+		if *castDir == "" {
+			return errors.New("air node: --cast-dir is required with --cast-port")
+		}
+		if err := requireAllow("cast", castAllow); err != nil {
+			return err
+		}
+		announcement, err = mergeHostedCast(announcement, *castPort)
 		if err != nil {
 			return fmt.Errorf("air node: %w", err)
 		}
@@ -255,6 +311,26 @@ func cmdAirNode(args []string) error {
 		defer stopRing()
 		if !*quiet {
 			fmt.Fprintln(os.Stderr, okLine("hosting ring on mesh port %d", *ringPort))
+		}
+	}
+	if hostingScreen {
+		stopScreen, err := hostFrameService(meshClient, *screenPort, *screenDir, screenAllow, *screenAudit, "screen")
+		if err != nil {
+			return fmt.Errorf("air node: screen: %w", err)
+		}
+		defer stopScreen()
+		if !*quiet {
+			fmt.Fprintln(os.Stderr, okLine("hosting screen on mesh port %d", *screenPort)+dim(" · dir "+*screenDir))
+		}
+	}
+	if hostingCast {
+		stopCast, err := hostFrameService(meshClient, *castPort, *castDir, castAllow, *castAudit, "cast")
+		if err != nil {
+			return fmt.Errorf("air node: cast: %w", err)
+		}
+		defer stopCast()
+		if !*quiet {
+			fmt.Fprintln(os.Stderr, okLine("hosting cast on mesh port %d", *castPort)+dim(" · dir "+*castDir))
 		}
 	}
 	first, err := postPresence(ctx, hc, announcement)
