@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strings"
 
 	"github.com/xrey167/meshmcp/air/sqlguard"
 	"github.com/xrey167/meshmcp/policy"
@@ -231,6 +232,8 @@ func cmdAirDatabaseServe(args []string) error {
 	fs.Var(&grantFlags, "grant", "table grant: id=db.table[,db.table...] (id is an FQDN glob or pubkey:<key>); repeatable")
 	redactFlags := multiFlag{}
 	fs.Var(&redactFlags, "redact", "column masked in results and forbidden in predicates (repeatable)")
+	dbFlags := multiFlag{}
+	fs.Var(&dbFlags, "db", "named PostgreSQL backend: name=postgres://... (repeatable); without any --db the executor is the documented refuse-cleanly stub")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -262,9 +265,18 @@ func cmdAirDatabaseServe(args []string) error {
 	}
 	defer stopMesh(client)
 
-	// The production executor is a documented v1 stub: it refuses cleanly until a
-	// concrete mesh database backend is wired behind the seam.
-	exec := meshDBExecutor{backend: fmt.Sprintf(":%d", *port)}
+	// With --db specs the firewall forwards validated reads to real PostgreSQL
+	// backends; without any it keeps the documented refuse-cleanly stub.
+	var exec dbExecutor = meshDBExecutor{backend: fmt.Sprintf(":%d", *port)}
+	if len(dbFlags) > 0 {
+		pgExec, err := newPGDBExecutor(dbFlags)
+		if err != nil {
+			return fmt.Errorf("air database serve: %w", err)
+		}
+		defer pgExec.Close()
+		exec = pgExec
+		fmt.Fprintln(os.Stderr, okLine("forwarding validated reads to PostgreSQL backend(s): %s", strings.Join(pgExec.names(), ", ")))
+	}
 	cfg := dbServeConfig{MaxRows: *maxRows, MaxBytes: *maxBytes, Redact: []string(redactFlags)}
 	identify := func(r *http.Request) (string, string) { return peerIdentityStr(client, r.RemoteAddr) }
 	h := databaseHandler(exec, identify, newACL(allow), grants, cfg, audit)
