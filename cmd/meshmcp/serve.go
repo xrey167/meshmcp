@@ -159,6 +159,15 @@ func cmdServe(args []string) error {
 	// engines holds each policy-bearing backend's running Engine, keyed by name,
 	// so a SIGHUP can hot-swap its policy rules in place without a restart.
 	engines := map[string]*policy.Engine{}
+	// byName retains each backend for the reload path; installing allowACL here
+	// (before any accept loop starts) makes every peer-admission check
+	// hot-swappable — the accept loops capture copies that share the pattern
+	// pointer.
+	byName := map[string]*Backend{}
+	for _, b := range cfg.Backends {
+		b.allowACL = newACL(b.Allow)
+		byName[b.Name] = b
+	}
 
 	for _, b := range cfg.Backends {
 		ln, err := client.ListenTCP(fmt.Sprintf(":%d", b.Port))
@@ -256,6 +265,10 @@ func cmdServe(args []string) error {
 		}(b, ln, factory, httpEnf, rc)
 	}
 
+	// Control-surface ACL handles, retained (when the endpoint is enabled) so a
+	// SIGHUP reload can hot-swap the operator/on-behalf allow lists in place.
+	var controlAllow, controlOnBehalf acl
+
 	// Optionally serve the Air control endpoint: list and steer live sessions
 	// across all resumable backends, gated by identity and audited.
 	if cfg.Control != nil && cfg.Control.Port > 0 {
@@ -274,7 +287,7 @@ func cmdServe(args []string) error {
 		// re-checks the target backend's ACL (not just the global Control.Allow).
 		backendACLs := map[string]acl{}
 		for _, b := range cfg.Backends {
-			backendACLs[b.Name] = newACL(b.Allow)
+			backendACLs[b.Name] = b.peerACL()
 		}
 		cards, err := buildCatalogBackends(cfg.Backends, meshIP, air.IdentityRef{
 			PubKey: meshPubKey,
@@ -299,9 +312,11 @@ func cmdServe(args []string) error {
 		// approver surface (both gate on this same acl), so a second operator can
 		// approve and pair without being hand-added to control.allow.
 		allow := newACL(append(append([]string(nil), cfg.Control.Allow...), operatorPatterns(cfg.Operators)...))
+		controlAllow = allow // retained so a SIGHUP reload can hot-swap it
 		// Dedicated proxy allow list for X-Air-On-Behalf attestation; empty ⇒
 		// no peer may attest (attribution stays the verified connecting peer).
 		onBehalfAllow := newACL(cfg.Control.OnBehalfAllow)
+		controlOnBehalf = onBehalfAllow
 		h := airControlHandler(ctl, identify, allow, onBehalfAllow, airAuditFunc(sharedAudit))
 		// Optional pairing surface, mounted on the SAME control listener. Peers
 		// request access with `air join` and an operator approves with `air pair`,
@@ -345,16 +360,14 @@ func cmdServe(args []string) error {
 	signal.Notify(sig, shutdownSignals...)
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, reloadSignals...)
-	if len(engines) > 0 {
-		log.Printf("send SIGHUP to hot-reload policy rules for %d backend(s) without a restart", len(engines))
-	}
+	log.Printf("send SIGHUP to hot-reload policy rules and peer/control ACLs without a restart")
 	// Serve until a shutdown signal; a SIGHUP in between re-reads the config and
-	// hot-swaps each backend's policy rules in place.
+	// hot-swaps each backend's policy rules and admission ACLs in place.
 waitForShutdown:
 	for {
 		select {
 		case <-hup:
-			reloadPolicies(*cfgPath, engines)
+			reloadPolicies(*cfgPath, engines, byName, controlAllow, controlOnBehalf)
 		case <-sig:
 			break waitForShutdown
 		}
@@ -384,7 +397,7 @@ waitForShutdown:
 // backend (optionally wrapped by the policy filter) and bridges bytes
 // both ways.
 func serveStdio(client *embed.Client, b *Backend, ln net.Listener, shutdown <-chan struct{}, factory session.BackendFactory) {
-	checker := newACL(b.Allow)
+	checker := b.peerACL()
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -425,7 +438,7 @@ func serveStdio(client *embed.Client, b *Backend, ln net.Listener, shutdown <-ch
 // register is non-nil it is called with the *session.Server before the loop
 // starts, so the caller can wire it into the Air control endpoint (Sessions/Steer).
 func serveResumable(client *embed.Client, b *Backend, ln net.Listener, shutdown <-chan struct{}, factory session.BackendFactory, register func(*session.Server)) {
-	checker := newACL(b.Allow)
+	checker := b.peerACL()
 	ttl := time.Duration(b.SessionTTLSeconds) * time.Second
 	srv := session.NewServer(factory, ttl, func(format string, a ...any) {
 		log.Printf("backend %q: "+format, append([]any{b.Name}, a...)...)
@@ -497,23 +510,28 @@ func bridgeConn(conn net.Conn, backend session.Backend) {
 	<-done
 }
 
-// reloadPolicies re-reads the config at cfgPath and hot-swaps each backend's
-// policy RULES into its running Engine, matched by backend name (SIGHUP). It is
-// fail-safe: a config that no longer loads (a bad edit) leaves every running
-// policy untouched, so a typo can never disarm the gateway. Only policy rules
-// are reloaded — peer ACLs, listeners, capability trust roots, and other startup
-// wiring are captured once and are NOT changed here (that is a wider re-plumb).
-// A require_cosign approval bound to the old PolicyHash stops verifying after a
+// reloadPolicies re-reads the config at cfgPath and hot-swaps, matched by
+// backend name (SIGHUP): each backend's policy RULES into its running Engine,
+// each backend's peer-admission ACL (b.Allow), and the control endpoint's
+// operator + on-behalf allow lists. It is fail-safe: a config that no longer
+// loads (a bad edit) leaves every running policy and ACL untouched, so a typo
+// can never disarm the gateway. Listeners, capability trust roots, and other
+// startup wiring stay startup-captured (that is a wider re-plumb). A
+// require_cosign approval bound to the old PolicyHash stops verifying after a
 // reload changes the rules, by design.
-func reloadPolicies(cfgPath string, engines map[string]*policy.Engine) {
+func reloadPolicies(cfgPath string, engines map[string]*policy.Engine, backends map[string]*Backend, controlAllow, controlOnBehalf acl) {
 	newCfg, err := loadConfig(cfgPath)
 	if err != nil {
-		log.Printf("reload: config %s did not load — keeping the running policy: %v", cfgPath, err)
+		log.Printf("reload: config %s did not load — keeping the running policy and ACLs: %v", cfgPath, err)
 		return
 	}
 	applied, present := 0, map[string]bool{}
 	for _, b := range newCfg.Backends {
 		present[b.Name] = true
+		// Peer-admission ACL: every accept loop holds a copy sharing this handle.
+		if running, ok := backends[b.Name]; ok && running.allowACL.p != nil {
+			running.allowACL.swap(b.Allow)
+		}
 		eng, ok := engines[b.Name]
 		if !ok {
 			continue // backend has no running policy engine (or is newly added — needs a restart to listen)
@@ -527,12 +545,18 @@ func reloadPolicies(cfgPath string, engines map[string]*policy.Engine) {
 		applied++
 		log.Printf("reload: backend %q policy updated (%d rules, default %s)", b.Name, len(pol.Rules), allowWord(pol.DefaultAllow))
 	}
+	// Control-surface ACLs. loadConfig guarantees an enabled control endpoint
+	// never loads with an empty allow surface, so a swap cannot open it wide.
+	if newCfg.Control != nil {
+		controlAllow.swap(append(append([]string(nil), newCfg.Control.Allow...), operatorPatterns(newCfg.Operators)...))
+		controlOnBehalf.swap(newCfg.Control.OnBehalfAllow)
+	}
 	for name := range engines {
 		if !present[name] {
 			log.Printf("reload: backend %q is gone from the config — its running policy is unchanged (remove needs a restart)", name)
 		}
 	}
-	log.Printf("reload: applied %d backend policy update(s) from %s", applied, cfgPath)
+	log.Printf("reload: applied %d backend policy update(s) + admission ACLs from %s", applied, cfgPath)
 }
 
 // backendFactory builds the per-session backend for a stdio backend. It
@@ -884,7 +908,7 @@ func allowWord(allow bool) string {
 // enforcing the ACL and stamping the caller's mesh identity onto each
 // request so the backend can do per-agent authorization and audit.
 func serveHTTP(client *embed.Client, b *Backend, ln net.Listener, enf *httpEnforcer) {
-	checker := newACL(b.Allow)
+	checker := b.peerACL()
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(b.httpURL)

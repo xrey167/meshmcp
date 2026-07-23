@@ -259,6 +259,21 @@ type Backend struct {
 	httpURL   *url.URL
 	remoteURL *url.URL            // parsed Remote.Endpoint, set at load
 	groups    map[string][]string // resolved from Config.Groups at load
+	// allowACL is the RUNNING gateway's peer-admission handle for this backend,
+	// set by cmdServe before the accept loops start. It shares its pattern list
+	// atomically across copies, so a SIGHUP reload can swap the patterns and
+	// every already-captured checker sees the change (see acl.swap).
+	allowACL acl
+}
+
+// peerACL returns the backend's live admission handle when the gateway
+// installed one, else a fresh ACL from the static config — the fallback keeps
+// direct callers (tests exercising serveStdio and friends) working unchanged.
+func (b *Backend) peerACL() acl {
+	if b.allowACL.p != nil {
+		return b.allowACL
+	}
+	return newACL(b.Allow)
 }
 
 // RemoteBackendConfig configures a "remote" backend: the gateway dials out to
