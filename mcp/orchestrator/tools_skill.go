@@ -3,15 +3,37 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"os"
 
+	"github.com/xrey167/meshmcp/harness/skills"
 	"github.com/xrey167/meshmcp/mcp"
 )
+
+// loadSkills builds the skill registry from the built-ins plus the project
+// (.harness/skills) and user (~/.harness/skills) scopes.
+func loadSkills() *skills.Registry {
+	reg, err := skills.LoadScopes(".harness/skills", userSkillsDir())
+	if err != nil || reg == nil {
+		reg = skills.NewRegistry()
+		for _, s := range skills.BuiltinSkills() {
+			reg.Add(s)
+		}
+	}
+	return reg
+}
+
+func userSkillsDir() string {
+	if h, err := os.UserHomeDir(); err == nil {
+		return h + "/.harness/skills"
+	}
+	return ""
+}
 
 func (s *Server) registerSkill() {
 	s.mcp.AddTool(mcp.Tool{
 		Name:        "skill",
-		Description: "Load & execute a built-in skill or slash-command by name (git-master, playwright, review-work, …). (skill.run)",
-		InputSchema: obj(map[string]any{"name": str("skill name"), "args": anyObj("skill args"), "context": str("optional context")}, "name"),
+		Description: "Load & execute a skill or slash-command by name (git-master, playwright, review-work, …). Returns the skill's instructions and declared embedded MCP. (skill.run)",
+		InputSchema: obj(map[string]any{"name": str("skill name (or empty to list)"), "args": anyObj("skill args"), "context": str("optional context to auto-match a skill")}),
 		Handler:     s.toolSkill,
 	})
 	s.mcp.AddTool(mcp.Tool{
@@ -28,31 +50,43 @@ func (s *Server) registerSkill() {
 	})
 }
 
-// builtinSkills is the built-in skill registry (from omo), advertised by the
-// skill tool. Their bodies load from SKILL.md in Phase 2.
-var builtinSkills = []string{
-	"git-master", "playwright", "agent-browser", "dev-browser",
-	"frontend-ui-ux", "review-work", "ai-slop-remover", "skillify",
-}
-
 func (s *Server) toolSkill(ctx context.Context, args json.RawMessage) (mcp.ToolResult, error) {
 	var p struct {
-		Name string `json:"name"`
+		Name    string `json:"name"`
+		Context string `json:"context"`
 	}
-	if err := json.Unmarshal(args, &p); err != nil || p.Name == "" {
-		return errText("name is required"), nil
-	}
-	known := false
-	for _, k := range builtinSkills {
-		if k == p.Name {
-			known = true
-			break
+	_ = json.Unmarshal(args, &p)
+
+	// No name: either auto-match by context, or list the registry.
+	if p.Name == "" {
+		if p.Context != "" {
+			matched := s.skills.Match(p.Context)
+			names := make([]string, len(matched))
+			for i, m := range matched {
+				names[i] = m.Name
+			}
+			return jsonText(map[string]any{"matched": names}), nil
 		}
+		list := s.skills.List()
+		out := make([]map[string]any, len(list))
+		for i, sk := range list {
+			out[i] = map[string]any{"name": sk.Name, "scope": sk.Scope, "description": sk.Description, "embedded_mcp": sk.EmbeddedMCP}
+		}
+		return jsonText(map[string]any{"skills": out}), nil
+	}
+
+	sk, ok := s.skills.Get(p.Name)
+	if !ok {
+		return errText("no such skill %q", p.Name), nil
 	}
 	return jsonText(map[string]any{
-		"skill":  p.Name,
-		"known":  known,
-		"status": "authorized; SKILL.md loader wired in Phase 2",
+		"name":         sk.Name,
+		"scope":        sk.Scope,
+		"description":  sk.Description,
+		"triggers":     sk.Triggers,
+		"embedded_mcp": sk.EmbeddedMCP,
+		"provenance":   sk.Provenance,
+		"instructions": sk.Body,
 	}), nil
 }
 

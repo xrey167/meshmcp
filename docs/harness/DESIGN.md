@@ -70,8 +70,10 @@ run.
 - **Providers** (`harness/provider/`): one `Provider` interface; `Mock`
   (deterministic, the default so headless runs execute), `CLI` (drives
   Claude/Codex/Gemini as subprocesses, key from the broker via `KeySource`),
-  and a `Registry` fallback chain resolving a model class to the first available
-  provider.
+  `MCPProvider` (reaches a model exposed as an MCP tool over a dialed
+  connection — a mesh dial in production, so a remote/cross-org provider is
+  reached via federation with transport-bound identity), and a `Registry`
+  fallback chain resolving a model class to the first available provider.
 - **Sandboxes** (`harness/sandbox/`): `local`, real git `worktree` isolation,
   and fail-closed `Stub`s for tmux/docker/ssh/openshell (an unavailable
   isolation backend never degrades to host execution). `AtLeast` ensures a
@@ -92,29 +94,72 @@ look_at governed with Phase-2 backends), sessions + task store, terminal
 (interactive_bash real), browser/canvas/nodes/cron (governed, Phase-2/4 driver),
 skills + market.
 
-## CLI (`meshmcp harness ...`)
+## Hooks (`harness/hooks/`)
 
-`serve` (stdio dark service), `run`, `plan`, `interview`, `verify`, `roles`,
-`status`. Shared flags wire a governed `Engine`: `--audit` (hash-chained log,
-continued across restarts), `--cosign-store`, `--state-dir` (air continuity).
+A lifecycle hook engine: a middleware chain of pure `(Event) → Effect` decisions
+(`continue|mutate|block|retry|inject`) evaluated at defined points (pre-plan,
+pre-tool, post-tool, pre-spawn, post-run, on-error, on-notify). Built-ins merge
+the source projects' 54–61 hooks into a representative governed set
+(keyword-detector, stop-continuation-guard, write-existing-file-guard,
+taint-egress-guard, tool-output-truncator, runtime-fallback). Governance: a
+`Safety` hook cannot be disabled, and a user hook declaring `WeakensSafety()` is
+refused at load. The `Engine` optionally runs pre-tool hooks in its guard path,
+so a safety hook can veto an otherwise-policy-allowed action.
+
+## Skills (`harness/skills/`)
+
+A `SKILL.md` loader (YAML front-matter + markdown body) over three scopes
+(builtin, project `.harness/skills/`, user `~/.harness/skills/`, later scopes
+overriding earlier). Triggers auto-match a skill to a request. A skill that
+embeds an MCP declares it (`EmbeddedMCP`); installation is a governed `market`
+transaction, so the loader only reads local, provenanced files. The MCP `skill`
+tool serves the registry (list / match-by-context / fetch instructions).
+
+## Gateway (`gateway/`) — Phase 4
+
+openclaw's multi-channel ingress folded in as a *front door to the same governed
+harness*, not a parallel brain. An inbound message maps to a harness
+`RunRequest` driven by a per-channel-user mesh identity, so the same firewall,
+audit, and continuity apply to a Slack message as to a CLI run. Channel adapters
+(`gateway/channels/`) authenticate via broker-held tokens — an un-provisioned
+channel is refused (fail-closed). DM pairing gates unpaired sessions. Session
+slash-commands (`/status /new /reset /compact /think /verbose /trace /usage
+/stop /pair /restart /activation /help`) map to harness/control ops. 22 known
+transports are enumerated; webchat is in-process and real, the rest are token
+channels pending live transport wiring.
+
+## CLI (`meshmcp harness ...` and `meshmcp gateway ...`)
+
+`harness serve` (stdio dark service), `run`, `plan`, `interview`, `verify`,
+`roles`, `status`; `gateway serve` (webchat over stdin), `gateway channels ls`.
+Shared flags wire a governed `Engine`: `--audit` (hash-chained log, continued
+across restarts), `--cosign-store`, `--state-dir` (air continuity).
 
 ## Implemented vs. deferred
 
-**Implemented and tested (Phases 0–3 core):** role→policy compilation and the
+**Implemented and tested (Phases 0–4 core):** role→policy compilation and the
 default-deny matrix; the governed-action choke point + audit chain; the full
 run lifecycle with all modes; loop termination; category routing; budgets;
 provider interface + mock + CLI adapter + fallback; local/worktree sandboxes +
 fail-closed stubs; air-backed and in-memory continuity with identity binding;
-the MCP tool catalog with global governance middleware; the CLI verb; insight
-adaptive-tuning (profile→recommend→simulate→apply).
+the MCP tool catalog with global governance middleware; the hook engine
+(wired into the guard path); the skills loader (wired into the `skill` tool);
+the gateway ingress with channels, DM pairing, and session slash-commands; the
+`harness` and `gateway` CLI verbs; insight adaptive-tuning
+(profile→recommend→simulate→apply).
+
+The orchestrator dark service now serves over the mesh (`harness serve
+--listen`, mirroring `cmdOrchestrate`'s accept loop) as well as stdio, and remote
+providers are reachable over MCP (`MCPProvider`) — closing the two headline
+wiring gaps.
 
 **Deferred (wiring, not design):** live provider CLIs require the binaries +
 broker keys; LSP/AST/browser/canvas/nodes/cron live backends (Phase 2/4);
-`control.NetBirdIssuer`-backed minter for real mesh worker keys (Phase 3);
-mesh-transport serving of the dark service (`harness serve --listen`); the
-openclaw gateway ingress (Phase 4). Every deferred tool is still *registered and
-governed* — a call passes the firewall and is audited; only its effect awaits
-the backend, and it fails closed rather than silently succeeding.
+`control.NetBirdIssuer`-backed minter for real mesh worker keys (Phase 3); the
+non-webchat channel transports (Phase 4 live wiring); Live Canvas / voice
+surfaces. Every deferred tool/channel is still *registered and governed* — a call
+passes the firewall and is audited, and it fails closed rather than silently
+succeeding.
 
 ## Tests
 

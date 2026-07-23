@@ -45,9 +45,13 @@ The agent never sees `sk_live_…`. Neither does the trace, nor the audit log.
 
 ## Configure
 
-Secrets require a stdio backend with a policy (injection happens at the
-enforcement point). Store values out of band — a mode-0600 JSON file and/or the
-environment — never in the config:
+Secrets require a policy (injection happens at the enforcement point) and work
+on stdio, http, and remote backends. On http/remote, injected values are also
+scrubbed from responses (JSON and SSE) per peer, and a response the gateway
+cannot scan — compressed or oversized — is refused (502), never forwarded; a
+grant with `block_labels` additionally requires callers to send `Mcp-Session-Id`
+on `tools/call` (label state is per session). Store values out of band — a
+mode-0600 JSON file and/or the environment — never in the config:
 
 ```yaml
 backends:

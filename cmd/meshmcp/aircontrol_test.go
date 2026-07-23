@@ -15,12 +15,13 @@ import (
 
 // fakeAirControl is an in-memory airController for handler tests.
 type fakeAirControl struct {
-	list       []AirSession
-	steers     []string // "backend/id/method" of accepted steers
-	callers    []string // "pubKey/fqdn" seen by steer
-	err        error    // returned by steer
-	denyOnFqdn string   // if set, steer/sessions deny this caller fqdn on backend "fs"
-	presence   *air.Registry
+	list          []AirSession
+	steers        []string // "backend/id/method" of accepted steers
+	callers       []string // "pubKey/fqdn" seen by steer
+	err           error    // returned by steer
+	denyOnFqdn    string   // if set, steer/sessions deny this caller fqdn on backend "fs"
+	presence      *air.Registry
+	groupPatterns map[string][]string // the operator `groups:` map served by /v1/groups
 }
 
 func (f *fakeAirControl) sessions(pubKey, fqdn string) []AirSession {
@@ -70,6 +71,11 @@ func (f *fakeAirControl) announce(pubKey, fqdn, observedIP string, a air.Announc
 }
 func (f *fakeAirControl) leave(pubKey string) bool {
 	return f.presenceRegistry().Remove(pubKey)
+}
+func (f *fakeAirControl) groups(pubKey, fqdn, name string, now time.Time) (airGroupsReply, error) {
+	// Same server-side resolution as the live gateway (shared helper), over the
+	// fake's presence registry.
+	return resolveGroupsReply(f.groupPatterns, f.nearby(now), name)
 }
 
 func newTestHandler(c airController, allowCaller bool) http.Handler {

@@ -869,16 +869,32 @@ unaffected.
 
 ### Residual risk / follow-up
 
-- Taint labels, secret injection, and capability upgrades remain on the stdio
-  path (they need per-session state / SSE body rewriting); this is documented in
-  the enforcer and the capability matrix rather than silently ignored. The
-  shared classifier prevents the classification/decision drift that mattered
-  most.
+- ~~Taint labels, secret injection, and capability upgrades remain on the stdio
+  path~~ — **closed (task 9, HTTP parity slice v1)**: the HTTP/remote enforcer
+  now tracks per-session taint labels (keyed by the transport-proven peer key +
+  `Mcp-Session-Id`; a label-bearing policy DENIES a session-less `tools/call`
+  rather than silently skipping), injects secrets after audit with per-peer
+  response redaction (JSON buffered, SSE line-streaming; an unscannable
+  compressed/oversized response is refused 502), folds capabilities through the
+  shared `policy.FoldCapability` (token stripped from every governed body), and
+  records `args_hash`/`policy_hash` on held co-signs. Honest residuals, matching
+  or strictly tightening stdio: labels attach at decision time (same as stdio);
+  redaction is best-effort under the same threat model; a fresh session id
+  starts label-clean (≈ a stdio reconnect) and idle label state expires after
+  24h; per-peer session-state caps DENY new sessions (never evict). DLP, shadow
+  policies, and router delegation remain stdio-only and config-refused for
+  HTTP/remote backends. Gateway `hooks:` decision events (bus/webhook) are
+  emitted by the stdio filter only — HTTP/remote decisions are recorded in the
+  audit ledger (including capabilities-only backends, which resolve the shared
+  ledger or their own `audit_log` like any policy backend) but not published on
+  the event bus; wiring the event hook into the HTTP enforcer is a follow-up.
 
 ### Definition-of-Done item satisfied
 
-- *"Stdio and HTTP enforce the same declared controls"* (classification + tool/
-  method decisions; per-session controls remain stdio-only and are labeled).
+- *"Stdio and HTTP enforce the same declared controls"* (classification, tool/
+  method decisions, taint labels, secret injection + redaction, capabilities;
+  DLP/shadow/router-delegation remain stdio-only and are refused in config,
+  never silently unenforced).
 
 ### Commit
 

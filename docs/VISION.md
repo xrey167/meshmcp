@@ -110,9 +110,16 @@ when" becomes queryable for an entire agent fleet.
 ## Honest limitations
 
 - Policy applies to **stdio** backends (newline-delimited JSON-RPC) in full, and to
-  Streamable-HTTP backends for per-tool authorization + audit + rate/window/co-sign
-  (F16, request-body parsing). Taint labels, secret injection, and capability upgrades
-  remain stdio-only (they need per-session state / SSE body rewriting).
+  Streamable-HTTP/remote backends for per-tool authorization + audit + rate/window/co-sign
+  (F16, request-body parsing) **plus** taint labels (per `Mcp-Session-Id`, keyed with the
+  transport-proven peer key; a label-bearing policy denies session-less `tools/call`
+  rather than silently skipping), secret injection with per-peer response redaction
+  (JSON and SSE — an unscannable compressed/oversized response is refused, never
+  forwarded), and capability upgrades (the token is stripped before the backend).
+  Honest residuals: labels attach at decision time (same as stdio); redaction is
+  best-effort (same threat model as stdio); a fresh session id starts label-clean
+  (≈ a stdio reconnect) and idle label state expires after 24h. DLP, shadow policies,
+  and router delegation remain stdio-only and are refused in config for HTTP/remote.
 - Policy matches FQDN, pubkey, and **`group:<name>`** rules (F17); groups are resolved from
   config today (`groups:`, a static `GroupResolver`). Dynamic NetBird group membership isn't
   available through the embed API — a management-API-backed resolver is a drop-in for the same

@@ -33,9 +33,9 @@ type SecretsConfig struct {
 type Config struct {
 	Mesh MeshConfig `yaml:"mesh"`
 	// AuditLog, when set, is a single gateway-wide tamper-evident audit ledger
-	// shared by every policy-enabled backend — one hash chain for the whole
-	// gateway, which is what a unified live view (dash / room) reads. When
-	// empty, each backend uses its own audit_log.
+	// shared by every policy- or capability-enabled backend — one hash chain for
+	// the whole gateway, which is what a unified live view (dash / room) reads.
+	// When empty, each backend uses its own audit_log.
 	AuditLog string `yaml:"audit_log"`
 	// AuditFailClosed makes the gateway-wide shared ledger a hard control:
 	// a record that cannot be written denies the call. Off by default.
@@ -68,7 +68,7 @@ type Config struct {
 	// shared ledger). See AuditOTLPConfig in otlpsink.go.
 	AuditOTLP *AuditOTLPConfig `yaml:"audit_otlp"`
 	Trace     *TraceConfig     `yaml:"trace"`
-	Registry      string       `yaml:"registry"` // dir: register backends for router discovery
+	Registry  string           `yaml:"registry"` // dir: register backends for router discovery
 	// TrustDomain is this gateway's SPIFFE trust domain (Feature A). When set,
 	// every local audit record is additively labeled with the caller's derived
 	// identity, spiffe://<trust_domain>/peer/<key>, in peer_spiffe_id. A label
@@ -90,6 +90,47 @@ type Config struct {
 	Control   *ControlConfig   `yaml:"control"` // optional: Air session-control endpoint
 	Hooks     *HooksConfig     `yaml:"hooks"`   // publish policy decisions to the event bus and/or a webhook
 	Backends  []*Backend       `yaml:"backends"`
+}
+
+// Group bounds (F17 policy groups + `group:` fan-out). maxGroupMembers caps
+// both the patterns per group AND the members one fan-out may resolve to;
+// both it and the per-pattern byte bound alias the air envelope bounds so
+// config and wire can never skew.
+const (
+	maxGroups            = 256
+	maxGroupMembers      = air.MaxFanoutMembers
+	maxGroupPatternBytes = air.MaxGroupPatternBytes
+)
+
+// validateGroups rejects a malformed top-level groups map at load time, so a
+// group name always fits the `group:<name>` selector grammar (no ":", bounded,
+// control-free — see air.ValidateGroupName) and every member pattern is a
+// usable acl pattern. An EMPTY pattern list stays legal: a defined-but-empty
+// group is a loud no-op at fan-out time, never a silent one.
+func validateGroups(groups map[string][]string) error {
+	if len(groups) > maxGroups {
+		return fmt.Errorf("groups: %d groups defined; max is %d", len(groups), maxGroups)
+	}
+	for name, patterns := range groups {
+		if err := air.ValidateGroupName(name); err != nil {
+			return fmt.Errorf("groups: %q: %w", name, err)
+		}
+		if len(patterns) > maxGroupMembers {
+			return fmt.Errorf("groups: %q has %d member patterns; max is %d", name, len(patterns), maxGroupMembers)
+		}
+		for i, p := range patterns {
+			// The SAME rule the fan-out envelope applies to its unmatched echo
+			// (air.ValidateGroupPattern), so a pattern this loader accepts can
+			// never invalidate a result envelope after deliveries ran.
+			if err := air.ValidateGroupPattern(p); err != nil {
+				return fmt.Errorf("groups: %q member pattern #%d: %w", name, i+1, err)
+			}
+			if key, ok := strings.CutPrefix(p, "pubkey:"); ok && strings.TrimSpace(key) == "" {
+				return fmt.Errorf("groups: %q member pattern #%d: the pubkey: form requires a key", name, i+1)
+			}
+		}
+	}
+	return nil
 }
 
 // OperatorConfig names one person permitted to operate this gateway. Identity is
@@ -224,9 +265,12 @@ type Backend struct {
 	// session_failover: standby.
 	SessionSweepSeconds int `yaml:"session_sweep_seconds"`
 	// Policy authorizes individual tools/call requests by caller identity. For
-	// stdio backends the gateway parses the JSON-RPC stream; for HTTP backends
-	// it parses each request body (F16). Rate limits, time windows, co-sign,
-	// and audit apply to both; taint/secret injection/capabilities are stdio.
+	// stdio backends the gateway parses the JSON-RPC stream; for HTTP/remote
+	// backends it parses each request body (F16). Rate limits, time windows,
+	// co-sign, audit, taint labels, secret injection, and capabilities apply on
+	// all three transports (HTTP/remote taint keys on Mcp-Session-Id; see the
+	// Secrets/Capabilities field docs). DLP, shadow policies, and router
+	// delegation remain stdio-only.
 	Policy *policy.Policy `yaml:"policy"`
 	// AuditLog is a file path for JSONL tool-call audit records. Empty
 	// sends audit records to stderr. The log is a tamper-evident hash chain
@@ -285,12 +329,16 @@ type Backend struct {
 	ApprovalSigningKey string `yaml:"approval_signing_key"`
 	// Secrets configures the credential broker: agents reference secrets by
 	// name ({{secret:NAME}}) and the gateway injects the value by identity,
-	// so the agent never holds the raw credential. Only valid for stdio
-	// backends with a policy.
+	// so the agent never holds the raw credential. Valid for stdio, http, and
+	// remote backends with a policy. On http/remote, injected values are also
+	// scrubbed from responses (JSON and SSE) per peer, and a response the
+	// gateway cannot scan (compressed/oversized) is refused, never forwarded.
 	Secrets *SecretsConfig `yaml:"secrets"`
 	// Capabilities pins authority keys for signed capability grants. A valid
 	// capability upgrades a policy-default-deny call to allow; required:true
-	// makes the backend a capability-only surface. Only valid for stdio.
+	// makes the backend a capability-only surface. Valid for stdio, http, and
+	// remote backends; the presented token is stripped from the body before it
+	// reaches the backend on every transport.
 	Capabilities *CapabilitiesConfig `yaml:"capabilities"`
 	// RouterDelegation pins router delegation-authority keys ("meshmcp router
 	// keygen"): a tools/call presenting a valid signed DelegationToken is
@@ -456,6 +504,11 @@ func loadConfig(path string) (*Config, error) {
 			return nil, fmt.Errorf("config %s: %w", path, err)
 		}
 	}
+	// Groups feed both policy `group:` peers (F17) and the `/v1/groups` fan-out
+	// roster, so the map itself is validated before anything references it.
+	if err := validateGroups(cfg.Groups); err != nil {
+		return nil, fmt.Errorf("config %s: %w", path, err)
+	}
 	seen := map[int]string{}
 	seenNames := map[string]bool{}
 	seenIDs := map[string]string{}
@@ -602,9 +655,6 @@ func loadConfig(path string) (*Config, error) {
 			}
 		}
 		if b.Capabilities != nil {
-			if !hasStdio {
-				return nil, fmt.Errorf("backend %q: capabilities are only valid for stdio backends", b.Name)
-			}
 			if len(b.Capabilities.TrustedPublicKeys) == 0 {
 				return nil, fmt.Errorf("backend %q: capabilities need at least one trusted_public_keys entry", b.Name)
 			}
@@ -644,9 +694,6 @@ func loadConfig(path string) (*Config, error) {
 			}
 		}
 		if b.Secrets != nil {
-			if !hasStdio {
-				return nil, fmt.Errorf("backend %q: secrets injection is only valid for stdio backends", b.Name)
-			}
 			if b.Policy == nil {
 				return nil, fmt.Errorf("backend %q: secrets requires a policy (injection happens at the enforcement point)", b.Name)
 			}

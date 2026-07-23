@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"time"
@@ -126,6 +127,7 @@ func harnessServe(args []string) error {
 	fs := flag.NewFlagSet("harness serve", flag.ExitOnError)
 	var d harnessDeps
 	d.bind(fs)
+	mo := meshFlags(fs)
 	listen := fs.String("listen", "", "mesh listen address (e.g. :9200); empty serves over stdio")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -135,17 +137,44 @@ func harnessServe(args []string) error {
 		return err
 	}
 	defer closer()
-	srv := orchestrator.New(eng, "meshmcp-orchestrator", version)
 
 	if *listen == "" {
+		srv := orchestrator.New(eng, "meshmcp-orchestrator", version)
 		fmt.Fprintln(os.Stderr, "harness: serving orchestrator over stdio (dark MCP service)")
 		return srv.Serve(context.Background(), os.Stdin, os.Stdout)
 	}
-	// Mesh listen: join the mesh and accept governed MCP connections. Wiring the
-	// dark service onto the mesh transport (mirroring cmdOrchestrate's accept
-	// loop) is Phase-0-plus; the stdio path is fully functional today.
-	fmt.Fprintf(os.Stderr, "harness: mesh listen %s (requires NB_SETUP_KEY)\n", *listen)
-	return fmt.Errorf("harness serve --listen: mesh transport wiring pending; use stdio for now")
+
+	// Mesh listen: join the mesh and accept governed MCP connections. Each
+	// connection gets its own orchestrator.Server over the SHARED engine (an
+	// mcp.Server holds one active session at a time). Zero public ports — the
+	// listener lives on the WireGuard mesh only, the spec's dark service.
+	client, err := startMesh(mo, os.Stderr)
+	if err != nil {
+		return err
+	}
+	defer stopMesh(client)
+	ln, err := client.ListenTCP(*listen)
+	if err != nil {
+		return fmt.Errorf("harness serve: listen on mesh %s: %w", *listen, err)
+	}
+	fmt.Fprintf(os.Stderr, "harness: orchestrator dark service on mesh %s\n", *listen)
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, shutdownSignals...)
+	go func() { <-sig; ln.Close() }()
+
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "harness: orchestrator shutting down")
+			return nil
+		}
+		go func() {
+			defer conn.Close()
+			srv := orchestrator.New(eng, "meshmcp-orchestrator", version)
+			_ = srv.Serve(context.Background(), conn, conn)
+		}()
+	}
 }
 
 func harnessRun(args []string) error {

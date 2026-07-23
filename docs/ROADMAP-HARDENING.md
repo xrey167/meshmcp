@@ -106,10 +106,13 @@ shipped to any sink through the F13 `AuditSink` plugin (OpenTelemetry, a SIEM, a
 > **Why it's revolutionary:** *"who called what, from where, when"* becomes queryable **and** exportable for
 > an entire agent fleet — through a plugin, with nothing exposed.
 
-### F16 · HTTP-backend policy parity
+### F16 · HTTP-backend policy parity — shipped (incl. per-session controls)
 Close the biggest honest limitation: HTTP backends today get only a network ACL, not per-tool parsing.
 Parse the Streamable-HTTP JSON-RPC at the reverse proxy so **policy, audit, secret injection, and
 capabilities apply to HTTP backends too**, reusing the exact `Filter` pipeline stdio backends already run.
+*Status:* shipped — tool/method decisions via the shared classifier, plus per-session taint labels
+(`Mcp-Session-Id` + peer key), secret injection with per-peer JSON/SSE response redaction, and
+capability upgrades; DLP/shadow/router-delegation stay stdio-only (config-refused).
 > **Why it's revolutionary:** the firewall stops being stdio-only — every backend, on any transport, gets
 > the same identity-keyed policy and tamper-evident audit.
 

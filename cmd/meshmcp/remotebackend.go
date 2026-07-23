@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -543,10 +544,32 @@ func remoteHandler(name string, checker acl, enf *httpEnforcer, rc *remoteClient
 			http.Error(w, "remote backend unavailable", http.StatusBadGateway)
 			return
 		}
+		// Scrub injected secret values from the (already fully buffered)
+		// response before it reaches the peer — parity with the stdio filter's
+		// response redaction. The outbound leg never sets Accept-Encoding, so
+		// Go's transport transparently decodes its own gzip; a response still
+		// carrying a Content-Encoding cannot be scanned and is refused
+		// (fail closed), never forwarded.
+		redacted := false
+		if red := enf.responseRedactor(pubKey); red.Active() {
+			if enc := header.Get("Content-Encoding"); enc != "" && !strings.EqualFold(enc, "identity") {
+				log.Printf("backend %q: remote response Content-Encoding %q cannot be scanned for injected secrets — refused", name, enc)
+				http.Error(w, "remote backend response cannot be scanned for injected secrets", http.StatusBadGateway)
+				return
+			}
+			respBody = red.Redact(respBody)
+			redacted = true
+		}
 		for k, vs := range header {
+			if redacted && k == "Content-Length" {
+				continue // recomputed below: redaction may change the length
+			}
 			for _, v := range vs {
 				w.Header().Add(k, v)
 			}
+		}
+		if redacted {
+			w.Header().Set("Content-Length", strconv.Itoa(len(respBody)))
 		}
 		w.WriteHeader(status)
 		_, _ = w.Write(respBody)

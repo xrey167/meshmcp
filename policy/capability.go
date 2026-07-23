@@ -3,6 +3,7 @@ package policy
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -47,6 +48,18 @@ type CapabilityClaims struct {
 	ExpiresAt int64  `json:"exp"`
 	PubKey    string `json:"pubkey"` // hex authority key — a HINT; must be pinned by the verifier
 	Sig       string `json:"sig,omitempty"`
+
+	// DelegatePub authorizes the HOLDER of this capability to mint sub-grants:
+	// it is the hex Ed25519 public key whose private half may sign a direct
+	// child token (see DelegateCapability). Empty = this capability cannot be
+	// delegated. Omitempty, so existing tokens are byte-identical.
+	DelegatePub string `json:"delegate_pub,omitempty"`
+	// Parent carries the ENCODED parent token of a sub-grant. The verifier
+	// walks the chain root-first: the root must be signed by a pinned
+	// authority, each child by its parent's DelegatePub key, and every hop
+	// must be strictly narrower (tool/corpus subset, same audience, expiry no
+	// later than the parent's). Empty = authority-issued root token.
+	Parent string `json:"parent,omitempty"`
 }
 
 func (c CapabilityClaims) signingBytes() []byte {
@@ -72,6 +85,12 @@ func (s *Signer) IssueCapability(claims CapabilityClaims, now time.Time) (string
 	}
 	if claims.Subject == "" || claims.Audience == "" || len(claims.Tools) == 0 {
 		return "", fmt.Errorf("capability needs subject, audience, and at least one tool")
+	}
+	if claims.Parent != "" {
+		return "", fmt.Errorf("an authority-issued capability cannot carry a parent (sub-grants are minted with DelegateCapability)")
+	}
+	if err := validateDelegatePub(claims); err != nil {
+		return "", err
 	}
 	// Reject a malformed glob at issue time; otherwise it silently never matches
 	// and the authority mints a token that can never authorize anything.
@@ -174,16 +193,14 @@ func (v *CapabilityVerifier) Verify(token, peerKey, backend, tool string) (Capab
 // token presented to a verifier without a replay cache still fails closed
 // here, so it can never authorize anything by omission.
 func (v *CapabilityVerifier) verifyClaims(token, peerKey, backend, tool string) (CapabilityClaims, error) {
-	raw, err := base64.RawURLEncoding.DecodeString(token)
+	c, err := decodeCapability(token)
 	if err != nil {
-		return CapabilityClaims{}, fmt.Errorf("capability is not valid base64url")
+		return CapabilityClaims{}, err
 	}
-	var c CapabilityClaims
-	if err := json.Unmarshal(raw, &c); err != nil {
-		return CapabilityClaims{}, fmt.Errorf("capability is not valid JSON")
-	}
-	if c.Version != 1 {
-		return CapabilityClaims{}, fmt.Errorf("unsupported capability version %d", c.Version)
+	// A sub-grant (Parent set) is verified by walking its chain — the root must
+	// be authority-pinned and every hop strictly narrower. See capability_delegation.go.
+	if c.Parent != "" {
+		return v.verifyDelegated(c, peerKey, backend, tool)
 	}
 	// Trust root: the embedded key MUST be pinned.
 	key, ok := v.trusted[c.PubKey]
@@ -235,6 +252,14 @@ func (v *CapabilityVerifier) verifyClaims(token, peerKey, backend, tool string) 
 // no-op. Callers that split verification from execution (the tools/call
 // filter) call this only once the call's final outcome is allow, so a held or
 // denied call never burns the grant.
+//
+// A delegated leaf's replay key is derived from its SIGNATURE, not its ID: a
+// sub-grant's ID is holder-chosen (a malicious delegate can hand-sign a token
+// with any ID), so keying by ID would let a delegate mint a colliding ID and
+// burn ANOTHER token's single-use grant. The Ed25519 signature is unique per
+// token content, so re-presenting the same token still burns exactly once
+// while distinct tokens can never collide. Authority-issued roots keep the
+// jti key (the authority controls those IDs).
 func (v *CapabilityVerifier) Consume(c CapabilityClaims) error {
 	if !c.SingleUse {
 		return nil
@@ -242,7 +267,12 @@ func (v *CapabilityVerifier) Consume(c CapabilityClaims) error {
 	if v.used == nil {
 		return fmt.Errorf("capability is single-use but this verifier has no replay cache (fail closed)")
 	}
-	if !v.used.Use("cap-jti:"+c.ID, time.Unix(c.ExpiresAt, 0), v.now()) {
+	key := "cap-jti:" + c.ID
+	if c.Parent != "" {
+		sum := sha256.Sum256([]byte(c.Sig))
+		key = "cap-sig:" + hex.EncodeToString(sum[:])
+	}
+	if !v.used.Use(key, time.Unix(c.ExpiresAt, 0), v.now()) {
 		return fmt.Errorf("capability %s has already been used (single-use)", c.ID)
 	}
 	return nil
@@ -278,27 +308,49 @@ func (f *Filter) SetCapabilityVerifier(v *CapabilityVerifier, required bool) {
 	f.capRequired = required
 }
 
-// applyCapability folds a presented capability into the policy decision:
+// applyCapability folds a presented capability into the policy decision. It
+// delegates to FoldCapability, the single shared implementation both the stdio
+// filter and the Streamable-HTTP enforcer use (the ClassifyRPC precedent), so
+// the two transports cannot drift on capability semantics.
+//
+// A SingleUse grant is NOT consumed here: the returned claims (non-nil only
+// when the token was load-bearing) are consumed by handleToolCall once the
+// call's final outcome is allow, so a co-sign hold or a downstream
+// delegation/hook deny never burns the grant.
+func (f *Filter) applyCapability(dec Decision, token, tool string) (Decision, *CapabilityClaims) {
+	return FoldCapability(dec, f.capVerifier, f.capRequired, token, f.caller.PeerKey, f.caller.Backend, tool)
+}
+
+// FoldCapability folds a presented capability into the policy decision:
 //   - required + no valid token        → deny (capability-only surface);
 //   - a presented but invalid token    → deny (fail closed);
 //   - a valid token cannot override an explicit deny or a co-sign requirement;
 //   - a valid token upgrades a policy-DEFAULT deny (RuleID -1) to allow, and
 //     otherwise leaves an already-allowed call allowed.
 //
+// It is the SHARED implementation used by the stdio filter and the
+// Streamable-HTTP enforcer, so both transports make the same capability
+// decision for the same (policy, token) input.
+//
 // A SingleUse grant is NOT consumed here: precedence runs first, and the
 // returned claims (non-nil only when the token was load-bearing — it upgraded
-// a default-deny, or the surface is capability-required) are consumed by
-// handleToolCall once the final outcome is allow. A co-sign hold, an explicit
+// a default-deny, or the surface is capability-required) are consumed by the
+// caller once the call's final outcome is allow. A co-sign hold, an explicit
 // deny, a delegation/hook deny, or a call the policy allowed on its own never
 // burns the grant — so a cosign-approved retry still has it.
-func (f *Filter) applyCapability(dec Decision, token, tool string) (Decision, *CapabilityClaims) {
+func FoldCapability(dec Decision, v *CapabilityVerifier, required bool, token, peerKey, backend, tool string) (Decision, *CapabilityClaims) {
 	if token == "" {
-		if f.capRequired {
+		if required {
 			return Decision{Outcome: OutcomeDeny, RuleID: dec.RuleID, Reason: "capability required but none presented"}, nil
 		}
 		return dec, nil
 	}
-	claims, err := f.capVerifier.verifyClaims(token, f.caller.PeerKey, f.caller.Backend, tool)
+	if v == nil {
+		// A token was presented but there is nothing pinned to verify it
+		// against: fail closed rather than silently ignoring it.
+		return Decision{Outcome: OutcomeDeny, RuleID: dec.RuleID, Reason: "invalid capability: no verifier configured"}, nil
+	}
+	claims, err := v.verifyClaims(token, peerKey, backend, tool)
 	if err != nil {
 		return Decision{Outcome: OutcomeDeny, RuleID: dec.RuleID, Reason: "invalid capability: " + err.Error()}, nil
 	}
@@ -310,7 +362,7 @@ func (f *Filter) applyCapability(dec Decision, token, tool string) (Decision, *C
 	if dec.Outcome == OutcomeDeny && dec.RuleID != -1 {
 		return dec, nil
 	}
-	loadBearing := claims.SingleUse && (f.capRequired || dec.Outcome != OutcomeAllow)
+	loadBearing := claims.SingleUse && (required || dec.Outcome != OutcomeAllow)
 	// Grant: upgrade a default-deny, or keep an existing allow.
 	grant := Decision{
 		Allow:     true,
@@ -332,6 +384,16 @@ func (f *Filter) applyCapability(dec Decision, token, tool string) (Decision, *C
 // present the line is returned unchanged.
 func stripCapability(line []byte) (token string, out []byte) {
 	return stripMetaToken(line, capMetaKey)
+}
+
+// StripCapabilityToken is the exported form of stripCapability, shared with the
+// Streamable-HTTP enforcer: it removes a presented capability token from a
+// JSON-RPC body's params._meta and returns the token plus the rewritten body,
+// so the token never reaches the backend, trace, or audit on ANY transport.
+// Output framing follows input framing (a trailing newline is preserved, and
+// never added to a body that had none).
+func StripCapabilityToken(line []byte) (token string, out []byte) {
+	return stripCapability(line)
 }
 
 // stripMetaToken removes the string-valued security token at the given
@@ -375,5 +437,10 @@ func stripMetaToken(line []byte, key string) (token string, out []byte) {
 	pb, _ := json.Marshal(pm)
 	msg["params"] = pb
 	ob, _ := json.Marshal(msg)
-	return token, append(ob, '\n')
+	// Preserve the input's framing: a stdio line keeps its trailing newline,
+	// while an HTTP body without one never gains one.
+	if len(line) > 0 && line[len(line)-1] == '\n' {
+		ob = append(ob, '\n')
+	}
+	return token, ob
 }

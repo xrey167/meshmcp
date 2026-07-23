@@ -117,6 +117,23 @@ func (r Rule) blockSet() []string {
 	return out
 }
 
+// UsesLabels reports whether any rule of this policy emits or blocks on
+// data-flow labels (including the taint_source/taint_guard sugar). The
+// Streamable-HTTP enforcer uses it to decide whether per-session label state
+// must be tracked — and therefore whether a tools/call must carry a session id
+// (fail closed: label rules that cannot be enforced deny, never silently skip).
+func (p *Policy) UsesLabels() bool {
+	if p == nil {
+		return false
+	}
+	for _, r := range p.Rules {
+		if len(r.emitSet()) > 0 || len(r.blockSet()) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // Policy is an ordered list of rules with a default decision.
 type Policy struct {
 	// DefaultAllow decides tool calls that match no rule. Default false

@@ -28,7 +28,7 @@ import (
 // presentation verbs.
 //
 //	meshmcp air sessions <control-ip:port>
-//	meshmcp air steer    <control-ip:port> (--to node | --backend b --session id) [--param k=v]
+//	meshmcp air steer    <control-ip:port> (--to node | --to group:<name> | --backend b --session id) [--param k=v]
 //	meshmcp air launch   --role reader [--nb-config dir] <gateway-ip:port>
 func cmdAir(args []string) error {
 	if len(args) == 0 {
@@ -175,11 +175,12 @@ func airUsage() error {
 	fmt.Fprintln(os.Stderr, "  "+b("air kg")+"          assert|query|neighbors|subgraph|verify|serve  "+dim("the mesh's governed, audited knowledge graph"))
 	fmt.Fprintln(os.Stderr, "  "+b("air database")+"    query|serve|ls                   "+dim("the governed firewall between an agent and a database (SELECT-only, per-table grants, audited)"))
 	fmt.Fprintln(os.Stderr, "  "+b("air sessions")+"    <control-ip:port>                 "+dim("list live sessions on a gateway"))
-	fmt.Fprintln(os.Stderr, "  "+b("air steer")+"       <control-ip:port> (--to node | --backend b --session id) [--param k=v]")
+	fmt.Fprintln(os.Stderr, "  "+b("air steer")+"       <control-ip:port> (--to node|group:<name> | --backend b --session id) [--param k=v] [--json]")
+	fmt.Fprintln(os.Stderr, "                  "+dim("steer one identity-bound session — or fan out per group member: one ACL decision + audit record each"))
 	fmt.Fprintln(os.Stderr, "  "+b("air tasks")+"       <backend-ip:port>                 "+dim("list a backend's async tasks"))
 	fmt.Fprintln(os.Stderr, "  "+b("air task-steer")+"  <backend-ip:port> --task id [--text s | --payload j | --cancel]")
 	fmt.Fprintln(os.Stderr, "  "+b("air agent-steer")+" <agent-ip:port>   --type task|nudge|cancel [--tool t --arg k=v | --text s]")
-	fmt.Fprintln(os.Stderr, "  "+b("air ring")+"        [--control c] --message s <target> "+dim("ring a Nearby ring service or raw address"))
+	fmt.Fprintln(os.Stderr, "  "+b("air ring")+"        [--control c] --message s <target|group:<name>> "+dim("ring a Nearby ring service, raw address, or every present group member"))
 	fmt.Fprintln(os.Stderr, "  "+b("air listen")+"      --port N --allow <id>              "+dim("receive rings over the mesh (deny-by-default, rate-limited, audited)"))
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, dim("LAUNCH & AUTOMATE"))
@@ -282,21 +283,25 @@ func cmdAirSessions(args []string) error {
 	return nil
 }
 
-// cmdAirSteer steers one live session via the gateway control endpoint.
+// cmdAirSteer steers one live session via the gateway control endpoint — or,
+// with --to group:<name>, fans one steer out to every present member of an
+// operator-defined group as N independent /v1/steer calls (one control-ACL +
+// backend-ACL decision and one audit record per member).
 func cmdAirSteer(args []string) error {
 	fs := flag.NewFlagSet("air steer", flag.ExitOnError)
 	o := meshFlags(fs)
 	backend := fs.String("backend", "", "backend name the session belongs to (from air sessions)")
 	sessionID := fs.String("session", "", "session id to steer")
-	to := fs.String("to", "", "verified Nearby selector (name | fqdn | pubkey): steer the single live session bound to that node's transport identity")
+	to := fs.String("to", "", "verified Nearby selector (name | fqdn | pubkey | group:<name>): steer the single live session bound to that node's transport identity, or fan out per group member")
 	method := fs.String("method", "notifications/air/steer", "server->client notification method")
+	asJSON := fs.Bool("json", false, "group mode only: print the air.fanout-result/v1 envelope instead of per-member lines")
 	params := argFlags{}
 	fs.Var(&params, "param", "steer param key=value (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: meshmcp air steer [flags] <control-ip:port> (--to <node> | --backend <b> --session <id>)")
+		return errors.New("usage: meshmcp air steer [flags] <control-ip:port> (--to <node> | --to group:<name> | --backend <b> --session <id>)")
 	}
 	if *to != "" && (*backend != "" || *sessionID != "") {
 		return errors.New("air steer: --to and --backend/--session are mutually exclusive")
@@ -304,11 +309,28 @@ func cmdAirSteer(args []string) error {
 	if *to == "" && (*backend == "" || *sessionID == "") {
 		return errors.New("air steer: pass --to <node>, or --backend and --session")
 	}
+	// Reserve the group: prefix before any presence resolution, so a card
+	// named "group:x" can never shadow the fan-out grammar (fail closed).
+	group, isGroup, err := parseGroupSelector(*to)
+	if err != nil {
+		return fmt.Errorf("air steer: %w", err)
+	}
+	if *asJSON && !isGroup {
+		return errors.New("air steer: --json is only supported with --to group:<name>")
+	}
 	hc, cleanup, err := airControlHTTP(o, fs.Arg(0))
 	if err != nil {
 		return err
 	}
 	defer cleanup()
+
+	if isGroup {
+		res, err := airSteerGroupFanout(context.Background(), hc, group, *method, map[string]any(params))
+		if err != nil {
+			return fmt.Errorf("air steer: %w", err)
+		}
+		return reportFanout(res, *asJSON)
+	}
 
 	if *to != "" {
 		// Resolve the selector through the current Presence directory, then
@@ -389,12 +411,7 @@ func identityBoundSession(sessions []AirSession, publicKey string) (AirSession, 
 	if strings.TrimSpace(publicKey) == "" {
 		return AirSession{}, errors.New("resolved node has no transport-stamped public key")
 	}
-	var matches []AirSession
-	for _, s := range sessions {
-		if s.PeerKey == publicKey {
-			matches = append(matches, s)
-		}
-	}
+	matches := identityBoundSessions(sessions, publicKey)
 	switch len(matches) {
 	case 0:
 		return AirSession{}, errors.New("no identity-bound live session for this node")
@@ -403,6 +420,126 @@ func identityBoundSession(sessions []AirSession, publicKey string) (AirSession, 
 	default:
 		return AirSession{}, fmt.Errorf("%d live sessions are bound to this node; pass --backend and --session explicitly", len(matches))
 	}
+}
+
+// identityBoundSessions returns every live session carrying the node's
+// transport-stamped peer key. Shared by the single-target binding above and
+// the group fan-out's per-member binding, so the two can never diverge.
+func identityBoundSessions(sessions []AirSession, publicKey string) []AirSession {
+	var matches []AirSession
+	for _, s := range sessions {
+		if s.PeerKey == publicKey {
+			matches = append(matches, s)
+		}
+	}
+	return matches
+}
+
+// airSteerGroupFanout resolves a group server-side (GET /v1/groups) and fans
+// the steer out SEQUENTIALLY, in server resolution order: one binding snapshot
+// (GET /v1/sessions), then one POST /v1/steer per identity-bound member — the
+// UNCHANGED endpoint, so every POST independently passes the control allow
+// gate AND the target backend's own ACL and appends its own audit record. A
+// member's skip, denial, or failure never stops the loop. Hard errors (unknown
+// group, empty group, an over-wide or malformed roster — refused by
+// fetchAirGroup at the trust boundary — unreachable control) happen before
+// any delivery. The result envelope carries the unmatched-pattern echo.
+func airSteerGroupFanout(ctx context.Context, hc *http.Client, group, method string, params map[string]any) (air.FanoutResult, error) {
+	roster, err := fetchAirGroup(ctx, hc, group)
+	if err != nil {
+		return air.FanoutResult{}, err
+	}
+	if len(roster.Members) == 0 {
+		return air.FanoutResult{}, emptyGroupError(group, roster.UnmatchedPatterns)
+	}
+	sessions, err := fetchAirSessions(hc)
+	if err != nil {
+		return air.FanoutResult{}, err
+	}
+	members := make([]air.FanoutMember, 0, len(roster.Members))
+	for _, card := range roster.Members {
+		members = append(members, steerGroupMember(ctx, hc, card, sessions, method, params))
+	}
+	return air.NewFanoutResult(group, air.FanoutActionSteer, members, roster.UnmatchedPatterns)
+}
+
+// steerGroupMember delivers one member's steer and reports per-member truth:
+// the exact single-target fail-closed binding rule applied per member (0
+// sessions → skipped, >1 → skipped ambiguous), the endpoint's own 403 as
+// `denied` with its reason, anything else undeliverable as `failed`.
+func steerGroupMember(ctx context.Context, hc *http.Client, card air.Presence, sessions []AirSession, method string, params map[string]any) air.FanoutMember {
+	m := air.FanoutMember{
+		Recipient: air.FanoutRecipient{Name: card.Name, FQDN: card.FQDN, PublicKey: card.PublicKey},
+		Time:      time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	skip := func(reason string) air.FanoutMember {
+		m.Status, m.Reason = air.FanoutSkipped, reason
+		return m
+	}
+	if strings.TrimSpace(card.PublicKey) == "" {
+		// Presence cards are identity-stamped, so this should be unreachable;
+		// fail closed anyway rather than let an empty key match legacy
+		// key-less sessions.
+		return skip("no transport-stamped public key")
+	}
+	matches := identityBoundSessions(sessions, card.PublicKey)
+	switch {
+	case len(matches) == 0:
+		return skip("no identity-bound live session")
+	case len(matches) > 1:
+		return skip(fmt.Sprintf("ambiguous (%d sessions)", len(matches)))
+	}
+	bound := matches[0]
+	// The binding snapshot is server data too: a session row whose backend/id
+	// the result envelope cannot truthfully carry (blank, over-long, control
+	// characters) is skipped BEFORE any POST — never steered and then found
+	// unreportable after the whole loop ran.
+	if err := (air.FanoutSteer{Backend: bound.Backend, Session: bound.ID}).Validate(); err != nil {
+		return skip("unusable session binding: " + singleLineReason(err.Error()))
+	}
+
+	reqBody, _ := json.Marshal(map[string]any{
+		"backend": bound.Backend, "id": bound.ID, "method": method, "params": params,
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://air-control/v1/steer", bytes.NewReader(reqBody))
+	if err != nil {
+		m.Status, m.Reason = air.FanoutFailed, singleLineReason(err.Error())
+		return m
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := hc.Do(req)
+	if err != nil {
+		m.Status, m.Reason = air.FanoutFailed, singleLineReason(err.Error())
+		return m
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	switch resp.StatusCode {
+	case http.StatusOK:
+		// The 200 body is display detail from an untrusted peer; the
+		// identity-bound pair we actually posted is the fallback truth. A body
+		// missing either field (e.g. backend set, id absent) or carrying
+		// envelope-unsafe text falls back to the validated bound pair instead
+		// of invalidating the whole fan-out envelope after delivery.
+		detail := air.FanoutSteer{Backend: bound.Backend, Session: bound.ID}
+		var st struct{ Status, Backend, ID, By string }
+		if json.Unmarshal(body, &st) == nil {
+			if confirmed := (air.FanoutSteer{Backend: st.Backend, Session: st.ID, By: st.By}); confirmed.Validate() == nil {
+				detail = confirmed
+			}
+		}
+		m.Status = air.FanoutDelivered
+		m.Steer = &detail
+	case http.StatusForbidden:
+		// The endpoint's own explicit refusal (control allow or the target
+		// backend's ACL) — the one outcome steer can truthfully call denied.
+		m.Status, m.Reason = air.FanoutDenied, singleLineReason(string(body))
+	default:
+		// Includes 404: the session vanished after the binding snapshot —
+		// reported truthfully, never upgraded or hidden.
+		m.Status, m.Reason = air.FanoutFailed, singleLineReason(resp.Status+": "+string(body))
+	}
+	return m
 }
 
 // cmdAirLaunch spawns a new agent as a child process with its own mesh
