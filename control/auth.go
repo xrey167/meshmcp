@@ -23,10 +23,12 @@ const (
 	RoleRegistryWrite   Role = "registry.write"
 	RolePolicyRead      Role = "policy.read"
 	RolePolicyWrite     Role = "policy.write"
+	// RoleAnchorSubmit permits POSTing audit checkpoints to the anchor witness.
+	RoleAnchorSubmit Role = "anchor.submit"
 )
 
 // allRoles is the set a RoleAdmin key implicitly holds.
-var allRoles = []Role{RoleAdmin, RoleEnrollmentIssue, RoleRegistryRead, RoleRegistryWrite, RolePolicyRead, RolePolicyWrite}
+var allRoles = []Role{RoleAdmin, RoleEnrollmentIssue, RoleRegistryRead, RoleRegistryWrite, RolePolicyRead, RolePolicyWrite, RoleAnchorSubmit}
 
 func validRole(r Role) bool {
 	for _, x := range allRoles {

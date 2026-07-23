@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -17,26 +18,80 @@ type Anchor interface {
 	Anchor(c Checkpoint) error
 }
 
+// AnchorRecord is one anchor-file line: a witness's commitment to a single
+// checkpoint. Checkpoint is the anchored checkpoint's own hash (Checkpoint.Hash,
+// which commits to span, Merkle root, chain head, prev-checkpoint link, signer
+// key, and signature). PrevAnchor self-links the anchor file: it is the SHA-256
+// (hex) of the previous line's exact JSON bytes (without the trailing newline),
+// "" for the first line — so an edited or dropped anchor line breaks linkage.
+// Signer is set by a witness that accepts checkpoints from peer gateways, naming
+// the pinned signer key the record was verified against. Legacy anchor records
+// (the pre-v1 format) lack v/prev_anchor and carried checkpoint_seq as a JSON
+// string; verifiers accept them, but linkage is only enforced on records that
+// carry it.
+type AnchorRecord struct {
+	V          int    `json:"v"`
+	Seq        int    `json:"checkpoint_seq"`
+	ChainHead  string `json:"chain_head"`
+	Checkpoint string `json:"checkpoint"`
+	Time       string `json:"time"`
+	Signer     string `json:"signer,omitempty"`
+	PrevAnchor string `json:"prev_anchor"`
+}
+
+// AnchorLineHash is the self-linkage hash of one anchor line: SHA-256 over the
+// line's exact bytes without the trailing newline, hex encoded. The next
+// record's PrevAnchor must equal it.
+func AnchorLineHash(line []byte) string {
+	sum := sha256.Sum256(line)
+	return hex.EncodeToString(sum[:])
+}
+
 // FileAnchor appends each checkpoint to a separate append-only file — the
-// simplest external witness. In production this is an RFC 6962 log, a notary
-// API, or a peer gateway's anchor endpoint.
+// simplest external witness. Records are self-linked via PrevAnchor, so the
+// anchor file is itself tamper-evident. In production this is an RFC 6962 log,
+// a notary API, or a peer gateway's anchor endpoint.
 type FileAnchor struct {
-	mu sync.Mutex
-	W  io.Writer
+	mu   sync.Mutex
+	W    io.Writer
+	prev string // AnchorLineHash of the last written line ("" for a fresh file)
+}
+
+// NewFileAnchor builds a FileAnchor whose next record links to prevAnchorHash —
+// the AnchorLineHash of the existing file's last line, or "" for a new file —
+// so restarts continue one self-linked witness chain.
+func NewFileAnchor(w io.Writer, prevAnchorHash string) *FileAnchor {
+	return &FileAnchor{W: w, prev: prevAnchorHash}
 }
 
 func (a *FileAnchor) Anchor(c Checkpoint) error {
+	return a.append(c, "")
+}
+
+// Witness appends an anchor record on behalf of a witness that verified the
+// checkpoint against the pinned signer key, recording that key in the line.
+func (a *FileAnchor) Witness(c Checkpoint, signer string) error {
+	return a.append(c, signer)
+}
+
+func (a *FileAnchor) append(c Checkpoint, signer string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	rec := map[string]string{
-		"checkpoint_seq": itoaCP(c.Seq),
-		"chain_head":     c.ChainHead,
-		"checkpoint":     c.Hash(),
-		"time":           c.Time,
+	rec := AnchorRecord{
+		V:          1,
+		Seq:        c.Seq,
+		ChainHead:  c.ChainHead,
+		Checkpoint: c.Hash(),
+		Time:       c.Time,
+		Signer:     signer,
+		PrevAnchor: a.prev,
 	}
 	b, _ := json.Marshal(rec)
-	_, err := a.W.Write(append(b, '\n'))
-	return err
+	if _, err := a.W.Write(append(b, '\n')); err != nil {
+		return err
+	}
+	a.prev = AnchorLineHash(b)
+	return nil
 }
 
 // Checkpointer batches record hashes and, every N records (and on Flush),
@@ -180,9 +235,4 @@ func (c *Checkpointer) flushLocked(toSeq int, chainHead string) {
 	c.prevCP = cp.Hash()
 	c.leaves = c.leaves[:0]
 	c.fromSeq = 0
-}
-
-func itoaCP(n int) string {
-	b, _ := json.Marshal(n)
-	return string(b)
 }
