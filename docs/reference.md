@@ -304,5 +304,5 @@ registry, and bidirectional MCP; stdio + HTTP backends; a CLI (`ls/call/read/pro
   a **client-hook firewall** for Claude Code / Cursor / Codex (F33), and new dark backends **vault/scheduler/bus** (F26–F28).
 
 **Still open:**
-- **Replicated store backend:** Redis/etcd behind the `SessionStore` interface for multi-datacenter HA.
-- Flagships F14 (plugin marketplace), F19 (Mesh Spotlight), F25 (multi-tenant), F30 (future live-session handoff, distinct from shipped Context Capsule continuation), F31 (federated SSO mapping).
+- **Replicated store backend:** shipped for PostgreSQL (`pgstore`, `session_store: postgres://...`); Redis/etcd remain drop-in options behind the same `SessionStore`/`LeaseStore` interfaces.
+- Flagships F25 (multi-tenant), F30 (future live-session handoff, distinct from shipped Context Capsule continuation), F31 (federated SSO mapping).
