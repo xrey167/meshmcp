@@ -57,6 +57,18 @@ type Server struct {
 
 	mu       sync.Mutex
 	sessions map[sessionID]*serverSession
+	// warming holds sessions this gateway has pre-warmed as the destination of a
+	// live-session move (v2): the backend is spawned (and, for replay modes,
+	// handshake-replayed) but NO lease is held, NO client is pumped, and there is
+	// NO s.sessions entry — the source keeps owning and serving until CommitMove's
+	// single CAS. A warm entry is in-memory only, so a crash or abort before commit
+	// strands nothing durable. Separate from s.sessions so every existing path
+	// (Count, Sessions, remove, rehydrate, sweep) is untouched. See move.go.
+	warming map[sessionID]*warmSession
+
+	// moveHooks are nil in production (zero effect). Tests set them to synchronize
+	// on and inject crashes at the exact points of a live-session move. See move.go.
+	moveHooks moveHooks
 }
 
 // WithStore enables session migration: session state is checkpointed to the
@@ -94,6 +106,7 @@ func NewServer(factory BackendFactory, ttl time.Duration, logf func(string, ...a
 		logf:     logf,
 		instance: inst.String(),
 		sessions: make(map[sessionID]*serverSession),
+		warming:  make(map[sessionID]*warmSession),
 	}
 }
 
@@ -345,26 +358,51 @@ func (s *Server) resumeFromPersisted(ps PersistedSession, ep *endpoint, meta Met
 	// Tell the fresh backend which session it is, so a backend-managed
 	// (EventStore) backend can restore its own state.
 	meta.SessionID = ps.ID
-	backend, err := s.factory(meta)
+	backend, reader, err := s.spawnBackendForResume(ps, meta)
 	if err != nil {
 		return nil, err
 	}
+	return s.registerResumed(ps, ep, backend, reader, meta, leaseGen, active), nil
+}
+
+// spawnBackendForResume spawns a fresh backend for a persisted session and, for
+// the replay modes, replays the captured client->backend bytes against it and
+// discards the responses it re-produces (the client already holds them).
+// MigrateBackend skips replay entirely — the backend restores its own state from
+// MESHMCP_SESSION_ID. It does NOT register or pump the session: the caller
+// decides whether the backend serves immediately (resumeFromPersisted, for
+// rehydrate/adopt) or parks warm without a lease awaiting a move commit
+// (PrepareMove, move.go). meta.SessionID must already be ps.ID. Extracted from
+// resumeFromPersisted with no behavior change; RunSessionMigration guards it.
+func (s *Server) spawnBackendForResume(ps PersistedSession, meta Meta) (Backend, *bufio.Reader, error) {
+	backend, err := s.factory(meta)
+	if err != nil {
+		return nil, nil, err
+	}
 	reader := bufio.NewReaderSize(backend, maxPayload+64)
-	// Replay the captured client->backend log against the fresh backend and
-	// discard the responses it re-produces (the client already has them).
-	// MigrateBackend skips this entirely — the backend restored itself.
 	if s.migMode != MigrateBackend && len(ps.Replay) > 0 {
 		if _, err := backend.Write(ps.Replay); err != nil {
 			backend.Close()
-			return nil, err
+			return nil, nil, err
 		}
 		for i := 0; i < ps.ReplayResponses; i++ {
 			if _, err := reader.ReadString('\n'); err != nil {
 				backend.Close()
-				return nil, err
+				return nil, nil, err
 			}
 		}
 	}
+	return backend, reader, nil
+}
+
+// registerResumed publishes an already-spawned backend as a live session: it
+// builds the serverSession, registers it in s.sessions, starts the pumps, and
+// takes the first checkpoint under this gateway's lease generation. Shared by
+// resumeFromPersisted (failover rehydrate/adopt) and CommitMove (promoting a
+// pre-warmed move backend to serving). The caller holds s.mu and has already
+// secured the ownership lease (leaseGen). Extracted from resumeFromPersisted with
+// no behavior change; RunSessionMigration guards it.
+func (s *Server) registerResumed(ps PersistedSession, ep *endpoint, backend Backend, reader *bufio.Reader, meta Meta, leaseGen uint64, active int) *serverSession {
 	sess := &serverSession{
 		ep:          ep,
 		backend:     backend,
@@ -380,7 +418,7 @@ func (s *Server) resumeFromPersisted(ps PersistedSession, ep *endpoint, meta Met
 	s.sessions[ep.id] = sess
 	s.pump(sess)
 	s.checkpoint(sess) // persist under this gateway's instance id
-	return sess, nil
+	return sess
 }
 
 // checkpoint persists the session's state (with this gateway's lease) so

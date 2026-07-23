@@ -63,6 +63,8 @@ func cmdAir(args []string) error {
 		return cmdAirNode(args[1:])
 	case "handoff", "continue-on":
 		return cmdAirHandoff(args[1:])
+	case "move":
+		return cmdAirMove(args[1:])
 	case "whoami", "self":
 		return cmdAirWhoami(args[1:])
 	case "map":
@@ -124,7 +126,7 @@ func cmdAir(args []string) error {
 	case "-h", "--help", "help":
 		return airUsage()
 	default:
-		return fmt.Errorf("meshmcp air: unknown subcommand %q (want init | up | join | pair | operator | grant | home | nearby | send | announce | node | handoff | whoami | map | browse | stream | vision | bind | film | play | ring | listen | cast | drive | screen | catalog | change | osint | dns | kg | database | sessions | steer | launch | agent-steer | tasks | task-steer | workflow | graph | rag | serve)", args[0])
+		return fmt.Errorf("meshmcp air: unknown subcommand %q (want init | up | join | pair | operator | grant | home | nearby | send | announce | node | handoff | move | whoami | map | browse | stream | vision | bind | film | play | ring | listen | cast | drive | screen | catalog | change | osint | dns | kg | database | sessions | steer | launch | agent-steer | tasks | task-steer | workflow | graph | rag | serve)", args[0])
 	}
 }
 

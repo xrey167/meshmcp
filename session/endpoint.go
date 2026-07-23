@@ -292,6 +292,20 @@ func (e *endpoint) dropConnLocked() {
 	}
 }
 
+// detach drops the current transport connection WITHOUT closing the endpoint:
+// the session stays live and resumable (closed stays false; sendBuf, recvSeq,
+// and acked are all preserved), exactly as if the peer's link had dropped. A
+// live-session move uses it to quiesce the source's client before the final
+// checkpoint, so no client->backend byte is dispatched after the move freezes;
+// the pump on the dropped connection then errors and (connGen unchanged) exits
+// via handleExit, arming the reaper as for any ordinary detach. Inert on a
+// session with no bound connection.
+func (e *endpoint) detach() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.dropConnLocked()
+}
+
 func (e *endpoint) recvCursor() uint64 {
 	e.mu.Lock()
 	defer e.mu.Unlock()

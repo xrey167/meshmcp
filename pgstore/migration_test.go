@@ -17,3 +17,13 @@ func TestPGSessionMigratesAcrossGateways(t *testing.T) {
 		return openTestStore(t)
 	})
 }
+
+// TestPGSessionLiveMove proves the deliberate prepare->ready->commit live-session
+// MOVE (v2) over a live PostgreSQL store — the CAS-backed ownership swap and the
+// source fence across what would be separate hosts in production. The store-level
+// counterpart of the move's in-memory crash matrix in session/move_test.go.
+func TestPGSessionLiveMove(t *testing.T) {
+	storetest.RunSessionLiveMove(t, func(t *testing.T) session.SessionStore {
+		return openTestStore(t)
+	})
+}

@@ -14,7 +14,7 @@ content lands in BACKLOG.md.
 | 2 | Dependabot #19 cosign-installer | **done** | Merged 2026-07-23 |
 | 3 | Approvals hosting decision | **done** | Decided: gateway-colocated; rationale in AIR-ECOSYSTEM.md |
 | 4 | Steer hosting decision | **done** | Decided (a): agent-runtime concern; rationale in AIR-ECOSYSTEM.md (shipped with task 3) |
-| 5 | Transactional Handoff v2 | todo | After 7+8; the flagship |
+| 5 | Transactional Handoff v2 | **done** | prepare/ready/commit live move; commit = one TakeoverLease CAS gated on a single-use grant; source serves until swap; crash matrix + concurrency ×20; critical concurrent-commit finding fixed |
 | 6 | Spaces / `group:` fan-out | todo | |
 | 7 | Idempotency-key enforcement | **done** | mcp.Idempotency middleware + Mem/PG claim stores; review fixed (tool,key) scoping |
 | 8 | Lease renewal + standby sweep | **done** | Always-on renewal, release-on-shutdown, opt-in standby adoption at 2xTTL margin; 5 review findings fixed |
