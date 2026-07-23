@@ -105,6 +105,9 @@ func TestScaffoldBackendWiring(t *testing.T) {
 
 // TestInitNoClobberAndForce proves init refuses to overwrite without --force.
 func TestInitNoClobberAndForce(t *testing.T) {
+	// Root scaffold state under a temp home so the test never writes into the
+	// real user config dir.
+	t.Setenv("MESHMCP_HOME", t.TempDir())
 	dir := t.TempDir()
 	out := filepath.Join(dir, "meshmcp.yaml")
 
@@ -166,6 +169,7 @@ func TestSetupKeyPresentDetected(t *testing.T) {
 // when the setup key is absent.
 func TestUpScaffoldsMissingConfigAndFriendlyKeyError(t *testing.T) {
 	t.Setenv("NB_SETUP_KEY", "")
+	t.Setenv("MESHMCP_HOME", t.TempDir())
 	dir := t.TempDir()
 	out := filepath.Join(dir, "meshmcp.yaml")
 
@@ -183,6 +187,79 @@ func TestUpScaffoldsMissingConfigAndFriendlyKeyError(t *testing.T) {
 	}
 	if cfg.AuditLog == "" || cfg.Backends[0].Policy.DefaultAllow {
 		t.Errorf("scaffolded-by-up config is not safe-by-default")
+	}
+}
+
+// TestScaffoldBaseDirRootsIdentity proves the whole point of the canonical data
+// directory: with a BaseDir set, the generated identity (nb config), audit
+// ledger, and pairing store all live at absolute paths under that dir — so two
+// scaffolds written to different working directories share ONE mesh identity
+// instead of silently forking a second one.
+func TestScaffoldBaseDirRootsIdentity(t *testing.T) {
+	home := t.TempDir()
+
+	// Two configs written to different CWD-relative output paths, but both
+	// rooting their state at the same canonical data dir.
+	cfgA, _, err := buildScaffoldConfig(scaffoldOptions{OutPath: "/work/a/meshmcp.yaml", DeviceName: "gw", BaseDir: home})
+	if err != nil {
+		t.Fatalf("build A: %v", err)
+	}
+	cfgB, _, err := buildScaffoldConfig(scaffoldOptions{OutPath: "/work/b/meshmcp.yaml", DeviceName: "gw", BaseDir: home})
+	if err != nil {
+		t.Fatalf("build B: %v", err)
+	}
+
+	// Identity path is what stabilizes the mesh IP across restarts; it must be
+	// the SAME absolute path for both, and must live under the data dir.
+	wantIdentity := filepath.Join(home, "meshmcp-nb.json")
+	if cfgA.Mesh.ConfigPath != wantIdentity {
+		t.Errorf("identity path = %q, want %q", cfgA.Mesh.ConfigPath, wantIdentity)
+	}
+	if cfgA.Mesh.ConfigPath != cfgB.Mesh.ConfigPath {
+		t.Errorf("identity forked: %q != %q", cfgA.Mesh.ConfigPath, cfgB.Mesh.ConfigPath)
+	}
+	if cfgA.AuditLog != filepath.Join(home, "audit.jsonl") || cfgA.AuditLog != cfgB.AuditLog {
+		t.Errorf("audit path not rooted/shared: A=%q B=%q", cfgA.AuditLog, cfgB.AuditLog)
+	}
+	if cfgA.Control.PairStore != filepath.Join(home, "paired.json") || cfgA.Control.PairStore != cfgB.Control.PairStore {
+		t.Errorf("pair store not rooted/shared: A=%q B=%q", cfgA.Control.PairStore, cfgB.Control.PairStore)
+	}
+}
+
+// TestScaffoldBaseDirEmptyKeepsCWDDefaults proves the back-compat path: with no
+// BaseDir, the historical CWD-relative defaults are preserved unchanged, so
+// existing workflows (and the pure round-trip tests) keep working.
+func TestScaffoldBaseDirEmptyKeepsCWDDefaults(t *testing.T) {
+	cfg, _, err := buildScaffoldConfig(scaffoldOptions{OutPath: "meshmcp.yaml", DeviceName: "gw"})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if cfg.Mesh.ConfigPath != "./meshmcp-nb.json" {
+		t.Errorf("identity path = %q, want ./meshmcp-nb.json", cfg.Mesh.ConfigPath)
+	}
+	if cfg.AuditLog != scaffoldAuditLog {
+		t.Errorf("audit path = %q, want %q", cfg.AuditLog, scaffoldAuditLog)
+	}
+	if cfg.Control.PairStore != scaffoldPairStore {
+		t.Errorf("pair store = %q, want %q", cfg.Control.PairStore, scaffoldPairStore)
+	}
+}
+
+// TestDataDirPathHonorsMeshmcpHome proves $MESHMCP_HOME overrides the OS config
+// dir and that dataDirPath resolves without creating anything.
+func TestDataDirPathHonorsMeshmcpHome(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "custom-home")
+	t.Setenv("MESHMCP_HOME", home)
+	got, err := dataDirPath()
+	if err != nil {
+		t.Fatalf("dataDirPath: %v", err)
+	}
+	if got != home {
+		t.Errorf("dataDirPath = %q, want %q", got, home)
+	}
+	// Resolve-only: must NOT have created the directory as a side effect.
+	if _, statErr := os.Stat(home); !os.IsNotExist(statErr) {
+		t.Errorf("dataDirPath created %s (should be resolve-only): %v", home, statErr)
 	}
 }
 

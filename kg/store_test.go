@@ -58,7 +58,7 @@ func TestTimeTravel(t *testing.T) {
 	st := newStore(t)
 	r1, _ := st.Assert("x", "status", "draft", "K")
 	_, _ = st.Assert("x", "status", "final", "K") // seq 2
-	st.Delete(r1.ID, "K")                          // seq 3: draft tombstoned
+	st.Delete(r1.ID, "K")                         // seq 3: draft tombstoned
 
 	// Now: only "final" remains.
 	now := st.Query("x", "status", "", 0)

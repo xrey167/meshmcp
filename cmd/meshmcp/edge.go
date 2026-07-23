@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"syscall"
 
 	"gopkg.in/yaml.v3"
 
@@ -103,7 +102,7 @@ func cmdEdge(args []string) error {
 		return err
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(context.Background(), shutdownSignals...)
 	defer stop()
 
 	fmt.Fprintf(os.Stderr, "meshmcp edge: serving %s on %s (backend %q)\n", cfg.PublicURL, cfg.Listen, cfg.Backend.Name)

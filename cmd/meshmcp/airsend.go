@@ -628,7 +628,7 @@ func cmdAirSend(args []string) error {
 	}
 	defer stopMesh(client)
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), shutdownSignals...)
 	defer stop()
 	snapshot, err := snapshotAirDelivery(delivery, defaultAirDeliveryBounds)
 	if err != nil {

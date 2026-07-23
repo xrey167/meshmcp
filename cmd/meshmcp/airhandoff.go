@@ -177,7 +177,7 @@ func cmdAirHandoffOffer(args []string) error {
 	if err := verifyHandoffTargetIdentity(client, fs.Arg(0), offer.Capsule.TargetKey); err != nil {
 		return fmt.Errorf("air handoff offer: %w", err)
 	}
-	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	signalCtx, stop := signal.NotifyContext(context.Background(), shutdownSignals...)
 	defer stop()
 	sendCtx, cancel := context.WithTimeout(signalCtx, *networkTimeout)
 	defer cancel()
@@ -396,7 +396,7 @@ func cmdAirHandoffReceive(args []string) error {
 	}
 	defer ln.Close()
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), shutdownSignals...)
 	defer stop()
 	go func() { <-ctx.Done(); _ = ln.Close() }()
 
@@ -759,7 +759,7 @@ func cmdAirHandoffContinue(args []string) error {
 	deliver := func(ctx context.Context, addr string, env steerEnvelope) error {
 		return sendSteerEnvelopeToPeer(ctx, client, addr, agentKey, env)
 	}
-	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	signalCtx, stop := signal.NotifyContext(context.Background(), shutdownSignals...)
 	defer stop()
 	deliveryCtx, cancel := context.WithTimeout(signalCtx, *networkTimeout)
 	defer cancel()

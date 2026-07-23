@@ -102,7 +102,7 @@ func cmdAirNearby(args []string) error {
 		return render(out)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), shutdownSignals...)
 	defer stop()
 	ticker := time.NewTicker(*interval)
 	defer ticker.Stop()
@@ -210,7 +210,7 @@ func cmdAirNode(args []string) error {
 	}
 	defer cleanup()
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), shutdownSignals...)
 	defer stop()
 
 	// The listener is up before the card advertises it, so a resolved Send
@@ -267,6 +267,14 @@ func parseAirControlFlags(fs *flag.FlagSet, args []string) (string, error) {
 	}
 	if err := fs.Parse(parseArgs); err != nil {
 		return "", err
+	}
+	// No positional given: fall back to a remembered default ($MESHMCP_CONTROL or
+	// the saved profile) so a configured operator can omit the address entirely.
+	if fs.NArg() == 0 {
+		if addr := resolveControl(""); addr != "" {
+			return addr, nil
+		}
+		return "", errors.New("exactly one control-ip:port is required" + noControlHint)
 	}
 	if fs.NArg() != 1 {
 		return "", errors.New("exactly one control-ip:port is required")

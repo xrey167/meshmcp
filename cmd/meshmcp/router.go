@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -10,6 +12,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path"
 	"sync"
 	"time"
 
@@ -61,9 +64,17 @@ func routerCallerAllowed(allow acl, pubKey, fqdn string) bool {
 }
 
 // Upstream is a set of interchangeable replica addresses for one logical
-// upstream. In YAML it may be written as a single string or a list.
+// upstream. In YAML it may be written as a single string, a list, or a mapping
+// with `addrs` and options.
 type Upstream struct {
 	Addrs []string
+	// RetryTools lists tool-name globs the OPERATOR classifies as safe to
+	// re-dispatch to another replica after an ambiguous transport failure
+	// (idempotent or read-only tools). Every dispatch of a matching tools/call
+	// carries the same _meta idempotency key so a cooperating backend can
+	// deduplicate. Unlisted tools keep the deny-default: never auto-retried
+	// after dispatch.
+	RetryTools []string
 }
 
 func (u *Upstream) UnmarshalYAML(value *yaml.Node) error {
@@ -77,14 +88,24 @@ func (u *Upstream) UnmarshalYAML(value *yaml.Node) error {
 		u.Addrs = many
 		return nil
 	}
-	return fmt.Errorf("upstream must be a string or a list of strings")
+	var m struct {
+		Addrs      []string `yaml:"addrs"`
+		RetryTools []string `yaml:"retry_tools"`
+	}
+	if err := value.Decode(&m); err == nil && len(m.Addrs) > 0 {
+		u.Addrs = m.Addrs
+		u.RetryTools = m.RetryTools
+		return nil
+	}
+	return fmt.Errorf("upstream must be a string, a list of strings, or a mapping with addrs (+ optional retry_tools)")
 }
 
-// addrs flattens the config into name -> replica addresses.
-func (c *RouterConfig) addrs() map[string][]string {
-	m := make(map[string][]string, len(c.Upstreams))
+// upstreamSet copies the static upstream map so discovery can merge registry
+// entries without mutating config.
+func (c *RouterConfig) upstreamSet() map[string]Upstream {
+	m := make(map[string]Upstream, len(c.Upstreams))
 	for name, up := range c.Upstreams {
-		m[name] = up.Addrs
+		m[name] = up
 	}
 	return m
 }
@@ -152,12 +173,14 @@ func cmdRouter(args []string) error {
 		}
 		log.Printf("router: dynamic discovery via registry %s", cfg.Registry)
 	}
-	discover := func() map[string][]string {
-		m := cfg.addrs()
+	discover := func() map[string]Upstream {
+		m := cfg.upstreamSet()
 		if reg != nil {
 			if rm, err := reg.Lookup(); err == nil {
 				for name, addrs := range rm {
-					m[name] = dedupeAddrs(append(m[name], addrs...))
+					up := m[name]
+					up.Addrs = dedupeAddrs(append(up.Addrs, addrs...))
+					m[name] = up
 				}
 			}
 		}
@@ -165,7 +188,7 @@ func cmdRouter(args []string) error {
 	}
 
 	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt)
+	signal.Notify(sig, shutdownSignals...)
 	go func() { <-sig; ln.Close() }()
 
 	allow := newACL(cfg.Allow)
@@ -204,7 +227,7 @@ type dialFunc func(ctx context.Context, addr string) (net.Conn, error)
 
 // handleRouterConn serves one downstream client: it discovers every
 // upstream, presents their union, and routes calls until the client leaves.
-func handleRouterConn(client *embed.Client, conn net.Conn, upstreams map[string][]string, allow acl, eng *policy.Engine) {
+func handleRouterConn(client *embed.Client, conn net.Conn, upstreams map[string]Upstream, allow acl, eng *policy.Engine) {
 	defer conn.Close()
 	ctx := context.Background()
 
@@ -261,22 +284,26 @@ type replica struct {
 // upstreamPool load-balances calls across an upstream's replicas
 // (round-robin) and fails over around dead ones, re-dialing lazily.
 type upstreamPool struct {
-	name   string
-	dial   dialFunc
-	origin map[string]any
-	notify func(method string, params json.RawMessage)
-	relay  func(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, *mcpclient.RPCError)
+	name       string
+	dial       dialFunc
+	origin     map[string]any
+	retryTools []string // operator-classified retry-safe tool globs (see Upstream)
+	notify     func(method string, params json.RawMessage)
+	relay      func(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, *mcpclient.RPCError)
 
 	mu       sync.Mutex
 	replicas []*replica
 	next     int
 }
 
-func newUpstreamPool(name string, addrs []string, dial dialFunc, origin map[string]any,
+func newUpstreamPool(name string, up Upstream, dial dialFunc, origin map[string]any,
 	notify func(string, json.RawMessage),
 	relay func(context.Context, string, json.RawMessage) (json.RawMessage, *mcpclient.RPCError)) *upstreamPool {
-	p := &upstreamPool{name: name, dial: dial, origin: origin, notify: notify, relay: relay}
-	for _, a := range addrs {
+	p := &upstreamPool{
+		name: name, dial: dial, origin: origin, notify: notify, relay: relay,
+		retryTools: append([]string(nil), up.RetryTools...),
+	}
+	for _, a := range up.Addrs {
 		p.replicas = append(p.replicas, &replica{addr: a})
 	}
 	return p
@@ -345,10 +372,11 @@ func (p *upstreamPool) any(ctx context.Context) (*mcpclient.Client, error) {
 // mutating (unknown), so it is never auto-retried after dispatch — repeating it
 // could execute a non-idempotent side effect (a payment, a deploy) twice.
 //
-// End-to-end idempotency keys (which would make even a mutating call safe to
-// retry) are not yet enforced across the gateway/backend contract, so tools/call
-// stays in the non-retryable class. See docs/THREAT-MODEL.md (delivery vs.
-// execution) and the router-delegation design.
+// The one exception is operator classification: an upstream's `retry_tools`
+// globs mark specific tools as idempotent/read-only, and a matching tools/call
+// is dispatched with a stable _meta idempotency key so a cooperating backend
+// can deduplicate a re-send (see retryEligibleToolCall). Everything else stays
+// non-retryable. See docs/THREAT-MODEL.md (delivery vs. execution).
 func safeToRetryAfterDispatch(method string) bool {
 	switch method {
 	case "resources/read", "resources/list", "resources/templates/list",
@@ -372,6 +400,16 @@ func (p *upstreamPool) call(ctx context.Context, method string, params any) (jso
 	defer p.mu.Unlock()
 	if len(p.replicas) == 0 {
 		return nil, fmt.Errorf("upstream %q: no replicas", p.name)
+	}
+	retryable := safeToRetryAfterDispatch(method)
+	if !retryable && p.retryEligibleToolCall(method, params) {
+		// Attach the idempotency key once, so every dispatch attempt of this
+		// logical call presents the same key. If no key can be attached, the
+		// call stays non-retryable (deny-default).
+		if decorated, ok := withIdempotencyKey(params); ok {
+			params = decorated
+			retryable = true
+		}
 	}
 	var lastErr error
 	for i := 0; i < len(p.replicas); i++ {
@@ -397,7 +435,7 @@ func (p *upstreamPool) call(ctx context.Context, method string, params any) (jso
 		// ambiguity instead of silently retrying it elsewhere.
 		p.markDown(r)
 		lastErr = err
-		if !safeToRetryAfterDispatch(method) {
+		if !retryable {
 			return nil, fmt.Errorf("upstream %q: %s not retried after an ambiguous transport failure (outcome unknown — the upstream may have already executed it): %w", p.name, method, err)
 		}
 	}
@@ -405,6 +443,57 @@ func (p *upstreamPool) call(ctx context.Context, method string, params any) (jso
 		lastErr = fmt.Errorf("upstream %q: all replicas failed", p.name)
 	}
 	return nil, lastErr
+}
+
+// retryEligibleToolCall reports whether this tools/call names a tool the
+// operator classified as retry-safe for this upstream (`retry_tools` globs).
+// Anything unparseable is not eligible — deny-default.
+func (p *upstreamPool) retryEligibleToolCall(method string, params any) bool {
+	if method != "tools/call" || len(p.retryTools) == 0 {
+		return false
+	}
+	pm, ok := params.(map[string]any)
+	if !ok {
+		return false
+	}
+	name, ok := pm["name"].(string)
+	if !ok || name == "" {
+		return false
+	}
+	for _, g := range p.retryTools {
+		if ok, _ := path.Match(g, name); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// withIdempotencyKey returns a copy of params carrying a fresh random key in
+// _meta["meshmcp.io/idempotency-key"], so a re-dispatched call presents the
+// same key and a cooperating backend can deduplicate. ok is false when no key
+// could be attached; the caller must then not retry.
+func withIdempotencyKey(params any) (any, bool) {
+	pm, ok := params.(map[string]any)
+	if !ok {
+		return params, false
+	}
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return params, false
+	}
+	cp := make(map[string]any, len(pm)+1)
+	for k, v := range pm {
+		cp[k] = v
+	}
+	meta := map[string]any{}
+	if prior, ok := cp["_meta"].(map[string]any); ok {
+		for k, v := range prior {
+			meta[k] = v
+		}
+	}
+	meta["meshmcp.io/idempotency-key"] = hex.EncodeToString(b[:])
+	cp["_meta"] = meta
+	return cp, true
 }
 
 func (p *upstreamPool) closeAll() {
@@ -451,7 +540,7 @@ func (p *upstreamPool) runHealth(stop <-chan struct{}) {
 // name; resources keyed by URI, first owner wins). Calls are load-balanced
 // and failed over across replicas; upstream notifications are forwarded to
 // the client and origin identity is stamped into every request's _meta.
-func buildAggregate(ctx context.Context, dial dialFunc, upstreams map[string][]string, origin map[string]any, enforce toolEnforcer) (*mcp.Server, func()) {
+func buildAggregate(ctx context.Context, dial dialFunc, upstreams map[string]Upstream, origin map[string]any, enforce toolEnforcer) (*mcp.Server, func()) {
 	s := mcp.New("meshmcp-router", "0.1.0")
 	var pools []*upstreamPool
 	seenURI := map[string]bool{}
@@ -466,8 +555,8 @@ func buildAggregate(ctx context.Context, dial dialFunc, upstreams map[string][]s
 		return res, nil
 	}
 
-	for name, addrs := range upstreams {
-		pool := newUpstreamPool(name, addrs, dial, origin, func(method string, params json.RawMessage) {
+	for name, up := range upstreams {
+		pool := newUpstreamPool(name, up, dial, origin, func(method string, params json.RawMessage) {
 			s.Notify(method, json.RawMessage(params))
 		}, relay)
 		pools = append(pools, pool)
@@ -496,7 +585,7 @@ func buildAggregate(ctx context.Context, dial dialFunc, upstreams map[string][]s
 				registerProxyPrompt(s, name, pr, pool)
 			}
 		}
-		log.Printf("router: upstream %q ready (%d replicas)", name, len(addrs))
+		log.Printf("router: upstream %q ready (%d replicas)", name, len(up.Addrs))
 	}
 
 	// Proactively re-dial down replicas in the background.

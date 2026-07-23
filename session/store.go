@@ -48,7 +48,18 @@ type PersistedSession struct {
 	// it passes another gateway may acquire the lease; the fencing generation is
 	// what actually prevents a superseded owner from writing.
 	LeaseExpiry int64 `json:"lease_expiry,omitempty"`
+
+	// SchemaVersion self-describes the persisted-session format so a session file
+	// written by a newer build is not misread by an older one. Session state is
+	// resumption state, not a security store: a newer-version file is treated as
+	// "no resumable session" (the client reconnects fresh) rather than failing
+	// closed. Additive/omitempty, so pre-versioning files decode as 0 (the current
+	// version) and keep resuming.
+	SchemaVersion int `json:"schema_version,omitempty"`
 }
+
+// sessionSchemaVersion is the current persisted-session on-disk format version.
+const sessionSchemaVersion = 1
 
 // SessionStore persists session state so a session survives the gateway that
 // created it. Implementations must be safe for concurrent use.
@@ -288,6 +299,7 @@ func (s *FileStore) Save(ps PersistedSession) error {
 	}
 	defer lk.release()
 
+	ps.SchemaVersion = sessionSchemaVersion
 	b, err := json.Marshal(ps)
 	if err != nil {
 		return err
@@ -324,6 +336,11 @@ func (s *FileStore) Load(id string) (PersistedSession, bool, error) {
 	var ps PersistedSession
 	if err := json.Unmarshal(b, &ps); err != nil {
 		return PersistedSession{}, false, err
+	}
+	if ps.SchemaVersion > sessionSchemaVersion {
+		// Written by a newer build: treat as no resumable session so the client
+		// reconnects fresh, rather than resuming against a format we may misread.
+		return PersistedSession{}, false, nil
 	}
 	return ps, true, nil
 }
@@ -378,6 +395,7 @@ func (s *FileStore) readUnlocked(id string) (PersistedSession, bool, error) {
 // writeUnlocked writes ps atomically (temp + fsync + rename). Caller holds the
 // locks.
 func (s *FileStore) writeUnlocked(ps PersistedSession) error {
+	ps.SchemaVersion = sessionSchemaVersion
 	b, err := json.Marshal(ps)
 	if err != nil {
 		return err
@@ -534,8 +552,8 @@ func (s *FileStore) List() ([]PersistedSession, error) {
 			continue // vanished between ReadDir and here
 		}
 		var ps PersistedSession
-		if json.Unmarshal(b, &ps) == nil && ps.ID != "" {
-			out = append(out, ps)
+		if json.Unmarshal(b, &ps) == nil && ps.ID != "" && ps.SchemaVersion <= sessionSchemaVersion {
+			out = append(out, ps) // skip newer-format files like any unreadable one
 		}
 	}
 	return out, nil

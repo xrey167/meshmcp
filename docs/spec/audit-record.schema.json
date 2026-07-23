@@ -23,6 +23,7 @@
     "provenance": { "type": "array", "items": { "type": "string" }, "description": "content refs that produced the answer (F6 provenance receipt)" },
     "seq": { "type": "integer", "minimum": 1 },
     "prev_hash": { "type": "string", "pattern": "^([0-9a-f]{64})?$" },
-    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "schema_version": { "type": "integer", "minimum": 1, "description": "audit-record on-disk format version; a record newer than the reader's supported version is refused (fail closed)" }
   }
 }

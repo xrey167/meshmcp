@@ -533,6 +533,38 @@ func ResolvePresence(list []Presence, selector string, kind ServiceKind) (Resolv
 	if !kind.valid() {
 		return ResolvedService{}, fmt.Errorf("unknown service kind %q", kind)
 	}
+	p, err := resolvePresenceNode(list, selector)
+	if err != nil {
+		return ResolvedService{}, err
+	}
+	for _, svc := range p.Services {
+		if svc.Kind == kind {
+			return ResolvedService{Node: clonePresence(p), Service: cloneService(svc)}, nil
+		}
+	}
+	return ResolvedService{}, fmt.Errorf("selected nearby node does not advertise service %q", kind)
+}
+
+// ResolvePresenceIdentity resolves a selector to exactly one verified node
+// without requiring an advertised service — the identity half of
+// ResolvePresence, for actions (session Steer) that bind to the node's
+// transport-stamped public key rather than to a service address. The same
+// selector validation, trust-tiered matching, and fail-closed ambiguity rules
+// apply.
+func ResolvePresenceIdentity(list []Presence, selector string) (Presence, error) {
+	selector, err := validatedPresenceSelector(selector)
+	if err != nil {
+		return Presence{}, err
+	}
+	p, err := resolvePresenceNode(list, selector)
+	if err != nil {
+		return Presence{}, err
+	}
+	return clonePresence(p), nil
+}
+
+// resolvePresenceNode matches a validated selector to exactly one node.
+func resolvePresenceNode(list []Presence, selector string) (Presence, error) {
 	keySelector, explicitKey := strings.CutPrefix(selector, "pubkey:")
 	var matches []Presence
 	if explicitKey {
@@ -571,18 +603,12 @@ func ResolvePresence(list []Presence, selector string, kind ServiceKind) (Resolv
 		}
 	}
 	if len(matches) == 0 {
-		return ResolvedService{}, errors.New("no nearby node matches the selector")
+		return Presence{}, errors.New("no nearby node matches the selector")
 	}
 	if len(matches) > 1 {
-		return ResolvedService{}, fmt.Errorf("nearby selector is ambiguous (%d matches); use the FQDN or full public key", len(matches))
+		return Presence{}, fmt.Errorf("nearby selector is ambiguous (%d matches); use the FQDN or full public key", len(matches))
 	}
-	p := matches[0]
-	for _, svc := range p.Services {
-		if svc.Kind == kind {
-			return ResolvedService{Node: clonePresence(p), Service: cloneService(svc)}, nil
-		}
-	}
-	return ResolvedService{}, fmt.Errorf("selected nearby node does not advertise service %q", kind)
+	return matches[0], nil
 }
 
 // ValidatePresenceSelector checks the public selector input contract without

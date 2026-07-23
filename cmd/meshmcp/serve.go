@@ -29,7 +29,7 @@ import (
 
 func cmdServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
-	cfgPath := fs.String("config", "meshmcp.yaml", "path to the meshmcp config file")
+	cfgPath := fs.String("config", defaultConfigPath(), "path to the meshmcp config file")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -103,7 +103,8 @@ func cmdServe(args []string) error {
 			return fmt.Errorf("open shared audit log %s: %w", cfg.AuditLog, err)
 		}
 		sharedAudit = policy.NewAuditLog(f, func() string { return time.Now().UTC().Format(time.RFC3339) }).
-			WithFailClosed(cfg.AuditFailClosed)
+			WithFailClosed(cfg.AuditFailClosed).
+			WithSync(auditFsyncEnabled(cfg.AuditFsync))
 		if seq > 0 {
 			sharedAudit.SeedFrom(seq, lastHash) // continue the chain across restart
 			log.Printf("shared audit ledger: resumed from seq %d", seq)
@@ -112,8 +113,24 @@ func cmdServe(args []string) error {
 			sharedAudit.AddSink(newWebhookSink(cfg.AuditWebhook, !cfg.AuditWebhookAll))
 			log.Printf("audit webhook sink: %s (deny/cosign only=%v)", cfg.AuditWebhook, !cfg.AuditWebhookAll)
 		}
+		if cfg.MetricsListen != "" {
+			sink := newMetricsSink()
+			ln, err := net.Listen("tcp", cfg.MetricsListen)
+			if err != nil {
+				return fmt.Errorf("metrics_listen %s: %w", cfg.MetricsListen, err)
+			}
+			sharedAudit.AddSink(sink)
+			mux := http.NewServeMux()
+			mux.Handle("/metrics", sink)
+			go func() { _ = http.Serve(ln, mux) }()
+			log.Printf("metrics: serving /metrics on %s", cfg.MetricsListen)
+		}
 		auditLogs = append(auditLogs, sharedAudit)
 		log.Printf("shared audit ledger: %s", cfg.AuditLog)
+	} else if cfg.MetricsListen != "" {
+		// The metrics sink observes the shared ledger; without one it would
+		// silently serve empty metrics — refuse instead.
+		return fmt.Errorf("metrics_listen requires audit_log (the metrics sink observes the shared ledger)")
 	}
 
 	// Optional gateway event hooks: publish every policy decision onto the
@@ -138,6 +155,10 @@ func cmdServe(args []string) error {
 		}
 		log.Printf("gateway hooks enabled (%s)", strings.Join(note, ", "))
 	}
+
+	// engines holds each policy-bearing backend's running Engine, keyed by name,
+	// so a SIGHUP can hot-swap its policy rules in place without a restart.
+	engines := map[string]*policy.Engine{}
 
 	for _, b := range cfg.Backends {
 		ln, err := client.ListenTCP(fmt.Sprintf(":%d", b.Port))
@@ -187,9 +208,14 @@ func cmdServe(args []string) error {
 		var factory session.BackendFactory
 		var httpEnf *httpEnforcer
 		if len(b.Stdio) > 0 {
-			factory = backendFactory(b, audit, tracer, hookSink)
+			var eng *policy.Engine
+			factory, eng = backendFactory(b, audit, tracer, hookSink)
+			if eng != nil {
+				engines[b.Name] = eng
+			}
 		} else if b.Policy != nil {
 			httpEnf = newHTTPEnforcer(b, audit)
+			engines[b.Name] = httpEnf.eng
 			log.Printf("backend %q: HTTP policy enforcement on (%d rules)", b.Name, len(b.Policy.Rules))
 		}
 
@@ -269,7 +295,10 @@ func cmdServe(args []string) error {
 			presence: air.NewRegistry(air.DefaultPresenceRegistryMax),
 		}
 		identify := func(r *http.Request) (string, string) { return peerIdentityStr(client, r.RemoteAddr) }
-		allow := newACL(cfg.Control.Allow)
+		// Configured operators are recognized on the control/steer AND pairing
+		// approver surface (both gate on this same acl), so a second operator can
+		// approve and pair without being hand-added to control.allow.
+		allow := newACL(append(append([]string(nil), cfg.Control.Allow...), operatorPatterns(cfg.Operators)...))
 		// Dedicated proxy allow list for X-Air-On-Behalf attestation; empty ⇒
 		// no peer may attest (attribution stays the verified connecting peer).
 		onBehalfAllow := newACL(cfg.Control.OnBehalfAllow)
@@ -313,8 +342,23 @@ func cmdServe(args []string) error {
 	}
 
 	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt)
-	<-sig
+	signal.Notify(sig, shutdownSignals...)
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, reloadSignals...)
+	if len(engines) > 0 {
+		log.Printf("send SIGHUP to hot-reload policy rules for %d backend(s) without a restart", len(engines))
+	}
+	// Serve until a shutdown signal; a SIGHUP in between re-reads the config and
+	// hot-swaps each backend's policy rules in place.
+waitForShutdown:
+	for {
+		select {
+		case <-hup:
+			reloadPolicies(*cfgPath, engines)
+		case <-sig:
+			break waitForShutdown
+		}
+	}
 
 	log.Println("shutting down")
 	close(shutdown)
@@ -453,13 +497,53 @@ func bridgeConn(conn net.Conn, backend session.Backend) {
 	<-done
 }
 
+// reloadPolicies re-reads the config at cfgPath and hot-swaps each backend's
+// policy RULES into its running Engine, matched by backend name (SIGHUP). It is
+// fail-safe: a config that no longer loads (a bad edit) leaves every running
+// policy untouched, so a typo can never disarm the gateway. Only policy rules
+// are reloaded — peer ACLs, listeners, capability trust roots, and other startup
+// wiring are captured once and are NOT changed here (that is a wider re-plumb).
+// A require_cosign approval bound to the old PolicyHash stops verifying after a
+// reload changes the rules, by design.
+func reloadPolicies(cfgPath string, engines map[string]*policy.Engine) {
+	newCfg, err := loadConfig(cfgPath)
+	if err != nil {
+		log.Printf("reload: config %s did not load — keeping the running policy: %v", cfgPath, err)
+		return
+	}
+	applied, present := 0, map[string]bool{}
+	for _, b := range newCfg.Backends {
+		present[b.Name] = true
+		eng, ok := engines[b.Name]
+		if !ok {
+			continue // backend has no running policy engine (or is newly added — needs a restart to listen)
+		}
+		pol := b.Policy
+		if pol == nil {
+			// A capabilities-only backend keeps its synthesized deny-by-default.
+			pol = &policy.Policy{DefaultAllow: false}
+		}
+		eng.SetPolicy(pol)
+		applied++
+		log.Printf("reload: backend %q policy updated (%d rules, default %s)", b.Name, len(pol.Rules), allowWord(pol.DefaultAllow))
+	}
+	for name := range engines {
+		if !present[name] {
+			log.Printf("reload: backend %q is gone from the config — its running policy is unchanged (remove needs a restart)", name)
+		}
+	}
+	log.Printf("reload: applied %d backend policy update(s) from %s", applied, cfgPath)
+}
+
 // backendFactory builds the per-session backend for a stdio backend. It
 // wraps the subprocess with the inspection filter when a policy is set OR a
 // tracer is configured; with neither, the raw subprocess is used.
-func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer, hook policy.EventHook) session.BackendFactory {
+// It also returns the per-backend policy Engine (nil when the backend has no
+// policy/capabilities) so the caller can hot-swap its policy on SIGHUP.
+func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer, hook policy.EventHook) (session.BackendFactory, *policy.Engine) {
 	exec := session.ExecBackendFactory(b.Stdio[0], b.Stdio[1:], os.Environ())
 	if b.Policy == nil && tracer == nil && b.Capabilities == nil {
-		return exec
+		return exec, nil
 	}
 	// One Engine per backend, shared across all its connections, so rate
 	// limits and co-sign approvals are per-identity rather than per-connection.
@@ -583,7 +667,7 @@ func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer, h
 			f.SetEventHook(hook)
 		}
 		return f, nil
-	}
+	}, eng
 }
 
 // secretStore builds the Store for a backend's secrets config: a file layered
@@ -642,14 +726,23 @@ func seedAuditFromExisting(path string) (seq int, lastHash string, err error) {
 	if len(bytes.TrimSpace(data)) == 0 {
 		return 0, "", nil
 	}
-	res, verr := policy.VerifyChain(bytes.NewReader(data))
-	if verr != nil {
-		return 0, "", verr
+	res, truncateTo, torn := policy.VerifyForRepair(data)
+	if res.OK {
+		return res.Count, res.LastHash, nil
 	}
-	if !res.OK {
-		return 0, "", fmt.Errorf("existing audit log %s is unverifiable (break at seq %d: %s); refusing to append and reset the chain", path, res.BreakSeq, res.Reason)
+	if torn {
+		// A crash/power-loss left an incomplete trailing record. Everything
+		// before it verified, so recover by truncating the torn line — never a
+		// complete record — and continue the same chain. A mid-chain tamper is
+		// NOT torn and falls through to the hard refusal below.
+		if err := os.Truncate(path, truncateTo); err != nil {
+			return 0, "", fmt.Errorf("audit log %s: repairing torn tail: %w", path, err)
+		}
+		log.Printf("audit log %s: recovered an incomplete trailing record (%s); truncated to %d bytes, resuming from seq %d",
+			path, res.Reason, truncateTo, res.Count)
+		return res.Count, res.LastHash, nil
 	}
-	return res.Count, res.LastHash, nil
+	return 0, "", fmt.Errorf("existing audit log %s is unverifiable (break at seq %d: %s); refusing to append and reset the chain", path, res.BreakSeq, res.Reason)
 }
 
 // seedCheckpointFromExisting returns the last checkpoint's ordinal and hash from
@@ -698,7 +791,11 @@ func auditSink(b *Backend) (*policy.AuditLog, error) {
 		w = f
 	}
 	now := func() string { return time.Now().UTC().Format(time.RFC3339) }
-	audit := policy.NewAuditLog(w, now).WithFailClosed(b.AuditFailClosed)
+	// Sync only a real file sink — fsyncing the stderr fallback (a terminal or
+	// pipe) can error and would wrongly deny calls under fail-closed.
+	audit := policy.NewAuditLog(w, now).
+		WithFailClosed(b.AuditFailClosed).
+		WithSync(b.AuditLog != "" && auditFsyncEnabled(b.AuditFsync))
 	if seedSeq > 0 {
 		audit.SeedFrom(seedSeq, seedHash) // continue the chain across restart
 		log.Printf("backend %q: audit resumed from seq %d", b.Name, seedSeq)

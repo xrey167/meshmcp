@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"sync"
 	"time"
@@ -40,7 +41,9 @@ func openAuditLedger(path string, writer io.Writer, now func() time.Time) (*audi
 	if err != nil {
 		return nil, fmt.Errorf("edge: open audit_log %s: %w", path, err)
 	}
-	log := policy.NewAuditLog(f, ts).WithFailClosed(true)
+	// The edge ledger is always fail-closed and always fsync'd — it is a low-
+	// volume, security-critical log, so power-loss durability is worth the cost.
+	log := policy.NewAuditLog(f, ts).WithFailClosed(true).WithSync(true)
 	if seq > 0 {
 		log.SeedFrom(seq, lastHash)
 	}
@@ -60,14 +63,20 @@ func seedEdgeAudit(path string) (seq int, lastHash string, err error) {
 	if len(bytes.TrimSpace(data)) == 0 {
 		return 0, "", nil
 	}
-	res, verr := policy.VerifyChain(bytes.NewReader(data))
-	if verr != nil {
-		return 0, "", fmt.Errorf("edge: verify existing audit_log %s: %w", path, verr)
+	res, truncateTo, torn := policy.VerifyForRepair(data)
+	if res.OK {
+		return res.Count, res.LastHash, nil
 	}
-	if !res.OK {
-		return 0, "", fmt.Errorf("edge: existing audit_log %s is unverifiable (break at seq %d: %s); refusing to append", path, res.BreakSeq, res.Reason)
+	if torn {
+		// Recover an incomplete trailing record (crash/power-loss); a mid-chain
+		// tamper is not torn and still refuses below.
+		if terr := os.Truncate(path, truncateTo); terr != nil {
+			return 0, "", fmt.Errorf("edge: repairing torn tail of %s: %w", path, terr)
+		}
+		log.Printf("edge: audit_log %s recovered an incomplete trailing record (%s); resuming from seq %d", path, res.Reason, res.Count)
+		return res.Count, res.LastHash, nil
 	}
-	return res.Count, res.LastHash, nil
+	return 0, "", fmt.Errorf("edge: existing audit_log %s is unverifiable (break at seq %d: %s); refusing to append", path, res.BreakSeq, res.Reason)
 }
 
 // append records one decision. The caller sets Decision ("allow"/"deny"/"cosign")

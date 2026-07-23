@@ -62,7 +62,9 @@ surface.
 rates; the audit stream shipped to any sink (OTel, a SIEM). "Who called what, from where,
 when" becomes queryable for an entire agent fleet.
 > **Shipped (Wave 2):** `meshmcp status` (live sessions, peers, per-tool call rates) plus a
-> webhook audit sink (**F15**); a dedicated OTel/Prometheus exporter (**S41**) is still open.
+> webhook audit sink (**F15**); a Prometheus `/metrics` endpoint ships via `metrics_listen`
+> (**S41** — metadata-only labels from the shared ledger); a full OTel/OTLP exporter remains
+> open on the same `AuditSink` seam.
 
 > These phases are developed, sized, and mapped to concrete seams in
 > **[ROADMAP-HARDENING.md](ROADMAP-HARDENING.md)** (Wave 2), most of them now **shipped**:

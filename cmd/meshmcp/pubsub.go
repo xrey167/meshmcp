@@ -342,7 +342,7 @@ func cmdPubsub(args []string) error {
 	}
 
 	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt)
+	signal.Notify(sig, shutdownSignals...)
 	<-sig
 	log.Println("pubsub broker shutting down")
 	close(fedQuit)
@@ -781,7 +781,7 @@ func cmdSubscribe(args []string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt)
+	signal.Notify(sig, shutdownSignals...)
 	go func() {
 		<-sig
 		log.Println("unsubscribing")
@@ -1131,7 +1131,7 @@ func cmdRespond(args []string) error {
 	}
 
 	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt)
+	signal.Notify(sig, shutdownSignals...)
 	go func() {
 		<-sig
 		log.Println("stopping responder")

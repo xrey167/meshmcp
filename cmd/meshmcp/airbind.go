@@ -234,7 +234,7 @@ func cmdAirBind(args []string) error {
 		return fmt.Errorf("air bind: --audit <audit.jsonl> is required (the ledger to watch)")
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), shutdownSignals...)
 	defer stop()
 
 	mode := "notify only"

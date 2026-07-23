@@ -65,3 +65,24 @@ func TestClientAgainstServer(t *testing.T) {
 		t.Fatalf("expected error for unknown tool")
 	}
 }
+
+// TestWithMetaMergesCallerMeta pins two properties: a caller-supplied _meta
+// entry survives the merge, and a RequestMeta key (the router's origin
+// identity stamp) always wins a conflict — params can never override it.
+func TestWithMetaMergesCallerMeta(t *testing.T) {
+	c := &Client{RequestMeta: map[string]any{"origin": "router"}}
+	out := c.withMeta(map[string]any{
+		"name":  "search",
+		"_meta": map[string]any{"meshmcp.io/idempotency-key": "k1", "origin": "spoof"},
+	})
+	meta, ok := out.(map[string]any)["_meta"].(map[string]any)
+	if !ok {
+		t.Fatalf("no merged _meta in %v", out)
+	}
+	if meta["meshmcp.io/idempotency-key"] != "k1" {
+		t.Fatalf("caller _meta entry lost: %v", meta)
+	}
+	if meta["origin"] != "router" {
+		t.Fatalf("RequestMeta must win a key conflict, got %v", meta["origin"])
+	}
+}

@@ -220,6 +220,9 @@ One CLI verb per target, as shipped:
 meshmcp air sessions 100.64.0.2:9600                     # list live sessions on a gateway
 meshmcp air steer 100.64.0.2:9600 --backend fs --session 9f2a \
     --param text="re-read customer 42"                   # steer a live session
+meshmcp air steer 100.64.0.2:9600 --to analyst \
+    --param text="re-read customer 42"   # same, addressed by verified identity: binds to the
+                                         # one live session carrying analyst's transport key
 meshmcp air agent-steer 100.64.0.9:9120 --type task --tool read_customer --arg id=42
 meshmcp air agent-steer 100.64.0.9:9120 --type nudge --text "focus on the API"
 meshmcp air tasks 100.64.0.2:9101                        # list a backend's async tasks
@@ -502,11 +505,13 @@ where they require vendor credentials or a physical device the repository cannot
    receipts. They move inert context and references; they do not move bearer tokens, secrets,
    capabilities, or a live session identity. Checkpoint-capable prepare → ready → commit
    remains a separate transactional v2 with single-use grants and fencing.
-3. **Next — finish universal addressing and consolidate Air Node.** Receiver-confirmed Resolved
-   Send completes the first universal-addressing slice across web, CLI, and assistant: it accepts
-   a verified name/FQDN/full key and resolves the current inbox at action time while raw
-   `host:port` stays compatible. Steer/Ring/Cast/Screen still need that logical-address contract;
-   one Air Node should then host and announce the selected services automatically.
+3. **Next — consolidate Air Node.** Receiver-confirmed Resolved Send completed the first
+   universal-addressing slice across web, CLI, and assistant, and every send/control verb now
+   accepts a verified name/FQDN/full key while raw `host:port` stays compatible: Ring/Cast/Screen
+   resolve a service address, and `air steer --to <node>` binds to the single live session
+   carrying the node's transport-stamped public key (zero or several matches fail closed).
+   What remains is one Air Node runtime that hosts and announces the selected services
+   automatically.
 4. **Push delivery — mostly done.** A **webhook `Notifier`** ships in-repo
    (`meshmcp approvals --devices <dir> --notify-webhook <url>`): each new pending is POSTed to
    an operator relay that fans out to APNs/FCM with its own credentials — real network delivery

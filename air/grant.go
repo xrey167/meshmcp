@@ -68,10 +68,16 @@ type GrantOpportunity struct {
 	Count     int    `json:"count"` // how many times this exact ask has been denied
 }
 
+// grantSchemaVersion is the current on-disk format version of the grant store.
+const grantSchemaVersion = 1
+
 // grantState is the on-disk shape: both sets, written together atomically.
 type grantState struct {
-	Grants  []Grant            `json:"grants"`
-	Pending []GrantOpportunity `json:"pending"`
+	// SchemaVersion self-describes the file format; a store from a newer build is
+	// refused on load (fail closed) rather than silently forgetting grants.
+	SchemaVersion int                `json:"schema_version"`
+	Grants        []Grant            `json:"grants"`
+	Pending       []GrantOpportunity `json:"pending"`
 }
 
 // GrantStore is an atomic, concurrency-safe store of written grants and pending
@@ -112,6 +118,9 @@ func OpenGrantStore(path string) (*GrantStore, error) {
 	var st grantState
 	if err := json.Unmarshal(b, &st); err != nil {
 		return nil, fmt.Errorf("grant: parse store %s: %w", path, err)
+	}
+	if err := checkSchemaVersion("grant", st.SchemaVersion, grantSchemaVersion); err != nil {
+		return nil, err
 	}
 	for _, g := range st.Grants {
 		if g.Identity != "" && g.Verb != "" && g.Scope != "" {
@@ -370,7 +379,7 @@ func grantLess(a, b Grant) bool {
 // sibling temp file, fsync it, then rename it into place, so a reader (or a crash)
 // never observes a partially written store at the canonical path.
 func (s *GrantStore) persistLocked() error {
-	st := grantState{Grants: s.sortedGrantsLocked(), Pending: s.sortedPendingLocked()}
+	st := grantState{SchemaVersion: grantSchemaVersion, Grants: s.sortedGrantsLocked(), Pending: s.sortedPendingLocked()}
 	b, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
 		return fmt.Errorf("grant: marshal store: %w", err)

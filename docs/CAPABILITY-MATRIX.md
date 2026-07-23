@@ -61,7 +61,7 @@ continuously tested.
 | Restart-safe audit append (seed from verified tail; refuse unverifiable) | 5 |
 | External audit anchoring interface (witnessed) | 5 |
 | Lease renewal + expiry-driven automatic failover (today a standby only takes over on the creator's reattach; the CAS/fencing lease primitive and its server wiring are done and migration-proven) | 6 |
-| Explicit tool retry classification + enforced idempotency keys | 6 |
+| Backend-side idempotency-key ENFORCEMENT (the router ships operator retry classification via `retry_tools` + a stable conveyed `_meta` idempotency key; a backend honoring the key end-to-end is the remaining half) | 6 |
 | Extend stdio/HTTP parity to per-session controls (taint/secrets/capabilities); classification + tool/method decisions are done + conformance-tested | 7 |
 | Backend egress restriction for secrets (response-side redaction is done) | 8 |
 | Extend strict config (`KnownFields`) to the remaining subsystem configs (gateway config + control ACL done) | 9 |

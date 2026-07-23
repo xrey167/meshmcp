@@ -299,7 +299,7 @@ func cmdAirRagServe(args []string) error {
 	}
 	defer ln.Close()
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), shutdownSignals...)
 	defer stop()
 	go func() { <-ctx.Done(); ln.Close() }()
 

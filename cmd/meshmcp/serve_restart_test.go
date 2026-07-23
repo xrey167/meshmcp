@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -113,6 +114,50 @@ func TestAuditRestartRefusesTamperedLog(t *testing.T) {
 
 	if _, _, err := seedAuditFromExisting(auditPath); err == nil {
 		t.Fatal("seeding must refuse a tampered/unverifiable existing audit log")
+	}
+}
+
+// TestAuditRestartRepairsTornTail: a crash/power-loss that leaves an incomplete
+// trailing record is recovered — the torn line is truncated and the chain
+// continues — while every complete record is preserved.
+func TestAuditRestartRepairsTornTail(t *testing.T) {
+	dir := t.TempDir()
+	auditPath := filepath.Join(dir, "audit.jsonl")
+	now := func() string { return "T" }
+	a := policy.NewAuditLog(mustCreate(t, auditPath), now)
+	for i := 0; i < 3; i++ {
+		if err := a.Append(policy.AuditRecord{Backend: "fs", Peer: "p", Method: "tools/call", Tool: "read_file", Decision: "allow"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Simulate a torn write: append a partial (incomplete JSON) 4th record.
+	f, err := os.OpenFile(auditPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString(`{"seq":4,"backend":"fs","pe`)
+	f.Close()
+
+	seq, hash, err := seedAuditFromExisting(auditPath)
+	if err != nil {
+		t.Fatalf("seeding must repair a torn tail, got %v", err)
+	}
+	if seq != 3 || hash == "" {
+		t.Fatalf("recovered seq = %d (want 3), hash empty=%v", seq, hash == "")
+	}
+	// The repaired file must now verify cleanly, and a resumed writer must extend it.
+	data, _ := os.ReadFile(auditPath)
+	if res, _ := policy.VerifyChain(bytes.NewReader(data)); !res.OK || res.Count != 3 {
+		t.Fatalf("repaired log must verify: OK=%v count=%d", res.OK, res.Count)
+	}
+	a2 := policy.NewAuditLog(mustCreate(t, auditPath), now)
+	a2.SeedFrom(seq, hash)
+	if err := a2.Append(policy.AuditRecord{Backend: "fs", Peer: "p", Method: "tools/call", Tool: "read_file", Decision: "allow"}); err != nil {
+		t.Fatalf("resumed append after repair: %v", err)
+	}
+	data, _ = os.ReadFile(auditPath)
+	if res, _ := policy.VerifyChain(bytes.NewReader(data)); !res.OK || res.Count != 4 {
+		t.Fatalf("chain after repair+resume must verify with 4 records: OK=%v count=%d", res.OK, res.Count)
 	}
 }
 
