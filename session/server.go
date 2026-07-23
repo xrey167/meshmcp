@@ -17,6 +17,11 @@ import (
 // session id alone can never authorize a takeover.
 var errSessionIdentity = errors.New("session: reattach identity does not match the session's creator")
 
+// errSessionNotFound refuses to turn a resume attempt into a fresh logical
+// session. Replaying an unacknowledged suffix into a new backend can duplicate
+// earlier side effects while making the new backend's totals look complete.
+var errSessionNotFound = errors.New("session: requested resume session is no longer available")
+
 // ErrNoSession is returned by Steer when no live session has the given id.
 var ErrNoSession = errors.New("session: no such session")
 
@@ -178,8 +183,9 @@ func (s *Server) handleExit(sess *serverSession) {
 	}
 }
 
-// attach returns an existing session for id, or creates a new one when id
-// is zero or unknown.
+// attach returns an existing session for a known id and creates a new one only
+// when id is zero. An unknown resume id is terminal: silently creating a new
+// backend could replay only a suffix after earlier side effects were installed.
 func (s *Server) attach(id sessionID, meta Meta) (*serverSession, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -217,6 +223,7 @@ func (s *Server) attach(id sessionID, meta Meta) (*serverSession, bool, error) {
 				return sess, true, nil
 			}
 		}
+		return nil, false, errSessionNotFound
 	}
 
 	newID, err := randID()
@@ -493,9 +500,10 @@ func (s *Server) Count() int {
 // view). The session layer knows the caller and the age; a gateway can enrich
 // it with a backend label it holds elsewhere.
 type SessionInfo struct {
-	ID   string        // hex session id
-	Peer string        // caller mesh FQDN
-	Age  time.Duration // since the session opened/rehydrated on this gateway
+	ID      string        // hex session id
+	Peer    string        // caller mesh FQDN
+	PeerKey string        // caller's full transport-stamped WireGuard key
+	Age     time.Duration // since the session opened/rehydrated on this gateway
 }
 
 // Sessions lists the live sessions on this gateway.
@@ -505,7 +513,10 @@ func (s *Server) Sessions() []SessionInfo {
 	now := time.Now()
 	out := make([]SessionInfo, 0, len(s.sessions))
 	for id, sess := range s.sessions {
-		out = append(out, SessionInfo{ID: id.String(), Peer: sess.meta.PeerFQDN, Age: now.Sub(sess.createdAt)})
+		out = append(out, SessionInfo{
+			ID: id.String(), Peer: sess.meta.PeerFQDN, PeerKey: sess.meta.PeerKey,
+			Age: now.Sub(sess.createdAt),
+		})
 	}
 	return out
 }
@@ -554,5 +565,6 @@ func writeControlConn(conn net.Conn, f frame) error {
 }
 
 func writeErr(conn net.Conn, msg string) {
-	_ = writeControlConn(conn, frame{typ: frameError, payload: []byte(msg)})
+	clean := sanitizeErrorText([]byte(msg), maxPeerErrorBytes)
+	_ = writeControlConn(conn, frame{typ: frameError, payload: []byte(clean)})
 }

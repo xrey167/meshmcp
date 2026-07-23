@@ -60,9 +60,10 @@ Air — move payloads and drive live work ([AIR.md](AIR.md), [AIR-STEER.md](AIR-
 | Tool | What the assistant can do |
 |---|---|
 | `air_peers` | List reachable mesh identities. |
-| `air_push` | Push a text payload (clipboard / a task) to a peer's inbox. `{target, text}` |
+| `air_send` | Resolve a verified Nearby node and deliver text plus an optional file/directory in one bounded session. `{to, text?, path?, name?}` |
+| `air_push` | Push text to either a verified Nearby node or legacy address. `{to\|target, text, name?}` |
 | `air_fetch` | Fetch a blob by sha256 from a peer's store. `{target, hash}` |
-| `drop_file` | AirDrop a local file to a peer's receiver. `{target, path}` |
+| `drop_file` | Drop a local file to either a verified Nearby node or legacy address. `{to\|target, path}` |
 | `air_sessions` | List the gateway's live sessions (needs `--control`). |
 | `air_steer` | Steer a live session. `{backend, id, method, params}` (needs `--control`). |
 | `air_tasks` | List a backend's running/finished tasks. `{target}` |
@@ -70,6 +71,71 @@ Air — move payloads and drive live work ([AIR.md](AIR.md), [AIR-STEER.md](AIR-
 | `air_launch` | Spawn a new agent (opt-in `--allow-launch`). `{role, gateway}` |
 | `pubsub_publish` | Publish an event to a broker topic. `{target, topic, data, json?, retain?}` |
 | `pubsub_stats` | Query a running broker's snapshot (subscribers, sequence, drops). `{target}` |
+
+Resolved `air_send`, `air_push`, and `drop_file` calls return the shared
+`air.action-result/v1` metadata envelope. It contains bounded per-payload
+receipts, never payload bodies or local source paths. Legacy raw-target calls
+retain their existing text responses for compatibility.
+
+For example, a confirmed two-payload result is:
+
+```json
+{
+  "schema": "air.action-result/v1",
+  "status": "delivered",
+  "recipient": {
+    "name": "Analyst",
+    "fqdn": "analyst.mesh.example",
+    "public_key": "full-transport-public-key",
+    "service": "inbox",
+    "address": "100.64.0.23:9110"
+  },
+  "payloads": 2,
+  "bytes": 17,
+  "receipts": [
+    {
+      "schema": "air.action-receipt/v1",
+      "action": "push",
+      "status": "delivered",
+      "recipient": {
+        "name": "Analyst",
+        "fqdn": "analyst.mesh.example",
+        "public_key": "full-transport-public-key",
+        "service": "inbox",
+        "address": "100.64.0.23:9110"
+      },
+      "payload_name": "note.txt",
+      "bytes": 5,
+      "time": "2026-07-23T10:15:30Z"
+    },
+    {
+      "schema": "air.action-receipt/v1",
+      "action": "drop",
+      "status": "delivered",
+      "recipient": {
+        "name": "Analyst",
+        "fqdn": "analyst.mesh.example",
+        "public_key": "full-transport-public-key",
+        "service": "inbox",
+        "address": "100.64.0.23:9110"
+      },
+      "payload_name": "report.pdf",
+      "bytes": 12,
+      "time": "2026-07-23T10:15:30Z"
+    }
+  ]
+}
+```
+
+`delivered` means the selected inbox advertised `drop.complete.v1` and returned
+a nonce-bound `meshmcp.drop-completion/v1` `installed` status with exact payload
+and byte totals. Rejection, mismatch, malformed/missing completion, or timeout
+returns an error instead of this object. If installation may have happened
+before confirmation was lost, the error warns against a blind retry. An inbox
+can advertise support with `--service inbox=9110,drop.complete.v1`; the receiver
+ACL/policy remains authoritative. A resolved client refuses older Presence
+cards without that capability, while explicit `target: "host:port"` calls keep
+the legacy response contract.
 
 ## What it feels like
 

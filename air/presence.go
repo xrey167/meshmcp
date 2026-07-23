@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -28,6 +29,10 @@ const (
 	MaxPresenceTTLSeconds      = 300
 	DefaultPresenceRegistryMax = 2048
 
+	// MaxPresenceSelectorBytes bounds the untrusted name, FQDN, or full-key
+	// selector accepted by ResolvePresence before it scans the directory.
+	MaxPresenceSelectorBytes = 512
+
 	maxPresenceName         = 128
 	maxPresenceLabels       = 16
 	maxPresenceLabel        = 64
@@ -39,7 +44,7 @@ const (
 	maxActivitySummary      = 512
 	maxActivityTarget       = 256
 	maxActivityContextRef   = 128
-	maxPresenceIdentityText = 512
+	maxPresenceIdentityText = MaxPresenceSelectorBytes
 )
 
 // NodeKind describes what a Presence card represents. It affects presentation,
@@ -98,6 +103,11 @@ const (
 	ServiceScreen    ServiceKind = "screen"
 	ServiceApprovals ServiceKind = "approvals"
 	ServiceHome      ServiceKind = "home"
+
+	// InboxCompletionCapabilityV1 advertises the application-level completion
+	// handshake used by resolved Send/Drop. It is protocol compatibility
+	// metadata, never an authorization grant.
+	InboxCompletionCapabilityV1 = "drop.complete.v1"
 )
 
 func (k ServiceKind) valid() bool {
@@ -515,9 +525,10 @@ type ResolvedService struct {
 // ResolvePresence is the transport-independent resolver used by Registry and
 // clients that fetched a Presence list from the control endpoint.
 func ResolvePresence(list []Presence, selector string, kind ServiceKind) (ResolvedService, error) {
-	selector = strings.TrimSpace(selector)
-	if selector == "" {
-		return ResolvedService{}, fmt.Errorf("presence selector is required")
+	var err error
+	selector, err = validatedPresenceSelector(selector)
+	if err != nil {
+		return ResolvedService{}, err
 	}
 	if !kind.valid() {
 		return ResolvedService{}, fmt.Errorf("unknown service kind %q", kind)
@@ -560,10 +571,10 @@ func ResolvePresence(list []Presence, selector string, kind ServiceKind) (Resolv
 		}
 	}
 	if len(matches) == 0 {
-		return ResolvedService{}, fmt.Errorf("no nearby node matches %q", selector)
+		return ResolvedService{}, errors.New("no nearby node matches the selector")
 	}
 	if len(matches) > 1 {
-		return ResolvedService{}, fmt.Errorf("nearby selector %q is ambiguous (%d matches); use the FQDN or full public key", selector, len(matches))
+		return ResolvedService{}, fmt.Errorf("nearby selector is ambiguous (%d matches); use the FQDN or full public key", len(matches))
 	}
 	p := matches[0]
 	for _, svc := range p.Services {
@@ -571,7 +582,30 @@ func ResolvePresence(list []Presence, selector string, kind ServiceKind) (Resolv
 			return ResolvedService{Node: clonePresence(p), Service: cloneService(svc)}, nil
 		}
 	}
-	return ResolvedService{}, fmt.Errorf("nearby node %q does not advertise service %q", selector, kind)
+	return ResolvedService{}, fmt.Errorf("selected nearby node does not advertise service %q", kind)
+}
+
+// ValidatePresenceSelector checks the public selector input contract without
+// performing a lookup. ResolvePresence applies the same validation itself.
+func ValidatePresenceSelector(selector string) error {
+	_, err := validatedPresenceSelector(selector)
+	return err
+}
+
+func validatedPresenceSelector(selector string) (string, error) {
+	if len(selector) > MaxPresenceSelectorBytes || !utf8.ValidString(selector) {
+		return "", errors.New("presence selector is invalid")
+	}
+	for _, r := range selector {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			return "", errors.New("presence selector is invalid")
+		}
+	}
+	selector = strings.TrimSpace(selector)
+	if selector == "" {
+		return "", errors.New("presence selector is required")
+	}
+	return selector, nil
 }
 
 func validateIdentity(id VerifiedIdentity, observedIP string) error {

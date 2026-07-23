@@ -318,7 +318,10 @@ func (g *gatewayAirControl) sessions(pubKey, fqdn string) []AirSession {
 			continue
 		}
 		for _, s := range srv.Sessions() {
-			out = append(out, AirSession{Backend: name, ID: s.ID, Peer: s.Peer, AgeSec: int(s.Age / time.Second)})
+			out = append(out, AirSession{
+				Backend: name, ID: s.ID, Peer: s.Peer, PeerKey: s.PeerKey,
+				AgeSec: int(s.Age / time.Second),
+			})
 		}
 	}
 	return out

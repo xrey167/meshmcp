@@ -48,6 +48,8 @@ func cmdAir(args []string) error {
 		return cmdAirGrant(args[1:])
 	case "nearby":
 		return cmdAirNearby(args[1:])
+	case "send":
+		return cmdAirSend(args[1:])
 	case "announce":
 		return cmdAirAnnounce(args[1:])
 	case "node":
@@ -115,7 +117,7 @@ func cmdAir(args []string) error {
 	case "-h", "--help", "help":
 		return airUsage()
 	default:
-		return fmt.Errorf("meshmcp air: unknown subcommand %q (want init | up | join | pair | grant | home | nearby | announce | node | handoff | whoami | map | browse | stream | vision | bind | film | play | ring | listen | cast | drive | screen | catalog | change | osint | dns | kg | database | sessions | steer | launch | agent-steer | tasks | task-steer | workflow | graph | rag | serve)", args[0])
+		return fmt.Errorf("meshmcp air: unknown subcommand %q (want init | up | join | pair | grant | home | nearby | send | announce | node | handoff | whoami | map | browse | stream | vision | bind | film | play | ring | listen | cast | drive | screen | catalog | change | osint | dns | kg | database | sessions | steer | launch | agent-steer | tasks | task-steer | workflow | graph | rag | serve)", args[0])
 	}
 }
 
@@ -137,6 +139,7 @@ func airUsage() error {
 	fmt.Fprintln(os.Stderr, "  "+b("air home")+"        <control-ip:port> [--audit f] [--approvals ip:port] [--watch] [--json]")
 	fmt.Fprintln(os.Stderr, "                  "+dim("your mesh at a glance — peers · sessions · reachable · waiting (one board; --serve for the web home)"))
 	fmt.Fprintln(os.Stderr, "  "+b("air nearby")+"      <control-ip:port> [--watch] [--json] "+dim("identity-stamped agent/device cards and their live services"))
+	fmt.Fprintln(os.Stderr, "  "+b("air send")+"        <control-ip:port> --to <node> [--text s] [--name n] [--file path ...] "+dim("receiver-confirmed · --file repeatable · 8 MiB each · 64 MiB total"))
 	fmt.Fprintln(os.Stderr, "  "+b("air announce")+"    <control-ip:port> --name n --kind agent --service steer=9120")
 	fmt.Fprintln(os.Stderr, "                  "+dim("publish one short-lived Presence + Activity card"))
 	fmt.Fprintln(os.Stderr, "  "+b("air node")+"        <control-ip:port> --name n [presence flags]")

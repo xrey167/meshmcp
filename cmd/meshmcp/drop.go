@@ -42,15 +42,19 @@ import (
 //	<size bytes of content>
 //	<trailer-json>\n             {"sha256"}
 //
-// terminated by EOF. The receiver hashes the content as it lands and rejects
-// a file whose trailer hash does not match — corruption and truncation are
-// detected, and the recorded hash makes "who sent what to whom" provable.
+// Legacy raw-address transfers terminate by EOF. Receiver-confirmed transfers
+// append a nonce-bound end marker and wait for exact installed totals. In both
+// modes the receiver hashes content as it lands and rejects a mismatched
+// trailer, so corruption/truncation are detected and the recorded hash makes
+// "who sent what to whom" provable.
 
 // dropHeader precedes each file's content.
 type dropHeader struct {
-	Name string `json:"name"`
-	Size int64  `json:"size"`
-	Mode uint32 `json:"mode"`
+	Name  string `json:"name"`
+	Size  int64  `json:"size"`
+	Mode  uint32 `json:"mode"`
+	End   bool   `json:"end,omitempty"`
+	Nonce string `json:"nonce,omitempty"`
 }
 
 // dropTrailer follows each file's content and carries its content hash.
@@ -159,14 +163,19 @@ func dirPlacer(dir string) placer {
 // JSON objects, so a hard cap costs nothing and stops a sender from forcing
 // unbounded buffering by streaming bytes without a newline (an OOM vector,
 // since ReadBytes accumulates until the delimiter regardless of buffer size).
-const maxDropFrameLine = 64 << 10 // 64 KiB
+const (
+	maxDropFrameLine  = 64 << 10 // 64 KiB
+	maxDropNameBytes  = 255
+	maxDropNamesBytes = 8 << 20 // aggregate decoded names per transfer
+)
 
 // dropLimits bounds a single transfer. A zero field means "unlimited" (used by
 // tests); the receiver daemon fills in defaults (see loadDropConfig).
 type dropLimits struct {
-	PerFile  int64 // per-file byte cap
-	MaxFiles int   // maximum files in one transfer
-	MaxTotal int64 // maximum aggregate bytes in one transfer
+	PerFile         int64 // per-file byte cap
+	MaxFiles        int   // maximum files in one transfer
+	MaxTotal        int64 // maximum aggregate bytes in one transfer
+	NameIndependent bool  // placer ignores names (for example, content-addressed storage)
 }
 
 // readDropLine reads one newline-terminated framing line, bounded by
@@ -194,38 +203,73 @@ func readDropLine(br *bufio.Reader) ([]byte, error) {
 // bounds the transfer (per-file, file count, and aggregate bytes). onFile is
 // called once per received file.
 func recvFiles(r io.Reader, place placer, lim dropLimits, onFile func(recvInfo)) error {
+	_, err := recvFilesWithCompletion(r, place, lim, onFile)
+	return err
+}
+
+// recvFilesWithCompletion is recvFiles plus the nonce from a current sender's
+// explicit end marker. A clean legacy EOF remains valid and returns an empty
+// nonce, preserving existing raw-address senders.
+func recvFilesWithCompletion(r io.Reader, place placer, lim dropLimits, onFile func(recvInfo)) (string, error) {
 	br := bufio.NewReader(r)
 	var files int
 	var total int64
+	var names dropNameBudget
+	seenNames := &dropNameTrie{}
 	for {
 		line, err := readDropLine(br)
 		if len(line) == 0 && errors.Is(err, io.EOF) {
-			return nil // clean end of stream
+			return "", nil // clean end of a legacy stream
 		}
 		if err != nil {
-			return fmt.Errorf("read header: %w", err)
+			return "", fmt.Errorf("read header: %w", err)
+		}
+		if !validDropWireNameEncoding(string(line[:len(line)-1])) {
+			return "", errors.New("drop header must be valid UTF-8")
 		}
 		var hdr dropHeader
 		if err := json.Unmarshal(line[:len(line)-1], &hdr); err != nil {
-			return fmt.Errorf("bad header: %w", err)
+			return "", fmt.Errorf("bad header: %w", err)
+		}
+		if hdr.End {
+			if hdr.Name != "" || hdr.Size != -1 || hdr.Mode != 0 || !validDropCompletionNonce(hdr.Nonce) {
+				return "", errors.New("invalid drop completion marker")
+			}
+			return hdr.Nonce, nil
+		}
+		if hdr.Nonce != "" {
+			return "", errors.New("drop file header must not contain a completion nonce")
+		}
+		if !validDropWireNameEncoding(hdr.Name) {
+			return "", errors.New("drop file name must be valid UTF-8")
+		}
+		if err := names.add(hdr.Name); err != nil {
+			return "", err
 		}
 		if hdr.Size < 0 {
-			return fmt.Errorf("bad file size %d", hdr.Size)
+			return "", fmt.Errorf("bad file size %d", hdr.Size)
+		}
+		nameKey := normalizedDropWireName(hdr.Name)
+		if nameKey == "." {
+			return "", errors.New("refusing empty file name")
+		}
+		if !lim.NameIndependent && !seenNames.reserve(nameKey) {
+			return "", errors.New("transfer contains conflicting destination file names")
 		}
 		if lim.PerFile > 0 && hdr.Size > lim.PerFile {
-			return fmt.Errorf("file %q is %d bytes, over the %d-byte limit", hdr.Name, hdr.Size, lim.PerFile)
+			return "", fmt.Errorf("file %q is %d bytes, over the %d-byte limit", hdr.Name, hdr.Size, lim.PerFile)
 		}
 		files++
 		if lim.MaxFiles > 0 && files > lim.MaxFiles {
-			return fmt.Errorf("transfer exceeds the %d-file limit", lim.MaxFiles)
+			return "", fmt.Errorf("transfer exceeds the %d-file limit", lim.MaxFiles)
 		}
 		total += hdr.Size
 		if lim.MaxTotal > 0 && total > lim.MaxTotal {
-			return fmt.Errorf("transfer exceeds the %d-byte aggregate limit", lim.MaxTotal)
+			return "", fmt.Errorf("transfer exceeds the %d-byte aggregate limit", lim.MaxTotal)
 		}
 		info, err := recvOne(br, place, hdr)
 		if err != nil {
-			return err
+			return "", err
 		}
 		if onFile != nil {
 			onFile(info)
@@ -347,6 +391,33 @@ func sanitizeDest(dir, name string) (string, error) {
 	if absDest != absDir && !strings.HasPrefix(absDest, absDir+string(os.PathSeparator)) {
 		return "", fmt.Errorf("refusing path %q: escapes destination directory", name)
 	}
+	// A lexical containment check is not enough when an already-existing
+	// parent inside the inbox is a symlink (for example, inbox/link -> /tmp).
+	// Refuse such parents before MkdirAll or Rename can follow them. The final
+	// component is intentionally excluded: Rename safely replaces a symlink at
+	// the file itself instead of following it.
+	rel, err := filepath.Rel(absDir, absDest)
+	if err != nil {
+		return "", err
+	}
+	cur := absDir
+	parts := strings.Split(rel, string(os.PathSeparator))
+	for _, part := range parts[:len(parts)-1] {
+		cur = filepath.Join(cur, part)
+		info, err := os.Lstat(cur)
+		if errors.Is(err, os.ErrNotExist) {
+			break
+		}
+		if err != nil {
+			return "", err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("refusing path %q: destination parent is a symbolic link", name)
+		}
+		if !info.IsDir() {
+			return "", fmt.Errorf("refusing path %q: destination parent is not a directory", name)
+		}
+	}
 	return absDest, nil
 }
 
@@ -462,7 +533,9 @@ func dropReceive(cfgPath string) error {
 			}
 		}
 	}
-	srv := session.NewServer(newDropFactory(place, cfg.limits(), audit), 2*time.Minute, log.Printf)
+	lim := cfg.limits()
+	lim.NameIndependent = cfg.CAS
+	srv := session.NewServer(newDropFactory(place, lim, audit), 2*time.Minute, log.Printf)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -484,9 +557,13 @@ func dropReceive(cfgPath string) error {
 func newDropFactory(place placer, lim dropLimits, audit *policy.AuditLog) session.BackendFactory {
 	return func(meta session.Meta) (session.Backend, error) {
 		pr, pw := io.Pipe()
-		d := &dropSink{pw: pw, done: make(chan struct{})}
+		d := newDropCompletionSink(pw)
 		go func() {
-			err := recvFiles(pr, place, lim, func(fi recvInfo) {
+			var installedPayloads int
+			var installedBytes int64
+			nonce, err := recvFilesWithCompletion(pr, place, lim, func(fi recvInfo) {
+				installedPayloads++
+				installedBytes += fi.Bytes
 				log.Printf("received %q (%d bytes, sha256 %s) from %s", fi.Name, fi.Bytes, fi.SHA256, meta.PeerFQDN)
 				if audit != nil {
 					audit.Append(policy.AuditRecord{
@@ -502,8 +579,8 @@ func newDropFactory(place placer, lim dropLimits, audit *policy.AuditLog) sessio
 					})
 				}
 			})
-			pr.CloseWithError(err)
-			d.finish(err)
+			d.finish(err, nonce, installedPayloads, installedBytes)
+			_ = pr.CloseWithError(err)
 		}()
 		return d, nil
 	}

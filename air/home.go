@@ -234,7 +234,7 @@ func (h Home) Signature() string {
 		return sess[i].ID < sess[j].ID
 	})
 	for _, s := range sess {
-		line("session", s.Backend, s.ID, s.Peer)
+		line("session", s.Backend, s.ID, s.Peer, s.PeerKey)
 	}
 
 	reach := append([]CatalogEntry(nil), h.Reachable...)

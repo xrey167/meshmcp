@@ -80,11 +80,11 @@ func (n Notice) Normalized() Notice {
 // Urgent reports whether the notice is urgent priority.
 func (n Notice) Urgent() bool { return n.Priority == PriorityUrgent }
 
-// hasControl reports whether s contains an ASCII control character (below 0x20
-// or DEL) other than none — the bytes that carry terminal escapes.
+// hasControl reports whether s contains a C0, DEL, or C1 control character —
+// including the single-code-point CSI form that can carry terminal escapes.
 func hasControl(s string) bool {
 	for _, r := range s {
-		if r < 0x20 || r == 0x7f {
+		if r < 0x20 || (r >= 0x7f && r <= 0x9f) {
 			return true
 		}
 	}

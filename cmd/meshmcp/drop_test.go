@@ -186,6 +186,25 @@ func TestDropRejectsPathTraversal(t *testing.T) {
 	}
 }
 
+func TestDropRejectsSymlinkedDestinationParent(t *testing.T) {
+	dst := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(dst, "link")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	var wire bytes.Buffer
+	if err := sendData(&wire, "link/escape.txt", []byte("never outside")); err != nil {
+		t.Fatal(err)
+	}
+	err := recvFiles(&wire, dirPlacer(dst), dropLimits{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "symbolic link") {
+		t.Fatalf("symlinked parent error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "escape.txt")); !os.IsNotExist(err) {
+		t.Fatalf("payload escaped inbox through symlink: %v", err)
+	}
+}
+
 // TestDropDetectsCorruption verifies a content/hash mismatch is caught and the
 // file is not installed.
 func TestDropDetectsCorruption(t *testing.T) {

@@ -32,6 +32,18 @@ func TestSessionReattachIdentityBinding(t *testing.T) {
 	}
 }
 
+func TestUnknownResumeSessionIsRejected(t *testing.T) {
+	factory := func(Meta) (Backend, error) { return newMigBackend(), nil }
+	srv := NewServer(factory, time.Minute, nil)
+	id, err := randID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, resumed, err := srv.attach(id, Meta{PeerFQDN: "alice", PeerKey: "alice-key"}); !errors.Is(err, errSessionNotFound) || resumed {
+		t.Fatalf("unknown resume = resumed:%v err:%v, want terminal not-found", resumed, err)
+	}
+}
+
 // TestSessionRehydrateIdentityBinding proves the identity binding also holds
 // across a gateway failover: a rehydrating gateway must reject a reattach from
 // any identity other than the session's original creator.

@@ -94,7 +94,7 @@ func TestSteerLineFraming(t *testing.T) {
 			if err != nil {
 				return
 			}
-			go srv.Handle(conn, Meta{PeerFQDN: "agent.mesh"})
+			go srv.Handle(conn, Meta{PeerFQDN: "agent.mesh", PeerKey: "AGENTKEY"})
 		}
 	}()
 
@@ -136,6 +136,9 @@ func TestSteerLineFraming(t *testing.T) {
 		if ss := srv.Sessions(); len(ss) > 0 {
 			if ss[0].Peer != "agent.mesh" {
 				t.Fatalf("Sessions() peer = %q, want agent.mesh", ss[0].Peer)
+			}
+			if ss[0].PeerKey != "AGENTKEY" {
+				t.Fatalf("Sessions() peer key = %q, want AGENTKEY", ss[0].PeerKey)
 			}
 			id = ss[0].ID
 		}

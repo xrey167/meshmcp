@@ -29,14 +29,18 @@ import (
 var airLiveHTML []byte
 
 const (
-	// maxAirUpload bounds a browser Drop/Push payload accepted by the served page.
-	maxAirUpload = 8 << 20
+	// maxAirUpload bounds the decoded Drop/Push payload accepted by the served
+	// page and matches the receiver-confirmed action protocol's payload bound.
+	maxAirUpload = air.MaxActionPayloadBytes
 	// maxAirActionJSON bounds small control requests such as Ring before their
 	// stricter domain validation runs.
 	maxAirActionJSON = 64 << 10
-	// maxAirMultipart admits one maxAirUpload file plus bounded multipart
-	// boundaries and form fields. The file itself is checked separately.
-	maxAirMultipart = maxAirUpload + maxAirActionJSON
+	// JSON strings can encode one byte as a six-byte escape (for example,
+	// "\\u0000"), so the request bound admits that worst case. Multipart only
+	// needs a small, independently bounded framing allowance.
+	maxAirRequestOverhead       = maxAirActionJSON
+	maxAirJSONRequestBytes      = 6*maxAirUpload + maxAirRequestOverhead
+	maxAirMultipartRequestBytes = maxAirUpload + maxAirRequestOverhead
 )
 
 // airServeDeps are the injectable dependencies of the served Air page, so the
@@ -47,16 +51,17 @@ type airServeDeps struct {
 	controlHC   *http.Client                              // client that reaches the gateway control endpoint
 	controlBase string                                    // base URL for the control endpoint (empty = sessions/steer disabled)
 
-	push         func(ctx context.Context, target, name string, data []byte) error // deliver a payload to a peer's drop inbox (nil = push/drop disabled)
-	ring         func(ctx context.Context, target string, notice air.Notice) error // deliver an attention notice to a peer's ring inbox (nil = disabled)
-	receipts     func(limit int) ([]json.RawMessage, error)                        // tail of the local audit ledger (nil = receipts disabled)
-	gallery      func(limit int) ([]galleryImage, error)                           // images that landed in a drop inbox — the Vision view (nil = disabled)
-	image        func(name string) (data []byte, contentType string, err error)    // read one gallery image, path-safe (nil = disabled)
-	cast         func(limit int) ([]galleryImage, error)                           // images in the cast inbox — the "Now Showing" view (nil = disabled)
-	castImage    func(name string) (data []byte, contentType string, err error)    // read one cast image, path-safe (nil = disabled)
-	approvals    string                                                            // approvals server (mesh-ip:port) the page links out to ("" = hidden)
-	allow        acl                                                               // page-wide viewer ACL; empty = any mesh peer
-	allowedHosts []string                                                          // Host values the page may be served at (mesh ip/fqdn:port); empty = no Host check (dev)
+	push          func(ctx context.Context, target, name string, data []byte) error              // legacy best-effort delivery for explicit raw targets
+	pushConfirmed func(ctx context.Context, target, expectedKey, name string, data []byte) error // identity-bound, receiver-confirmed resolved delivery
+	ring          func(ctx context.Context, target string, notice air.Notice) error              // deliver an attention notice to a peer's ring inbox (nil = disabled)
+	receipts      func(limit int) ([]json.RawMessage, error)                                     // tail of the local audit ledger (nil = receipts disabled)
+	gallery       func(limit int) ([]galleryImage, error)                                        // images that landed in a drop inbox — the Vision view (nil = disabled)
+	image         func(name string) (data []byte, contentType string, err error)                 // read one gallery image, path-safe (nil = disabled)
+	cast          func(limit int) ([]galleryImage, error)                                        // images in the cast inbox — the "Now Showing" view (nil = disabled)
+	castImage     func(name string) (data []byte, contentType string, err error)                 // read one cast image, path-safe (nil = disabled)
+	approvals     string                                                                         // approvals server (mesh-ip:port) the page links out to ("" = hidden)
+	allow         acl                                                                            // page-wide viewer ACL; empty = any mesh peer
+	allowedHosts  []string                                                                       // Host values the page may be served at (mesh ip/fqdn:port); empty = no Host check (dev)
 
 	self         func() airPeerRow                      // this node's own mesh identity for /api/home (nil = zero You)
 	pendingCount func(ctx context.Context) (int, error) // count held approvals for /api/home (nil = pending unknown, -1)
@@ -85,7 +90,7 @@ func airServeHandler(d airServeDeps) http.Handler {
 		}
 		writeJSONResp(w, http.StatusOK, map[string]any{
 			"approvals": d.approvals,
-			"push":      d.push != nil,
+			"push":      d.push != nil || d.pushConfirmed != nil,
 			"ring":      d.ring != nil,
 			"receipts":  d.receipts != nil,
 			"vision":    d.gallery != nil,
@@ -192,17 +197,18 @@ func airServeHandler(d airServeDeps) http.Handler {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
 			return
 		}
-		if d.push == nil {
+		if d.push == nil && d.pushConfirmed == nil {
 			http.Error(w, "push is not enabled on this page", http.StatusServiceUnavailable)
 			return
 		}
 		var body struct {
+			To        string `json:"to"`
 			Target    string `json:"target"`
 			Recipient string `json:"recipient"`
 			Name      string `json:"name"`
 			Text      string `json:"text"`
 		}
-		if status, err := decodeAirJSON(w, r, &body, maxAirUpload); err != nil {
+		if status, err := decodeAirJSON(w, r, &body, maxAirJSONRequestBytes); err != nil {
 			http.Error(w, err.Error(), status)
 			return
 		}
@@ -210,9 +216,8 @@ func airServeHandler(d airServeDeps) http.Handler {
 			http.Error(w, "text is required", http.StatusBadRequest)
 			return
 		}
-		target, status, err := d.resolveActionTarget(r, body.Target, body.Recipient, air.ServiceInbox)
-		if err != nil {
-			http.Error(w, err.Error(), status)
+		if int64(len(body.Text)) > maxAirUpload {
+			http.Error(w, "text exceeds the 8 MiB payload limit", http.StatusRequestEntityTooLarge)
 			return
 		}
 		// Base-sanitize the sender-supplied name (the receiver re-checks, but the
@@ -221,11 +226,58 @@ func airServeHandler(d airServeDeps) http.Handler {
 		if name == "" || name == "." || name == string(filepath.Separator) {
 			name = "clip.txt"
 		}
-		if err := d.push(r.Context(), target, name, []byte(body.Text)); err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
+		logicalTo, err := airLogicalRecipient(body.To, body.Recipient)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		writeJSONResp(w, http.StatusOK, map[string]string{"status": "pushed", "target": target, "name": name})
+		// Resolve only after the request payload is fully accepted, so Presence is
+		// fetched as close as possible to the actual delivery attempt.
+		recipient, err := d.resolveActionRecipient(r, logicalTo, body.Target)
+		if err != nil {
+			http.Error(w, err.Error(), airActionStatus(err))
+			return
+		}
+		logical := logicalTo != ""
+		if logical {
+			if d.pushConfirmed == nil {
+				http.Error(w, "receiver-confirmed delivery is not enabled on this page", http.StatusServiceUnavailable)
+				return
+			}
+			if _, err := air.NewActionReceipt(air.ActionPush, recipient, name, int64(len(body.Text)), time.Unix(1, 0)); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
+		if !logical && d.push == nil {
+			http.Error(w, "legacy raw-address delivery is not enabled on this page", http.StatusServiceUnavailable)
+			return
+		}
+		var sendErr error
+		if logical {
+			sendErr = d.pushConfirmed(r.Context(), recipient.Address, recipient.PublicKey, name, []byte(body.Text))
+		} else {
+			sendErr = d.push(r.Context(), recipient.Address, name, []byte(body.Text))
+		}
+		if sendErr != nil {
+			http.Error(w, sendErr.Error(), http.StatusBadGateway)
+			return
+		}
+		if !logical {
+			writeJSONResp(w, http.StatusOK, map[string]string{"status": "pushed", "target": recipient.Address, "name": name})
+			return
+		}
+		receipt, err := air.NewActionReceipt(air.ActionPush, recipient, name, int64(len(body.Text)), time.Now())
+		if err != nil {
+			http.Error(w, "build confirmed receipt", http.StatusInternalServerError)
+			return
+		}
+		result, err := air.NewActionResult(recipient, []air.ActionReceipt{receipt})
+		if err != nil {
+			http.Error(w, "build confirmed result", http.StatusInternalServerError)
+			return
+		}
+		writeJSONResp(w, http.StatusOK, result)
 	})
 
 	mux.HandleFunc("/api/drop", func(w http.ResponseWriter, r *http.Request) {
@@ -233,51 +285,94 @@ func airServeHandler(d airServeDeps) http.Handler {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
 			return
 		}
-		if d.push == nil {
+		if d.push == nil && d.pushConfirmed == nil {
 			http.Error(w, "drop is not enabled on this page", http.StatusServiceUnavailable)
 			return
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, maxAirMultipart)
+		r.Body = http.MaxBytesReader(w, r.Body, maxAirMultipartRequestBytes)
 		if err := r.ParseMultipartForm(maxAirUpload); err != nil {
 			var tooLarge *http.MaxBytesError
 			if errors.As(err, &tooLarge) {
-				http.Error(w, fmt.Sprintf("upload request exceeds %d bytes", maxAirMultipart), http.StatusRequestEntityTooLarge)
+				http.Error(w, fmt.Sprintf("upload request exceeds %d bytes", maxAirMultipartRequestBytes), http.StatusRequestEntityTooLarge)
 				return
 			}
 			http.Error(w, "bad upload: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		targetInput := r.FormValue("target")
-		recipient := r.FormValue("recipient")
+		if r.MultipartForm != nil {
+			defer r.MultipartForm.RemoveAll()
+		}
 		file, hdr, err := r.FormFile("file")
 		if err != nil {
 			http.Error(w, "file is required", http.StatusBadRequest)
 			return
 		}
 		defer file.Close()
-		target, status, err := d.resolveActionTarget(r, targetInput, recipient, air.ServiceInbox)
-		if err != nil {
-			http.Error(w, err.Error(), status)
-			return
-		}
 		data, err := io.ReadAll(io.LimitReader(file, maxAirUpload+1))
 		if err != nil {
 			http.Error(w, "read upload: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		if len(data) > maxAirUpload {
-			http.Error(w, fmt.Sprintf("file exceeds %d bytes", maxAirUpload), http.StatusRequestEntityTooLarge)
+		if int64(len(data)) > maxAirUpload {
+			http.Error(w, "file exceeds the 8 MiB payload limit", http.StatusRequestEntityTooLarge)
 			return
 		}
 		name := filepath.Base(hdr.Filename)
 		if name == "" || name == "." || name == string(filepath.Separator) {
 			name = "upload.bin"
 		}
-		if err := d.push(r.Context(), target, name, data); err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
+		logicalTo, err := airLogicalRecipient(r.FormValue("to"), r.FormValue("recipient"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		writeJSONResp(w, http.StatusOK, map[string]any{"status": "dropped", "target": target, "name": name, "bytes": len(data)})
+		// Resolve after the upload has been read and validated. The chosen inbox
+		// therefore comes from a fresh Presence view immediately before delivery.
+		recipient, err := d.resolveActionRecipient(r, logicalTo, r.FormValue("target"))
+		if err != nil {
+			http.Error(w, err.Error(), airActionStatus(err))
+			return
+		}
+		logical := logicalTo != ""
+		if logical {
+			if d.pushConfirmed == nil {
+				http.Error(w, "receiver-confirmed delivery is not enabled on this page", http.StatusServiceUnavailable)
+				return
+			}
+			if _, err := air.NewActionReceipt(air.ActionDrop, recipient, name, int64(len(data)), time.Unix(1, 0)); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
+		if !logical && d.push == nil {
+			http.Error(w, "legacy raw-address delivery is not enabled on this page", http.StatusServiceUnavailable)
+			return
+		}
+		var sendErr error
+		if logical {
+			sendErr = d.pushConfirmed(r.Context(), recipient.Address, recipient.PublicKey, name, data)
+		} else {
+			sendErr = d.push(r.Context(), recipient.Address, name, data)
+		}
+		if sendErr != nil {
+			http.Error(w, sendErr.Error(), http.StatusBadGateway)
+			return
+		}
+		if !logical {
+			writeJSONResp(w, http.StatusOK, map[string]any{"status": "dropped", "target": recipient.Address, "name": name, "bytes": len(data)})
+			return
+		}
+		receipt, err := air.NewActionReceipt(air.ActionDrop, recipient, name, int64(len(data)), time.Now())
+		if err != nil {
+			http.Error(w, "build confirmed receipt", http.StatusInternalServerError)
+			return
+		}
+		result, err := air.NewActionResult(recipient, []air.ActionReceipt{receipt})
+		if err != nil {
+			http.Error(w, "build confirmed result", http.StatusInternalServerError)
+			return
+		}
+		writeJSONResp(w, http.StatusOK, result)
 	})
 
 	mux.HandleFunc("/api/ring", func(w http.ResponseWriter, r *http.Request) {
@@ -290,6 +385,7 @@ func airServeHandler(d airServeDeps) http.Handler {
 			return
 		}
 		var body struct {
+			To        string `json:"to"`
 			Target    string `json:"target"`
 			Recipient string `json:"recipient"`
 			Message   string `json:"message"`
@@ -307,7 +403,12 @@ func airServeHandler(d airServeDeps) http.Handler {
 			return
 		}
 		notice = notice.Normalized()
-		target, status, err := d.resolveActionTarget(r, body.Target, body.Recipient, air.ServiceRing)
+		logicalTo, err := airLogicalRecipient(body.To, body.Recipient)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		target, status, err := d.resolveActionTarget(r, body.Target, logicalTo, air.ServiceRing)
 		if err != nil {
 			http.Error(w, err.Error(), status)
 			return
@@ -538,6 +639,21 @@ func decodeAirJSON(w http.ResponseWriter, r *http.Request, dst any, limit int64)
 	return 0, nil
 }
 
+// airLogicalRecipient normalizes the two public names for a logical action
+// destination. `recipient` is the universal-action UI contract; `to` is the
+// receiver-confirmed action contract. They are aliases, never two independent
+// selectors, so accepting both would make the delivery target ambiguous.
+func airLogicalRecipient(to, recipient string) (string, error) {
+	switch {
+	case to != "" && recipient != "":
+		return "", fmt.Errorf("to and recipient are aliases; give only one")
+	case to != "":
+		return to, nil
+	default:
+		return recipient, nil
+	}
+}
+
 // resolveActionTarget keeps explicit host:port compatibility while making a
 // logical recipient a fail-closed lookup in the browser-attributed Presence
 // directory. A failed selector is never retried as a raw address.
@@ -581,8 +697,8 @@ func validMeshTarget(target string) bool {
 	if err != nil || host == "" || port == "" {
 		return false
 	}
-	p, err := strconv.Atoi(port)
-	if err != nil || p < 1 || p > 65535 {
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 1 || portNumber > 65535 {
 		return false
 	}
 	return true
@@ -854,7 +970,7 @@ func cmdAirServe(args []string) error {
 			d.castImage = func(name string) ([]byte, string, error) { return readGalleryImage(castDir, name) }
 		}
 		fmt.Fprintf(os.Stderr, "Air (live) on http://%s (LOCAL — no mesh; peers/sessions unavailable)\n", *addr)
-		return newLocalHTTPServer(*addr, airServeHandler(d)).ListenAndServe()
+		return newAirHTTPServer(*addr, airServeHandler(d)).ListenAndServe()
 	}
 
 	// The privileged endpoints (steer/sessions via --control, push, drop, ring) act
@@ -944,6 +1060,12 @@ func cmdAirServe(args []string) error {
 			go func() { pw.CloseWithError(sendData(pw, name, data)) }()
 			dial := func(ctx context.Context) (net.Conn, error) { return client.Dial(ctx, "tcp", target) }
 			return session.NewClient(dial, log.Printf).Run(ctx, sendStream{r: pr})
+		}
+		d.pushConfirmed = func(ctx context.Context, target, expectedKey, name string, data []byte) error {
+			dial := verifiedAirDialer(client, target, expectedKey)
+			return runDropWithCompletion(ctx, dial, func(w io.Writer) error {
+				return sendData(w, name, data)
+			}, 1, int64(len(data)), log.Printf)
 		}
 		d.ring = func(ctx context.Context, target string, notice air.Notice) error {
 			return sendNotice(ctx, client, target, notice)
@@ -1043,5 +1165,5 @@ func cmdAirServe(args []string) error {
 	}
 	// Read/header timeouts even on the mesh: any admitted peer could otherwise
 	// dribble headers forever and exhaust the listener (Slowloris).
-	return newLocalHTTPServer("", airServeHandler(d)).Serve(ln)
+	return newAirHTTPServer("", airServeHandler(d)).Serve(ln)
 }

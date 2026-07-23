@@ -3,8 +3,9 @@
 > **North star:** any agent, any device, one continuous activity — private by
 > default, governed at every action, and independently provable afterward.
 
-Air already has the useful verbs: discover, drop, push, fetch, ring, cast,
-screen, steer, approve, launch, automate, inspect, and replay. The ecosystem is
+Air already has the useful verbs: init, up, join, pair, discover, send, drop,
+push, fetch, ring, cast, screen, steer, approve, launch, query databases,
+automate, inspect, and replay. The ecosystem is
 the layer that makes those verbs feel like one product instead of a toolbox.
 It gives each nearby agent or device a verified identity card, lets work appear
 as a stable Activity, resolves friendly recipients to the service they actually
@@ -25,7 +26,7 @@ separate future protocol.
 | **Transactional Handoff v2** | A future checkpoint-capable runtime prepares, readies, and commits a true move. | Requires single-use grants, policy binding, lease fencing, compatible checkpoint adapters, and split-brain recovery tests. |
 | **Spaces** | A named group of agents/devices shares selected activities and automations. | Membership is separate from tool authorization; every fanned-out action is individually policy-checked and audited. |
 
-## Shipped: Nearby v1 and Handoff v1
+## Shipped: Nearby v1, Resolved Send v1, and Handoff v1
 
 Nearby is the connective foundation:
 
@@ -42,6 +43,30 @@ Nearby is the connective foundation:
 5. `air nearby`, Air Home, the served page, and the assistant's `air_nearby`
    tool consume the same cards. A selector can resolve an exact name, FQDN, or
    full public key to a requested service.
+6. The normal Send/Drop path submits the selected node's full, stamped public
+   key—not an address copied from the page—and resolves its current `inbox`
+   service again immediately before delivery.
+7. The CLI (`air send`), served page, and MCP app (`air_send`) share that
+   selector vocabulary. Legacy `host:port` inputs remain explicit compatibility
+   paths for operators and scripts.
+8. Delivery still enters the existing receiver and its sender ACL/policy. A
+   successful discovery or resolution is not an authorization decision.
+9. Every **resolved** surface returns the same bounded Action Result only after
+   receiver installation is confirmed. Its per-payload
+   receipts contain identity, destination, payload name/size, status, and time—
+   never the payload itself, a local source path, a secret, or a capability
+   token. A payload is at most 8 MiB; a mixed send is at most 64 MiB and 256
+   payloads. Explicit raw-target endpoints retain their legacy response shapes;
+   they do not return this envelope.
+10. A compatible inbox advertises `drop.complete.v1`, for example
+    `--service inbox=9110,drop.complete.v1`. The sender terminates the framed
+    delivery with a nonce-bound marker; the receiver returns a bounded
+    `meshmcp.drop-completion/v1` status plus installed payload/byte totals.
+    `delivered` is emitted only for `installed` with the same nonce and exact
+    totals. Missing, malformed, rejected, or uncertain completion is an error.
+11. Mixed versions remain explicit: resolved clients refuse an inbox without
+    the completion capability, current receivers accept legacy EOF senders, and
+    operators may still choose a raw `host:port` compatibility route.
 
 An optional Activity on the card is deliberately read-only metadata: stable ID,
 kind, title, short summary, state, progress, typed target, revision, update time,
@@ -71,12 +96,21 @@ Air Home now turns the Presence directory into one coherent action surface:
 ### Trust rules
 
 - A public key is kept in full internally and shortened only while rendering.
+- ACL-filtered session and Home responses include the session owner's full
+  **public** peer key solely so clients can bind a Nearby card to the right live
+  session. The standard UI does not render that stable identifier.
+- A Nearby card may expose Steer only when exactly one live session carries the
+  same transport-stamped public key; a card-authored name or session ID is not
+  sufficient.
 - On-behalf browser headers may attribute a **read**, but may never register or
   remove Presence. Only the directly connected mesh identity owns its card.
 - Presence TTL, card size, strings, labels, services, capabilities, and registry
   cardinality are bounded.
+- Resolver selectors are limited to 512 valid UTF-8 bytes, reject C0/C1/DEL
+  controls before matching, and are never reflected in resolver errors.
 - An advertised capability is a hint for user experience, not a grant. The
-  receiver remains deny-by-default.
+  receiver's ACL and policy remain authoritative; configure its `allow` list
+  when the Inbox must be restricted to selected identities.
 - Heartbeat-only refreshes do not flood the enforcement ledger; material card
   changes, leaves, reads, malformed writes, and denied attempts are auditable.
 
@@ -122,8 +156,8 @@ export contracts exist; it is not required for v1's explicit application continu
 |---|---|---|
 | **1 · Nearby** | Presence registry, Activity cards, resolver, CLI/Home/web/MCP views. | Existing Air control endpoint and mesh identity. |
 | **2 · Air Node** | One command/config starts selected inbox, ring, cast, screen, approvals, and steer services; publishes them automatically. | Nearby service contracts. |
-| **3 · Universal addressing** | **Core shipped:** Push, Drop, Ring, Cast, and Screen accept `name`, `fqdn`, or full `pubkey` plus the required service kind; raw `host:port` remains compatible. | Nearby resolver. |
-| **4 · Context Capsule v1** | Shipped bounded work summary, content references, exact-target seal, explicit accept/decline, governed continuation, and durable delivery receipts. | Existing Air Handoff CLI, mesh identity, and destination tool policy. |
+| **3 · Universal addressing** | **Core shipped:** Push, Drop, Ring, Cast, and Screen accept `name`, `fqdn`, or full `pubkey` plus the required service kind; raw `host:port` remains compatible. Resolved Send across web, CLI, and assistant surfaces additionally requires `drop.complete.v1` and returns one receiver-confirmed Action Result. | Nearby resolver. |
+| **4 · Context Capsule + Handoff v1** | Shipped bounded work summary, content references, exact-target seal, explicit accept/decline, governed continuation, and durable delivery receipts. | Existing Air Handoff CLI, mesh identity, and destination tool policy. |
 | **5 · Transactional Handoff v2** | Prepare → accept → ready → commit/abort, checkpoint adapters, single-use grants, fencing, recovery tests, and a Home action sheet. | Context Capsule v1, durable Activity identity, and runtime checkpoint support. |
 | **6 · Spaces** | User-owned agent/device groups, shared Activity board, individually governed fan-out, focus/notification policy. | Nearby, Activities, and the pub/sub event fabric. |
 
@@ -131,8 +165,8 @@ export contracts exist; it is not required for v1's explicit application continu
 
 - A new agent appears everywhere after one announcement and disappears after a
   crash without manual cleanup.
-- A user can resolve `analyst` to its `steer` service without copying an IP or
-  port, while a backend ACL still independently denies an unauthorized call.
+- A user can send to `analyst` without copying an IP or port, while the inbox
+  ACL still independently denies an unauthorized delivery.
 - A malicious card cannot spoof identity, advertise a different host, inject a
   terminal escape, exhaust the registry, or smuggle executable parameters.
 - The same Presence and Activity JSON is rendered by terminal, web, and MCP

@@ -64,7 +64,7 @@ func sampleHome(generated string) Home {
 			Services: []Service{{Kind: ServiceSteer, Port: 9120, Protocol: "tcp", Address: "100.64.0.2:9120"}},
 			Activity: &Activity{Schema: ActivitySchema, ID: "research", Kind: ActivityTask, Title: "Customer research", State: ActivityRunning},
 		}},
-		Sessions:  []Session{{Backend: "fs", ID: "9f2a", Peer: "a.mesh", AgeSec: 4}},
+		Sessions:  []Session{{Backend: "fs", ID: "9f2a", Peer: "a.mesh", PeerKey: "K1", AgeSec: 4}},
 		Reachable: []CatalogEntry{{Name: "fs", Address: "100.64.0.2:9101", Transport: "stdio"}},
 		Activity:  []Receipt{{Decision: "allow", Time: "2026-07-22T11:59:00Z", Peer: "a.mesh", Method: "tools/call"}},
 		Showing:   &Media{Name: "slide.png", ModUnix: 1700000000},
@@ -94,6 +94,11 @@ func TestSignatureChangesOnDelta(t *testing.T) {
 		},
 		"new session": func(h Home) Home {
 			h.Sessions = append(append([]Session(nil), h.Sessions...), Session{Backend: "sql", ID: "abcd", Peer: "b.mesh"})
+			return h
+		},
+		"session identity": func(h Home) Home {
+			h.Sessions = append([]Session(nil), h.Sessions...)
+			h.Sessions[0].PeerKey = "K9"
 			return h
 		},
 		"activity progress": func(h Home) Home {

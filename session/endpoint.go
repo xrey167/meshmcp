@@ -236,7 +236,7 @@ func (e *endpoint) pumpReader(conn net.Conn, r *bufio.Reader, gen uint64) error 
 			e.closeWith(nil)
 			return nil
 		case frameError:
-			err := errors.New("session: peer error: " + string(f.payload))
+			err := boundedPeerError("session: peer error: ", f.payload)
 			e.closeWith(err)
 			return err
 		}

@@ -249,13 +249,13 @@
   .agent-avatar .icon{width:27px;height:27px}
   .avatar-status{position:absolute;right:-1px;bottom:-1px;width:13px;height:13px;border:2px solid var(--panel-solid);border-radius:50%;background:var(--green)}
   .avatar-status.away{background:var(--faint)}.avatar-status.busy,.avatar-status.focus{background:var(--orange)}
-  .near-copy{min-width:0}
-  .near-title{font-size:15px;font-weight:680;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .near-state{font-size:12px;color:var(--muted);text-transform:capitalize;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .near-copy{min-width:0;display:block}
+  .near-title{display:block;font-size:15px;font-weight:680;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .near-state{display:block;font-size:12px;color:var(--muted);text-transform:capitalize;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .near-state.running{color:var(--green)}
   .chips{display:flex;gap:5px;flex-wrap:wrap;margin-top:7px}
   .chip{padding:2px 7px;border:1px solid var(--line);border-radius:6px;background:var(--panel-soft);color:var(--muted);font-size:9.5px;white-space:nowrap}
-  .identity-detail{font:10px var(--mono);color:var(--faint);margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .identity-detail{display:block;font:10px var(--mono);color:var(--faint);margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
   /* Attention and actions */
   .attention{
@@ -871,7 +871,7 @@
           <svg class="icon card-arrow"><use href="#i-arrow"/></svg>
         </button>
       </div>
-      <p class="action-trust"><svg class="icon"><use href="#i-security"/></svg><span>Actions use this agent's verified services and remain policy governed.</span></p>
+      <p class="action-trust"><svg class="icon"><use href="#i-security"/></svg><span>Actions use this agent's verified services and remain policy governed. Send and Drop complete only after receiver confirmation.</span></p>
     </div>
     <div class="action-ring" id="actionRing" hidden>
       <div class="segmented" role="radiogroup" aria-label="Ring priority">
@@ -918,6 +918,9 @@
   var actionNode=null;
   var commandItems=[];
   var commandIndex=0;
+  var selectedRecipient="";
+  var selectedRecipientName="";
+  var INBOX_COMPLETION="drop.complete.v1";
   var HUES=[210,145,275,25,340,190,50,300];
 
   function icon(id,cls){return '<svg class="icon '+(cls||"")+'" aria-hidden="true"><use href="#'+id+'"></use></svg>'}
@@ -932,6 +935,21 @@
   function nodeName(n){return n.name||n.fqdn||n.ip||"Unknown peer"}
   function shortKey(k){k=String(k||"");return k.length>18?k.slice(0,8)+"…"+k.slice(-6):k}
   function nodeKey(n){return n.public_key||n.pubkey||n.fqdn||n.ip||n.name||""}
+  function fullNodeKey(n){
+    var k=String(n&&(n.public_key||n.pubkey)||"");
+    return k.length>=32&&k.indexOf("…")<0&&k.indexOf("...")<0?k:"";
+  }
+  function nodeSelector(n){var k=fullNodeKey(n);return k?"pubkey:"+k:""}
+  function stableNodeKey(n){return fullNodeKey(n)||nodeKey(n)}
+  function inboxService(n){
+    var services=array(n&&n.services);
+    for(var i=0;i<services.length;i++)if(services[i]&&services[i].kind==="inbox")return services[i];
+    return null;
+  }
+  function inboxCanConfirm(n){
+    var inbox=inboxService(n);
+    return !!(inbox&&array(inbox.capabilities).indexOf(INBOX_COMPLETION)>=0);
+  }
   function nodeIcon(n){var k=String(n.kind||"").toLowerCase();if(k==="gateway")return"i-gateway";if(k==="device")return"i-device";return"i-agent"}
   function serviceFor(n,kind){
     var services=array(n&&n.services);
@@ -939,10 +957,7 @@
     return null;
   }
   function selectorForNode(n){
-    if(!n)return"";
-    var key=n.public_key||n.pubkey||"";
-    if(key)return "pubkey:"+String(key);
-    return n.fqdn?String(n.fqdn):"";
+    return nodeSelector(n);
   }
   function sameVerifiedNode(a,b){
     if(!a||!b)return false;
@@ -952,26 +967,20 @@
     return !!(a.ip&&b.ip&&String(a.ip)===String(b.ip));
   }
   function sessionForNode(n){
-    if(!n)return null;
-    // A Presence name and Activity target are client-authored presentation
-    // metadata. Never let either one confer steering authority. Sessions may
-    // be associated only through transport-stamped identity fields.
-    var ids=[n.fqdn,n.public_key,n.pubkey,n.ip].filter(Boolean).map(String);
-    for(var i=0;i<sessions.length;i++)if(ids.indexOf(String(sessions[i].peer||""))>=0)return sessions[i];
-    return null;
+    return matchingSession(n);
   }
   function actionsForNode(n){
     var actions=[],selector=selectorForNode(n),session=sessionForNode(n);
-    if(cfg.push&&selector&&serviceFor(n,"inbox")){
-      actions.push({id:"send",title:"Send message",subtitle:"Private governed delivery",icon:"i-share",node:n});
-      actions.push({id:"drop",title:"Drop file",subtitle:"Resumable file transfer",icon:"i-file",node:n});
+    if(cfg.push&&selector&&inboxCanConfirm(n)){
+      actions.push({id:"send",title:"Send message",subtitle:"Receiver-confirmed governed delivery",icon:"i-share",node:n});
+      actions.push({id:"drop",title:"Drop file",subtitle:"Resumable · receiver confirmed",icon:"i-file",node:n});
     }
     if(cfg.ring&&selector&&serviceFor(n,"ring"))actions.push({id:"ring",title:"Ring",subtitle:"Request this agent's attention",icon:"i-ring",node:n});
     if(session)actions.push({id:"steer",title:"Steer session",subtitle:session.backend||"Live session",icon:"i-steer",node:n,session:session});
     return actions;
   }
   function updateActionAvailability(){
-    var inbox=nearbyCards.some(function(n){return !!(selectorForNode(n)&&serviceFor(n,"inbox"))});
+    var inbox=nearbyCards.some(function(n){return !!(selectorForNode(n)&&inboxCanConfirm(n))});
     var ring=nearbyCards.some(function(n){return !!(selectorForNode(n)&&serviceFor(n,"ring"))});
     $("quickSend").disabled=!cfg.push||!inbox;
     $("quickDrop").disabled=!cfg.push||!inbox;
@@ -1032,6 +1041,8 @@
       public_key:n.public_key||n.pubkey,fqdn:n.fqdn,ip:n.ip,fallback:n.fallback
     }}));
     if(changed(el,sig)){
+      var focused=document.activeElement;
+      var focusedKey=focused&&focused.classList&&focused.classList.contains("near-card")?focused.dataset.nodeKey:"";
       el.innerHTML=nearbyCards.map(function(n,i){
         var name=nodeName(n),status=safeStatus(n.status),activity=n.activity&&typeof n.activity==="object"?n.activity:null;
         var state=activity&&activity.state?String(activity.state):status;
@@ -1040,7 +1051,7 @@
         var chips=hints.map(function(x){return'<span class="chip">'+esc(x)+"</span>"}).join("");
         var key=n.fqdn||n.ip||shortKey(nodeKey(n));
         var avatar=(n.kind==="device"||n.kind==="gateway"||n.fallback)?icon(nodeIcon(n)):esc(initials(name));
-        return '<button class="near-card fade-in" id="presence-card-'+i+'" type="button" data-node="'+i+'" aria-label="Open actions for '+esc(name)+'">'+
+        return '<button class="near-card fade-in" id="presence-card-'+i+'" type="button" data-node="'+i+'" data-node-key="'+esc(stableNodeKey(n))+'" aria-label="Open actions for '+esc(name)+'">'+
           '<div class="agent-avatar '+(n.kind==="device"?"device":"")+'" style="'+avatarVars(nodeKey(n))+'">'+
             avatar+'<span class="avatar-status '+esc(status)+'" aria-hidden="true"></span></div>'+
           '<div class="near-copy"><div class="near-title">'+esc(name)+'</div>'+
@@ -1051,6 +1062,10 @@
       Array.prototype.forEach.call(el.querySelectorAll("[data-node]"),function(button){
         button.addEventListener("click",function(){openNodeActions(nearbyCards[+button.dataset.node])});
       });
+      if(focusedKey){
+        var replacement=findNearbyCard(focusedKey);
+        if(replacement){try{replacement.focus({preventScroll:true})}catch(e){replacement.focus()}}
+      }
     }
     renderRecipients(nearbyCards);
     updateActionAvailability();
@@ -1059,17 +1074,17 @@
   function renderRecipients(nodes){
     var options=[];
     array(nodes).forEach(function(n){
-      array(n.services).forEach(function(s){
-        var selector=selectorForNode(n);
-        if(s&&s.kind==="inbox"&&s.address&&selector)options.push({name:nodeName(n),selector:selector});
-      });
+      var selector=selectorForNode(n);
+      if(selector&&inboxCanConfirm(n))options.push({name:nodeName(n),selector:selector});
     });
+    var selectedFound=options.some(function(o){return o.selector===selectedRecipient});
+    if(selectedRecipient&&!selectedFound)options.push({name:(selectedRecipientName||"Selected recipient")+" · not currently nearby",selector:selectedRecipient});
     var field=$("recipientField"),select=$("pushRecipient");
     var sig=JSON.stringify(options);
     if(!options.length){field.hidden=true;if(changed(select,sig)){select.textContent="";$("addressDetails").open=true}return}
     field.hidden=false;
     if(!changed(select,sig))return;
-    var previous=select.value;
+    var previous=selectedRecipient||select.value;
     select.innerHTML='<option value="">Choose a verified recipient</option>'+options.map(function(o){return'<option value="'+esc(o.selector)+'">'+esc(o.name)+"</option>"}).join("");
     if(options.some(function(o){return o.selector===previous}))select.value=previous;
   }
@@ -1094,7 +1109,7 @@
     var el=$("sessions");sessions=array(items);el.setAttribute("aria-busy","false");
     $("sessionCount").textContent=sessions.length?sessions.length+" active":"";
     if(!sessions.length){el.dataset.sig="";el.innerHTML=emptyState("i-session","No live sessions");return}
-    var sig=JSON.stringify(sessions.map(function(s){return{backend:s.backend,id:s.id,peer:s.peer}}));
+    var sig=JSON.stringify(sessions.map(function(s){return{backend:s.backend,id:s.id,peer:s.peer,peer_key:s.peer_key}}));
     if(!changed(el,sig))return;
     el.innerHTML=sessions.map(function(s,i){
       return '<article class="session-row fade-in"><div class="agent-avatar session-avatar" style="'+avatarVars(s.id)+'">'+esc(initials(s.backend))+'</div>'+
@@ -1187,12 +1202,19 @@
   }
 
   function matchingSession(item){
-    if(!item||!item.node)return null;
-    var n=item.node,ids=[n.fqdn,n.public_key,n.pubkey,n.ip].filter(Boolean).map(String);
-    for(var j=0;j<sessions.length;j++){
-      var p=String(sessions[j].peer||"");
-      if(p&&ids.indexOf(p)>=0)return sessions[j];
-    }
+    if(!item)return null;
+    var n=item.node||item;
+    var key=fullNodeKey(n);
+    if(!key)return null;
+    var matches=sessions.filter(function(s){
+      return String(s.peer_key||"")===key;
+    });
+    return matches.length===1?matches[0]:null;
+  }
+
+  function findNearbyCard(key){
+    var cards=$("peers").querySelectorAll("[data-node-key]");
+    for(var i=0;i<cards.length;i++)if(cards[i].dataset.nodeKey===key)return cards[i];
     return null;
   }
 
@@ -1325,7 +1347,9 @@
 
   function selectRecipient(n){
     var selector=selectorForNode(n),select=$("pushRecipient");
-    if(!selector)return false;
+    if(!selector||!inboxCanConfirm(n))return false;
+    selectedRecipient=selector;
+    selectedRecipientName=nodeName(n);
     select.value=selector;
     if(select.value!==selector)return false;
     $("pushTarget").value="";
@@ -1539,30 +1563,50 @@
   });
 
   /* Push and Drop */
-  $("pushRecipient").addEventListener("change",function(){if(this.value){$("pushTarget").value="";$("addressDetails").open=false}});
-  $("pushTarget").addEventListener("input",function(){if(this.value.trim())$("pushRecipient").value=""});
+  $("pushRecipient").addEventListener("change",function(){
+    selectedRecipient=this.value||"";
+    selectedRecipientName=selectedRecipient&&this.selectedIndex>=0?this.options[this.selectedIndex].textContent.replace(/ · not currently nearby$/,""):"";
+    if(selectedRecipient){$("pushTarget").value="";$("addressDetails").open=false}
+  });
+  $("pushTarget").addEventListener("input",function(){
+    if(!this.value.trim())return;
+    selectedRecipient="";selectedRecipientName="";$("pushRecipient").value="";
+  });
   $("dropFile").addEventListener("change",function(){var f=this.files[0];$("dropLabel").textContent=f?f.name:"Choose file"});
+  function selectedShareTarget(){
+    if(selectedRecipient)return{field:"to",value:selectedRecipient};
+    return{field:"target",value:$("pushTarget").value.trim()};
+  }
+  function confirmedActionMessage(raw,fallback){
+    var result;
+    try{result=JSON.parse(raw)}catch(e){throw new Error("Receiver returned an invalid Action Result")}
+    if(!result||result.schema!=="air.action-result/v1"||result.status!=="delivered"||!Array.isArray(result.receipts)||!result.receipts.length||result.payloads!==result.receipts.length||result.receipts.some(function(receipt){return !receipt||receipt.status!=="delivered"})){
+      throw new Error("Receiver confirmation was missing from the Action Result");
+    }
+    var recipient=result.recipient||{},label=recipient.name||recipient.fqdn||shortKey(recipient.public_key)||"recipient";
+    return fallback+" · installed by receiver ("+label+")";
+  }
   $("pushSend").addEventListener("click",async function(){
-    var recipient=$("pushRecipient").value.trim(),target=$("pushTarget").value.trim(),message=$("pushText").value,btn=this,out=$("pushOut");
-    if((!recipient&&!target)||!message){setStatus(out,"Recipient and message are required","bad");return}
+    var recipient=selectedShareTarget(),message=$("pushText").value,btn=this,out=$("pushOut");
+    if(!recipient.value||!message){setStatus(out,"Recipient and message are required","bad");return}
     setStatus(out,"Sending…","muted");btn.disabled=true;
     try{
-      var payload={text:message};if(recipient)payload.recipient=recipient;else payload.target=target;
+      var payload={text:message};payload[recipient.field]=recipient.value;
       var r=await fetch("api/push",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
       var t=(await r.text()).trim();if(!r.ok)throw new Error(r.status+" "+t);
-      setStatus(out,"Message sent","ok");$("pushText").value="";
+      setStatus(out,recipient.field==="to"?confirmedActionMessage(t,"Message delivered"):"Message sent","ok");$("pushText").value="";
     }catch(e){setStatus(out,e.message,"bad")}finally{btn.disabled=false}
   });
   $("dropSend").addEventListener("click",async function(){
-    var recipient=$("pushRecipient").value.trim(),target=$("pushTarget").value.trim(),f=$("dropFile").files[0],btn=this,out=$("pushOut");
-    if((!recipient&&!target)||!f){setStatus(out,"Recipient and a chosen file are required","bad");return}
+    var recipient=selectedShareTarget(),f=$("dropFile").files[0],btn=this,out=$("pushOut");
+    if(!recipient.value||!f){setStatus(out,"Recipient and a chosen file are required","bad");return}
     if(f.size>8*1024*1024){setStatus(out,"This Air page accepts files up to 8 MiB.","bad");return}
     setStatus(out,"Dropping "+f.name+"…","muted");btn.disabled=true;
     try{
-      var form=new FormData();if(recipient)form.append("recipient",recipient);else form.append("target",target);form.append("file",f);
+      var form=new FormData();form.append(recipient.field,recipient.value);form.append("file",f);
       var r=await fetch("api/drop",{method:"POST",body:form});
       var t=(await r.text()).trim();if(!r.ok)throw new Error(r.status+" "+t);
-      setStatus(out,"Dropped "+f.name,"ok");$("dropFile").value="";$("dropLabel").textContent="Choose file";
+      setStatus(out,recipient.field==="to"?confirmedActionMessage(t,"Dropped "+f.name):"Dropped "+f.name,"ok");$("dropFile").value="";$("dropLabel").textContent="Choose file";
     }catch(e){setStatus(out,e.message,"bad")}finally{btn.disabled=false}
   });
 
