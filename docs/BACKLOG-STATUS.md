@@ -32,7 +32,7 @@ content lands in BACKLOG.md.
 | 20 | Placeholder modules | todo | Doctor implementable; sibling modules have no git remote — local + documented |
 | 21 | Router delegation wiring | todo | **Security priority — first meaty task** |
 | 22 | Postgres CAS in CI | **blocked-CI** | Workflow YAML can be pre-staged; unverifiable until 1 |
-| 23 | Fenced-dispatch regression test | todo | |
+| 23 | Fenced-dispatch regression test | **done** | Bound proven in handshake + backend modes |
 | 24 | FileStore lock-steal hardening | **done** | Owner-token release; steal contract preserved |
 | 25 | Thin policy test spots | todo | |
 | 26 | Steer close/resume race fix | todo | Local fix + re-enable; cross-OS confirm rides 1 |
