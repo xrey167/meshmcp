@@ -44,7 +44,7 @@ Share and automate:
 
 Trust and operate:
   audit · capability · approve · secrets · hook · insight · replay
-  config · status · budget · doctor
+  config · status · budget · doctor · profile
 
 Discover and extend:
   graphrag · spotlight · market · plugins · edge
@@ -112,6 +112,7 @@ Usage:
   meshmcp spotlight [flags] <query>             federated semantic search across authorized mesh backends (F19)
   meshmcp market <keygen|publish|list|verify|install>  governed plugin marketplace: signed bundle manifests, metered + audited installs (F14)
   meshmcp edge --config edge.yaml               public OAuth ingress for hosted MCP clients (e.g. claude.ai) — off by default, one tool-scoped path
+  meshmcp profile <set|show|clear>              remember a default control-ip:port so commands can omit it ($MESHMCP_CONTROL overrides)
   meshmcp version
 
 Mesh credentials come from flags, config, or $NB_SETUP_KEY / $NB_MANAGEMENT_URL.
@@ -221,6 +222,8 @@ func main() {
 		err = cmdMarket(os.Args[2:])
 	case "edge":
 		err = cmdEdge(os.Args[2:])
+	case "profile":
+		err = cmdProfile(os.Args[2:])
 	case "version":
 		fmt.Println(version)
 	case "-h", "--help", "help":

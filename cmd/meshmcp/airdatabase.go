@@ -274,10 +274,11 @@ func cmdAirDatabaseLS(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if fs.NArg() != 1 {
-		return errors.New("usage: meshmcp air database ls [flags] <host:port>")
+	control, err := resolveControlPositional(fs.NArg(), fs.Arg(0), "usage: meshmcp air database ls [flags] <host:port>")
+	if err != nil {
+		return err
 	}
-	hc, cleanup, err := airControlHTTP(o, fs.Arg(0))
+	hc, cleanup, err := airControlHTTP(o, control)
 	if err != nil {
 		return err
 	}
