@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/signal"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -89,6 +90,19 @@ func cmdFederate(args []string) error {
 	}
 	defer ln.Close()
 	log.Printf("federation boundary on mesh port %d -> upstream %s", cfg.Port, cfg.Upstream)
+
+	// Graceful stop: a shutdown signal closes the listener, which breaks the
+	// accept loop below; the deferred close/stopMesh then run and the crossing
+	// audit is flushed instead of the process dying mid-record.
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, shutdownSignals...)
+	defer signal.Stop(stop)
+	go func() {
+		sig := <-stop
+		log.Printf("received %v — closing the federation listener", sig)
+		ln.Close()
+	}()
+	defer audit.Flush()
 
 	for {
 		conn, err := ln.Accept()

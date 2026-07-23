@@ -51,8 +51,23 @@ type PairStatus string
 const (
 	StatusApproved PairStatus = "approved"
 	StatusPending  PairStatus = "pending"
+	StatusDenied   PairStatus = "denied"
 	StatusNone     PairStatus = "none"
 )
+
+// DeniedRequest records an operator's decline so the requester can be TOLD —
+// "your request was declined: <reason>" beats a silent disappearance from the
+// queue (guided recovery, not a dead end). A denial is advisory memory, never
+// a ban: a fresh Request clears it and queues the ask again.
+type DeniedRequest struct {
+	PublicKey string `json:"public_key"`
+	Reason    string `json:"reason,omitempty"`
+	DeniedAt  string `json:"denied_at"`
+}
+
+// maxDeniedRemembered bounds how many denials are kept (oldest evicted), so
+// remembering declines can never grow the store without bound.
+const maxDeniedRemembered = 256
 
 // PendingRequest is a queued, not-yet-approved pair request. It records the
 // peer's TRANSPORT-VERIFIED identity (never a body-supplied one) and confers
@@ -86,6 +101,9 @@ type pairedState struct {
 	SchemaVersion int              `json:"schema_version"`
 	Pending       []PendingRequest `json:"pending"`
 	Paired        []PairedPeer     `json:"paired"`
+	// Denied is additive (older builds simply ignore it), so the schema version
+	// stays 1 and existing stores keep loading both directions.
+	Denied []DeniedRequest `json:"denied,omitempty"`
 }
 
 // PairedStore is an atomic, concurrency-safe store of pending pair requests and
@@ -99,6 +117,7 @@ type PairedStore struct {
 	path    string
 	pending map[string]PendingRequest // keyed by public key
 	paired  map[string]PairedPeer     // keyed by public key
+	denied  map[string]DeniedRequest  // keyed by public key (advisory memory, not a ban)
 }
 
 // OpenPairedStore loads the store at path, or returns an empty store when the
@@ -113,6 +132,7 @@ func OpenPairedStore(path string) (*PairedStore, error) {
 		path:    path,
 		pending: map[string]PendingRequest{},
 		paired:  map[string]PairedPeer{},
+		denied:  map[string]DeniedRequest{},
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -140,6 +160,19 @@ func OpenPairedStore(path string) (*PairedStore, error) {
 			delete(s.pending, p.PublicKey)
 			s.paired[p.PublicKey] = p
 		}
+	}
+	for _, d := range st.Denied {
+		if d.PublicKey == "" {
+			continue
+		}
+		// Approved or re-pending supersedes a stale denial.
+		if _, ok := s.paired[d.PublicKey]; ok {
+			continue
+		}
+		if _, ok := s.pending[d.PublicKey]; ok {
+			continue
+		}
+		s.denied[d.PublicKey] = d
 	}
 	return s, nil
 }
@@ -177,9 +210,16 @@ func (s *PairedStore) Request(id VerifiedIdentity, label string, now time.Time) 
 		Label:       label,
 		RequestedAt: now.UTC().Format(time.RFC3339),
 	}
+	// A fresh request supersedes a remembered denial — a decline is advisory
+	// memory for the requester, never a ban; the operator decides again.
+	prevDenied, hadDenied := s.denied[id.PublicKey]
+	delete(s.denied, id.PublicKey)
 	s.pending[id.PublicKey] = req
 	if err := s.persistLocked(); err != nil {
 		delete(s.pending, id.PublicKey) // roll back the in-memory change on a persist failure
+		if hadDenied {
+			s.denied[id.PublicKey] = prevDenied
+		}
 		return PendingRequest{}, false, err
 	}
 	return req, true, nil
@@ -221,9 +261,18 @@ func (s *PairedStore) Approve(pubKey, approver string, now time.Time) (PairedPee
 	return peer, nil
 }
 
-// Deny drops a pending request without recognizing it. removed is false when no
-// pending request existed for the identity.
-func (s *PairedStore) Deny(pubKey string) (bool, error) {
+// Deny drops a pending request without recognizing it, remembering the
+// operator's reason so the requester can be told WHY (guided recovery — the
+// requester polls status and sees "denied: <reason>" instead of silently
+// vanishing from the queue). The reason is bounded and control-character free
+// like a pair label; empty is fine. removed is false when no pending request
+// existed for the identity (no denial is recorded then — there was nothing to
+// decline).
+func (s *PairedStore) Deny(pubKey, reason string, now time.Time) (bool, error) {
+	reason, err := cleanPairLabel(reason)
+	if err != nil {
+		return false, fmt.Errorf("pairing: deny reason: %w", err)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	req, ok := s.pending[pubKey]
@@ -231,11 +280,29 @@ func (s *PairedStore) Deny(pubKey string) (bool, error) {
 		return false, nil
 	}
 	delete(s.pending, pubKey)
+	den := DeniedRequest{PublicKey: pubKey, Reason: reason, DeniedAt: now.UTC().Format(time.RFC3339)}
+	s.denied[pubKey] = den
+	s.evictDeniedLocked()
 	if err := s.persistLocked(); err != nil {
 		s.pending[pubKey] = req
+		delete(s.denied, pubKey)
 		return false, err
 	}
 	return true, nil
+}
+
+// evictDeniedLocked drops the oldest remembered denials over the cap. The
+// caller holds s.mu.
+func (s *PairedStore) evictDeniedLocked() {
+	for len(s.denied) > maxDeniedRemembered {
+		oldestKey, oldestAt := "", ""
+		for k, d := range s.denied {
+			if oldestKey == "" || d.DeniedAt < oldestAt || (d.DeniedAt == oldestAt && k < oldestKey) {
+				oldestKey, oldestAt = k, d.DeniedAt
+			}
+		}
+		delete(s.denied, oldestKey)
+	}
 }
 
 // Revoke removes an approved peer, so it is no longer recognized. removed is
@@ -274,18 +341,30 @@ func (s *PairedStore) Recognized(pubKey, fqdn string) bool {
 // Status returns the caller's own view of where it stands. It reveals only the
 // queried identity's state — never anything about other peers.
 func (s *PairedStore) Status(pubKey string) PairStatus {
+	st, _ := s.StatusDetail(pubKey)
+	return st
+}
+
+// StatusDetail is Status plus the operator's decline reason when the identity's
+// last request was denied — so `air join` can tell the human WHY and what to do
+// next instead of a bare "declined". The reason is only ever revealed to the
+// identity it concerns (the caller queries its own transport-verified key).
+func (s *PairedStore) StatusDetail(pubKey string) (PairStatus, string) {
 	if pubKey == "" {
-		return StatusNone
+		return StatusNone, ""
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.paired[pubKey]; ok {
-		return StatusApproved
+		return StatusApproved, ""
 	}
 	if _, ok := s.pending[pubKey]; ok {
-		return StatusPending
+		return StatusPending, ""
 	}
-	return StatusNone
+	if d, ok := s.denied[pubKey]; ok {
+		return StatusDenied, d.Reason
+	}
+	return StatusNone, ""
 }
 
 // Pending returns a deterministic snapshot of the queued requests (oldest
@@ -309,7 +388,7 @@ func (s *PairedStore) Paired() []PairedPeer {
 // it, then rename it into place, so a reader (or a crash) never observes a
 // partially written store at the canonical path.
 func (s *PairedStore) persistLocked() error {
-	st := pairedState{SchemaVersion: pairedSchemaVersion, Pending: sortedPending(s.pending), Paired: sortedPaired(s.paired)}
+	st := pairedState{SchemaVersion: pairedSchemaVersion, Pending: sortedPending(s.pending), Paired: sortedPaired(s.paired), Denied: sortedDenied(s.denied)}
 	b, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
 		return fmt.Errorf("pairing: marshal store: %w", err)
@@ -353,6 +432,20 @@ func sortedPending(m map[string]PendingRequest) []PendingRequest {
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].RequestedAt != out[j].RequestedAt {
 			return out[i].RequestedAt < out[j].RequestedAt
+		}
+		return out[i].PublicKey < out[j].PublicKey
+	})
+	return out
+}
+
+func sortedDenied(m map[string]DeniedRequest) []DeniedRequest {
+	out := make([]DeniedRequest, 0, len(m))
+	for _, d := range m {
+		out = append(out, d)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].DeniedAt != out[j].DeniedAt {
+			return out[i].DeniedAt < out[j].DeniedAt
 		}
 		return out[i].PublicKey < out[j].PublicKey
 	})

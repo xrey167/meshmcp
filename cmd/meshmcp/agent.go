@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"sort"
 	"strings"
 	"time"
@@ -177,7 +178,10 @@ func runSteerableAgent(o *meshOptions, target string, steps []agentStep, count i
 	}
 	defer mc.Close()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	// Signal-aware root context: SIGINT/SIGTERM cancels the agent loop, so a
+	// supervisor stop drains through the deferred cleanup (audit close, MCP
+	// close, listener close, mesh stop) instead of killing the process mid-step.
+	ctx, cancel := signal.NotifyContext(context.Background(), shutdownSignals...)
 	defer cancel()
 
 	steer := make(chan steerEnvelope, 16)

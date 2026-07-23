@@ -42,6 +42,9 @@
   #drop code { font-family: var(--mono); color: var(--cyan); background: var(--ink); padding: 2px 6px; border-radius: 5px; }
   #empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 14px; text-align: center; padding: 24px; }
   #empty code { font-family: var(--mono); color: var(--cyan); }
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important;scroll-behavior:auto !important}
+}
 </style>
 </head>
 <body>
@@ -189,5 +192,8 @@
   resize(); draw();
 })();
 </script>
+<footer style="text-align:center;padding:18px;font-size:12px;opacity:.6">
+  Privacy: this demo runs entirely in your browser on locally simulated data — a dropped file's name is only echoed back to you; nothing is uploaded, stored, or sent anywhere.
+</footer>
 </body>
 </html>

@@ -146,8 +146,12 @@ func (a *AuditLog) WithCheckpointer(cp *Checkpointer) *AuditLog {
 	return a
 }
 
-// Flush seals any buffered records into a final checkpoint.
+// Flush seals any buffered records into a final checkpoint. Nil-safe (like
+// write), so shutdown paths can flush an optional log unconditionally.
 func (a *AuditLog) Flush() {
+	if a == nil {
+		return
+	}
 	a.mu.Lock()
 	cp, seq, hash := a.cp, a.lastSeq, a.lastHash
 	a.mu.Unlock()

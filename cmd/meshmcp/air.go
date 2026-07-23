@@ -49,6 +49,8 @@ func cmdAir(args []string) error {
 		return cmdAirOperator(args[1:])
 	case "remove", "uninstall":
 		return cmdUninstall(args[1:])
+	case "revoke":
+		return cmdRevokeDevice(args[1:])
 	case "grant":
 		return cmdAirGrant(args[1:])
 	case "nearby":

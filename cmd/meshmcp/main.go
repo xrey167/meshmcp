@@ -44,7 +44,7 @@ Share and automate:
 
 Trust and operate:
   audit · capability · approve · secrets · hook · insight · replay
-  config · status · budget · doctor · profile
+  config · status · budget · doctor · diag · profile
 
 Discover and extend:
   graphrag · spotlight · market · plugins · edge
@@ -106,6 +106,7 @@ Usage:
   meshmcp status --audit <file> [--json]        roll up an audit ledger: per-peer/tool/backend calls + chain verdict
   meshmcp budget --audit <file> [--by-tool]     sum cost/quota units consumed per identity (FinOps for the fleet)
   meshmcp doctor --config <file>                pre-flight checks: config valid, commands present, dirs writable, secret perms
+  meshmcp diag [--config <f>] [--bundle out.tar.gz]   support bundle: redacted config, doctor report, audit tail + chain verdict, versions, data-dir listing
   meshmcp hook --client <c> --config <file>     PreToolUse hook adapter: govern EVERY tool call in Claude Code/Cursor/Codex by policy+audit
   meshmcp hook install --client <c>             print the hook config to add to a client's settings
   meshmcp plugins                                list extensions compiled into this build
@@ -114,6 +115,7 @@ Usage:
   meshmcp edge --config edge.yaml               public OAuth ingress for hosted MCP clients (e.g. claude.ai) — off by default, one tool-scoped path
   meshmcp profile <set|show|clear>              remember a default control-ip:port so commands can omit it ($MESHMCP_CONTROL overrides)
   meshmcp uninstall [--config <f>] [--yes] [--purge]   remove this gateway's local state (mesh identity, ledgers, stores); dry-run without --yes
+  meshmcp revoke-device [flags] <peer-pubkey>   lost-device kill-switch: revoke pairing, grants, capabilities, operator surface + NetBird peer in one audited pass
   meshmcp version
 
 Mesh credentials come from flags, config, or $NB_SETUP_KEY / $NB_MANAGEMENT_URL.
@@ -125,6 +127,16 @@ func main() {
 	log.SetOutput(os.Stderr)
 	log.SetPrefix("meshmcp: ")
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
+
+	// A leading --verbose/-v (before the subcommand) forces debug-level output;
+	// otherwise $MESHMCP_LOG picks the level. Stripped here so every subcommand
+	// switch below stays untouched.
+	verbose := false
+	if len(os.Args) > 1 && (os.Args[1] == "--verbose" || os.Args[1] == "-v") {
+		verbose = true
+		os.Args = append(os.Args[:1], os.Args[2:]...)
+	}
+	initLogging(verbose)
 
 	if len(os.Args) < 2 {
 		usage()
@@ -213,6 +225,8 @@ func main() {
 		err = cmdBudget(os.Args[2:])
 	case "doctor":
 		err = cmdDoctor(os.Args[2:])
+	case "diag":
+		err = cmdDiag(os.Args[2:])
 	case "hook":
 		err = cmdHook(os.Args[2:])
 	case "plugins":
@@ -227,8 +241,10 @@ func main() {
 		err = cmdProfile(os.Args[2:])
 	case "uninstall":
 		err = cmdUninstall(os.Args[2:])
-	case "version":
-		fmt.Println(version)
+	case "revoke-device":
+		err = cmdRevokeDevice(os.Args[2:])
+	case "version", "--version":
+		printVersion()
 	case "-h", "--help", "help":
 		if len(os.Args) > 2 && os.Args[2] == "all" {
 			usageAll()
@@ -247,6 +263,6 @@ func main() {
 		}
 	}
 	if err != nil {
-		log.Fatal(err)
+		presentError(err)
 	}
 }

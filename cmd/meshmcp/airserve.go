@@ -970,7 +970,7 @@ func cmdAirServe(args []string) error {
 			d.castImage = func(name string) ([]byte, string, error) { return readGalleryImage(castDir, name) }
 		}
 		fmt.Fprintf(os.Stderr, "Air (live) on http://%s (LOCAL — no mesh; peers/sessions unavailable)\n", *addr)
-		return newAirHTTPServer(*addr, airServeHandler(d)).ListenAndServe()
+		return serveGracefully(newAirHTTPServer(*addr, airServeHandler(d)), nil)
 	}
 
 	// The privileged endpoints (steer/sessions via --control, push, drop, ring) act
@@ -1165,5 +1165,5 @@ func cmdAirServe(args []string) error {
 	}
 	// Read/header timeouts even on the mesh: any admitted peer could otherwise
 	// dribble headers forever and exhaust the listener (Slowloris).
-	return newAirHTTPServer("", airServeHandler(d)).Serve(ln)
+	return serveGracefully(newAirHTTPServer("", airServeHandler(d)), ln)
 }

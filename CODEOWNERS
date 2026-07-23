@@ -1,0 +1,10 @@
+# Default owner for everything in the repository.
+* @xrey167
+
+# Security-critical surfaces: policy enforcement, the audit chain, identity,
+# and the public OAuth ingress. Changes here get extra scrutiny.
+/policy/ @xrey167
+/edge/ @xrey167
+/control/ @xrey167
+/session/ @xrey167
+/SECURITY.md @xrey167

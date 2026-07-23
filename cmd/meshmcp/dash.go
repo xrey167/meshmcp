@@ -56,7 +56,7 @@ func cmdDash(args []string) error {
 	// Guard the dashboard like the room: a DNS-rebinding / non-loopback Host is
 	// rejected, so the audit summary (identities, tools, reasons) can't be read
 	// by a rebound domain or a stray LAN client. Timeouts bound Slowloris.
-	return newLocalHTTPServer(*addr, guardLoopback(mux, *addr)).ListenAndServe()
+	return serveGracefully(newLocalHTTPServer(*addr, guardLoopback(mux, *addr)), nil)
 }
 
 const dashHTML = `<!doctype html><html lang="en"><head><meta charset="utf-8">

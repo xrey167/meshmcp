@@ -30,14 +30,15 @@ var (
 	_ policy.DPoPReplayStore = (*Store)(nil)
 )
 
-// Store is a PostgreSQL-backed SessionStore, LeaseStore, NonceStore, and
-// DPoPReplayStore. Safe for concurrent use (database/sql pools connections;
-// atomicity comes from the database, not process-local locks).
+// Store is a PostgreSQL-backed SessionStore, LeaseStore, NonceStore,
+// DPoPReplayStore, and idempotency ClaimStore (mcp.ClaimStore, satisfied
+// structurally — see claims.go). Safe for concurrent use (database/sql pools
+// connections; atomicity comes from the database, not process-local locks).
 type Store struct {
 	db *sql.DB
 	// Table names, fixed at Open. A non-empty prefix (tests) keeps parallel
 	// runs against a shared database from colliding.
-	sessions, nonces, dpopNonces, dpopJTIs string
+	sessions, nonces, dpopNonces, dpopJTIs, idemClaims string
 }
 
 // Driver errors can echo the raw connection string: pgx's ParseConfigError
@@ -78,6 +79,7 @@ func open(dsn, prefix string) (*Store, error) {
 		nonces:     prefix + "nonces",
 		dpopNonces: prefix + "dpop_nonces",
 		dpopJTIs:   prefix + "dpop_jtis",
+		idemClaims: prefix + "idempotency_claims",
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), openTimeout)
 	defer cancel()
@@ -90,6 +92,7 @@ func open(dsn, prefix string) (*Store, error) {
 		fmt.Sprintf(ddlNonces, s.nonces),
 		fmt.Sprintf(ddlDPoPNonces, s.dpopNonces),
 		fmt.Sprintf(ddlDPoPJTIs, s.dpopJTIs),
+		fmt.Sprintf(ddlIdemClaims, s.idemClaims),
 	} {
 		if _, err := db.ExecContext(ctx, ddl); err != nil {
 			db.Close()
