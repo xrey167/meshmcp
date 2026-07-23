@@ -34,7 +34,7 @@ content lands in BACKLOG.md.
 | 22 | Postgres CAS in CI | **blocked-CI** | Workflow YAML can be pre-staged; unverifiable until 1 |
 | 23 | Fenced-dispatch regression test | **done** | Bound proven in handshake + backend modes |
 | 24 | FileStore lock-steal hardening | **done** | Owner-token release; steal contract preserved |
-| 25 | Thin policy test spots | todo | |
+| 25 | Thin policy test spots | **done** | 8 new test files: cosign, pending, groups, shadow, cost/quota, windows, merkle, checkpoint |
 | 26 | Steer close/resume race fix | todo | Local fix + re-enable; cross-OS confirm rides 1 |
 | 27 | Manifest gating decision | **done** | Decided (b): distribution-only; boundary documented in MARKETPLACE.md |
 | 28 | SpiffeLabel schema/doc pairing | todo | |
