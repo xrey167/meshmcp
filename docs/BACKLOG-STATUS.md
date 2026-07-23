@@ -21,7 +21,7 @@ content lands in BACKLOG.md.
 | 9 | HTTP per-session policy parity | **done** | Taint + secrets + capabilities on Streamable HTTP; per-session state, SSE redaction; refused features still refused |
 | 10 | AKS pillars 1–3 | **done** | Record-level subgraph scoping + provenance, supersede/alias, RAG entity-linking, governed graph loop; Phase 4 deferred |
 | 11 | F25 multi-tenant control plane | todo | |
-| 12 | F31 SSO/OIDC mapping | todo | |
+| 12 | F31 SSO/OIDC mapping | **done** | Verified OIDC claim -> transport-key-bound additive attribution; SSO groups drive policy group: rules; transport stays root; 0 review findings |
 | 13 | F30 drag-to-handoff | todo | Blocked on 5 until 5 ships |
 | 14 | Native mobile shell + APNs/FCM | **blocked** | Needs mobile toolchain + physical device |
 | 15 | S33 govulncheck in CI | **blocked-CI** | Workflow YAML can be pre-staged; unverifiable until 1 |

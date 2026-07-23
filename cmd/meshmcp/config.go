@@ -2,12 +2,18 @@ package main
 
 import (
 	"bytes"
+	"crypto"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/hex"
+	"encoding/pem"
 	"fmt"
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -89,7 +95,16 @@ type Config struct {
 	Operators []OperatorConfig `yaml:"operators"`
 	Control   *ControlConfig   `yaml:"control"` // optional: Air session-control endpoint
 	Hooks     *HooksConfig     `yaml:"hooks"`   // publish policy decisions to the event bus and/or a webhook
-	Backends  []*Backend       `yaml:"backends"`
+	// OIDC enables SSO-mapped group attribution (F31): a verified external IdP
+	// token presented over an already-authenticated mesh connection attributes
+	// its `groups` claim to the caller's WireGuard TRANSPORT key, so existing
+	// `group:<name>` policy rules match SSO-derived groups too. It is ADDITIVE —
+	// the transport identity stays the root of trust; a forged/expired/
+	// wrong-audience token maps to nothing (deny). nil (the default) = no SSO,
+	// byte-identical to today. Requires control.port (the /v1/sso/attest binding
+	// surface mounts on the mesh control listener).
+	OIDC     *OIDCConfig `yaml:"oidc"`
+	Backends []*Backend  `yaml:"backends"`
 }
 
 // Group bounds (F17 policy groups + `group:` fan-out). maxGroupMembers caps
@@ -181,6 +196,186 @@ type ControlConfig struct {
 	// allow or any tool ACL (that is grant-on-request, a separate explicit
 	// step). Empty ⇒ pairing off. Approve/deny/revoke are gated on Allow above.
 	PairStore string `yaml:"pair_store"`
+}
+
+// OIDCConfig configures SSO-mapped group attribution (F31). Keys are pinned
+// STATICALLY per issuer (a JWKS document on disk, or a PEM public key) — there is
+// no outbound network call on the verify path, mirroring
+// federation/exchange.go's PinnedIssuers. A forged/expired/wrong-audience token
+// attributes nothing; enforcement always keys on the WireGuard transport key.
+type OIDCConfig struct {
+	// Audience is meshmcp's identity that a presented token's `aud` MUST contain
+	// (audience-confusion defense). Required when oidc is set.
+	Audience string `yaml:"audience"`
+	// GroupsClaim / EmailClaim name the token claim paths (defaults "groups" /
+	// "email").
+	GroupsClaim string `yaml:"groups_claim"`
+	EmailClaim  string `yaml:"email_claim"`
+	// BindTTLMaxSeconds caps a binding's lifetime: a bind lives for
+	// min(token.exp, now + this). 0 means the default 3600s. Bounds the blast
+	// radius of any single attribution.
+	BindTTLMaxSeconds int `yaml:"bind_ttl_max"`
+	// Issuers pins each trusted external issuer's algorithm and public key(s).
+	Issuers []OIDCIssuerConfig `yaml:"issuers"`
+
+	// resolved holds the parsed verifier issuers (populated at load); bindTTL is
+	// the resolved cap. Unexported so serve.go reuses them without re-reading key
+	// files.
+	resolved map[string]*policy.OIDCIssuer
+	bindTTL  time.Duration
+}
+
+// OIDCIssuerConfig pins one external issuer. Exactly one of JWKSFile or KeyFile
+// must be set. Alg is PINNED here per issuer and is never read from a token's own
+// header to choose a verification path.
+type OIDCIssuerConfig struct {
+	// Issuer is the exact `iss` string this key set verifies (no glob, no "*").
+	Issuer string `yaml:"issuer"`
+	// Alg is the pinned signing algorithm: "ES256" or "RS256".
+	Alg string `yaml:"alg"`
+	// JWKSFile is a path to a pinned RFC 7517 JWK Set document (the IdP's
+	// published keys, saved locally). Supports multiple keys + `kid` rotation.
+	JWKSFile string `yaml:"jwks_file"`
+	// KeyFile is a path to a single PEM-encoded public key (an alternative to
+	// jwks_file for a one-key issuer).
+	KeyFile string `yaml:"key_file"`
+	// JWKSURI is REJECTED in v1: an automatic cached fetch of the IdP's JWKS URI
+	// is the documented v2 extension. v1 pins the JWKS document itself (jwks_file)
+	// so verification stays offline and deterministic — the honesty boundary is
+	// explicit. Setting it is a config error.
+	JWKSURI string `yaml:"jwks_uri"`
+}
+
+const (
+	maxOIDCIssuers     = 64
+	defaultOIDCBindTTL = 3600  // seconds
+	maxOIDCBindTTLSecs = 86400 // 24h ceiling on a single attribution
+	maxOIDCIssuerLenB  = 512
+)
+
+// validateOIDC validates the OIDC config and resolves every pinned key at load
+// (fail closed on an unreadable/unparseable key — a security-config error, never
+// a silent skip; mirrors the LoadSigner startup convention). It populates
+// cfg.OIDC.resolved / .bindTTL for serve.go to construct the verifier from.
+func validateOIDC(oc *OIDCConfig) error {
+	if oc == nil {
+		return nil
+	}
+	if strings.TrimSpace(oc.Audience) == "" {
+		return fmt.Errorf("oidc: audience is required (a token's aud must contain meshmcp's identity)")
+	}
+	if len(oc.Issuers) == 0 {
+		return fmt.Errorf("oidc: at least one issuer must be pinned (an empty pin set verifies nothing)")
+	}
+	if len(oc.Issuers) > maxOIDCIssuers {
+		return fmt.Errorf("oidc: %d issuers pinned; max is %d", len(oc.Issuers), maxOIDCIssuers)
+	}
+	if oc.BindTTLMaxSeconds < 0 {
+		return fmt.Errorf("oidc: bind_ttl_max must be >= 0")
+	}
+	if oc.BindTTLMaxSeconds > maxOIDCBindTTLSecs {
+		return fmt.Errorf("oidc: bind_ttl_max %d exceeds the %d-second ceiling", oc.BindTTLMaxSeconds, maxOIDCBindTTLSecs)
+	}
+	ttl := oc.BindTTLMaxSeconds
+	if ttl == 0 {
+		ttl = defaultOIDCBindTTL
+	}
+	oc.bindTTL = time.Duration(ttl) * time.Second
+
+	resolved := make(map[string]*policy.OIDCIssuer, len(oc.Issuers))
+	for i, ic := range oc.Issuers {
+		iss := strings.TrimSpace(ic.Issuer)
+		if iss == "" {
+			return fmt.Errorf("oidc: issuer #%d: issuer string is required", i+1)
+		}
+		if len(iss) > maxOIDCIssuerLenB || hasCtrl(iss) {
+			return fmt.Errorf("oidc: issuer #%d: issuer must be at most %d bytes with no control characters", i+1, maxOIDCIssuerLenB)
+		}
+		if _, dup := resolved[iss]; dup {
+			return fmt.Errorf("oidc: issuer %q is pinned more than once", iss)
+		}
+		if ic.Alg != policy.OIDCAlgES256 && ic.Alg != policy.OIDCAlgRS256 {
+			return fmt.Errorf("oidc: issuer %q: alg %q is not one of %s|%s", iss, ic.Alg, policy.OIDCAlgES256, policy.OIDCAlgRS256)
+		}
+		if ic.JWKSURI != "" {
+			return fmt.Errorf("oidc: issuer %q: jwks_uri is a v2 feature and not supported — pin the JWKS document with jwks_file so verification stays offline", iss)
+		}
+		hasJWKS, hasKey := ic.JWKSFile != "", ic.KeyFile != ""
+		if hasJWKS == hasKey {
+			return fmt.Errorf("oidc: issuer %q: set exactly one of jwks_file or key_file", iss)
+		}
+		keys, err := resolveOIDCKeys(ic)
+		if err != nil {
+			return fmt.Errorf("oidc: issuer %q: %w", iss, err)
+		}
+		resolved[iss] = &policy.OIDCIssuer{Alg: ic.Alg, Keys: keys}
+	}
+	oc.resolved = resolved
+	return nil
+}
+
+// resolveOIDCKeys reads and parses an issuer's pinned key material, validating
+// that every key's type matches the pinned algorithm.
+func resolveOIDCKeys(ic OIDCIssuerConfig) (map[string]crypto.PublicKey, error) {
+	var keys map[string]crypto.PublicKey
+	if ic.JWKSFile != "" {
+		data, err := os.ReadFile(ic.JWKSFile)
+		if err != nil {
+			return nil, fmt.Errorf("read jwks_file %s: %w", ic.JWKSFile, err)
+		}
+		keys, err = policy.ParseJWKS(data)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		pub, err := loadPEMPublicKey(ic.KeyFile)
+		if err != nil {
+			return nil, err
+		}
+		keys = map[string]crypto.PublicKey{"": pub}
+	}
+	for kid, k := range keys {
+		if err := keyMatchesAlg(k, ic.Alg); err != nil {
+			return nil, fmt.Errorf("key (kid %q): %w", kid, err)
+		}
+	}
+	return keys, nil
+}
+
+// loadPEMPublicKey reads a single PEM-encoded (PKIX) public key from path.
+func loadPEMPublicKey(path string) (crypto.PublicKey, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read key_file %s: %w", path, err)
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return nil, fmt.Errorf("key_file %s: no PEM block found", path)
+	}
+	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("key_file %s: parse PKIX public key: %w", path, err)
+	}
+	return pub, nil
+}
+
+// keyMatchesAlg fails closed when a pinned key's type cannot produce the pinned
+// algorithm's signatures (RS256 needs RSA, ES256 needs ECDSA), so an operator can
+// never pin a key that will silently never verify.
+func keyMatchesAlg(k crypto.PublicKey, alg string) error {
+	switch alg {
+	case policy.OIDCAlgRS256:
+		if _, ok := k.(*rsa.PublicKey); !ok {
+			return fmt.Errorf("alg RS256 requires an RSA public key, got %T", k)
+		}
+	case policy.OIDCAlgES256:
+		if _, ok := k.(*ecdsa.PublicKey); !ok {
+			return fmt.Errorf("alg ES256 requires an ECDSA public key, got %T", k)
+		}
+	default:
+		return fmt.Errorf("unsupported alg %q", alg)
+	}
+	return nil
 }
 
 // TraceConfig turns on a gateway-wide trace of every MCP message (both
@@ -509,6 +704,11 @@ func loadConfig(path string) (*Config, error) {
 	if err := validateGroups(cfg.Groups); err != nil {
 		return nil, fmt.Errorf("config %s: %w", path, err)
 	}
+	// OIDC (F31): validate + resolve pinned issuer keys at load. Absent ⇒ no SSO,
+	// byte-identical to today.
+	if err := validateOIDC(cfg.OIDC); err != nil {
+		return nil, fmt.Errorf("config %s: %w", path, err)
+	}
 	seen := map[int]string{}
 	seenNames := map[string]bool{}
 	seenIDs := map[string]string{}
@@ -760,6 +960,14 @@ func loadConfig(path string) (*Config, error) {
 	}
 	if err := validateOperators(cfg.Operators); err != nil {
 		return nil, err
+	}
+	// The SSO attestation surface (/v1/sso/attest) binds a verified token to the
+	// caller's WireGuard TRANSPORT key, which only exists on a mesh connection —
+	// so it mounts on the mesh control listener. Require that listener to be
+	// enabled when OIDC is configured (fail closed at load, not with a silently
+	// missing endpoint at runtime).
+	if cfg.OIDC != nil && (cfg.Control == nil || cfg.Control.Port <= 0) {
+		return nil, fmt.Errorf("config %s: oidc requires control.port (the /v1/sso/attest binding surface mounts on the mesh control listener)", path)
 	}
 	return &cfg, nil
 }

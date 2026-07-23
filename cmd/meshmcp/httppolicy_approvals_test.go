@@ -38,7 +38,7 @@ func TestHTTPEnforcerRequestBoundApprovals(t *testing.T) {
 		CosignStore:        cosignDir,
 		ApprovalSigningKey: keyPath,
 	}
-	enf, err := newHTTPEnforcer(b, policy.NewAuditLog(io.Discard, func() string { return "T" }))
+	enf, err := newHTTPEnforcer(b, policy.NewAuditLog(io.Discard, func() string { return "T" }), nil)
 	if err != nil {
 		t.Fatalf("newHTTPEnforcer: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestNewHTTPEnforcerFailsClosedOnBadKey(t *testing.T) {
 		CosignStore:        t.TempDir(),
 		ApprovalSigningKey: filepath.Join(t.TempDir(), "does-not-exist.key"),
 	}
-	if _, err := newHTTPEnforcer(b, policy.NewAuditLog(io.Discard, func() string { return "T" })); err == nil {
+	if _, err := newHTTPEnforcer(b, policy.NewAuditLog(io.Discard, func() string { return "T" }), nil); err == nil {
 		t.Fatal("expected a hard error for an unloadable approval signing key")
 	}
 }

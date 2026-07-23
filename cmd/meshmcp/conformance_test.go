@@ -82,7 +82,7 @@ func stdioReaches(t *testing.T, pol *policy.Policy, peer, key, line string) bool
 func httpReaches(t *testing.T, pol *policy.Policy, peer, key, body string) bool {
 	t.Helper()
 	b := &Backend{Name: "b", Policy: pol}
-	enf, err := newHTTPEnforcer(b, policy.NewAuditLog(io.Discard, func() string { return "T" }))
+	enf, err := newHTTPEnforcer(b, policy.NewAuditLog(io.Discard, func() string { return "T" }), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
