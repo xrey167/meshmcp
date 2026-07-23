@@ -140,7 +140,7 @@ func (s *Server) Handle(conn net.Conn, meta Meta) {
 		s.logf("session: read ATTACH: %v", err)
 		return
 	}
-	if att.typ != frameAttack {
+	if att.typ != frameAttach {
 		writeErr(conn, "expected ATTACH")
 		return
 	}
