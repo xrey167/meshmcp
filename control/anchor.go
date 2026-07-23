@@ -151,7 +151,11 @@ func (s *Server) handleAnchor(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
-	if _, ok := s.authorize(w, r, RoleAnchorSubmit, "anchor.submit", ""); !ok {
+	// The anchor witness file is this host's own append-only external-anchoring
+	// log, not per-tenant control storage, so it stays shared in v1; the tenantID
+	// is discarded. Authorization still funnels through authorize, so a caller
+	// must belong to some tenant and hold anchor.submit within it.
+	if _, _, ok := s.authorize(w, r, RoleAnchorSubmit, "anchor.submit", ""); !ok {
 		return
 	}
 	var cp policy.Checkpoint

@@ -64,6 +64,11 @@ type ControlAudit struct {
 	Result string `json:"result"` // "allow" | "deny"
 	Reason string `json:"reason,omitempty"`
 	Corr   string `json:"correlation_id"`
+	// Tenant is the control-storage partition the action operated in, derived
+	// solely from the actor's transport-proven key (never from the request). It
+	// is omitempty so a single-tenant deployment emits byte-identical records to
+	// before this field existed. A no-tenant denial carries "".
+	Tenant string `json:"tenant,omitempty"`
 }
 
 // AuditSink records privileged control-plane actions. Implementations must not
@@ -92,6 +97,19 @@ type Server struct {
 	// records them in this host's own append-only anchor file (external audit
 	// anchoring). Nil ⇒ the route reports 501.
 	Witness *AnchorWitness
+
+	// Tenants, when non-nil, makes the control plane MULTI-TENANT: it resolves a
+	// transport-proven key to a tenant and authorizes WITHIN that tenant. Nil ⇒
+	// single-tenant, where Auth is the authorizer and every caller shares the one
+	// Reg/Policies/Enroll store set — behaviourally identical to before tenancy
+	// existed. The tenant is a pure function of the key; no route ever reads it
+	// from a header, body, param, or URL.
+	Tenants TenantResolver
+	// Stores, when non-nil, supplies the per-tenant policy/registry/enroll
+	// instances selected by the resolved tenantID (and is also the per-tenant
+	// audit router, installed as Audit). Nil ⇒ the fixed Reg/Policies/Enroll are
+	// used. Set together with Tenants.
+	Stores *TenantStores
 }
 
 // Handler returns the control-plane HTTP handler.
@@ -114,34 +132,107 @@ func (s *Server) audit(rec ControlAudit) {
 }
 
 // authorize enforces default-deny RBAC for a privileged action. It derives the
-// caller identity from the transport (never headers/body), checks the required
-// role, audits the allow or deny with a correlation id, and writes a 403 on
-// denial. It returns the identity and true only when the caller is authorized.
-func (s *Server) authorize(w http.ResponseWriter, r *http.Request, role Role, action, target string) (Identity, bool) {
+// caller identity from the transport (never headers/body), resolves the caller's
+// TENANT from that same transport-proven key, checks the required role within the
+// tenant, audits the allow or deny with a correlation id, and writes a 403 on
+// denial. It returns the identity, the resolved tenantID, and true only when the
+// caller is authorized. The tenantID is the ONLY handle a handler has on a
+// tenant; every store is addressed through it, so a handler cannot operate on a
+// tenant other than the one the caller's key resolves to.
+func (s *Server) authorize(w http.ResponseWriter, r *http.Request, role Role, action, target string) (Identity, string, bool) {
 	corr := newCorrelationID()
 	w.Header().Set("X-Control-Correlation-Id", corr)
 
-	// Fail closed on a misconfigured control plane: without both an identity
-	// resolver and an authorizer we cannot make an authorization decision, so we
-	// must deny rather than admit every reachable peer.
-	if s.Identify == nil || s.Auth == nil {
+	// Fail closed on a misconfigured control plane: without an identity resolver
+	// and SOME authorizer (flat Auth or a tenant resolver) we cannot make an
+	// authorization decision, so we must deny rather than admit every reachable
+	// peer.
+	if s.Identify == nil || (s.Auth == nil && s.Tenants == nil) {
 		s.audit(ControlAudit{Action: action, Target: target, Result: "deny", Reason: "control authorization not configured", Corr: corr})
 		http.Error(w, "forbidden: control authorization not configured (fail-closed)", http.StatusForbidden)
-		return Identity{}, false
+		return Identity{}, "", false
 	}
 	id, ok := s.Identify(r.RemoteAddr)
 	if !ok || id.PubKey == "" {
 		s.audit(ControlAudit{Action: action, Target: target, Result: "deny", Reason: "caller could not be attributed to a mesh peer", Corr: corr})
 		http.Error(w, "forbidden: unattributable caller", http.StatusForbidden)
-		return Identity{}, false
+		return Identity{}, "", false
 	}
-	if !s.Auth.HasRole(id.PubKey, role) {
-		s.audit(ControlAudit{Actor: id.PubKey, FQDN: id.FQDN, Action: action, Target: target, Result: "deny", Reason: "missing role " + string(role), Corr: corr})
+	// Resolve the tenant from the transport-proven key BEFORE the role check.
+	// Deny-by-default: a key that belongs to no tenant is refused with an empty
+	// tenant (the record cannot enter any tenant's chain), same shape as the
+	// unattributable-caller path.
+	tid, ok := s.resolveTenant(id.PubKey)
+	if !ok {
+		s.audit(ControlAudit{Actor: id.PubKey, FQDN: id.FQDN, Action: action, Target: target, Result: "deny", Reason: "caller belongs to no tenant", Corr: corr})
+		http.Error(w, "forbidden: caller belongs to no tenant", http.StatusForbidden)
+		return Identity{}, "", false
+	}
+	if !s.hasRole(tid, id.PubKey, role) {
+		s.audit(ControlAudit{Actor: id.PubKey, FQDN: id.FQDN, Action: action, Target: target, Result: "deny", Reason: "missing role " + string(role), Corr: corr, Tenant: tid})
 		http.Error(w, "forbidden: caller lacks role "+string(role), http.StatusForbidden)
-		return Identity{}, false
+		return Identity{}, "", false
 	}
-	s.audit(ControlAudit{Actor: id.PubKey, FQDN: id.FQDN, Action: action, Target: target, Result: "allow", Corr: corr})
-	return id, true
+	s.audit(ControlAudit{Actor: id.PubKey, FQDN: id.FQDN, Action: action, Target: target, Result: "allow", Corr: corr, Tenant: tid})
+	return id, tid, true
+}
+
+// resolveTenant maps a transport-proven key to its tenant. Single-tenant
+// (Tenants == nil) returns the sentinel "" for every caller — which the store
+// selectors collapse to the un-prefixed root — so behaviour is identical to
+// before tenancy existed.
+func (s *Server) resolveTenant(pubKey string) (string, bool) {
+	if s.Tenants == nil {
+		return "", true
+	}
+	return s.Tenants.TenantFor(pubKey)
+}
+
+// hasRole checks role within the resolved tenant. Single-tenant defers to the
+// flat authorizer (today's StaticAuthorizer).
+func (s *Server) hasRole(tenantID, pubKey string, role Role) bool {
+	if s.Tenants == nil {
+		return s.Auth.HasRole(pubKey, role)
+	}
+	return s.Tenants.Authorized(tenantID, pubKey, role)
+}
+
+// policyStore selects the policy store for a tenant: the per-tenant instance in
+// multi-tenant mode, the fixed store (tenantID is "") in single-tenant mode.
+func (s *Server) policyStore(tenantID string) (PolicyStore, error) {
+	if s.Stores != nil {
+		return s.Stores.PolicyStore(tenantID)
+	}
+	return s.Policies, nil
+}
+
+// regStore selects the registry for a tenant (see policyStore).
+func (s *Server) regStore(tenantID string) (registry.Registry, error) {
+	if s.Stores != nil {
+		return s.Stores.Registry(tenantID)
+	}
+	return s.Reg, nil
+}
+
+// enrollWith selects the enroller for a tenant (see policyStore).
+func (s *Server) enrollWith(tenantID string) (EnrollFunc, error) {
+	if s.Stores != nil {
+		return s.Stores.Enroller(tenantID)
+	}
+	return s.Enroll, nil
+}
+
+// policyConfigured / registryConfigured / enrollConfigured report whether a
+// capability is wired at all (independent of any tenant), driving the 501 "not
+// configured" responses.
+func (s *Server) policyConfigured() bool {
+	return s.Policies != nil || (s.Stores != nil && s.Stores.HasPolicy())
+}
+func (s *Server) registryConfigured() bool {
+	return s.Reg != nil || (s.Stores != nil && s.Stores.HasRegistry())
+}
+func (s *Server) enrollConfigured() bool {
+	return s.Enroll != nil || (s.Stores != nil && s.Stores.HasEnroll())
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -155,7 +246,7 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
-	if s.Enroll == nil {
+	if !s.enrollConfigured() {
 		http.Error(w, "enrollment not configured", http.StatusNotImplemented)
 		return
 	}
@@ -175,11 +266,19 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The node label is caller-supplied and is NOT identity; authorize the
-	// transport-proven caller before issuing anything.
-	if _, ok := s.authorize(w, r, RoleEnrollmentIssue, "enroll.issue", req.Node); !ok {
+	// transport-proven caller before issuing anything. The returned tenantID
+	// (derived from the caller's key) selects the tenant's enroller — its
+	// enroll_groups and its audit chain.
+	_, tid, ok := s.authorize(w, r, RoleEnrollmentIssue, "enroll.issue", req.Node)
+	if !ok {
 		return
 	}
-	resp, err := s.Enroll(req)
+	enroll, err := s.enrollWith(tid)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	resp, err := enroll(req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -190,16 +289,22 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 // handleRegistry serves the service registry: GET lists name->addrs; POST
 // {name,addr} registers; DELETE {name,addr} deregisters.
 func (s *Server) handleRegistry(w http.ResponseWriter, r *http.Request) {
-	if s.Reg == nil {
+	if !s.registryConfigured() {
 		http.Error(w, "registry not configured", http.StatusNotImplemented)
 		return
 	}
 	switch r.Method {
 	case http.MethodGet:
-		if _, ok := s.authorize(w, r, RoleRegistryRead, "registry.list", ""); !ok {
+		_, tid, ok := s.authorize(w, r, RoleRegistryRead, "registry.list", "")
+		if !ok {
 			return
 		}
-		m, err := s.Reg.Lookup()
+		reg, err := s.regStore(tid)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		m, err := reg.Lookup()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -220,14 +325,19 @@ func (s *Server) handleRegistry(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodDelete {
 			action = "registry.deregister"
 		}
-		if _, ok := s.authorize(w, r, RoleRegistryWrite, action, e.Name+" "+e.Addr); !ok {
+		_, tid, ok := s.authorize(w, r, RoleRegistryWrite, action, e.Name+" "+e.Addr)
+		if !ok {
 			return
 		}
-		var err error
+		reg, err := s.regStore(tid)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		if r.Method == http.MethodPost {
-			err = s.Reg.Register(e.Name, e.Addr)
+			err = reg.Register(e.Name, e.Addr)
 		} else {
-			err = s.Reg.Deregister(e.Name, e.Addr)
+			err = reg.Deregister(e.Name, e.Addr)
 		}
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -243,7 +353,7 @@ func (s *Server) handleRegistry(w http.ResponseWriter, r *http.Request) {
 // parses as a policy before storing, so the control plane never distributes a
 // policy a gateway would reject.
 func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
-	if s.Policies == nil {
+	if !s.policyConfigured() {
 		http.Error(w, "policy distribution not configured", http.StatusNotImplemented)
 		return
 	}
@@ -254,10 +364,16 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		if _, ok := s.authorize(w, r, RolePolicyRead, "policy.get", name); !ok {
+		_, tid, ok := s.authorize(w, r, RolePolicyRead, "policy.get", name)
+		if !ok {
 			return
 		}
-		raw, err := s.Policies.Get(name)
+		store, err := s.policyStore(tid)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		raw, err := store.Get(name)
 		if err != nil {
 			http.Error(w, "no such policy", http.StatusNotFound)
 			return
@@ -265,7 +381,8 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/x-yaml")
 		_, _ = w.Write(raw)
 	case http.MethodPut:
-		if _, ok := s.authorize(w, r, RolePolicyWrite, "policy.put", name); !ok {
+		_, tid, ok := s.authorize(w, r, RolePolicyWrite, "policy.put", name)
+		if !ok {
 			return
 		}
 		buf, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxControlBody))
@@ -280,7 +397,12 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid policy: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		if err := s.Policies.Put(name, buf); err != nil {
+		store, err := s.policyStore(tid)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := store.Put(name, buf); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -291,15 +413,21 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePolicyList(w http.ResponseWriter, r *http.Request) {
-	if s.Policies == nil {
+	if !s.policyConfigured() {
 		http.Error(w, "policy distribution not configured", http.StatusNotImplemented)
 		return
 	}
 	// Listing policy names is sensitive administrative state.
-	if _, ok := s.authorize(w, r, RolePolicyRead, "policy.list", ""); !ok {
+	_, tid, ok := s.authorize(w, r, RolePolicyRead, "policy.list", "")
+	if !ok {
 		return
 	}
-	names, err := s.Policies.List()
+	store, err := s.policyStore(tid)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	names, err := store.List()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
