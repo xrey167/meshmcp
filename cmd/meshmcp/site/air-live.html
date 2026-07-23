@@ -7,62 +7,69 @@
 <meta name="theme-color" content="#f7f9fd" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#080b12" media="(prefers-color-scheme: dark)">
 <title>Air · meshmcp</title>
+<link rel="stylesheet" href="/assets/agent-os.css">
 <style>
+  /* One design language: the CORE tokens (surfaces, text, accent, status
+     colors, shadow, fonts) come from the shared Agent OS foundation
+     (agent-os.css, served at /assets/ by airserve.go) — the same source
+     Approvals, Dashboard, and Control Room already consume — so all four
+     surfaces are recognizable as one product. The var() fallbacks keep the
+     page usable when previewed standalone; everything below the core block is
+     DERIVED from the core via color-mix (so it flips with the scheme
+     automatically) or is Air-layout-specific and deliberately local. */
   :root{
-    --bg:#f7f9fd;
-    --bg-soft:#f0f5fc;
-    --panel:rgba(255,255,255,.88);
-    --panel-solid:#fff;
-    --panel-soft:#f8faff;
-    --sidebar:rgba(244,248,254,.9);
-    --line:#dce4ef;
-    --line-strong:#c8d4e3;
-    --ink:#101828;
-    --muted:#5e6b82;
-    --faint:#8b98ab;
-    --blue:#0866ff;
-    --blue-strong:#0758dc;
-    --blue-soft:#eaf2ff;
-    --green:#0c9f63;
-    --green-soft:#e5f8ef;
-    --orange:#ec7100;
-    --orange-soft:#fff4e8;
-    --red:#db3a34;
-    --red-soft:#ffefee;
+    --bg:var(--mesh-bg,#f7f9fd);
+    --panel-solid:var(--mesh-surface,#fff);
+    --panel:var(--mesh-surface-raised,rgba(255,255,255,.88));
+    --line:var(--mesh-line,#dce4ef);
+    --ink:var(--mesh-text,#101828);
+    --muted:var(--mesh-muted,#5e6b82);
+    --faint:var(--mesh-faint,#8b98ab);
+    --blue:var(--mesh-accent,#0866ff);
+    --green:var(--mesh-ok,#0c9f63);
+    --orange:var(--mesh-warn,#ec7100);
+    --red:var(--mesh-danger,#db3a34);
+    --shadow:var(--mesh-shadow,0 12px 32px rgba(30,64,110,.075),0 1px 2px rgba(16,24,40,.04));
+    --sans:var(--mesh-sans,-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,Helvetica,Arial,system-ui,sans-serif);
+    --mono:var(--mesh-mono,ui-monospace,"SF Mono",Menlo,Consolas,monospace);
+
+    /* Derived shades — computed from the core so light/dark follow the theme. */
+    --bg-soft:color-mix(in srgb,var(--blue) 4%,var(--bg));
+    --panel-soft:color-mix(in srgb,var(--blue) 3%,var(--panel-solid));
+    --sidebar:color-mix(in srgb,var(--panel-solid) 90%,transparent);
+    --line-strong:color-mix(in srgb,var(--ink) 16%,var(--bg));
+    --blue-strong:color-mix(in srgb,var(--ink) 12%,var(--blue));
+    --blue-soft:color-mix(in srgb,var(--blue) 11%,var(--panel-solid));
+    --green-soft:color-mix(in srgb,var(--green) 11%,var(--panel-solid));
+    --orange-soft:color-mix(in srgb,var(--orange) 11%,var(--panel-solid));
+    --red-soft:color-mix(in srgb,var(--red) 9%,var(--panel-solid));
+
+    /* Air-specific: no shared equivalent (yet). */
     --purple:#7457e8;
-    --shadow:0 12px 32px rgba(30,64,110,.075),0 1px 2px rgba(16,24,40,.04);
     --shadow-soft:0 4px 18px rgba(30,64,110,.055);
     --radius:18px;
     --radius-sm:13px;
     --tap:44px;
     --sidebar-w:254px;
-    --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,Helvetica,Arial,system-ui,sans-serif;
-    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
   }
   @media(prefers-color-scheme:dark){
     :root{
-      --bg:#080b12;
-      --bg-soft:#0c1220;
-      --panel:rgba(20,27,40,.9);
-      --panel-solid:#141b28;
-      --panel-soft:#111827;
-      --sidebar:rgba(12,18,29,.92);
-      --line:#263246;
-      --line-strong:#35445c;
-      --ink:#f4f7fb;
-      --muted:#a5b1c4;
-      --faint:#78869d;
-      --blue:#5794ff;
-      --blue-strong:#7aaaff;
-      --blue-soft:#122b52;
-      --green:#3dd894;
-      --green-soft:#113a2b;
-      --orange:#ff9b3d;
-      --orange-soft:#402816;
-      --red:#ff716c;
-      --red-soft:#431d20;
+      /* Standalone-preview fallbacks only: with agent-os.css linked, the
+         mesh-* tokens above already flip and the derived shades follow. */
+      --bg:var(--mesh-bg,#080b12);
+      --panel-solid:var(--mesh-surface,#141b28);
+      --panel:var(--mesh-surface-raised,rgba(20,27,40,.9));
+      --line:var(--mesh-line,#263246);
+      --ink:var(--mesh-text,#f4f7fb);
+      --muted:var(--mesh-muted,#a5b1c4);
+      --faint:var(--mesh-faint,#78869d);
+      --blue:var(--mesh-accent,#5794ff);
+      --green:var(--mesh-ok,#3dd894);
+      --orange:var(--mesh-warn,#ff9b3d);
+      --red:var(--mesh-danger,#ff716c);
+      --shadow:var(--mesh-shadow,0 14px 40px rgba(0,0,0,.24),0 1px 2px rgba(0,0,0,.4));
+      --blue-strong:color-mix(in srgb,white 18%,var(--blue));
       --purple:#a994ff;
-      --shadow:0 14px 40px rgba(0,0,0,.24),0 1px 2px rgba(0,0,0,.4);
       --shadow-soft:0 4px 18px rgba(0,0,0,.2);
     }
   }

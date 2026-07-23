@@ -84,27 +84,41 @@ func cmdAirJoin(args []string) error {
 			return nil // interrupted
 		case <-ticker.C:
 		}
-		st, _, err := getPairStatus(ctx, hc)
+		st, err := getPairStatus(ctx, hc)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
 			return fmt.Errorf("air join: %w", err)
 		}
-		switch air.PairStatus(st) {
+		switch air.PairStatus(st.Status) {
 		case air.StatusApproved:
 			return reportJoinApproved(you, *asJSON)
 		case air.StatusPending:
 			sawPending = true
+		case air.StatusDenied:
+			// The operator declined — say WHY (when they gave a reason) and what
+			// to do next, instead of a bare rejection.
+			if *asJSON {
+				return printJSONValue(map[string]string{"status": "declined", "you": you, "reason": st.Reason})
+			}
+			if st.Reason != "" {
+				fmt.Fprintln(os.Stderr, amber("✗ your request was declined: ")+st.Reason)
+			} else {
+				fmt.Fprintln(os.Stderr, amber("✗ your request was declined."))
+			}
+			fmt.Fprintln(os.Stderr, dim("  If you think this is a mistake, contact the gateway's operator, then run `air join` again — a fresh request re-queues for approval."))
+			return errors.New("air join: request declined")
 		case air.StatusNone:
-			// A request we watched go pending has vanished — the operator
-			// declined it (or it aged out). Report it plainly rather than
-			// silently spinning.
+			// A request we watched go pending has vanished without a recorded
+			// decline (an older gateway, or it aged out). Report it plainly
+			// rather than silently spinning.
 			if sawPending {
 				if *asJSON {
 					return printJSONValue(map[string]string{"status": "declined", "you": you})
 				}
 				fmt.Fprintln(os.Stderr, amber("✗ your request was declined."))
+				fmt.Fprintln(os.Stderr, dim("  Contact the gateway's operator, then run `air join` again to re-queue."))
 				return errors.New("air join: request declined")
 			}
 		}
@@ -123,9 +137,11 @@ func reportJoinApproved(you string, asJSON bool) error {
 }
 
 // pairStatusResponse is the shared shape of /v1/pair/request and /status.
+// Reason is present only when the caller's own last request was declined.
 type pairStatusResponse struct {
 	Status string `json:"status"`
 	You    string `json:"you"`
+	Reason string `json:"reason,omitempty"`
 }
 
 func postPairRequest(ctx context.Context, hc *http.Client, label string) (status, you string, err error) {
@@ -139,32 +155,33 @@ func postPairRequest(ctx context.Context, hc *http.Client, label string) (status
 		return "", "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	return doPairStatus(hc, req)
+	out, err := doPairStatus(hc, req)
+	return out.Status, out.You, err
 }
 
-func getPairStatus(ctx context.Context, hc *http.Client) (status, you string, err error) {
+func getPairStatus(ctx context.Context, hc *http.Client) (pairStatusResponse, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://air-control/v1/pair/status", nil)
 	if err != nil {
-		return "", "", err
+		return pairStatusResponse{}, err
 	}
 	return doPairStatus(hc, req)
 }
 
-func doPairStatus(hc *http.Client, req *http.Request) (status, you string, err error) {
+func doPairStatus(hc *http.Client, req *http.Request) (pairStatusResponse, error) {
 	resp, err := hc.Do(req)
 	if err != nil {
-		return "", "", err
+		return pairStatusResponse{}, err
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("%s: %s", resp.Status, bytes.TrimSpace(b))
+		return pairStatusResponse{}, fmt.Errorf("%s: %s", resp.Status, bytes.TrimSpace(b))
 	}
 	var out pairStatusResponse
 	if err := json.Unmarshal(b, &out); err != nil {
-		return "", "", fmt.Errorf("bad response: %w", err)
+		return pairStatusResponse{}, fmt.Errorf("bad response: %w", err)
 	}
-	return out.Status, out.You, nil
+	return out, nil
 }
 
 // cmdAirPair is the operator side: list who is waiting/recognized, and
@@ -195,7 +212,7 @@ func airPairUsage() error {
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "  "+bold("air pair list")+"    <control-ip:port>              "+dim("who is waiting, and who is recognized"))
 	fmt.Fprintln(os.Stderr, "  "+bold("air pair approve")+" <control-ip:port> <peer-key>   "+dim("recognize a pending peer (identity only — not tool access)"))
-	fmt.Fprintln(os.Stderr, "  "+bold("air pair deny")+"    <control-ip:port> <peer-key>   "+dim("drop a pending request"))
+	fmt.Fprintln(os.Stderr, "  "+bold("air pair deny")+"    <control-ip:port> <peer-key> [--reason s]  "+dim("drop a pending request; the reason is shown to the requester"))
 	fmt.Fprintln(os.Stderr, "  "+bold("air pair revoke")+"  <control-ip:port> <peer-key>   "+dim("un-recognize a paired peer"))
 	return nil
 }
@@ -277,6 +294,10 @@ func cmdAirPairAction(op string, args []string) error {
 	fs := flag.NewFlagSet("air pair "+op, flag.ExitOnError)
 	o := meshFlags(fs)
 	asJSON := fs.Bool("json", false, "emit the raw JSON result")
+	var reason *string
+	if op == "deny" {
+		reason = fs.String("reason", "", "short reason shown to the requester on its next status check (e.g. \"unknown device — ask in #ops\")")
+	}
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -291,7 +312,11 @@ func cmdAirPairAction(op string, args []string) error {
 	}
 	defer cleanup()
 
-	reqBody, _ := json.Marshal(map[string]string{"pubkey": peerKey})
+	bodyFields := map[string]string{"pubkey": peerKey}
+	if reason != nil && *reason != "" {
+		bodyFields["reason"] = *reason
+	}
+	reqBody, _ := json.Marshal(bodyFields)
 	resp, err := hc.Post("http://air-control/v1/pair/"+op, "application/json", bytes.NewReader(reqBody))
 	if err != nil {
 		return fmt.Errorf("air pair %s: %w", op, err)

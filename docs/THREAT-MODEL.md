@@ -136,10 +136,29 @@ An adversary who can write the audit file (but lacks the signing key).
   let the OPERATOR classify specific tools as idempotent/read-only: a matching
   call is re-dispatched to another replica after an ambiguous transport
   failure, and every dispatch carries the same
-  `_meta["meshmcp.io/idempotency-key"]` so a cooperating backend can
-  deduplicate. The key is conveyed, not enforced — a backend that ignores it
-  executes a retried call twice, so classify only tools where that is safe.
-  Unlisted tools keep the deny-default.
+  `_meta["meshmcp.io/idempotency-key"]` so the backend can deduplicate.
+- **Backend-side enforcement (framework-built backends):** servers built on
+  the `mcp` framework can enforce the key with `mcp.Idempotency(store, ttl)`:
+  the first claimant of a key executes and records the terminal outcome,
+  concurrent duplicates single-flight onto it, and replays within the TTL get
+  the recorded outcome (results above `mcp.MaxCachedResultBytes` are returned
+  once but not cached — their replays get an error, never a silent second
+  execution). Claims are scoped per (tool, key): the key namespace is
+  client-controllable, so the same key presented on two different tools never
+  shares a claim — an unscoped claim would let one tool's cached result
+  silently answer, and suppress, a different tool's call. A claim-store error
+  refuses the call (fail closed: a broken store must never allow a
+  possibly-duplicate execution). Claims live in memory (`MemClaimStore`,
+  single process, bounded at 4096 live claims — at the cap NEW keys are
+  refused fail-closed, so untrusted clients flooding distinct keys can wedge
+  keyed calls until claims expire; use the PostgreSQL store or upstream rate
+  limiting where that matters) or PostgreSQL (`pgstore`, shared across
+  replicas — required for the cross-replica retry to be safe). This is
+  at-most-once per (tool, key) within the TTL, not global exactly-once.
+- **Foreign backends:** for external servers proxied by the gateway the key
+  remains conveyed, not enforced — a backend that ignores it executes a
+  retried call twice, so classify only tools where that is safe. Unlisted
+  tools keep the deny-default.
 
 ### 9. Concurrent gateways restoring the same session (split-brain)
 
@@ -249,7 +268,7 @@ defense against that requires **external anchoring** (the `Anchor` /
 | In-order frame delivery | Yes, within a session |
 | Duplicate suppression on reconnect | Yes |
 | Gateway restart continuity of audit chain | Verified on read; restart-safe append is in progress |
-| Exactly-once tool execution | **No** — requires an end-to-end idempotency protocol |
+| Exactly-once tool execution | **No** — framework-built backends using `mcp.Idempotency` give at-most-once per (tool, idempotency key) within the claim TTL (with result replay); foreign backends get the key conveyed only |
 | Automatic retry of unknown-outcome mutating call | **No** — only safe/idempotent-keyed calls may retry |
 | Cross-gateway session HA | **No** with file storage; needs a CAS-capable shared store |
 

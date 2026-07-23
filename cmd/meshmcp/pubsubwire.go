@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"sync"
 	"time"
@@ -30,6 +31,14 @@ import (
 // being silently rejected. The broker's MaxPayloadBytes remains the
 // authoritative payload limit.
 const frameEnvelope = 1 << 16 // 64 KiB
+
+// maxInboundLine caps the partial inbound line a client buffers before a
+// newline arrives. A cooperating broker's event lines are bounded by its
+// payload cap plus envelope; an endless unterminated byte stream is not
+// protocol traffic, so the client ends the session instead of growing the
+// buffer without bound. Generous headroom over the broker's 1 MiB default
+// payload cap keeps legitimately large configured payloads flowing.
+const maxInboundLine = (8 << 20) + frameEnvelope
 
 type helloFrame struct {
 	Role         string   `json:"role"` // "pub" | "sub"
@@ -304,11 +313,21 @@ func (s *clientStream) Write(p []byte) (int, error) {
 		lines = append(lines, append([]byte(nil), s.inbuf[:i]...))
 		s.inbuf = s.inbuf[i+1:]
 	}
+	overflow := len(s.inbuf) > maxInboundLine
+	if overflow {
+		s.inbuf = nil
+	}
 	s.mu.Unlock()
 	for _, ln := range lines {
 		if len(ln) > 0 {
 			s.onLine(ln)
 		}
+	}
+	if overflow {
+		// The error propagates through the session client (closeWith), ending
+		// the run; finish() also unblocks Read so the session closes cleanly.
+		s.finish()
+		return len(p), fmt.Errorf("inbound line exceeds %d bytes without a newline", maxInboundLine)
 	}
 	return len(p), nil
 }

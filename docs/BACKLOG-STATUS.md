@@ -13,10 +13,10 @@ content lands in BACKLOG.md.
 | 1 | GitHub Actions billing | **blocked** | Account/billing action — operator only |
 | 2 | Dependabot #19 cosign-installer | **done** | Merged 2026-07-23 |
 | 3 | Approvals hosting decision | **done** | Decided: gateway-colocated; rationale in AIR-ECOSYSTEM.md |
-| 4 | Steer hosting decision | todo | Direction: document "agent-runtime concern" rationale |
+| 4 | Steer hosting decision | **done** | Decided (a): agent-runtime concern; rationale in AIR-ECOSYSTEM.md (shipped with task 3) |
 | 5 | Transactional Handoff v2 | todo | After 7+8; the flagship |
 | 6 | Spaces / `group:` fan-out | todo | |
-| 7 | Idempotency-key enforcement | todo | mcp framework middleware + pgstore table |
+| 7 | Idempotency-key enforcement | **done** | mcp.Idempotency middleware + Mem/PG claim stores; review fixed (tool,key) scoping |
 | 8 | Lease renewal + standby sweep | todo | |
 | 9 | HTTP per-session policy parity | todo | |
 | 10 | AKS pillars 1–3 | todo | Phase 4 stays deferred by design |
@@ -32,13 +32,13 @@ content lands in BACKLOG.md.
 | 20 | Placeholder modules | todo | Doctor implementable; sibling modules have no git remote — local + documented |
 | 21 | Router delegation wiring | todo | **Security priority — first meaty task** |
 | 22 | Postgres CAS in CI | **blocked-CI** | Workflow YAML can be pre-staged; unverifiable until 1 |
-| 23 | Fenced-dispatch regression test | todo | |
-| 24 | FileStore lock-steal hardening | todo | |
-| 25 | Thin policy test spots | todo | |
-| 26 | Steer close/resume race fix | **done** | Atomic sendClose; quarantine removed from ci.yml; zero review findings |
+| 23 | Fenced-dispatch regression test | **done** | Bound proven in handshake + backend modes |
+| 24 | FileStore lock-steal hardening | **done** | Owner-token release; steal contract preserved |
+| 25 | Thin policy test spots | **done** | 8 new test files: cosign, pending, groups, shadow, cost/quota, windows, merkle, checkpoint |
+| 26 | Steer close/resume race fix | **done** | Atomic sendClose (structural) + reconnectLoop drain-wait (parallel session, defensive); quarantine removed |
 | 27 | Manifest gating decision | **done** | Decided (b): distribution-only; boundary documented in MARKETPLACE.md |
-| 28 | SpiffeLabel schema/doc pairing | todo | |
-| 29 | `air stream` over the mesh | todo | |
+| 28 | SpiffeLabel schema/doc pairing | **done** | trust_domain config; stdio+HTTP emit; chain byte-identity proven |
+| 29 | `air stream` over the mesh | **done** | Shipped 2026-07-23; review fixed escape-injection + inbound-line cap |
 | 30 | `frameAttack` rename | **done** | Shipped 2026-07-23 |
 
 ## Execution order

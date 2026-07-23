@@ -23,7 +23,7 @@ record's hash, forming a hash chain.
 | `peer` | string | yes | Caller identity (mesh FQDN, org id, or principal). |
 | `peer_key` | string | no | Caller's cryptographic key (e.g. WireGuard public key). |
 | `peer_addr` | string | no | Caller transport address. |
-| `peer_spiffe_id` | string | no | Derived, additive SPIFFE identity label (`spiffe://<trust-domain>/peer/<key>`). A label only — enforcement keys on `peer_key`, never on this field. |
+| `peer_spiffe_id` | string | no | Derived, additive SPIFFE identity label (`spiffe://<trust-domain>/peer/<key>`). A label only — enforcement keys on `peer_key`, never on this field. Present only when the emitter has a configured trust domain; see §1.4 for placement and mixed-fleet semantics. |
 | `method` | string | yes | JSON-RPC method (`tools/call`, `enroll`, …). |
 | `tool` | string | no | Tool name for `tools/call`. |
 | `rpc_id` | string | no | JSON-RPC request id. |
@@ -63,6 +63,35 @@ The first failing `seq` localizes the tampering. A hash chain is
 **tamper-evident**: any edit, reorder, insertion, or deletion is detected
 without the original — but an attacker who controls the whole file can rewrite
 every record and re-link the chain. Signed checkpoints (§2) close that gap.
+
+### 1.4 Additive fields & mixed-fleet compatibility (`peer_spiffe_id`)
+
+`peer_spiffe_id` is an **additive, optional** field, appended after `hash` in
+the canonical field order (§3) — never inserted before it. It is present only
+when the emitter is configured with a SPIFFE trust domain (the gateway's
+`trust_domain` setting for local records; a federation mapping's
+`trust_domain` for boundary crossings) **and** the caller has a stable,
+well-formed peer key; its value is `spiffe://<trust-domain>/peer/<key>`, where
+`<key>` is the peer's public key re-encoded as unpadded URL-safe base64. It is
+a label only: enforcement keys on `peer_key`, never on this field.
+
+Compatibility semantics:
+
+- **Records without the field are byte-identical to a pre-field build**
+  (`omitempty` elides it), so existing logs, hashes, and chains verify
+  unchanged. Leaving the trust domain unconfigured keeps emitting exactly
+  yesterday's bytes.
+- **Mixed-fleet note:** a record that DOES carry `peer_spiffe_id` hashes
+  differently than the same logical record without it — the field is inside
+  the hashed bytes like any other. An **old verifier** (one predating the
+  field) that re-serializes records from a struct without it will therefore
+  compute a different hash for such records and report a mismatch. This is
+  expected, not tampering: upgrade verifiers before (or together with)
+  enabling a trust domain on emitters. Verifiers that preserve unknown fields
+  in canonical order, or same-version binaries, are unaffected.
+
+Future additive fields MUST follow the same pattern: appended after `hash`
+(and after previously appended additive fields), optional, `omitempty`.
 
 ## 2. Signed checkpoints
 

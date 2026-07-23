@@ -108,18 +108,59 @@ first, fixed with the smallest robust change, and documented in
 - `SECURITY.md`, `LICENSE-DECISION.md`, `CONTRIBUTING.md`, this changelog, and a
   release checklist.
 
-### Fixed
+### Added — hosted clients, day-2 operability, product hardening
 
-- **Session graceful-close race**: `endpoint.sendClose` now commits the close
-  atomically with the CLOSE frame write, so a one-shot sender (steer/push)
-  whose peer finalizes the session first can no longer misreport a fully
-  acknowledged delivery as "requested resume session is no longer available".
-  An unknown resume id remains a terminal rejection. `TestTaskSteer` and
-  `TestSteerDeliveryRequiresApplicationAck` are un-quarantined in CI.
+- **`meshmcp edge`** — an off-by-default, tool-scoped public OAuth ingress so
+  hosted MCP clients that cannot join the mesh (e.g. claude.ai custom
+  connectors) can connect: OAuth 2.1 + PKCE, dynamic client registration
+  (RFC 7591/7592), consent, capability-bound tokens, Streamable HTTP with
+  sessions/SSE, a revocation cascade, and an end-to-end conformance harness.
+  See `docs/EDGE.md` and the threat-model addendum (adversaries 12–13).
+- **Audit durability** — every committed record fsyncs by default
+  (`audit_fsync: false` to opt out); a torn trailing write from power loss is
+  conservatively repaired on boot while any mid-chain tamper still refuses to
+  start. Store **schema versioning** across audit/paired/grant/edge
+  (fail-closed reject-newer) and session/registry (tolerant).
+- **Stable identity & config lifecycle** — a canonical per-user data dir
+  (`$MESHMCP_HOME`, else the OS config dir) ends CWD-relative identity forks;
+  SIGHUP hot-reloads policy rules AND peer/control ACLs with no restart;
+  `meshmcp profile` remembers a default gateway; SIGTERM (and, for the eight
+  formerly signal-less servers, any stop) drains gracefully with audit flush.
+- **Trust lifecycle** — `operators` config + `air operator add/remove` onboard
+  a second operator without YAML surgery; `meshmcp approve` binds the approver
+  to a configured operator instead of a self-asserted `$USER`;
+  **`meshmcp revoke-device`** severs pairing, grants, outstanding capability
+  tokens (new subject-level revocation in the verifier), the operator surface,
+  and the NetBird peer in one audited pass; `meshmcp uninstall` removes local
+  state (dry-run by default). See `docs/RUNBOOK.md`.
+- **Supportability** — leveled logging (`$MESHMCP_LOG` / `--verbose`) with the
+  historical output format preserved; `meshmcp diag --bundle` support bundles
+  (secret-redacted config, doctor report, audit chain verdict, versions);
+  an error-presentation layer where common failures name their next command;
+  pairing declines carry the operator's reason to `air join`.
+- **Quality** — the two formerly quarantined steer tests are fixed at the root
+  (a session clean-finalization race) and CI runs the whole suite with no
+  skips; first benchmarks (policy decision, audit append ± fsync, chain
+  verify, session checkpoint); one design language (`agent-os.css`) across
+  Air/Approvals/Dashboard/Control Room; community health files; runnable
+  `mcpclient` godoc example; `meshmcp version` reports commit/date provenance.
 
 ### Known issues
 
-- Several enforcement primitives (request-bound approval grant UI, session-lease
-  failover wiring, delegation in the router proxy path) are implemented and
-  tested but not yet wired end-to-end; see the capability matrix.
+### Fixed
+
+- **Session graceful-close race (structural fix)**: `endpoint.sendClose` now
+  commits the close atomically with the CLOSE frame write, so a one-shot
+  sender (steer/push) whose peer finalizes the session first can no longer
+  redial and misreport a fully acknowledged delivery as "requested resume
+  session is no longer available". Complements the reconnectLoop drain-phase
+  wait shipped in the same cycle; an unknown resume id remains a terminal
+  rejection. Deterministic regression: `TestGracefulDrainCloseNeverReattaches`.
+
 - The license is unresolved (proprietary/read-only); see `LICENSE-DECISION.md`.
+  Cutting the first tag is blocked on that owner decision, not on the pipeline:
+  all five release targets cross-compile clean and the workflow is ready.
+- GitHub-hosted CI is red for an infrastructure reason (Actions jobs are never
+  assigned a runner — an account/billing-level setting); the full
+  `go test -race ./...` suite is green locally with no skips.
+- staticcheck stays advisory until honnef.co/go/tools supports go1.26.

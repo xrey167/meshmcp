@@ -555,7 +555,7 @@ func remoteHandler(name string, checker acl, enf *httpEnforcer, rc *remoteClient
 
 // serveRemote exposes a "remote" backend on the mesh port ln.
 func serveRemote(client *embed.Client, b *Backend, ln net.Listener, enf *httpEnforcer, rc *remoteClient) {
-	checker := newACL(b.Allow)
+	checker := b.peerACL()
 	identify := func(r *http.Request) (string, string) { return peerIdentityStr(client, r.RemoteAddr) }
 	srv := &http.Server{Handler: remoteHandler(b.Name, checker, enf, rc, identify)}
 	if err := srv.Serve(ln); err != nil &&

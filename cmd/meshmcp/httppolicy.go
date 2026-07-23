@@ -23,6 +23,10 @@ type httpEnforcer struct {
 	audit   *policy.AuditLog
 	pending *policy.FilePending
 	backend string
+	// trustDomain is the gateway's LOCAL SPIFFE trust domain (Feature A); when
+	// set, records carry the additive peer_spiffe_id label, keeping HTTP/remote
+	// backends at parity with the stdio filter. Empty = no label.
+	trustDomain string
 }
 
 // newHTTPEnforcer builds the enforcer for an HTTP backend that declares a
@@ -39,7 +43,7 @@ func newHTTPEnforcer(b *Backend, audit *policy.AuditLog) *httpEnforcer {
 	if len(b.groups) > 0 {
 		eng.SetGroupResolver(policy.StaticGroups(b.groups))
 	}
-	return &httpEnforcer{eng: eng, audit: audit, pending: pending, backend: b.Name}
+	return &httpEnforcer{eng: eng, audit: audit, pending: pending, backend: b.Name, trustDomain: b.trustDomain}
 }
 
 // decide authorizes the request. It returns ok=true (and possibly a rewound
@@ -134,6 +138,7 @@ func (e *httpEnforcer) record(method, tool, rpcID string, dec policy.Decision, p
 		Backend: e.backend, Peer: peer, PeerKey: peerKey,
 		Method: method, Tool: tool, RPCID: rpcID,
 		Decision: dec.Outcome.String(), Reason: dec.Reason, Rule: dec.RuleID, Cost: dec.Cost,
+		PeerSpiffeID: policy.SpiffeID(e.trustDomain, peerKey),
 	}
 }
 

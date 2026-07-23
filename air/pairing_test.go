@@ -84,12 +84,12 @@ func TestApproveRecognizesDenyDropsRevokeRemoves(t *testing.T) {
 	if _, _, err := s.Request(VerifiedIdentity{PublicKey: "k2", FQDN: "two.mesh"}, "", pairTestNow()); err != nil {
 		t.Fatalf("Request k2: %v", err)
 	}
-	denied, err := s.Deny("k2")
+	denied, err := s.Deny("k2", "not this one", time.Unix(30, 0))
 	if err != nil || !denied {
 		t.Fatalf("Deny removed=%v err=%v", denied, err)
 	}
-	if s.Recognized("k2", "two.mesh") || s.Status("k2") != StatusNone {
-		t.Fatalf("denied peer must be neither recognized nor pending")
+	if s.Recognized("k2", "two.mesh") || s.Status("k2") != StatusDenied {
+		t.Fatalf("denied peer must be unrecognized and report StatusDenied (so the requester can be told why), got %q", s.Status("k2"))
 	}
 }
 

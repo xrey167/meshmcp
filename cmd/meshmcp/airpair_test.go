@@ -262,11 +262,11 @@ func TestPairJoinClientRoundTrip(t *testing.T) {
 	if _, err := store.Approve("joiner", "op.mesh", pairTestNowCLI()); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
-	status, _, err = getPairStatus(context.Background(), hc)
+	st, err := getPairStatus(context.Background(), hc)
 	if err != nil {
 		t.Fatalf("getPairStatus: %v", err)
 	}
-	if status != string(air.StatusApproved) {
-		t.Fatalf("status after approval = %q, want approved", status)
+	if st.Status != string(air.StatusApproved) {
+		t.Fatalf("status after approval = %q, want approved", st.Status)
 	}
 }

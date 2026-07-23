@@ -49,6 +49,8 @@ func cmdAir(args []string) error {
 		return cmdAirOperator(args[1:])
 	case "remove", "uninstall":
 		return cmdUninstall(args[1:])
+	case "revoke":
+		return cmdRevokeDevice(args[1:])
 	case "grant":
 		return cmdAirGrant(args[1:])
 	case "nearby":
@@ -162,7 +164,7 @@ func airUsage() error {
 	fmt.Fprintln(os.Stderr, "  "+b("air osint")+"       --config <gateway.yaml> [--identity id] [--snapshot f] [--fail-on lvl] [--live]")
 	fmt.Fprintln(os.Stderr, "                  "+dim("defensive self-recon of YOUR OWN mesh — reachability matrix + risky-grant findings (self-scoped)"))
 	fmt.Fprintln(os.Stderr, "  "+b("air browse")+"      <backend-ip:port>                 "+dim("what tools/resources/prompts a backend exposes"))
-	fmt.Fprintln(os.Stderr, "  "+b("air stream")+"      <audit.jsonl>                     "+dim("watch governed Air activity live (tail the ledger)"))
+	fmt.Fprintln(os.Stderr, "  "+b("air stream")+"      <audit.jsonl> | --bus <peer-ip:port>  "+dim("watch governed Air activity live (tail the ledger, or subscribe to the gateway hook bus over the mesh)"))
 	fmt.Fprintln(os.Stderr, "  "+b("air vision")+"      <inbox-dir>                       "+dim("images the mesh dropped here (view on a phone via serve --gallery)"))
 	fmt.Fprintln(os.Stderr, "  "+b("air cast")+"        [--control c] <target> <image>    "+dim("present an image to a Nearby cast service or raw address"))
 	fmt.Fprintln(os.Stderr, "  "+b("air screen")+"      [--control c] --watch <f> <target> "+dim("stream to a Nearby screen service or raw address; --recv receives"))
