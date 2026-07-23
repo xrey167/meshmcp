@@ -19,6 +19,15 @@ func TestMemStoreConformance(t *testing.T) {
 	})
 }
 
+// TestMemStoreSessionMigration keeps the public-API migration harness honest
+// on every run (no external database needed); pgstore runs the same harness
+// against live PostgreSQL when MESHMCP_TEST_PG_DSN is set.
+func TestMemStoreSessionMigration(t *testing.T) {
+	storetest.RunSessionMigration(t, func(t *testing.T) session.SessionStore {
+		return session.NewMemStore()
+	})
+}
+
 func TestFileStoreConformance(t *testing.T) {
 	storetest.RunLeaseStoreConformance(t, func(t *testing.T) session.LeaseStore {
 		s, err := session.NewFileStore(t.TempDir())

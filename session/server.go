@@ -97,6 +97,14 @@ type serverSession struct {
 	cmu         sync.Mutex // guards replay / captureDone
 	replay      []byte     // captured client->backend bytes to replay on migration
 	captureDone bool       // handshake captured (handshake mode)
+
+	// ckptMu serializes whole checkpoints (snapshot + store write). The
+	// ack-driven and replay-persist triggers run on different goroutines; over
+	// a slow store (PostgreSQL) an older snapshot could otherwise commit after
+	// a newer one, and a gateway rehydrating from that older state would
+	// re-serve send sequence numbers the client has already seen — silently
+	// dropping every response after the failover.
+	ckptMu sync.Mutex
 }
 
 // sendLines forwards complete-line data to the peer, chunked to the frame cap,
@@ -332,6 +340,8 @@ func (s *Server) checkpoint(sess *serverSession) {
 	if s.store == nil {
 		return
 	}
+	sess.ckptMu.Lock()
+	defer sess.ckptMu.Unlock()
 	sess.cmu.Lock()
 	replay := append([]byte(nil), sess.replay...)
 	sess.cmu.Unlock()

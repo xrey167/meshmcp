@@ -144,17 +144,24 @@ An adversary who can write the audit file (but lacks the signing key).
   fenced out of writes (its stale generation fails `SaveIfOwned`). Proven for
   both `MemStore` and `FileStore` with concurrent single-winner and fencing
   tests.
-- **Limit:** the session *server's* failover path does not yet route through the
-  lease API (it still checkpoints via unconditional `Save`); wiring
-  lease-expiry-driven takeover + per-write fencing into the server is the
-  remaining step. `FileStore` provides CAS only for a single host / lock-correct
-  shared filesystem and is **not** cross-gateway HA. A distributed CAS backend
-  now ships: `pgstore` implements the same lease store on PostgreSQL
-  (row-locked transactions; enabled via `session_store: postgres://...`),
-  conformance-proven by the shared store harness. Until the server failover
-  wiring lands (Phase 6), do not run two gateways over one shared session store
-  in production — the store guarantees exist, the server path does not yet use
-  them for takeover.
+- **Defended (server path):** the session server routes through the lease API
+  end to end: it acquires the lease on session create, gates every checkpoint
+  with `SaveIfOwned` (a fenced write makes the superseded gateway yield), takes
+  over via `TakeoverLease` only on a reattach carrying the session creator's
+  transport-verified identity, and reaps with `DeleteIfOwner`. Checkpoints are
+  serialized per session so an older snapshot can never commit after a newer
+  one over a slow store. Proven end to end by the migration harness
+  (`session/storetest.RunSessionMigration`): crash one gateway, reattach to a
+  second, rehydrate + lease takeover — run against `MemStore` on every test
+  run and against live PostgreSQL (`pgstore`) when `MESHMCP_TEST_PG_DSN` is
+  set.
+- **Limit:** takeover is *reattach-driven only* — a standby gateway never
+  claims an expired lease on its own (`RenewLease`/`ReleaseLease` are unused;
+  a long-lived session's lease lapses and the fencing generation is what keeps
+  writes safe). There is no exactly-once tool execution across a failover
+  (§8). `FileStore`'s CAS holds only on a single host / lock-correct shared
+  filesystem; cross-host deployments need the PostgreSQL store
+  (`session_store: postgres://...`).
 
 ### 10. Malformed / adversarial JSON-RPC
 

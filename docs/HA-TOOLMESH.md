@@ -107,7 +107,15 @@ across hosts, not just across processes on one machine. Enable it by setting
 (`session_store: postgres://user:pass@host/db`); `serve` detects the DSN form
 and `meshmcp doctor` pings it and applies the schema. Conformance-proven by the
 shared harness in `session/storetest` (same single-winner / fencing subtests as
-`MemStore`/`FileStore`) against a live PostgreSQL. The genuinely-open work is
-the **server failover path**: lease-expiry-driven cross-gateway TAKEOVER wiring
-(capability-matrix Phase 6) is not done, so multi-host failover is not yet an
-end-to-end supported deployment.
+`MemStore`/`FileStore`) against a live PostgreSQL.
+
+**Server failover path — WIRED and proven.** The session server acquires the
+lease on create, fences every checkpoint through `SaveIfOwned`, and performs an
+identity-verified `TakeoverLease` when the session's creator reattaches to a
+different gateway; `session/storetest.RunSessionMigration` proves the full
+crash → reattach → rehydrate → takeover flow, including against live
+PostgreSQL (`MESHMCP_TEST_PG_DSN`). Two gateways sharing one PostgreSQL
+session store is a supported deployment. What remains open (capability-matrix
+Phase 6): failover is reattach-driven only — there is no lease-expiry-driven
+automatic takeover by a standby — and ambiguous-outcome mutating calls are
+still not auto-retried (no enforced idempotency keys).
