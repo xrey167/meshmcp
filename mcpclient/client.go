@@ -221,7 +221,9 @@ func (c *Client) Notify(method string, params any) error {
 }
 
 // withMeta merges RequestMeta into a map-shaped params object as _meta,
-// without mutating the caller's value.
+// without mutating the caller's value. A caller-supplied _meta map is
+// preserved, but RequestMeta wins on key conflicts: RequestMeta carries the
+// router's origin identity stamp, which params must never override.
 func (c *Client) withMeta(params any) any {
 	if c.RequestMeta == nil {
 		return params
@@ -234,7 +236,16 @@ func (c *Client) withMeta(params any) any {
 	for k, v := range pm {
 		cp[k] = v
 	}
-	cp["_meta"] = c.RequestMeta
+	meta := make(map[string]any, len(c.RequestMeta)+1)
+	if prior, ok := cp["_meta"].(map[string]any); ok {
+		for k, v := range prior {
+			meta[k] = v
+		}
+	}
+	for k, v := range c.RequestMeta {
+		meta[k] = v
+	}
+	cp["_meta"] = meta
 	return cp
 }
 
