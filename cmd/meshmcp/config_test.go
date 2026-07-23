@@ -97,6 +97,55 @@ backends:
 	}
 }
 
+func TestConfigEgressWrapperValidation(t *testing.T) {
+	// A resolvable wrapper[0] loads clean. The running test binary stands in
+	// for the operator's jailer (guaranteed present); real firejail/bwrap/netns
+	// launchers are Linux-only and are not exercised on this worktree.
+	self := filepath.ToSlash(os.Args[0])
+	valid := `
+backends:
+  - name: fs
+    port: 9101
+    stdio: ["echo","hi"]
+    egress_wrapper: ["` + self + `","--net=none"]
+`
+	if _, err := loadConfig(writeConfig(t, valid)); err != nil {
+		t.Fatalf("resolvable egress_wrapper should load: %v", err)
+	}
+
+	cases := []struct{ name, body, want string }{
+		{"unresolvable fails closed", `
+backends:
+  - name: fs
+    port: 9101
+    stdio: ["echo"]
+    egress_wrapper: ["/no/such/jailer-xyzzy-meshmcp"]
+`, "could not be resolved"},
+		{"stdio only", `
+backends:
+  - name: web
+    port: 9102
+    http: "http://127.0.0.1:9000"
+    egress_wrapper: ["` + self + `"]
+`, "only valid for stdio"},
+		{"empty element", `
+backends:
+  - name: fs
+    port: 9101
+    stdio: ["echo"]
+    egress_wrapper: ["` + self + `",""]
+`, "must not be empty"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := loadConfig(writeConfig(t, tc.body))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("want error containing %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
 func TestConfigComponentCardIdentity(t *testing.T) {
 	valid, err := loadConfig(writeConfig(t, `
 backends:

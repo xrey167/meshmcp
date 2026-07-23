@@ -1,6 +1,7 @@
 package session
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -80,8 +81,40 @@ type BackendFactory func(meta Meta) (Backend, error)
 // subprocess, wiring its stdin/stdout to the session and inheriting the
 // parent's stderr. The caller's env is extended with MESHMCP_PEER*.
 func ExecBackendFactory(name string, args, baseEnv []string) BackendFactory {
+	return ExecBackendFactoryWithWrapper(nil, name, args, baseEnv)
+}
+
+// ExecBackendFactoryWithWrapper is ExecBackendFactory with an optional
+// operator-supplied OS jailer/launcher prepended to the argv. When wrapper is
+// non-empty, the process spawned is wrapper[0] with arguments
+// wrapper[1:]+name+args — the wrapper receives the real backend command as its
+// tail arguments and is expected to exec it after applying OS-level
+// containment (e.g. `firejail --net=none`, a bwrap sandbox, or a network
+// namespace launcher). Because the wrapper inherits the same stdin/stdout
+// pipes, a wrapper that execs its tail speaks MCP transparently.
+//
+// meshmcp only WIRES the wrapper into the argv; the OS enforces the
+// containment. meshmcp does not, and pure Go cannot, restrict a child
+// process's network egress cross-platform. A nil/empty wrapper is
+// byte-identical to ExecBackendFactory.
+//
+// Fail-closed: an empty wrapper[0], or a wrapper[0] that exec cannot start,
+// surfaces as a spawn error exactly like a missing stdio command, so the
+// backend never runs unwrapped (which would silently restore full egress
+// while the operator believes it is contained). Config load additionally
+// resolves wrapper[0] with exec.LookPath up front; this is the runtime
+// backstop.
+func ExecBackendFactoryWithWrapper(wrapper []string, name string, args, baseEnv []string) BackendFactory {
 	return func(meta Meta) (Backend, error) {
-		cmd := exec.Command(name, args...)
+		execName, execArgs := name, args
+		if len(wrapper) > 0 {
+			if wrapper[0] == "" {
+				return nil, fmt.Errorf("egress wrapper: wrapper[0] is empty")
+			}
+			execName = wrapper[0]
+			execArgs = append(append(append([]string{}, wrapper[1:]...), name), args...)
+		}
+		cmd := exec.Command(execName, execArgs...)
 		cmd.Stderr = os.Stderr
 		cmd.Env = append(append([]string{}, baseEnv...),
 			"MESHMCP_PEER="+meta.PeerFQDN,

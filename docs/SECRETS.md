@@ -42,6 +42,16 @@ The agent never sees `sk_live_…`. Neither does the trace, nor the audit log.
   a session that has touched untrusted content (a `taint_source` tool) can no
   longer obtain a credential — so injected instructions can't cause a secret to
   be used. Credential-exfiltration defense at the network layer.
+- **Out-of-band exfil residual.** Response-side redaction stops a backend from
+  echoing an injected secret back down the agent stream, but a malicious backend
+  that legitimately received a secret can still transform it and exfiltrate over
+  its own outbound socket. A backend's `egress_wrapper` prepends an
+  operator-supplied OS jailer (e.g. `["firejail","--net=none"]`) to the backend
+  argv to contain that path. meshmcp only WIRES it — **the OS enforces
+  containment, meshmcp does not** — and it is fail-closed (an unresolvable
+  wrapper fails startup). It is containment, not cryptography; short-lived scoped
+  credentials stay the primary mitigation. See THREAT-MODEL §5 and the
+  `egress_wrapper` field on a stdio backend.
 
 ## Configure
 

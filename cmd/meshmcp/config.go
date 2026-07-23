@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -567,6 +568,22 @@ type Backend struct {
 	// where the two disagree, the divergence is logged, but enforcement is
 	// unchanged (F24). A live canary for a policy change. Stdio + a policy.
 	ShadowPolicy *policy.Policy `yaml:"shadow_policy"`
+	// EgressWrapper, when non-empty, prepends an operator-supplied OS
+	// jailer/launcher to this backend's argv: wrapper[0] is exec'd and
+	// wrapper[1:]+stdio become its arguments (it is expected to exec the tail
+	// after applying containment, e.g. ["firejail","--net=none"]). meshmcp only
+	// WIRES the argv — the OS enforces the network containment; meshmcp does
+	// not, and pure Go cannot, restrict a child's egress cross-platform. This
+	// is containment (defense-in-depth for the exfil-out-of-band residual on a
+	// malicious backend that legitimately received an injected secret), not
+	// cryptography; short-lived scoped credentials remain the primary
+	// mitigation. Only valid for stdio backends (http/remote backends are not
+	// spawned as a child process, so a wrapper is meaningless). Fail-closed: an
+	// empty element, or a wrapper[0] that exec.LookPath cannot resolve, is a
+	// startup error — a silently-unwrapped backend (full egress while the
+	// operator believes it is contained) must never run. Empty = today's
+	// behavior byte-for-byte.
+	EgressWrapper []string `yaml:"egress_wrapper"`
 
 	httpURL     *url.URL
 	remoteURL   *url.URL            // parsed Remote.Endpoint, set at load
@@ -779,6 +796,28 @@ func loadConfig(path string) (*Config, error) {
 		}
 		if b.SessionStore != "" && !b.Resumable {
 			return nil, fmt.Errorf("backend %q: session_store requires resumable: true", b.Name)
+		}
+		if len(b.EgressWrapper) > 0 {
+			// http/remote backends are not spawned as a child process, so a
+			// launcher wrapper is meaningless — refuse rather than silently
+			// ignore (matching the resumable/session_store stdio gates above).
+			if !hasStdio {
+				return nil, fmt.Errorf("backend %q: egress_wrapper is only valid for stdio backends", b.Name)
+			}
+			for j, part := range b.EgressWrapper {
+				if strings.TrimSpace(part) == "" {
+					return nil, fmt.Errorf("backend %q: egress_wrapper[%d] must not be empty", b.Name, j)
+				}
+			}
+			// Fail-closed: resolve wrapper[0] at load. A wrapper that cannot be
+			// resolved must NOT fall through to an unwrapped spawn — that would
+			// run the backend with full egress while the operator believes it
+			// is contained. Containment itself is enforced by the OS jailer,
+			// not by meshmcp; this only guarantees the configured jailer is
+			// present before the backend can start.
+			if _, err := exec.LookPath(b.EgressWrapper[0]); err != nil {
+				return nil, fmt.Errorf("backend %q: egress_wrapper command %q could not be resolved (fail-closed: a wrapper that cannot start must not run the backend unwrapped): %w", b.Name, b.EgressWrapper[0], err)
+			}
 		}
 		if b.Policy != nil {
 			if err := b.Policy.Validate(); err != nil {
