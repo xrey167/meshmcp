@@ -3,6 +3,7 @@ package policy
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -47,6 +48,18 @@ type CapabilityClaims struct {
 	ExpiresAt int64  `json:"exp"`
 	PubKey    string `json:"pubkey"` // hex authority key — a HINT; must be pinned by the verifier
 	Sig       string `json:"sig,omitempty"`
+
+	// DelegatePub authorizes the HOLDER of this capability to mint sub-grants:
+	// it is the hex Ed25519 public key whose private half may sign a direct
+	// child token (see DelegateCapability). Empty = this capability cannot be
+	// delegated. Omitempty, so existing tokens are byte-identical.
+	DelegatePub string `json:"delegate_pub,omitempty"`
+	// Parent carries the ENCODED parent token of a sub-grant. The verifier
+	// walks the chain root-first: the root must be signed by a pinned
+	// authority, each child by its parent's DelegatePub key, and every hop
+	// must be strictly narrower (tool/corpus subset, same audience, expiry no
+	// later than the parent's). Empty = authority-issued root token.
+	Parent string `json:"parent,omitempty"`
 }
 
 func (c CapabilityClaims) signingBytes() []byte {
@@ -72,6 +85,12 @@ func (s *Signer) IssueCapability(claims CapabilityClaims, now time.Time) (string
 	}
 	if claims.Subject == "" || claims.Audience == "" || len(claims.Tools) == 0 {
 		return "", fmt.Errorf("capability needs subject, audience, and at least one tool")
+	}
+	if claims.Parent != "" {
+		return "", fmt.Errorf("an authority-issued capability cannot carry a parent (sub-grants are minted with DelegateCapability)")
+	}
+	if err := validateDelegatePub(claims); err != nil {
+		return "", err
 	}
 	// Reject a malformed glob at issue time; otherwise it silently never matches
 	// and the authority mints a token that can never authorize anything.
@@ -174,16 +193,14 @@ func (v *CapabilityVerifier) Verify(token, peerKey, backend, tool string) (Capab
 // token presented to a verifier without a replay cache still fails closed
 // here, so it can never authorize anything by omission.
 func (v *CapabilityVerifier) verifyClaims(token, peerKey, backend, tool string) (CapabilityClaims, error) {
-	raw, err := base64.RawURLEncoding.DecodeString(token)
+	c, err := decodeCapability(token)
 	if err != nil {
-		return CapabilityClaims{}, fmt.Errorf("capability is not valid base64url")
+		return CapabilityClaims{}, err
 	}
-	var c CapabilityClaims
-	if err := json.Unmarshal(raw, &c); err != nil {
-		return CapabilityClaims{}, fmt.Errorf("capability is not valid JSON")
-	}
-	if c.Version != 1 {
-		return CapabilityClaims{}, fmt.Errorf("unsupported capability version %d", c.Version)
+	// A sub-grant (Parent set) is verified by walking its chain — the root must
+	// be authority-pinned and every hop strictly narrower. See capability_delegation.go.
+	if c.Parent != "" {
+		return v.verifyDelegated(c, peerKey, backend, tool)
 	}
 	// Trust root: the embedded key MUST be pinned.
 	key, ok := v.trusted[c.PubKey]
@@ -235,6 +252,14 @@ func (v *CapabilityVerifier) verifyClaims(token, peerKey, backend, tool string) 
 // no-op. Callers that split verification from execution (the tools/call
 // filter) call this only once the call's final outcome is allow, so a held or
 // denied call never burns the grant.
+//
+// A delegated leaf's replay key is derived from its SIGNATURE, not its ID: a
+// sub-grant's ID is holder-chosen (a malicious delegate can hand-sign a token
+// with any ID), so keying by ID would let a delegate mint a colliding ID and
+// burn ANOTHER token's single-use grant. The Ed25519 signature is unique per
+// token content, so re-presenting the same token still burns exactly once
+// while distinct tokens can never collide. Authority-issued roots keep the
+// jti key (the authority controls those IDs).
 func (v *CapabilityVerifier) Consume(c CapabilityClaims) error {
 	if !c.SingleUse {
 		return nil
@@ -242,7 +267,12 @@ func (v *CapabilityVerifier) Consume(c CapabilityClaims) error {
 	if v.used == nil {
 		return fmt.Errorf("capability is single-use but this verifier has no replay cache (fail closed)")
 	}
-	if !v.used.Use("cap-jti:"+c.ID, time.Unix(c.ExpiresAt, 0), v.now()) {
+	key := "cap-jti:" + c.ID
+	if c.Parent != "" {
+		sum := sha256.Sum256([]byte(c.Sig))
+		key = "cap-sig:" + hex.EncodeToString(sum[:])
+	}
+	if !v.used.Use(key, time.Unix(c.ExpiresAt, 0), v.now()) {
 		return fmt.Errorf("capability %s has already been used (single-use)", c.ID)
 	}
 	return nil

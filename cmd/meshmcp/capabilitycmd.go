@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/xrey167/meshmcp/policy"
@@ -28,12 +29,14 @@ func cmdCapability(args []string) error {
 		return capabilityKeygen(args[1:])
 	case "issue":
 		return capabilityIssue(args[1:])
+	case "delegate":
+		return capabilityDelegate(args[1:])
 	case "revoke":
 		return capabilityRevoke(args[1:])
 	case "list":
 		return capabilityList(args[1:])
 	default:
-		return fmt.Errorf("meshmcp capability: unknown subcommand %q (want: keygen, issue, revoke, list)", args[0])
+		return fmt.Errorf("meshmcp capability: unknown subcommand %q (want: keygen, issue, delegate, revoke, list)", args[0])
 	}
 }
 
@@ -115,6 +118,7 @@ func capabilityIssue(args []string) error {
 	fs.Var(&tools, "tool", "tool-name glob the grant covers (repeatable) (required)")
 	var corpora stringList
 	fs.Var(&corpora, "corpus", "corpus/subgraph glob the grant may query (repeatable; knowledge capabilities)")
+	delegatePub := fs.String("delegate-pub", "", "hex Ed25519 public key allowed to mint sub-grants of this capability (from `capability keygen`)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -127,12 +131,13 @@ func capabilityIssue(args []string) error {
 	}
 	now := time.Now()
 	claims := policy.CapabilityClaims{
-		Issuer:    *issuer,
-		Subject:   *subject,
-		Audience:  *audience,
-		Tools:     tools,
-		Corpora:   corpora,
-		ExpiresAt: now.Add(*ttl).Unix(),
+		Issuer:      *issuer,
+		Subject:     *subject,
+		Audience:    *audience,
+		Tools:       tools,
+		Corpora:     corpora,
+		DelegatePub: *delegatePub,
+		ExpiresAt:   now.Add(*ttl).Unix(),
 	}
 	if *notBefore > 0 {
 		claims.NotBefore = now.Add(*notBefore).Unix()
@@ -145,5 +150,63 @@ func capabilityIssue(args []string) error {
 	// than pasted into shell history.
 	fmt.Fprintln(os.Stdout, token)
 	fmt.Fprintf(os.Stderr, "issued capability for subject %s → %s (tools %v), valid %s\n", *subject, *audience, []string(tools), ttl.String())
+	return nil
+}
+
+// capabilityDelegate mints a sub-grant (S57): the HOLDER of a delegable
+// capability narrows it to a new subject with their delegate key — no
+// authority round-trip. The verifier walks the embedded chain back to the
+// pinned authority; every hop must be strictly narrower.
+func capabilityDelegate(args []string) error {
+	fs := flag.NewFlagSet("capability delegate", flag.ContinueOnError)
+	parentTok := fs.String("parent", "", "the parent capability token (or use --parent-file)")
+	parentFile := fs.String("parent-file", "", "file containing the parent capability token")
+	keyPath := fs.String("delegate-key", "", "the holder's delegate key file (from `capability keygen`; its public key must be the parent's delegate_pub) (required)")
+	issuer := fs.String("issuer", "", "named issuer of the sub-grant")
+	subject := fs.String("subject", "", "sub-grantee's WireGuard public key (required)")
+	ttl := fs.Duration("ttl", 15*time.Minute, "lifetime (also capped by the parent's expiry)")
+	var tools stringList
+	fs.Var(&tools, "tool", "tool the sub-grant covers — a literal name matched by a parent glob, or a parent pattern verbatim (repeatable) (required)")
+	var corpora stringList
+	fs.Var(&corpora, "corpus", "corpus the sub-grant may query (must be within the parent's corpora)")
+	delegatePub := fs.String("delegate-pub", "", "hex Ed25519 public key allowed to delegate FURTHER (depth-capped)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	token := *parentTok
+	if token == "" && *parentFile != "" {
+		b, err := os.ReadFile(*parentFile)
+		if err != nil {
+			return fmt.Errorf("read parent token: %w", err)
+		}
+		token = strings.TrimSpace(string(b))
+	}
+	if token == "" || *keyPath == "" || *subject == "" || len(tools) == 0 {
+		return fmt.Errorf("capability delegate: --parent (or --parent-file), --delegate-key, --subject, and at least one --tool are required")
+	}
+	s, err := policy.LoadSigner(*keyPath)
+	if err != nil {
+		return fmt.Errorf("load delegate key: %w", err)
+	}
+	parent, err := policy.DecodeCapabilityClaims(token)
+	if err != nil {
+		return fmt.Errorf("parent token: %w", err)
+	}
+	now := time.Now()
+	child := policy.CapabilityClaims{
+		Issuer:      *issuer,
+		Subject:     *subject,
+		Audience:    parent.Audience, // a sub-grant can never change audience
+		Tools:       tools,
+		Corpora:     corpora,
+		DelegatePub: *delegatePub,
+		ExpiresAt:   now.Add(*ttl).Unix(),
+	}
+	out, err := policy.DelegateCapability(token, s, child, now)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(os.Stdout, out)
+	fmt.Fprintf(os.Stderr, "delegated sub-grant for subject %s → %s (tools %v), valid %s (capped by the parent's expiry)\n", *subject, parent.Audience, []string(tools), ttl.String())
 	return nil
 }
