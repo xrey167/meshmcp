@@ -535,21 +535,9 @@ func dropReceive(cfgPath string) error {
 	}
 	lim := cfg.limits()
 	lim.NameIndependent = cfg.CAS
-	srv := session.NewServer(newDropFactory(place, lim, audit), 2*time.Minute, log.Printf)
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			log.Println("drop receiver shutting down")
-			return nil
-		}
-		pubKey, fqdn := peerIdentity(client, conn.RemoteAddr())
-		if !checker.allows(pubKey, fqdn) {
-			log.Printf("drop DENIED from %s (%s): not in allow list", fqdn, shortKey(pubKey))
-			conn.Close()
-			continue
-		}
-		go srv.Handle(conn, session.Meta{PeerFQDN: fqdn, PeerAddr: conn.RemoteAddr().String(), PeerKey: pubKey})
-	}
+	identity := func(addr net.Addr) (string, string) { return peerIdentity(client, addr) }
+	runDropAcceptLoop(ln, identity, checker, place, lim, audit, log.Printf)
+	return nil
 }
 
 // newDropFactory returns a session backend factory whose backends receive a
