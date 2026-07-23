@@ -25,10 +25,10 @@ content lands in BACKLOG.md.
 | 13 | F30 drag-to-handoff | todo | Blocked on 5 until 5 ships |
 | 14 | Native mobile shell + APNs/FCM | **blocked** | Needs mobile toolchain + physical device |
 | 15 | S33 govulncheck in CI | **blocked-CI** | Workflow YAML can be pre-staged; unverifiable until 1 |
-| 16 | Witnessed audit anchoring | todo | |
+| 16 | Witnessed audit anchoring | **done** | Self-linked FileAnchor + governed PeerAnchor witness + verify cross-check; review fixed hot-path stall |
 | 17 | Backend secret-egress restriction | todo | Containment scope per threat model |
 | 18 | OTel/OTLP exporter | todo | |
-| 19 | Wave-2 minors | todo | Thematic batches: policy UX / transfer UX / client builds / misc |
+| 19 | Wave-2 minors | in-progress | Batch A done (S19 jti replay, S21 bounded dash tail, S51 audit rotation, S49 config lint); batch B queued |
 | 20 | Placeholder modules | todo | Doctor implementable; sibling modules have no git remote — local + documented |
 | 21 | Router delegation wiring | **done** | Minted per-call, verified when pinned, caller from token; review fixed side-effecting caller-leg |
 | 22 | Postgres CAS in CI | **blocked-CI** | Workflow YAML can be pre-staged; unverifiable until 1 |

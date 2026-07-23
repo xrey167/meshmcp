@@ -45,6 +45,12 @@ type Config struct {
 	// means true; set `audit_fsync: false` to opt out on throughput-sensitive
 	// deployments (one fsync per audited decision has a real hot-path cost).
 	AuditFsync *bool `yaml:"audit_fsync"`
+	// AuditRotateBytes, when > 0, rotates the shared ledger when the active
+	// file would exceed this size: the segment is sealed (fsync+close), renamed
+	// to <audit_log>.<UTC timestamp>, and a fresh file continues the SAME hash
+	// chain (next seq, prev_hash into the archive). Verify the full history by
+	// concatenating segments in name order. 0 (default) = no rotation.
+	AuditRotateBytes int64 `yaml:"audit_rotate_bytes"`
 	// AuditWebhook POSTs audit records to an external URL (SIEM / Slack /
 	// PagerDuty) via a best-effort observer sink. AuditWebhookAll forwards every
 	// record; by default only deny/cosign records are sent.
@@ -210,6 +216,10 @@ type Backend struct {
 	// AuditFsync fsyncs each committed record (power-loss durability). On by
 	// default (nil = true); set audit_fsync: false to opt out.
 	AuditFsync *bool `yaml:"audit_fsync"`
+	// AuditRotateBytes, when > 0, size-rotates this backend's audit_log (see
+	// Config.AuditRotateBytes for the sealing/verification contract). Requires
+	// audit_log (the stderr fallback cannot rotate). 0 = no rotation.
+	AuditRotateBytes int64 `yaml:"audit_rotate_bytes"`
 	// AuditCheckpoints is a file for signed Merkle checkpoints over the audit
 	// log, making it non-repudiable and externally verifiable. Requires a
 	// signing key (audit_signing_key). Verify with
@@ -222,8 +232,15 @@ type Backend struct {
 	// AuditCheckpointEvery is how many records per checkpoint (default 128).
 	AuditCheckpointEvery int `yaml:"audit_checkpoint_every"`
 	// AuditAnchor is an append-only file where each checkpoint is also written
-	// as an external witness (the transparency-log seam).
+	// as an external witness (the transparency-log seam). Records are
+	// self-linked (prev_anchor), so the anchor file is itself tamper-evident.
 	AuditAnchor string `yaml:"audit_anchor"`
+	// AuditAnchorURL POSTs each checkpoint to a peer gateway's witness endpoint
+	// (the control plane's /v1/anchor, run with --anchor-witness). Best-effort
+	// with a bounded retry queue: a witness outage never blocks a checkpoint,
+	// and `meshmcp audit anchor` replays the checkpoints file idempotently
+	// after an outage. May be combined with audit_anchor (both fire).
+	AuditAnchorURL string `yaml:"audit_anchor_url"`
 	// AuditFailClosed makes this backend's audit sink a hard control: when a
 	// record cannot be written (full disk, I/O error), the call is denied
 	// rather than proceeding unrecorded. Off by default (best-effort).
@@ -397,6 +414,12 @@ func loadConfig(path string) (*Config, error) {
 	if len(cfg.Backends) == 0 {
 		return nil, fmt.Errorf("config %s: no backends defined", path)
 	}
+	if cfg.AuditRotateBytes < 0 {
+		return nil, fmt.Errorf("config %s: audit_rotate_bytes must be >= 0", path)
+	}
+	if cfg.AuditRotateBytes > 0 && cfg.AuditLog == "" {
+		return nil, fmt.Errorf("config %s: audit_rotate_bytes requires audit_log", path)
+	}
 	// Validate the SPIFFE trust domain up front (Feature A, mirroring
 	// federate.go): a malformed domain is a config error, not something to
 	// silently derive empty labels from later. Empty stays valid (labels off).
@@ -502,11 +525,26 @@ func loadConfig(path string) (*Config, error) {
 		if b.ApprovalSigningKey != "" && b.CosignStore == "" {
 			return nil, fmt.Errorf("backend %q: approval_signing_key requires cosign_store (the shared approval directory)", b.Name)
 		}
+		if b.AuditRotateBytes < 0 {
+			return nil, fmt.Errorf("backend %q: audit_rotate_bytes must be >= 0", b.Name)
+		}
+		if b.AuditRotateBytes > 0 && b.AuditLog == "" {
+			return nil, fmt.Errorf("backend %q: audit_rotate_bytes requires audit_log (the stderr fallback cannot rotate)", b.Name)
+		}
 		if b.AuditCheckpoints != "" && b.AuditSigningKey == "" {
 			return nil, fmt.Errorf("backend %q: audit_checkpoints requires audit_signing_key", b.Name)
 		}
 		if b.AuditCheckpoints != "" && b.Policy == nil {
 			return nil, fmt.Errorf("backend %q: audit_checkpoints requires a policy (nothing to audit otherwise)", b.Name)
+		}
+		if (b.AuditAnchor != "" || b.AuditAnchorURL != "") && b.AuditCheckpoints == "" {
+			return nil, fmt.Errorf("backend %q: audit_anchor/audit_anchor_url require audit_checkpoints (anchoring witnesses signed checkpoints)", b.Name)
+		}
+		if b.AuditAnchorURL != "" {
+			u, err := url.Parse(b.AuditAnchorURL)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+				return nil, fmt.Errorf("backend %q: invalid audit_anchor_url %q (want http(s)://host[:port]/v1/anchor)", b.Name, b.AuditAnchorURL)
+			}
 		}
 		if b.Capabilities != nil {
 			if !hasStdio {
