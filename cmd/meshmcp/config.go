@@ -209,6 +209,20 @@ type Backend struct {
 	// client->backend log, idempotent backends), or "backend" (the backend
 	// restores its own state from MESHMCP_SESSION_ID).
 	SessionStoreMode string `yaml:"session_store_mode"`
+	// SessionFailover selects "standby" to run an expiry-driven sweep: this
+	// gateway adopts sessions whose owner stopped renewing its lease (crashed
+	// or paused past a conservative margin of 2x the session TTL), respawning
+	// the backend before the client returns. Safety comes from the store's
+	// lease generation CAS (exactly one adopter; the previous owner is fenced),
+	// never from timing. Empty or "off" keeps failover reattach-driven.
+	// Requires resumable + a PostgreSQL session_store (a file store's lock can
+	// be stolen from a paused-not-dead gateway, which could regress the
+	// generation an adoption committed).
+	SessionFailover string `yaml:"session_failover"`
+	// SessionSweepSeconds is how often the standby sweep scans the store for
+	// adoptable sessions (default 30, minimum 5). Only meaningful with
+	// session_failover: standby.
+	SessionSweepSeconds int `yaml:"session_sweep_seconds"`
 	// Policy authorizes individual tools/call requests by caller identity. For
 	// stdio backends the gateway parses the JSON-RPC stream; for HTTP backends
 	// it parses each request body (F16). Rate limits, time windows, co-sign,
@@ -518,6 +532,31 @@ func loadConfig(path string) (*Config, error) {
 		case "", "handshake", "full", "backend":
 		default:
 			return nil, fmt.Errorf("backend %q: session_store_mode %q is not one of handshake|full|backend", b.Name, b.SessionStoreMode)
+		}
+		switch b.SessionFailover {
+		case "", "off", "standby":
+		default:
+			return nil, fmt.Errorf("backend %q: session_failover %q is not one of standby|off", b.Name, b.SessionFailover)
+		}
+		if b.SessionFailover == "standby" && (!b.Resumable || b.SessionStore == "") {
+			return nil, fmt.Errorf("backend %q: session_failover: standby requires resumable: true and a session_store (the sweep adopts sessions from the shared store)", b.Name)
+		}
+		if b.SessionFailover == "standby" && b.SessionStore != "" && !isPostgresDSN(b.SessionStore) {
+			// The file store's cross-process lock steals stale locks from
+			// paused-not-dead holders, which can regress the lease generation
+			// the sweep's adoption committed — the split-brain the sweep must
+			// never create. Only a store with genuine atomic CAS may back the
+			// autonomous sweep; reattach-driven failover keeps working on the
+			// file store.
+			return nil, fmt.Errorf("backend %q: session_failover: standby requires a PostgreSQL session_store (a file-based store's lock cannot fence a paused gateway; got %q)", b.Name, b.SessionStore)
+		}
+		if b.SessionSweepSeconds != 0 {
+			if b.SessionFailover != "standby" {
+				return nil, fmt.Errorf("backend %q: session_sweep_seconds requires session_failover: standby", b.Name)
+			}
+			if b.SessionSweepSeconds < 5 {
+				return nil, fmt.Errorf("backend %q: session_sweep_seconds must be at least 5 (got %d)", b.Name, b.SessionSweepSeconds)
+			}
 		}
 		if len(b.DLP) > 0 {
 			if !hasStdio || b.Policy == nil {

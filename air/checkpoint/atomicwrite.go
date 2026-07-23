@@ -10,7 +10,7 @@ import "os"
 // left untouched.
 //
 // This is a small, self-contained re-implementation of the repo's temp+fsync+
-// rename idiom (session.FileStore.writeUnlocked, federation.DCRStore.writeAtomic,
+// rename idiom (session.FileStore.writeLocked, federation.DCRStore.writeAtomic,
 // policy's approval-token store). Those helpers are unexported methods bound to
 // their own store/record types and are not importable without refactoring the
 // packages that own them, so — per the S5 constraint against extracting a

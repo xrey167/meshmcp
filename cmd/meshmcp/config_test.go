@@ -310,6 +310,119 @@ func TestConfigControlRequiresAllowList(t *testing.T) {
 	}
 }
 
+// TestConfigSessionFailoverValidation guards the standby-sweep config: standby
+// needs the resumable + shared-store plumbing it sweeps over, unknown modes are
+// rejected (not silently ignored), and the sweep cadence has a sane floor.
+func TestConfigSessionFailoverValidation(t *testing.T) {
+	cases := []struct {
+		name    string
+		body    string
+		wantErr string // substring; "" means it must load
+	}{
+		{
+			name: "standby with resumable + postgres store loads",
+			body: `
+backends:
+  - name: fs
+    port: 9101
+    stdio: ["echo"]
+    resumable: true
+    session_store: postgres://mesh:pw@db/mesh
+    session_failover: standby
+    session_sweep_seconds: 10
+`,
+		},
+		{
+			name: "standby over a file store is rejected (paused-holder lock steal)",
+			body: `
+backends:
+  - name: fs
+    port: 9101
+    stdio: ["echo"]
+    resumable: true
+    session_store: ./sessions
+    session_failover: standby
+`,
+			wantErr: "requires a PostgreSQL session_store",
+		},
+		{
+			name: "off never requires the store plumbing",
+			body: `
+backends:
+  - name: fs
+    port: 9101
+    stdio: ["echo"]
+    session_failover: "off"
+`,
+		},
+		{
+			name: "standby without resumable/store is rejected",
+			body: `
+backends:
+  - name: fs
+    port: 9101
+    stdio: ["echo"]
+    session_failover: standby
+`,
+			wantErr: "requires resumable: true and a session_store",
+		},
+		{
+			name: "unknown mode is rejected",
+			body: `
+backends:
+  - name: fs
+    port: 9101
+    stdio: ["echo"]
+    resumable: true
+    session_store: ./sessions
+    session_failover: primary
+`,
+			wantErr: "not one of standby|off",
+		},
+		{
+			name: "sweep interval without standby is rejected",
+			body: `
+backends:
+  - name: fs
+    port: 9101
+    stdio: ["echo"]
+    resumable: true
+    session_store: ./sessions
+    session_sweep_seconds: 10
+`,
+			wantErr: "requires session_failover: standby",
+		},
+		{
+			name: "sweep interval below the floor is rejected",
+			body: `
+backends:
+  - name: fs
+    port: 9101
+    stdio: ["echo"]
+    resumable: true
+    session_store: postgres://mesh:pw@db/mesh
+    session_failover: standby
+    session_sweep_seconds: 2
+`,
+			wantErr: "at least 5",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := writeAndLoad(t, c.body)
+			if c.wantErr == "" {
+				if err != nil {
+					t.Fatalf("expected load to succeed, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", c.wantErr, err)
+			}
+		})
+	}
+}
+
 func writeAndLoad(t *testing.T, body string) error {
 	t.Helper()
 	f := t.TempDir() + "/config.yaml"

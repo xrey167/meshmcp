@@ -42,7 +42,10 @@ func (s *Store) casLease(id, owner string, expectedGen uint64, ttl time.Duration
 		if expectedGen != 0 {
 			return session.Lease{}, false, nil
 		}
-		payload, err := json.Marshal(session.PersistedSession{ID: id, Owner: owner, Generation: 1, LeaseExpiry: exp.UnixNano()})
+		payload, err := json.Marshal(session.PersistedSession{
+			ID: id, Owner: owner, Generation: 1, LeaseExpiry: exp.UnixNano(),
+			SchemaVersion: session.SessionSchemaVersion, // mirror FileStore's write stamp
+		})
 		if err != nil {
 			return session.Lease{}, false, err
 		}
@@ -128,6 +131,7 @@ func (s *Store) SaveIfOwned(ps session.PersistedSession, owner string, gen uint6
 	// longer hold the lease. lease_expiry is untouched — the caller cannot
 	// change lease fields via save.
 	ps.Owner, ps.Generation = owner, gen
+	ps.SchemaVersion = session.SessionSchemaVersion // mirror FileStore's write stamp
 	payload, err := json.Marshal(ps)
 	if err != nil {
 		return false, err
