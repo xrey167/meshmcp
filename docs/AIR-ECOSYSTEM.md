@@ -93,6 +93,26 @@ Air Home now turns the Presence directory into one coherent action surface:
 - Discovery still grants nothing: the resolved destination independently
   applies its mesh ACL, policy, rate limits, and audit controls.
 
+### What Air Node deliberately does not host
+
+Two services stay out of `air node` by decision, not omission:
+
+- **Approvals.** The co-sign approver serves the *gateway's* pending-approval
+  store: the gateway parks a held call in its cosign store and the approver
+  resolves entries in that same store. Hosting the approver inside a remote
+  `air node` would either split that state (approvals resolved on a device the
+  gateway cannot see) or require replicating the pending store across hosts —
+  both weaken the one-place, auditable approval story. The supported shape
+  stays: `meshmcp approvals` runs gateway-colocated where the store lives, and
+  any device (including a node) reaches it over the mesh as an approver
+  *client* — the phone taps, the gateway's store records.
+- **Steer.** A steer inbox belongs to the runtime that executes the steer. A
+  node hosting a steer port would accept envelopes on behalf of some other
+  local process and forward them — inserting a hop that makes "who received
+  this steer" ambiguous. An agent that wants to be steerable embeds the
+  presence client and its own inbox (the `agent` command shows the shape); the
+  node's card then advertises the agent's own service, not a proxy.
+
 ### Trust rules
 
 - A public key is kept in full internally and shortened only while rendering.
@@ -155,7 +175,7 @@ export contracts exist; it is not required for v1's explicit application continu
 | Phase | Deliverable | Depends on |
 |---|---|---|
 | **1 · Nearby** | Presence registry, Activity cards, resolver, CLI/Home/web/MCP views. | Existing Air control endpoint and mesh identity. |
-| **2 · Air Node** | **First slice shipped:** `air node --inbox-port <p> --inbox-dir <d> --inbox-allow <acl>` hosts the drop/push inbox (with `drop.complete.v1`) on the node's own identity and announces it automatically — the listener is up before the card advertises it, and the sender ACL is required (deny-by-default). `--ring-port` likewise hosts the rate-limited ring receiver, and `--screen-port`/`--cast-port` host the bounded per-sender frame receivers (each with its required `-allow` ACL and, for frame services, a `-dir`). Approvals and steer hosting remain separate processes for now. | Nearby service contracts. |
+| **2 · Air Node** | **First slice shipped:** `air node --inbox-port <p> --inbox-dir <d> --inbox-allow <acl>` hosts the drop/push inbox (with `drop.complete.v1`) on the node's own identity and announces it automatically — the listener is up before the card advertises it, and the sender ACL is required (deny-by-default). `--ring-port` likewise hosts the rate-limited ring receiver, and `--screen-port`/`--cast-port` host the bounded per-sender frame receivers (each with its required `-allow` ACL and, for frame services, a `-dir`). Approvals and steer hosting are **deliberately not hosted** — see "What Air Node deliberately does not host" below. | Nearby service contracts. |
 | **3 · Universal addressing** | **Shipped:** Push, Drop, Ring, Cast, and Screen accept `name`, `fqdn`, or full `pubkey` plus the required service kind; `air steer --to <node>` binds to the single live session carrying the node's transport-stamped public key (zero or several matches fail closed); raw `host:port` remains compatible. Resolved Send across web, CLI, and assistant surfaces additionally requires `drop.complete.v1` and returns one receiver-confirmed Action Result. | Nearby resolver + session `peer_key`. |
 | **4 · Context Capsule + Handoff v1** | Shipped bounded work summary, content references, exact-target seal, explicit accept/decline, governed continuation, and durable delivery receipts. | Existing Air Handoff CLI, mesh identity, and destination tool policy. |
 | **5 · Transactional Handoff v2** | Prepare → accept → ready → commit/abort, checkpoint adapters, single-use grants, fencing, recovery tests, and a Home action sheet. | Context Capsule v1, durable Activity identity, and runtime checkpoint support. |
