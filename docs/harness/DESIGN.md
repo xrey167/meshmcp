@@ -70,8 +70,10 @@ run.
 - **Providers** (`harness/provider/`): one `Provider` interface; `Mock`
   (deterministic, the default so headless runs execute), `CLI` (drives
   Claude/Codex/Gemini as subprocesses, key from the broker via `KeySource`),
-  and a `Registry` fallback chain resolving a model class to the first available
-  provider.
+  `MCPProvider` (reaches a model exposed as an MCP tool over a dialed
+  connection — a mesh dial in production, so a remote/cross-org provider is
+  reached via federation with transport-bound identity), and a `Registry`
+  fallback chain resolving a model class to the first available provider.
 - **Sandboxes** (`harness/sandbox/`): `local`, real git `worktree` isolation,
   and fail-closed `Stub`s for tmux/docker/ssh/openshell (an unavailable
   isolation backend never degrades to host execution). `AtLeast` ensures a
@@ -146,10 +148,14 @@ the gateway ingress with channels, DM pairing, and session slash-commands; the
 `harness` and `gateway` CLI verbs; insight adaptive-tuning
 (profile→recommend→simulate→apply).
 
+The orchestrator dark service now serves over the mesh (`harness serve
+--listen`, mirroring `cmdOrchestrate`'s accept loop) as well as stdio, and remote
+providers are reachable over MCP (`MCPProvider`) — closing the two headline
+wiring gaps.
+
 **Deferred (wiring, not design):** live provider CLIs require the binaries +
 broker keys; LSP/AST/browser/canvas/nodes/cron live backends (Phase 2/4);
-`control.NetBirdIssuer`-backed minter for real mesh worker keys (Phase 3);
-mesh-transport serving of the dark service (`harness serve --listen`); the
+`control.NetBirdIssuer`-backed minter for real mesh worker keys (Phase 3); the
 non-webchat channel transports (Phase 4 live wiring); Live Canvas / voice
 surfaces. Every deferred tool/channel is still *registered and governed* — a call
 passes the firewall and is audited, and it fails closed rather than silently
