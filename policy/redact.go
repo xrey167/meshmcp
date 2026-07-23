@@ -53,6 +53,23 @@ func (r *Redactor) Add(vals ...[]byte) {
 	}
 }
 
+// Len reports how many distinct injected values the redactor holds. The
+// Streamable-HTTP enforcer uses it to bound a per-peer redactor: an injection
+// that would exceed the cap is DENIED (a value we could not remember could not
+// be scrubbed from responses — refuse to inject rather than fail open).
+func (r *Redactor) Len() int {
+	if r == nil {
+		return 0
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.vals)
+}
+
+// Active reports whether the redactor has any values to scrub (exported for
+// the HTTP response-rewrite path's fast bypass).
+func (r *Redactor) Active() bool { return r.active() }
+
 // active reports whether the redactor has any values to scrub (fast path).
 func (r *Redactor) active() bool {
 	if r == nil {

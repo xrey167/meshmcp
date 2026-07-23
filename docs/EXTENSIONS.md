@@ -97,8 +97,10 @@ backends:
         - { peers: ["*"], tools: ["delete_all"], allow: false }  # capability can't override
 ```
 
-Validation rules (enforced at load): capabilities are stdio-only, need at least
-one `trusted_public_keys` entry, and with `required: false` need a
+Validation rules (enforced at load): capabilities work on stdio, http, and
+remote backends (the presented token is stripped from the body before it
+reaches the backend on every transport), need at least one
+`trusted_public_keys` entry, and with `required: false` need a
 deny-by-default policy (a capability only upgrades a policy-default call, so
 there must be a policy for it to upgrade).
 

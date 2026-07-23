@@ -203,26 +203,20 @@ func cmdServe(args []string) error {
 		}
 		log.Printf("backend %q: %s on mesh port %d (allow: %s%s)", b.Name, b.kind(), b.Port, allow, policyNote)
 
-		// Resolve the audit sink for any policy-bearing backend (stdio OR http):
-		// prefer the gateway-wide shared ledger, else a per-backend sink.
-		var audit *policy.AuditLog
-		if b.Policy != nil || b.HTTP == "" {
-			audit = sharedAudit
-			if audit == nil || b.Policy == nil {
-				var err error
-				audit, err = auditSink(b)
-				if err != nil {
-					close(shutdown)
-					for _, l := range listeners {
-						l.Close()
-					}
-					wg.Wait()
-					return err
-				}
-				if audit != nil {
-					auditLogs = append(auditLogs, audit)
-				}
+		// Resolve the audit sink for any policy- or capability-bearing backend
+		// (stdio, http, or remote): prefer the gateway-wide shared ledger, else a
+		// per-backend sink.
+		audit, ownAudit, err := resolveBackendAudit(b, sharedAudit)
+		if err != nil {
+			close(shutdown)
+			for _, l := range listeners {
+				l.Close()
 			}
+			wg.Wait()
+			return err
+		}
+		if ownAudit {
+			auditLogs = append(auditLogs, audit)
 		}
 
 		// stdio backends run through the byte-stream Filter; HTTP and remote
@@ -235,7 +229,7 @@ func cmdServe(args []string) error {
 			if eng != nil {
 				engines[b.Name] = eng
 			}
-		} else if b.Policy != nil {
+		} else if b.Policy != nil || b.Capabilities != nil {
 			var enfErr error
 			httpEnf, enfErr = newHTTPEnforcer(b, audit)
 			if enfErr != nil {
@@ -247,7 +241,11 @@ func cmdServe(args []string) error {
 				return enfErr
 			}
 			engines[b.Name] = httpEnf.eng
-			log.Printf("backend %q: HTTP policy enforcement on (%d rules)", b.Name, len(b.Policy.Rules))
+			if b.Policy != nil {
+				log.Printf("backend %q: HTTP policy enforcement on (%d rules)", b.Name, len(b.Policy.Rules))
+			} else {
+				log.Printf("backend %q: HTTP capability enforcement on (deny-by-default engine)", b.Name)
+			}
 		}
 
 		// A remote backend's OAuth/DPoP client is built once at startup; a
@@ -817,9 +815,32 @@ func buildTracer(cfg *TraceConfig) (*policy.Tracer, error) {
 	}, policy.TraceOptions{Payloads: cfg.Payloads, MaxBytes: cfg.MaxBytes}), nil
 }
 
-// auditSink opens the audit destination for a policy-enabled backend.
-// A configured file that cannot be opened is a hard error: an audit sink
-// is a security control, not best-effort.
+// resolveBackendAudit picks the audit destination for one backend: the
+// gateway-wide shared ledger when configured, else the backend's own sink
+// (auditSink). A capability decision is an authorization exactly like a policy
+// decision, so a capabilities-only backend (capabilities with no policy) must
+// land its decisions in a ledger too — never silently discard a configured
+// shared ledger or per-backend audit_log. A backend with neither a policy nor
+// capabilities has no enforcement engine and gets no sink. ownAudit=true means
+// the caller owns the returned sink (must track and flush it); the shared
+// ledger is registered and flushed once, at startup.
+func resolveBackendAudit(b *Backend, shared *policy.AuditLog) (audit *policy.AuditLog, ownAudit bool, err error) {
+	if b.Policy == nil && b.Capabilities == nil {
+		return nil, false, nil
+	}
+	if shared != nil {
+		return shared, false, nil
+	}
+	a, err := auditSink(b)
+	if err != nil {
+		return nil, false, err
+	}
+	return a, a != nil, nil
+}
+
+// auditSink opens the audit destination for a policy- or capability-bearing
+// backend. A configured file that cannot be opened is a hard error: an audit
+// sink is a security control, not best-effort.
 // seedAuditFromExisting verifies an existing audit log and returns its tail
 // (last sequence + hash) so a restarting gateway continues the SAME chain
 // instead of resetting to seq 1 with a fresh genesis. It refuses to append to a
@@ -993,7 +1014,7 @@ func (m multiAnchor) Anchor(c policy.Checkpoint) error {
 }
 
 func auditSink(b *Backend) (*policy.AuditLog, error) {
-	if b.Policy == nil {
+	if b.Policy == nil && b.Capabilities == nil {
 		return nil, nil
 	}
 	var w io.Writer = os.Stderr
@@ -1122,22 +1143,43 @@ func allowWord(allow bool) string {
 	return "deny"
 }
 
-// serveHTTP reverse-proxies mesh connections to a local HTTP MCP server,
-// enforcing the ACL and stamping the caller's mesh identity onto each
-// request so the backend can do per-agent authorization and audit.
-func serveHTTP(client *embed.Client, b *Backend, ln net.Listener, enf *httpEnforcer) {
+// httpBackendHandler builds the mesh-facing handler for an HTTP backend:
+// ACL → policy enforcement → identity stamping → reverse proxy. identify is
+// injectable (mirroring remoteHandler) so tests can drive it via httptest
+// without a real mesh connection. When the enforcer carries a secrets broker,
+// the proxy also scrubs injected secret values out of responses (JSON and SSE)
+// via ModifyResponse — an unscannable (compressed/oversized) response is
+// refused (502), never forwarded.
+func httpBackendHandler(b *Backend, enf *httpEnforcer, identify func(*http.Request) (pubKey, fqdn string)) http.Handler {
 	checker := b.peerACL()
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(b.httpURL)
 			pr.SetXForwarded()
+			if enf.redactsResponses() {
+				// The redactor must see backend bytes as sent: drop the client's
+				// Accept-Encoding so the transport's own transparent gzip (which
+				// it decodes before ModifyResponse) is the only compression in
+				// play; a backend that compresses anyway is refused there.
+				pr.Out.Header.Del("Accept-Encoding")
+			}
 		},
 		// MCP Streamable HTTP uses SSE; flush every write immediately.
 		FlushInterval: -1,
 	}
+	if enf.redactsResponses() {
+		proxy.ModifyResponse = func(resp *http.Response) error {
+			// The peer key was stamped by the gateway below — never client input.
+			red := enf.responseRedactor(resp.Request.Header.Get("X-Meshmcp-Peer-Key"))
+			if red == nil {
+				return nil
+			}
+			return redactResponse(resp, red)
+		}
+	}
 
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		pubKey, fqdn := peerIdentityStr(client, r.RemoteAddr)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pubKey, fqdn := identify(r)
 		if !checker.allows(pubKey, fqdn) {
 			log.Printf("backend %q: DENIED peer %s (%s)", b.Name, fqdn, r.RemoteAddr)
 			http.Error(w, "forbidden: mesh peer not in backend ACL", http.StatusForbidden)
@@ -1162,6 +1204,14 @@ func serveHTTP(client *embed.Client, b *Backend, ln net.Listener, enf *httpEnfor
 		r.Header.Set("X-Meshmcp-Peer-Key", pubKey)
 		proxy.ServeHTTP(w, r)
 	})
+}
+
+// serveHTTP reverse-proxies mesh connections to a local HTTP MCP server,
+// enforcing the ACL and stamping the caller's mesh identity onto each
+// request so the backend can do per-agent authorization and audit.
+func serveHTTP(client *embed.Client, b *Backend, ln net.Listener, enf *httpEnforcer) {
+	identify := func(r *http.Request) (string, string) { return peerIdentityStr(client, r.RemoteAddr) }
+	handler := httpBackendHandler(b, enf, identify)
 
 	// ReadHeaderTimeout bounds a slow/half-open header dribble (Slowloris)
 	// without a Read/Write timeout that would sever legitimate long-lived SSE

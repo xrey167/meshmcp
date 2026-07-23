@@ -164,7 +164,10 @@ backends:
 			wantErr: "at least one trusted_public_keys",
 		},
 		{
-			name: "capabilities need stdio, not http",
+			// HTTP parity: capabilities are enforced by the httpEnforcer now
+			// (token stripped from the body before the backend sees it), so an
+			// http backend with capabilities loads.
+			name: "capabilities on an http backend: ok",
 			body: `
 backends:
   - name: web
@@ -174,7 +177,6 @@ backends:
       required: true
       trusted_public_keys: ["04f9f6e4dfefca3cb23d93db44427e44e5b90a81661690b15f0ac47847c7796c"]
 `,
-			wantErr: "only valid for stdio",
 		},
 	}
 	for _, c := range cases {

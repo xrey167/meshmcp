@@ -41,7 +41,7 @@ Ready-to-adapt gateway configurations, one per feature, plus the human-in-the-lo
 
 ### Working In This Directory
 - Configs reference the demo backend as `./cmd/mcpserver/mcpserver.exe` and use tool names from `prompt_mcp` (`read_file`, `run_command`, `charge`, `fetch`, …). If a tool is renamed, fix it here too.
-- Cross-field rules enforced by `loadConfig`: capabilities are stdio-only, need ≥1 trusted key, and with `required:false` need a deny-by-default policy; secrets need a policy. Keep examples valid — `meshmcp secrets check --config <f>` parses the whole file.
+- Cross-field rules enforced by `loadConfig`: capabilities work on stdio/http/remote backends, need ≥1 trusted key, and with `required:false` need a deny-by-default policy; secrets need a policy (any transport). DLP, shadow_policy, and router_delegation remain stdio-only. Keep examples valid — `meshmcp secrets check --config <f>` parses the whole file.
 - Placeholder keys use valid-format hex (e.g. all-zero 32-byte) so the file still loads; replace with real `capability keygen` output.
 
 <!-- MANUAL: Any manually added notes below this line are preserved on regeneration -->
