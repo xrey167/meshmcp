@@ -25,7 +25,7 @@ func presentError(err error) {
 		fmt.Fprintln(os.Stderr, dim("  → "+hint))
 	}
 	if logLevel.Level() > slog.LevelDebug {
-		fmt.Fprintln(os.Stderr, dim("  (run with --verbose or MESHMCP_LOG=debug for diagnostic logging)"))
+		fmt.Fprintln(os.Stderr, dim("  "+tr("(run with --verbose or MESHMCP_LOG=debug for diagnostic logging)")))
 	}
 	os.Exit(1)
 }

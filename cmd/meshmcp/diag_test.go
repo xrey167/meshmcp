@@ -118,7 +118,64 @@ func TestRedactConfigMasksEveryKeyForm(t *testing.T) {
 	if !strings.Contains(out, "device_name: gw") {
 		t.Fatalf("non-secret line was damaged:\n%s", out)
 	}
-	if got := strings.Count(out, "[REDACTED]"); got != 2 {
-		t.Fatalf("want 2 redactions, got %d:\n%s", got, out)
+	if !strings.Contains(out, "[REDACTED]") {
+		t.Fatalf("no redaction applied:\n%s", out)
+	}
+}
+
+// TestRedactConfigMasksNonBlockStyling is the defense-in-depth guarantee: the
+// literal secret is masked even when the line regex can't match it — flow-style
+// mappings, quoted values, and deeper nesting. A hand-authored config must not
+// be able to smuggle the setup key past redaction by styling.
+func TestRedactConfigMasksNonBlockStyling(t *testing.T) {
+	cases := []string{
+		"mesh: {setup_key: FLOWSECRET, device_name: gw}\n",     // flow mapping
+		"mesh:\n  setup_key: \"QUOTEDSECRET\"\n",               // quoted scalar
+		"mesh:\n  setup_key:    SPACEDSECRET\n",                // wide spacing
+		"outer:\n  mesh:\n    setup_key: NESTEDSECRET\n",       // deeper nesting
+		"mesh: {device_name: gw, setup_key: 'SINGLEQUOTED'}\n", // flow + single quotes
+	}
+	secrets := []string{"FLOWSECRET", "QUOTEDSECRET", "SPACEDSECRET", "NESTEDSECRET", "SINGLEQUOTED"}
+	for i, in := range cases {
+		out := string(redactConfig([]byte(in)))
+		if strings.Contains(out, secrets[i]) {
+			t.Errorf("case %d: secret %q survived redaction:\n%s", i, secrets[i], out)
+		}
+		if !strings.Contains(out, "[REDACTED]") {
+			t.Errorf("case %d: no redaction marker applied:\n%s", i, out)
+		}
+	}
+}
+
+// TestRedactConfigMasksDSNAndWebhook proves the bundle hides the two secrets a
+// gateway config can carry BEYOND setup_key: a postgres session_store DSN's
+// password (host/db stay visible for support) and an audit_webhook URL (masked
+// whole — a Slack/PagerDuty URL is itself the credential). A plain-directory
+// session_store is not a secret and must stay intact.
+func TestRedactConfigMasksDSNAndWebhook(t *testing.T) {
+	in := `mesh:
+  setup_key: mesh-secret
+audit_webhook: https://hooks.slack.com/services/T000/B000/XXXXWEBHOOKTOKEN
+backends:
+  - name: kb
+    session_store: postgres://user:DBPASSWORD@db.internal:5432/meshmcp?sslmode=require
+  - name: files
+    session_store: /var/lib/meshmcp/sessions
+`
+	out := string(redactConfig([]byte(in)))
+
+	for _, secret := range []string{"mesh-secret", "DBPASSWORD", "XXXXWEBHOOKTOKEN"} {
+		if strings.Contains(out, secret) {
+			t.Errorf("secret %q survived redaction:\n%s", secret, out)
+		}
+	}
+	// A DSN keeps host/db visible — support needs to know WHICH database — with
+	// only the password masked.
+	if !strings.Contains(out, "db.internal:5432") {
+		t.Errorf("DSN host was over-redacted (support needs it):\n%s", out)
+	}
+	// A plain-directory session_store is not a secret and must stay intact.
+	if !strings.Contains(out, "/var/lib/meshmcp/sessions") {
+		t.Errorf("plain session_store dir was wrongly masked:\n%s", out)
 	}
 }

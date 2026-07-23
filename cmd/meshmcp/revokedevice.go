@@ -206,6 +206,16 @@ func cmdRevokeDevice(args []string) error {
 		skip("operator surface", "identity is not an operator and not in control.allow")
 	}
 
+	// control.allow may also carry FQDN-glob patterns (e.g. "laptop-*.mesh").
+	// This command is keyed to the crypto identity, not a name, and never edits a
+	// glob — one glob can cover many devices, so auto-removing it would silently
+	// over-revoke. But a lost device whose FQDN matches such a pattern could still
+	// reach the control endpoint if the mesh deregister below is skipped, so the
+	// residual patterns are surfaced as a manual next step rather than a silent gap.
+	if fqdns := residualControlFQDNs(cfg); len(fqdns) > 0 {
+		skip("control.allow fqdn rules", "left in place (a glob can cover other devices) — verify none matches this device: "+strings.Join(fqdns, ", "))
+	}
+
 	// 5) Management plane: deregister the peer from the NetBird account. Only
 	// the control node holds the PAT, so elsewhere this is a named next step.
 	token := *nbToken
@@ -246,6 +256,24 @@ func cmdRevokeDevice(args []string) error {
 	fmt.Println(okLine("identity revoked on every reachable surface"))
 	fmt.Println(dim("  skipped rows above name the surfaces this host could not reach — finish them where noted."))
 	return nil
+}
+
+// residualControlFQDNs returns the non-pubkey (FQDN-glob) entries left in
+// control.allow after a pubkey-keyed revocation. revoke-device deliberately does
+// not edit these (a glob can cover many devices; the command has only the crypto
+// identity, not a name), but surfaces them so a lost device whose FQDN matches a
+// glob cannot silently retain control-endpoint access.
+func residualControlFQDNs(cfg *Config) []string {
+	if cfg == nil || cfg.Control == nil {
+		return nil
+	}
+	var out []string
+	for _, p := range cfg.Control.Allow {
+		if !strings.HasPrefix(strings.TrimSpace(p), "pubkey:") {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // dropIdentityFromConfig removes pubKey from the config's operators list and

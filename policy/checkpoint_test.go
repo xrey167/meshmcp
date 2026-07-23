@@ -214,7 +214,7 @@ func TestCheckpointerAnchorFailureDoesNotUncommit(t *testing.T) {
 
 // TestFileAnchorAppendsWitnessRecord: the anchor line commits to the
 // checkpoint's own hash, chain head, ordinal, and time — enough for a witness
-// to detect a later rollback.
+// to detect a later rollback — and self-links to the previous anchor line.
 func TestFileAnchorAppendsWitnessRecord(t *testing.T) {
 	signer := mustSigner(t)
 	cp := signer.sign(Checkpoint{Version: 1, Seq: 3, FromSeq: 5, ToSeq: 8, Count: 4,
@@ -228,13 +228,78 @@ func TestFileAnchorAppendsWitnessRecord(t *testing.T) {
 	if !strings.HasSuffix(line, "\n") {
 		t.Fatal("anchor record must be newline-terminated (append-only JSONL)")
 	}
-	var rec map[string]string
+	var rec AnchorRecord
 	if err := json.Unmarshal([]byte(line), &rec); err != nil {
 		t.Fatalf("anchor record must be JSON: %v", err)
 	}
-	if rec["checkpoint"] != cp.Hash() || rec["chain_head"] != "bb" ||
-		rec["checkpoint_seq"] != "3" || rec["time"] != "T" {
-		t.Fatalf("anchor record fields wrong: %v", rec)
+	if rec.Checkpoint != cp.Hash() || rec.ChainHead != "bb" ||
+		rec.Seq != 3 || rec.Time != "T" || rec.V != 1 {
+		t.Fatalf("anchor record fields wrong: %+v", rec)
+	}
+	if rec.PrevAnchor != "" {
+		t.Fatalf("first anchor record must have an empty prev_anchor, got %q", rec.PrevAnchor)
+	}
+
+	// A second record links to the first line's hash.
+	cp2 := signer.sign(Checkpoint{Version: 1, Seq: 4, FromSeq: 9, ToSeq: 12, Count: 4,
+		MerkleRoot: "dd", ChainHead: "ee", PrevCP: cp.Hash(), Time: "T"})
+	if err := fa.Anchor(cp2); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	var rec2 AnchorRecord
+	if err := json.Unmarshal([]byte(lines[1]), &rec2); err != nil {
+		t.Fatal(err)
+	}
+	if rec2.PrevAnchor != AnchorLineHash([]byte(lines[0])) {
+		t.Fatalf("second anchor record must link to the first line's hash: %+v", rec2)
+	}
+}
+
+// TestFileAnchorLinkageAcrossRestart: seeding a fresh FileAnchor from the
+// existing file's last-line hash (via ReadAnchorRecords) continues one
+// self-linked witness chain across restarts.
+func TestFileAnchorLinkageAcrossRestart(t *testing.T) {
+	signer := mustSigner(t)
+	var buf bytes.Buffer
+	fa := NewFileAnchor(&buf, "")
+	cp1 := signer.sign(Checkpoint{Version: 1, Seq: 1, FromSeq: 1, ToSeq: 2, Count: 2, MerkleRoot: "aa", ChainHead: "bb", Time: "T"})
+	if err := fa.Anchor(cp1); err != nil {
+		t.Fatal(err)
+	}
+
+	// "Restart": re-read the file, seed a new FileAnchor from the last line.
+	recs, lastHash, err := ReadAnchorRecords(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 1 || recs[0].Seq != 1 || recs[0].Checkpoint != cp1.Hash() {
+		t.Fatalf("re-read records wrong: %+v", recs)
+	}
+	fa2 := NewFileAnchor(&buf, lastHash)
+	cp2 := signer.sign(Checkpoint{Version: 1, Seq: 2, FromSeq: 3, ToSeq: 4, Count: 2, MerkleRoot: "cc", ChainHead: "dd", PrevCP: cp1.Hash(), Time: "T"})
+	if err := fa2.Anchor(cp2); err != nil {
+		t.Fatal(err)
+	}
+
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 anchor lines, got %d", len(lines))
+	}
+	var rec2 AnchorRecord
+	if err := json.Unmarshal([]byte(lines[1]), &rec2); err != nil {
+		t.Fatal(err)
+	}
+	if rec2.PrevAnchor != AnchorLineHash([]byte(lines[0])) {
+		t.Fatal("post-restart record must link to the pre-restart line")
+	}
+	// And the linkage verifies end to end.
+	res, err := VerifyAnchors(bytes.NewReader(buf.Bytes()), map[int]Checkpoint{1: cp1, 2: cp2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != AnchorStatusAnchored || res.Matched != 2 {
+		t.Fatalf("restart-continued anchor chain must verify anchored: %+v", res)
 	}
 }
 

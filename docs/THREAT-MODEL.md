@@ -301,8 +301,29 @@ against a pinned public key for the sealed portion. It does **not** prove that
 every real-world action was observed, and gateway signatures are **not** caller
 non-repudiation (the gateway signs, not the caller). A key-holding insider who
 controls both the log and its local checkpoints can roll both back together;
-defense against that requires **external anchoring** (the `Anchor` /
-`FileAnchor` interface exists; a witnessed external anchor is Labs).
+defense against that requires **external anchoring**, which is now implemented:
+every signed checkpoint can be witnessed outside the gateway — appended to a
+self-linked local anchor file (`audit_anchor`) and/or POSTed to a peer
+gateway's witness endpoint (`audit_anchor_url` → `meshmcp control
+--anchor-witness`, which pins the signer key, verifies the signature, and
+records checkpoints append-only with per-signer dedup). `meshmcp audit verify
+--anchors` cross-checks the checkpoints against the witness and exits non-zero
+on disagreement **even when the chain verifies sealed internally** — the
+rollback case signatures alone cannot catch. The four verification states are
+unchanged; the anchor verdict (`anchored` / `anchor_partial` /
+`anchor_mismatch`) is orthogonal, added evidence.
+
+**Witness-trust assumption, stated plainly:** anchoring converts "trust the
+gateway host" into "trust that the gateway host and the witness do not collude
+(or are not controlled by the same insider)." A witness on the same host, or
+writable by the same insider, adds nothing — run it on an independently
+administered peer. Peer delivery is asynchronous and best-effort — a slow or
+unreachable witness delays witnessing but never blocks a checkpoint or an
+audited call — so checkpoints not yet witnessed (`anchor_partial`, e.g. during
+a witness outage or in the short delivery window) remain rollable until the
+witness records them or `meshmcp audit anchor` replays them; the verifier
+reports that window honestly rather than hiding it. RFC 3161 timestamping
+remains future work behind the same `Anchor` interface.
 
 ## Delivery vs. execution guarantees (summary)
 

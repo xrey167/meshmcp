@@ -37,6 +37,8 @@ func cmdControl(args []string) error {
 	enrollAudit := fs.String("enroll-audit", "", "tamper-evident enrollment audit log (JSONL)")
 	aclPath := fs.String("acl", "", "operator ACL file (YAML: grants: {<wg-pubkey>: [roles]}) — REQUIRED for privileged routes")
 	controlAudit := fs.String("control-audit", "", "audit log for privileged control-plane actions (JSONL; defaults to stderr)")
+	anchorWitness := fs.String("anchor-witness", "", "append-only anchor file: accept peer gateways' signed audit checkpoints on /v1/anchor (requires --anchor-signers)")
+	anchorSigners := fs.String("anchor-signers", "", "comma-separated hex Ed25519 audit-signing PUBLIC keys pinned as accepted /v1/anchor signers")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -124,10 +126,33 @@ func cmdControl(args []string) error {
 		}
 	}
 
+	// Anchor witness: record peer gateways' signed audit checkpoints in an
+	// append-only, self-linked file so an insider on the peer cannot roll the
+	// log and checkpoints back together undetected. Fail closed: a witness with
+	// no pinned signers is refused (NewAnchorWitness errors on an empty list),
+	// and enabling it without one is a startup error rather than a silent no-op.
+	if *anchorWitness != "" {
+		var signers []string
+		for _, s := range strings.Split(*anchorSigners, ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				signers = append(signers, s)
+			}
+		}
+		wt, err := control.NewAnchorWitness(*anchorWitness, signers)
+		if err != nil {
+			return err
+		}
+		defer wt.Close()
+		srv.Witness = wt
+		log.Printf("anchor witness: recording checkpoints from %d pinned signer(s) to %s", len(signers), *anchorWitness)
+	} else if *anchorSigners != "" {
+		return fmt.Errorf("--anchor-signers requires --anchor-witness <file>")
+	}
+
 	// Fail closed at startup: if any privileged capability is exposed, an ACL is
 	// mandatory. A control plane that serves enrollment/registry/policy without
 	// an authorizer would authorize every reachable mesh peer.
-	if (srv.Reg != nil || srv.Policies != nil || srv.Enroll != nil) && srv.Auth == nil {
+	if (srv.Reg != nil || srv.Policies != nil || srv.Enroll != nil || srv.Witness != nil) && srv.Auth == nil {
 		return fmt.Errorf("control plane exposes privileged routes but no --acl was provided: refusing to start (WireGuard membership is not authorization). Provide --acl <file> granting roles per WireGuard public key")
 	}
 

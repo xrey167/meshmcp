@@ -38,7 +38,10 @@ var shortDay = []string{"sun", "mon", "tue", "wed", "thu", "fri", "sat"}
 // egressHints classify a tool name as likely external egress (heuristic).
 var egressHints = []string{"post_", "email_", "http_", "fetch", "upload_", "send_", "webhook", "sms_", "external", "publish_", "slack_"}
 
-func looksEgress(tool string) bool {
+// LooksEgress reports whether a tool name looks like external egress per
+// egressHints. Exported so config lint reuses the same heuristic the
+// recommender and detector apply.
+func LooksEgress(tool string) bool {
 	for _, h := range egressHints {
 		if strings.HasPrefix(tool, h) || tool == strings.TrimSuffix(h, "_") {
 			return true
@@ -46,6 +49,8 @@ func looksEgress(tool string) bool {
 	}
 	return false
 }
+
+func looksEgress(tool string) bool { return LooksEgress(tool) }
 
 // Recommend synthesizes a least-privilege policy from an observed corpus: one
 // allow rule per identity granting exactly the tools it successfully used, a

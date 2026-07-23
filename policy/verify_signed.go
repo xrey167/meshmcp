@@ -21,6 +21,14 @@ type SignedVerifyResult struct {
 	Status         string `json:"status"`          // "invalid" | "untrusted_key" | "unsealed" | "sealed"
 	Reason         string `json:"reason,omitempty"`
 	SignerPub      string `json:"signer_pubkey,omitempty"`
+
+	// Anchor evidence, filled by the caller from VerifyAnchors when an external
+	// witness file is supplied. These fields are ORTHOGONAL to Status: anchoring
+	// adds evidence about witness agreement and never remaps the four chain
+	// states above. All empty when no anchor source was given.
+	AnchorStatus        string `json:"anchor_status,omitempty"` // "anchored" | "anchor_partial" | "anchor_mismatch"
+	AnchorReason        string `json:"anchor_reason,omitempty"`
+	AnchoredCheckpoints int    `json:"anchored_checkpoints,omitempty"`
 }
 
 // Verification status values, distinguishing the four outcomes a signed audit

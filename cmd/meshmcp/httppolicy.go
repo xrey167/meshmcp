@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"time"
 
@@ -31,11 +32,13 @@ type httpEnforcer struct {
 
 // newHTTPEnforcer builds the enforcer for an HTTP backend that declares a
 // policy. audit may be the gateway-wide shared ledger or a per-backend sink.
-func newHTTPEnforcer(b *Backend, audit *policy.AuditLog) *httpEnforcer {
+// It errors on a security-config problem (an unloadable approval signing key)
+// rather than silently downgrading to the weaker ambient co-sign path.
+func newHTTPEnforcer(b *Backend, audit *policy.AuditLog) (*httpEnforcer, error) {
 	var cosign policy.CosignStore
 	var pending *policy.FilePending
+	ttl := time.Duration(b.CosignTTLSeconds) * time.Second
 	if b.CosignStore != "" {
-		ttl := time.Duration(b.CosignTTLSeconds) * time.Second
 		cosign = &policy.FileCosign{Dir: b.CosignStore, TTL: ttl}
 		pending = &policy.FilePending{Dir: b.CosignStore, TTL: ttl}
 	}
@@ -43,7 +46,20 @@ func newHTTPEnforcer(b *Backend, audit *policy.AuditLog) *httpEnforcer {
 	if len(b.groups) > 0 {
 		eng.SetGroupResolver(policy.StaticGroups(b.groups))
 	}
-	return &httpEnforcer{eng: eng, audit: audit, pending: pending, backend: b.Name, trustDomain: b.trustDomain}
+	// Request-bound approvals, at parity with the stdio path (backendFactory):
+	// with a shared approval signing key configured, a require_cosign call is
+	// released only by a signed, single-use token bound to its exact arguments —
+	// and a configured-but-unreadable key is a hard startup error, never a
+	// silent fall-back to the ambient (peer, tool) grant.
+	if b.ApprovalSigningKey != "" {
+		signer, err := policy.LoadSigner(b.ApprovalSigningKey)
+		if err != nil {
+			return nil, fmt.Errorf("backend %q: approval_signing_key %s: %w", b.Name, b.ApprovalSigningKey, err)
+		}
+		eng.SetRequestApprovals(policy.NewFileApprovalStore(b.CosignStore, ttl, signer))
+		log.Printf("backend %q: request-bound approvals enabled over HTTP (approver key %s…); ambient co-sign no longer releases held calls", b.Name, signer.PubKeyHex()[:16])
+	}
+	return &httpEnforcer{eng: eng, audit: audit, pending: pending, backend: b.Name, trustDomain: b.trustDomain}, nil
 }
 
 // decide authorizes the request. It returns ok=true (and possibly a rewound

@@ -1,14 +1,137 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"path/filepath"
+	"sort"
+	"sync"
 
 	"github.com/xrey167/meshmcp/policy"
 )
+
+// auditTailer serves live summaries of a growing audit file WITHOUT re-reading
+// the whole file on every poll (S21): it remembers the byte offset of the last
+// complete line it folded into a policy.Accumulator and, on each call, reads
+// only the bytes appended since. The first call pays one full scan; steady
+// state is O(new records) per poll instead of O(file) every 2 seconds.
+//
+// Rotation-aware (S51): whenever it (re)starts from scratch — first poll, or
+// the active file shrank because RotatingFileSink sealed it and reopened a
+// fresh one — it first folds every sealed archive (<path>.<UTC timestamp>, in
+// name order = chronological) and only then tails the active segment. The
+// summary therefore keeps whole-ledger totals and a chain verdict seeded from
+// genesis; without this, a rescan of the active segment alone would start at a
+// mid-chain seq and report a healthy ledger as tampered. Safe for concurrent
+// polls.
+type auditTailer struct {
+	mu        sync.Mutex
+	path      string
+	recentCap int
+	acc       *policy.Accumulator
+	off       int64 // bytes of the ACTIVE file folded so far
+	primed    bool  // archives folded for the current accumulator generation
+}
+
+func newAuditTailer(path string, recentCap int) *auditTailer {
+	return &auditTailer{path: path, recentCap: recentCap, acc: policy.NewAccumulator(recentCap)}
+}
+
+// foldArchives folds every sealed rotation archive of t.path, oldest first,
+// into the accumulator. Archives are complete (fsync+close before rename), so
+// every line is folded — there is no partial tail to defer.
+func (t *auditTailer) foldArchives() error {
+	matches, err := filepath.Glob(t.path + ".*")
+	if err != nil || len(matches) == 0 {
+		return err
+	}
+	var archives []string
+	for _, m := range matches {
+		if auditArchivePattern.MatchString(m) {
+			archives = append(archives, m)
+		}
+	}
+	sort.Strings(archives) // timestamp names are lexicographically chronological
+	for _, a := range archives {
+		if err := t.foldWholeFile(a); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (t *auditTailer) foldWholeFile(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	r := bufio.NewReaderSize(f, 64*1024)
+	for {
+		line, err := r.ReadBytes('\n')
+		if len(line) > 0 {
+			t.acc.AddLine(line)
+		}
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
+}
+
+// summary folds any newly appended complete lines and snapshots the rollups.
+// A partially written trailing line (a record mid-write) is left for the next
+// poll rather than being misread as corruption.
+func (t *auditTailer) summary() (policy.Summary, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	f, err := os.Open(t.path)
+	if err != nil {
+		return policy.Summary{}, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return policy.Summary{}, err
+	}
+	if st.Size() < t.off {
+		// Truncated or rotated underneath us: start over (one full rescan,
+		// archives included, then back to incremental tailing).
+		t.acc = policy.NewAccumulator(t.recentCap)
+		t.off = 0
+		t.primed = false
+	}
+	if !t.primed {
+		if err := t.foldArchives(); err != nil {
+			return policy.Summary{}, err
+		}
+		t.primed = true
+	}
+	if _, err := f.Seek(t.off, io.SeekStart); err != nil {
+		return policy.Summary{}, err
+	}
+	r := bufio.NewReaderSize(f, 64*1024)
+	for {
+		line, err := r.ReadBytes('\n')
+		if err == nil {
+			t.acc.AddLine(line)
+			t.off += int64(len(line))
+			continue
+		}
+		if err == io.EOF {
+			break // trailing partial line (if any) waits for the next poll
+		}
+		return policy.Summary{}, err
+	}
+	return t.acc.Summary(), nil
+}
 
 // cmdDash serves the mesh control dashboard: a live, identity-attributed view
 // of the audit log — per-caller call graph, policy hits, and the tamper-chain
@@ -28,16 +151,17 @@ func cmdDash(args []string) error {
 
 	mux := http.NewServeMux()
 	registerAgentOSAssets(mux)
+	// Bounded tailing read (S21): fold only newly appended records per poll
+	// instead of ReadAll-ing the whole ledger every 2 seconds.
+	tail := newAuditTailer(*auditPath, *recent)
 	mux.HandleFunc("/api/summary", func(w http.ResponseWriter, r *http.Request) {
-		f, err := os.Open(*auditPath)
+		sum, err := tail.summary()
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
-			return
-		}
-		defer f.Close()
-		sum, err := policy.Analyze(f, *recent)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			status := http.StatusInternalServerError
+			if os.IsNotExist(err) {
+				status = http.StatusNotFound
+			}
+			http.Error(w, err.Error(), status)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
