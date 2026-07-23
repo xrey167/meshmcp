@@ -13,6 +13,7 @@ import (
 	"io"
 
 	"github.com/xrey167/meshmcp/harness"
+	"github.com/xrey167/meshmcp/harness/skills"
 	"github.com/xrey167/meshmcp/mcp"
 	"github.com/xrey167/meshmcp/policy"
 )
@@ -20,10 +21,11 @@ import (
 // Server registers the governed tool catalog on an mcp.Server, backed by a
 // harness.Engine.
 type Server struct {
-	eng   *harness.Engine
-	mcp   *mcp.Server
-	tasks *taskStore
-	bg    *bgJobs
+	eng    *harness.Engine
+	mcp    *mcp.Server
+	tasks  *taskStore
+	bg     *bgJobs
+	skills *skills.Registry
 
 	// caller is the identity every tool call is authorized as, until transport
 	// identity injection is wired (a full mesh deployment resolves the caller
@@ -39,6 +41,7 @@ func New(eng *harness.Engine, name, version string) *Server {
 		mcp:    mcp.New(name, version),
 		tasks:  newTaskStore(),
 		bg:     newBgJobs(),
+		skills: loadSkills(),
 		caller: harness.Identity{Key: "operator", FQDN: "orchestrator--mcp--0", Role: harness.RoleOrchestrator},
 	}
 	// Governance is a GLOBAL middleware, so no tool — present or future — can be

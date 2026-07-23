@@ -191,6 +191,8 @@ func main() {
 		err = cmdOrchestrate(os.Args[2:])
 	case "harness":
 		err = cmdHarness(os.Args[2:])
+	case "gateway":
+		err = cmdGateway(os.Args[2:])
 	case "graphrag":
 		err = cmdGraphRAG(os.Args[2:])
 	case "control":
