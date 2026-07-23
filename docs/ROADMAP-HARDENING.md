@@ -276,7 +276,7 @@ concentrated here.
 | **S38** | Extract the `AuditSink` / `TraceSink` interfaces (a narrow, single-call-site seam) | `policy/audit.go`, `trace.go`, `filter.go` |
 | **S39** | The `policy.DecisionHook` interface, its composition, and `-race` tests | `policy/engine.go` |
 | **S40** | A subcommand registry (`init()`-populated map) replacing the `main.go` switch | `main.go` |
-| **S41** | An OpenTelemetry / Prometheus metrics exporter plugin | F13 sink + `analyze.go` |
+| **S41** | ✅ A Prometheus metrics exporter — `metrics_listen` serves `/metrics` from an observer `AuditSink` (dependency-free text exposition; metadata-only labels, bounded series). A full OTel/OTLP exporter remains a plugin opportunity on the same seam. | `metricsink.go`, F13 sink |
 | **S42** | A webhook audit-sink plugin (Slack / PagerDuty on deny or cosign) | F13 sink |
 | **S43** | `meshmcp status` with JSON output and per-tool call rates | `policy/analyze.go` |
 | **S44** | Config-driven per-tool `Timeout` / `LimitConcurrency` middleware | `mcp/middleware.go` |

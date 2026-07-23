@@ -112,8 +112,24 @@ func cmdServe(args []string) error {
 			sharedAudit.AddSink(newWebhookSink(cfg.AuditWebhook, !cfg.AuditWebhookAll))
 			log.Printf("audit webhook sink: %s (deny/cosign only=%v)", cfg.AuditWebhook, !cfg.AuditWebhookAll)
 		}
+		if cfg.MetricsListen != "" {
+			sink := newMetricsSink()
+			ln, err := net.Listen("tcp", cfg.MetricsListen)
+			if err != nil {
+				return fmt.Errorf("metrics_listen %s: %w", cfg.MetricsListen, err)
+			}
+			sharedAudit.AddSink(sink)
+			mux := http.NewServeMux()
+			mux.Handle("/metrics", sink)
+			go func() { _ = http.Serve(ln, mux) }()
+			log.Printf("metrics: serving /metrics on %s", cfg.MetricsListen)
+		}
 		auditLogs = append(auditLogs, sharedAudit)
 		log.Printf("shared audit ledger: %s", cfg.AuditLog)
+	} else if cfg.MetricsListen != "" {
+		// The metrics sink observes the shared ledger; without one it would
+		// silently serve empty metrics — refuse instead.
+		return fmt.Errorf("metrics_listen requires audit_log (the metrics sink observes the shared ledger)")
 	}
 
 	// Optional gateway event hooks: publish every policy decision onto the
