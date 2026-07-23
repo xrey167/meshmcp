@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/netbirdio/netbird/client/embed"
@@ -27,7 +28,7 @@ import (
 // presentation verbs.
 //
 //	meshmcp air sessions <control-ip:port>
-//	meshmcp air steer    <control-ip:port> --backend b --session id [--param k=v]
+//	meshmcp air steer    <control-ip:port> (--to node | --backend b --session id) [--param k=v]
 //	meshmcp air launch   --role reader [--nb-config dir] <gateway-ip:port>
 func cmdAir(args []string) error {
 	if len(args) == 0 {
@@ -165,7 +166,7 @@ func airUsage() error {
 	fmt.Fprintln(os.Stderr, "  "+b("air kg")+"          assert|query|neighbors|subgraph|verify|serve  "+dim("the mesh's governed, audited knowledge graph"))
 	fmt.Fprintln(os.Stderr, "  "+b("air database")+"    query|serve|ls                   "+dim("the governed firewall between an agent and a database (SELECT-only, per-table grants, audited)"))
 	fmt.Fprintln(os.Stderr, "  "+b("air sessions")+"    <control-ip:port>                 "+dim("list live sessions on a gateway"))
-	fmt.Fprintln(os.Stderr, "  "+b("air steer")+"       <control-ip:port> --backend b --session id [--param k=v]")
+	fmt.Fprintln(os.Stderr, "  "+b("air steer")+"       <control-ip:port> (--to node | --backend b --session id) [--param k=v]")
 	fmt.Fprintln(os.Stderr, "  "+b("air tasks")+"       <backend-ip:port>                 "+dim("list a backend's async tasks"))
 	fmt.Fprintln(os.Stderr, "  "+b("air task-steer")+"  <backend-ip:port> --task id [--text s | --payload j | --cancel]")
 	fmt.Fprintln(os.Stderr, "  "+b("air agent-steer")+" <agent-ip:port>   --type task|nudge|cancel [--tool t --arg k=v | --text s]")
@@ -268,6 +269,7 @@ func cmdAirSteer(args []string) error {
 	o := meshFlags(fs)
 	backend := fs.String("backend", "", "backend name the session belongs to (from air sessions)")
 	sessionID := fs.String("session", "", "session id to steer")
+	to := fs.String("to", "", "verified Nearby selector (name | fqdn | pubkey): steer the single live session bound to that node's transport identity")
 	method := fs.String("method", "notifications/air/steer", "server->client notification method")
 	params := argFlags{}
 	fs.Var(&params, "param", "steer param key=value (repeatable)")
@@ -275,16 +277,44 @@ func cmdAirSteer(args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: meshmcp air steer [flags] <control-ip:port> --backend <b> --session <id>")
+		return errors.New("usage: meshmcp air steer [flags] <control-ip:port> (--to <node> | --backend <b> --session <id>)")
 	}
-	if *backend == "" || *sessionID == "" {
-		return errors.New("air steer: --backend and --session are required")
+	if *to != "" && (*backend != "" || *sessionID != "") {
+		return errors.New("air steer: --to and --backend/--session are mutually exclusive")
+	}
+	if *to == "" && (*backend == "" || *sessionID == "") {
+		return errors.New("air steer: pass --to <node>, or --backend and --session")
 	}
 	hc, cleanup, err := airControlHTTP(o, fs.Arg(0))
 	if err != nil {
 		return err
 	}
 	defer cleanup()
+
+	if *to != "" {
+		// Resolve the selector through the current Presence directory, then
+		// bind to the single live session carrying that node's transport
+		// public key. A card-authored name or a session id alone never
+		// selects a session.
+		ctx := context.Background()
+		out, err := fetchPresence(ctx, hc)
+		if err != nil {
+			return fmt.Errorf("air steer: resolve %q: %w", *to, err)
+		}
+		node, err := air.ResolvePresenceIdentity(out.Presence, *to)
+		if err != nil {
+			return fmt.Errorf("air steer: resolve %q: %w", *to, err)
+		}
+		sessions, err := fetchAirSessions(hc)
+		if err != nil {
+			return fmt.Errorf("air steer: %w", err)
+		}
+		bound, err := identityBoundSession(sessions, node.PublicKey)
+		if err != nil {
+			return fmt.Errorf("air steer: %q: %w", *to, err)
+		}
+		*backend, *sessionID = bound.Backend, bound.ID
+	}
 
 	reqBody, _ := json.Marshal(map[string]any{
 		"backend": *backend, "id": *sessionID, "method": *method, "params": map[string]any(params),
@@ -309,6 +339,51 @@ func cmdAirSteer(args []string) error {
 		fmt.Println(string(bytes.TrimSpace(body)))
 	}
 	return nil
+}
+
+// fetchAirSessions reads the gateway's live-session list from the control
+// endpoint.
+func fetchAirSessions(hc *http.Client) ([]AirSession, error) {
+	resp, err := hc.Get("http://air-control/v1/sessions")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("sessions: %s: %s", resp.Status, body)
+	}
+	var out struct {
+		Sessions []AirSession `json:"sessions"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("sessions: bad response: %w", err)
+	}
+	return out.Sessions, nil
+}
+
+// identityBoundSession selects the single live session whose transport-stamped
+// peer key matches the resolved node. Zero or several matches fail closed —
+// a client-authored name or a session id alone is never sufficient to bind
+// Steer to a session.
+func identityBoundSession(sessions []AirSession, publicKey string) (AirSession, error) {
+	if strings.TrimSpace(publicKey) == "" {
+		return AirSession{}, errors.New("resolved node has no transport-stamped public key")
+	}
+	var matches []AirSession
+	for _, s := range sessions {
+		if s.PeerKey == publicKey {
+			matches = append(matches, s)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return AirSession{}, errors.New("no identity-bound live session for this node")
+	case 1:
+		return matches[0], nil
+	default:
+		return AirSession{}, fmt.Errorf("%d live sessions are bound to this node; pass --backend and --session explicitly", len(matches))
+	}
 }
 
 // cmdAirLaunch spawns a new agent as a child process with its own mesh
