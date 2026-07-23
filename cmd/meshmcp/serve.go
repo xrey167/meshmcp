@@ -278,7 +278,10 @@ func cmdServe(args []string) error {
 			presence: air.NewRegistry(air.DefaultPresenceRegistryMax),
 		}
 		identify := func(r *http.Request) (string, string) { return peerIdentityStr(client, r.RemoteAddr) }
-		allow := newACL(cfg.Control.Allow)
+		// Configured operators are recognized on the control/steer AND pairing
+		// approver surface (both gate on this same acl), so a second operator can
+		// approve and pair without being hand-added to control.allow.
+		allow := newACL(append(append([]string(nil), cfg.Control.Allow...), operatorPatterns(cfg.Operators)...))
 		// Dedicated proxy allow list for X-Air-On-Behalf attestation; empty ⇒
 		// no peer may attest (attribution stays the verified connecting peer).
 		onBehalfAllow := newACL(cfg.Control.OnBehalfAllow)

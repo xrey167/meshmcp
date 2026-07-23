@@ -54,10 +54,43 @@ type Config struct {
 	Registry        string       `yaml:"registry"` // dir: register backends for router discovery
 	// Groups maps a group name to member patterns (pubkey:<key> or FQDN glob)
 	// so policy rules can match `group:<name>` (F17). Shared by all backends.
-	Groups   map[string][]string `yaml:"groups"`
-	Control  *ControlConfig      `yaml:"control"` // optional: Air session-control endpoint
-	Hooks    *HooksConfig        `yaml:"hooks"`   // publish policy decisions to the event bus and/or a webhook
-	Backends []*Backend          `yaml:"backends"`
+	Groups map[string][]string `yaml:"groups"`
+	// Operators names the people who may operate this gateway: approve co-signs,
+	// approve/deny/revoke pairing, and list/steer sessions. Adding an operator
+	// here (or with `air operator add`) grants the control/steer + pairing-approver
+	// surface WITHOUT hand-editing control.allow — the second-operator onboarding
+	// seam. Recognition is by the unforgeable WireGuard public key.
+	Operators []OperatorConfig `yaml:"operators"`
+	Control   *ControlConfig   `yaml:"control"` // optional: Air session-control endpoint
+	Hooks     *HooksConfig     `yaml:"hooks"`   // publish policy decisions to the event bus and/or a webhook
+	Backends  []*Backend       `yaml:"backends"`
+}
+
+// OperatorConfig names one person permitted to operate this gateway. Identity is
+// the unforgeable WireGuard public key; the FQDN is advisory (for readability),
+// and Roles is reserved for finer control RBAC. It is recognized on the same
+// control/steer + pairing-approver surface as control.allow, so a second operator
+// can approve and pair without being hand-added to that allow list.
+type OperatorConfig struct {
+	PubKey string   `yaml:"pubkey"`          // WireGuard public key (unforgeable) — the primary identity
+	FQDN   string   `yaml:"fqdn,omitempty"`  // advisory mesh FQDN, for human readability
+	Roles  []string `yaml:"roles,omitempty"` // optional role labels (reserved for control RBAC)
+}
+
+// operatorPatterns yields the acl patterns (pubkey:<key> and any advisory FQDN)
+// for the configured operators, so they are recognized on the control/steer and
+// pairing-approver surface alongside control.allow.
+func operatorPatterns(ops []OperatorConfig) []string {
+	pats := make([]string, 0, len(ops))
+	for _, o := range ops {
+		if o.PubKey != "" {
+			pats = append(pats, "pubkey:"+o.PubKey)
+		}
+		if o.FQDN != "" {
+			pats = append(pats, o.FQDN)
+		}
+	}
+	return pats
 }
 
 // ControlConfig enables the Air session-control endpoint: a mesh HTTP surface
@@ -489,13 +522,50 @@ func loadConfig(path string) (*Config, error) {
 		}
 		// The Air control endpoint lists and steers live sessions — privileged.
 		// Refuse to expose it without an explicit allow list (default-deny) rather
-		// than silently admitting any mesh peer. Per-backend ACLs add depth, but
-		// the global endpoint must not be open by omission.
-		if len(cfg.Control.Allow) == 0 {
-			return nil, fmt.Errorf("control: the Air control endpoint is enabled but has no allow list — set control.allow to the WireGuard keys/FQDNs permitted to list/steer (default-deny)")
+		// than silently admitting any mesh peer. A configured operator counts as an
+		// allowed identity, so an operators-only gateway is valid. Per-backend ACLs
+		// add depth, but the global endpoint must not be open by omission.
+		if len(cfg.Control.Allow) == 0 && len(cfg.Operators) == 0 {
+			return nil, fmt.Errorf("control: the Air control endpoint is enabled but has no allow list — set control.allow (or operators) to the WireGuard keys/FQDNs permitted to list/steer (default-deny)")
 		}
 	}
+	if err := validateOperators(cfg.Operators); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
+}
+
+// validateOperators rejects an unusable operator entry: each must carry at least
+// an identity (pubkey or fqdn), bounded and control-character free, so a
+// malformed operator can never widen the control/pairing surface by accident.
+func validateOperators(ops []OperatorConfig) error {
+	seen := map[string]bool{}
+	for i, o := range ops {
+		if strings.TrimSpace(o.PubKey) == "" && strings.TrimSpace(o.FQDN) == "" {
+			return fmt.Errorf("operator #%d: needs a pubkey or fqdn", i+1)
+		}
+		if len(o.PubKey) > 512 || len(o.FQDN) > 512 || hasCtrl(o.PubKey) || hasCtrl(o.FQDN) {
+			return fmt.Errorf("operator #%d: pubkey/fqdn must be at most 512 bytes and contain no control characters", i+1)
+		}
+		if o.PubKey != "" {
+			if seen[o.PubKey] {
+				return fmt.Errorf("operator #%d: pubkey %q is listed more than once", i+1, o.PubKey)
+			}
+			seen[o.PubKey] = true
+		}
+	}
+	return nil
+}
+
+// hasCtrl reports whether s contains an ASCII control character (rejected in
+// identities that are later matched, logged, and rendered).
+func hasCtrl(s string) bool {
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
 }
 
 // options converts the mesh section into meshOptions, resolving the
