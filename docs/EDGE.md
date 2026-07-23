@@ -184,6 +184,22 @@ documented non-goal for now.
 
 ---
 
+## Shared DPoP replay store
+
+The edge constructs an RFC 9449 DPoP verifier whose replay store (spent `jti`
+values and server-issued nonces) is in-process by default — correct for a
+single instance, but two edge instances behind one public URL would each track
+replays alone, so a proof spent on one could be replayed against the other.
+`oauth.dpop_replay_store` (a `postgres://` DSN, backed by the `pgstore`
+package) makes the store shared and restart-surviving. It is fail-closed: a
+non-postgres value is a config error, and an unreachable database at startup
+refuses to start the listener rather than silently degrading to per-process
+tracking. Note the public surface is bearer-only today (the recorded
+exposure-model decision — hosted clients such as claude.ai present no DPoP);
+the verifier is the seam DPoP-bound flows will enforce through.
+
+---
+
 ## What it is not
 
 - **Not** a general-purpose OAuth authorization server for arbitrary bearer
