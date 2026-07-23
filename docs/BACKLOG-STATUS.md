@@ -29,7 +29,7 @@ content lands in BACKLOG.md.
 | 17 | Backend secret-egress restriction | todo | Containment scope per threat model |
 | 18 | OTel/OTLP exporter | **done** | Zero-dep OTLP/HTTP logs sink; drop-not-block proven; bounded shutdown drain |
 | 19 | Wave-2 minors | in-progress | Batch A done (S19 jti replay, S21 bounded dash tail, S51 audit rotation, S49 config lint); batch B queued |
-| 20 | Placeholder modules | todo | Doctor implementable; sibling modules have no git remote — local + documented |
+| 20 | Placeholder modules | **done (scoped)** | meshmcp-app: decided no purpose (WORKSPACE-MODULES.md); cross-store doctor scoped, blocked-external (meshmcp-service has no git remote to ship to) |
 | 21 | Router delegation wiring | **done** | Minted per-call, verified when pinned, caller from token; review fixed side-effecting caller-leg |
 | 22 | Postgres CAS in CI | **blocked-CI** | Workflow YAML can be pre-staged; unverifiable until 1 |
 | 23 | Fenced-dispatch regression test | **done** | Bound proven in handshake + backend modes |
