@@ -333,7 +333,27 @@ func (e *endpoint) closeWith(err error) {
 }
 
 // sendClose tries to tell the peer the session is ending, then closes.
+//
+// The closed flag is committed, the CLOSE frame written, and the connection
+// dropped in one critical section under e.mu, so no other goroutine can
+// observe an in-between state: every path that reacts to a connection error
+// (pumpReader's rebound check, isClosed) must take e.mu and therefore sees
+// closed=true once the peer can possibly have reacted to our CLOSE.
+// Publishing closed before the wire write matters on the client: the peer may
+// process CLOSE and finalize the session before our own goroutine runs again,
+// and the read pump's resulting transport error must resolve as a clean close
+// (reconnectLoop consults isClosed) instead of triggering a redial whose
+// resume of the just-finalized id would be rejected with errSessionNotFound.
 func (e *endpoint) sendClose() {
-	e.writeControl(frame{typ: frameClose})
-	e.closeWith(nil)
+	e.closeOne.Do(func() {
+		e.mu.Lock()
+		e.closed = true
+		if e.w != nil {
+			// Best-effort, bounded by writeTimeout; state is the source of truth.
+			_ = e.writeFrameLocked(frame{typ: frameClose})
+		}
+		e.dropConnLocked()
+		e.mu.Unlock()
+		close(e.closeC)
+	})
 }

@@ -35,7 +35,7 @@ content lands in BACKLOG.md.
 | 23 | Fenced-dispatch regression test | todo | |
 | 24 | FileStore lock-steal hardening | todo | |
 | 25 | Thin policy test spots | todo | |
-| 26 | Steer close/resume race fix | todo | Local fix + re-enable; cross-OS confirm rides 1 |
+| 26 | Steer close/resume race fix | **done** | Atomic sendClose; quarantine removed from ci.yml; zero review findings |
 | 27 | Manifest gating decision | **done** | Decided (b): distribution-only; boundary documented in MARKETPLACE.md |
 | 28 | SpiffeLabel schema/doc pairing | todo | |
 | 29 | `air stream` over the mesh | todo | |

@@ -108,9 +108,17 @@ first, fixed with the smallest robust change, and documented in
 - `SECURITY.md`, `LICENSE-DECISION.md`, `CONTRIBUTING.md`, this changelog, and a
   release checklist.
 
+### Fixed
+
+- **Session graceful-close race**: `endpoint.sendClose` now commits the close
+  atomically with the CLOSE frame write, so a one-shot sender (steer/push)
+  whose peer finalizes the session first can no longer misreport a fully
+  acknowledged delivery as "requested resume session is no longer available".
+  An unknown resume id remains a terminal rejection. `TestTaskSteer` and
+  `TestSteerDeliveryRequiresApplicationAck` are un-quarantined in CI.
+
 ### Known issues
 
-- `mcp:TestTaskSteer` is a pre-existing flaky test (fix staged separately).
 - Several enforcement primitives (request-bound approval grant UI, session-lease
   failover wiring, delegation in the router proxy path) are implemented and
   tested but not yet wired end-to-end; see the capability matrix.

@@ -139,11 +139,12 @@ func (w *failSecondSteerAuditWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// NOTE: quarantined in CI (.github/workflows/ci.yml) as timing-flaky under
-// -race — the one-shot steer client can race its own graceful close against a
-// net.Pipe EOF and try to resume a just-finalized session ("requested resume
-// session is no longer available"). Self-healing over a real mesh; a proper
-// fix belongs in the session/ reconnect path. Runs by default locally.
+// Once quarantined in CI as timing-flaky under -race: the one-shot steer
+// client could race its own graceful close against the server finalizing the
+// session and try to resume the just-closed id ("requested resume session is
+// no longer available"). Fixed by committing the close atomically with the
+// CLOSE write in session/endpoint.go (sendClose); the deterministic regression
+// test is TestGracefulDrainCloseNeverReattaches in session/close_race_test.go.
 func TestSteerDeliveryRequiresApplicationAck(t *testing.T) {
 	agentCtx, stopAgent := context.WithCancel(context.Background())
 	defer stopAgent()
