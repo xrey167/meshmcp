@@ -10,10 +10,19 @@ cryptographic identity for every caller, an **agent firewall** that enforces wha
 and a **gateway-signed, tamper-evident audit log** of every decision.
 
 > **Positioning:** a self-hosted agent firewall for private MCP servers — no public application
-> ingress, transport-bound workload identity, enforceable tool/method policy, and a gateway-signed
-> tamper-evident decision log. See **[docs/THREAT-MODEL.md](docs/THREAT-MODEL.md)** for the exact
-> guarantee and limit of each control, and **[docs/CAPABILITY-MATRIX.md](docs/CAPABILITY-MATRIX.md)**
+> ingress **by default**, transport-bound workload identity, enforceable tool/method policy, and a
+> gateway-signed tamper-evident decision log. See **[docs/THREAT-MODEL.md](docs/THREAT-MODEL.md)** for
+> the exact guarantee and limit of each control, and **[docs/CAPABILITY-MATRIX.md](docs/CAPABILITY-MATRIX.md)**
 > for what is stable vs. experimental.
+>
+> One deliberate, opt-in exception exists for **hosted MCP clients that cannot join a mesh** (e.g.
+> [claude.ai](https://claude.ai) custom connectors): `meshmcp edge` runs a single, **off-by-default**,
+> operator-configured TLS ingress that terminates OAuth 2.1 + PKCE (with operator-in-the-loop consent)
+> and exposes **exactly one tool-scoped backend** at `/mcp`. Behind that door the hosted client is just
+> another identity (`oauth:<client_id>`) subject to the same default-deny policy, an Ed25519 capability
+> double-gate, and the fail-closed audit log. See the recorded exposure-model decision in
+> **[docs/spec/OAUTH-STANDARDS.md](docs/spec/OAUTH-STANDARDS.md)** and the walkthrough in
+> **[docs/COOKBOOK.md](docs/COOKBOOK.md)**.
 
 > ⚖️ **License & current status.** meshmcp is **not** open source (yet). The current
 > [`LICENSE`](LICENSE) is **proprietary and read-only**: you may view the source for evaluation, but
@@ -367,6 +376,7 @@ examples/    ready-to-adapt configs        docs/  design docs + open specs
 - **[docs/IDEAS.md](docs/IDEAS.md)** — the payload layer: a provenance-native knowledge graph (`cmd/kg`), zero-exposure RAG (`cmd/vectors`), an agent-memory fabric (`cmd/memory`), `meshmcp drop` (AirDrop across instances) + content-addressed `fetch`, taint-contained retrieval, signed provenance receipts, and more — 22 enhancements grounded in the existing primitives (see `examples/knowledge.yaml`, `drop.yaml`, `rag-firewall.yaml`).
 - **[docs/ROADMAP-HARDENING.md](docs/ROADMAP-HARDENING.md)** — the Wave-2 roadmap: a compile-time **plugin platform** (tool · decision · sink · subcommand seams), a governed plugin marketplace, HTTP-backend policy parity, federated Mesh Spotlight, new dark backends (vault · scheduler · event bus), fail-closed audit + identity-bound sessions, and a 30-finding hardening sweep — **20 flagships (F13–F32) + 50 minor (S11–S60)**, each grounded in an existing primitive.
 - **[docs/CLIENT-HOOKS.md](docs/CLIENT-HOOKS.md)** — bake the firewall **into the LLM client's own tool loop** (F33): `meshmcp hook` is the decision engine behind Claude Code's `PreToolUse`, Cursor's `beforeShellExecution`/`beforeMCPExecution`, and Codex's `PermissionRequest` — so *every* local tool call (Bash, Edit, native MCP) is policy-governed, DLP-scanned, and recorded in the tamper-evident ledger, not just mesh traffic.
+- **[docs/EDGE.md](docs/EDGE.md)** — **`meshmcp edge`**: the one off-by-default public OAuth ingress for **hosted MCP clients that cannot join the mesh** (e.g. claude.ai custom connectors). Terminates OAuth 2.1 + PKCE with operator-in-the-loop consent, maps the caller to `oauth:<client_id>`, and exposes exactly one tool-scoped `/mcp` behind the same default-deny policy, capability double-gate, and fail-closed audit.
 
 ## Build & test
 

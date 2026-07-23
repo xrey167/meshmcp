@@ -3,6 +3,7 @@ module github.com/xrey167/meshmcp
 go 1.26.0
 
 require (
+	github.com/caddyserver/certmagic v0.21.3
 	github.com/netbirdio/netbird v0.72.2
 	golang.org/x/crypto v0.52.0
 	golang.org/x/sys v0.45.0
@@ -27,7 +28,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.34.2 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.38.2 // indirect
 	github.com/aws/smithy-go v1.23.0 // indirect
-	github.com/caddyserver/certmagic v0.21.3 // indirect
 	github.com/caddyserver/zerossl v0.1.3 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cilium/ebpf v0.19.0 // indirect

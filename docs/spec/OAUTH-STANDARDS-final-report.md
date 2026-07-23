@@ -52,22 +52,35 @@ This reviewer independently rated the identical defect as Low severity (included
 
 ## 5. Before This Ships — Checklist
 
+> **Update 2026-07-23 (edge Phase 1 verification).** All Must-Fix and both
+> C1/C2 "should-fix" items below are now **closed in-tree** (commit `c862c18`,
+> re-verified this session), the exposure-model decision is **recorded**
+> (commit recording extended Option A in `OAUTH-STANDARDS.md`), and the full
+> module test suite was run **under `-race` with `CGO_ENABLED=1` on a host
+> with gcc** — green after fixing two unrelated pre-existing stale
+> `cmd/meshmcp` air-live assertions. The one item that could **not** be closed
+> in this environment is `govulncheck`: the agent proxy denies
+> `vuln.go.dev` (403), so the vulnerability database cannot be fetched here —
+> it must be run in CI. Feature A's SPIFFE wiring remains open (out of scope
+> for the edge work).
+
 **Must fix (Critical/High, in order of severity):**
-- [ ] **CRITICAL** — Add per-`client_id` locking (or an equivalent atomic compare-and-swap on the store) to `federation/dcr.go`'s `handleManage` so concurrent DELETE/PUT cannot resurrect a deleted client with its old token still valid (`federation/dcr.go:567`).
-- [ ] **HIGH** — Fix the corpora-intersection logic in `federation/exchange.go:217` so an empty org grant or an omitted `datatypes` field mints `Corpora` that denies-by-default (matching `federation/boundary.go`'s `CheckCorpus` convention and the design doc's stated intersection semantics), not allow-all.
-- [ ] **HIGH** — Sanitize `tokenErrorFromBody` in `meshmcp/remotebackend.go:262` to whitelist only the fixed RFC 6749 §5.2 error codes before logging/returning them, so a hostile or compromised authorization server cannot inject secret material into local logs.
-- [ ] **HIGH** — Serialize `federation/dcr.go:462`'s `liveCountForIssuer`-then-`writeAtomic` sequence (a per-issuer lock or an atomic reserve-then-commit step) so the registration quota cannot be bypassed by concurrent requests — this defect was independently reproduced by three separate reviewer passes.
+- [x] **CRITICAL** — Per-`client_id` locking added to `federation/dcr.go`'s `handleManage` (`s.keyed.lock("client:"+clientID)`, `dcr.go:590`; `keyedLocks`, `dcr.go:117-147`). Regression test `TestDCR_ConcurrentDeletePutNoResurrect` (`dcr_concurrency_test.go:67`). Verified green under `-race`.
+- [x] **HIGH** — Corpora intersection now denies-by-default via `clampCorpora` + deny-all sentinel (`exchange.go:217`, `:528-542`). Regression test `TestExchange_EmptyCorporaDeniesByDefault` (`exchange_corpora_test.go:18`).
+- [x] **HIGH** — `tokenErrorFromBody` whitelists the closed RFC 6749 §5.2 code set before surfacing (`rfc6749TokenErrorCodes`, `remotebackend.go:265`, gate at `:281`).
+- [x] **HIGH** — Registration quota serialized by a per-issuer lock (`s.keyed.lock("issuer:"+issuerHashHex)`, `dcr.go:512`). Regression test `TestDCR_ConcurrentRegisterRespectsQuota` (`dcr_concurrency_test.go:40`).
 
 **Blocking decision (not a code fix):**
-- [ ] Record the exposure-model product/operator decision for Feature C3 in `docs/spec/OAUTH-STANDARDS.md` (it currently still reads as pending sign-off). Until this is recorded, C3 (wiring any of A/B/C0/C1/C2 into a live listener) should not proceed — and, in the interim, it should be made explicit to stakeholders that C0–C2 were built ahead of this precondition, only safely so because nothing is wired live yet.
+- [x] Exposure-model decision **recorded** in `docs/spec/OAUTH-STANDARDS.md` — extended Option A: a second, off-by-default TLS ingress (`meshmcp edge`) that may carry exactly one tool-scoped MCP path for hosted MCP clients (claude.ai), with deviations D-A..D-D and compensating controls enumerated. THREAT-MODEL adversaries 12–13 and CAPABILITY-MATRIX rows added.
 
 **Should fix before considering C1/C2 fully done (per the spec's own upgraded requirement):**
-- [ ] Add the fuzz target for the DCR registration JSON parser and the `authorization_details` mapper — the tests doc explicitly upgrades this from optional to required before C1/C2 sign-off, and no `Fuzz*` function exists anywhere in `federation/` today.
-- [ ] Add a DoS/body-size test for the C2 exchange endpoint analogous to C1's `TestDCR_MaxBytesReaderEnforced`/`TestDCR_SlowlorisTimeoutEnforced` (the 32KB body-size limit exists in code; it just isn't independently tested).
+- [x] Fuzz targets present: `FuzzDCRRegisterMetadata` and `FuzzAuthorizationDetails` (`federation/fuzz_test.go:14`, `:31`).
+- [x] C2 DoS/body-size test present: `TestExchange_OversizedBodyRejected` (`federation/fuzz_test.go:45`; `exchangeMaxBodyBytes`, `exchange.go:31`).
 
 **Should fix before Feature A is considered real:**
-- [ ] Feature A's federation-side wiring (`Config.TrustDomain`, `Mapping.TrustDomain`, `Boundary.SpiffeID`, `NewBoundary` collision detection) does not exist. Currently the SPIFFE primitive is unused dead code from the running system's perspective — no label is ever emitted. This needs a dedicated follow-up slice; treat prior claims of Feature A completion as inaccurate.
+- [ ] Feature A's federation-side wiring (`Config.TrustDomain`, `Mapping.TrustDomain`, `Boundary.SpiffeID`, `NewBoundary` collision detection) does not exist. Currently the SPIFFE primitive is unused dead code from the running system's perspective — no label is ever emitted. This needs a dedicated follow-up slice; treat prior claims of Feature A completion as inaccurate. **(Still open; out of scope for the edge/hosted-client work.)**
 
 **Process / environment, before signing off on any of the above as fully verified:**
-- [ ] Re-run the full test suite, including `-race`, on a host with a working C compiler — no build in this session was ever raced (no gcc/clang/cl available in the sandbox).
-- [ ] Consolidate the `docs/CAPABILITY-MATRIX.md` / `docs/ROADMAP-HARDENING.md` / `docs/THREAT-MODEL.md` bookkeeping in a single pass — five concurrent agents editing these shared files left only Feature C0's entries intact.
+- [x] Full test suite re-run under `-race` with `CGO_ENABLED=1` on a host with gcc (2026-07-23). Green across the module after fixing two unrelated pre-existing stale air-live assertions in `cmd/meshmcp`.
+- [ ] `govulncheck ./...` — **could not run in this environment**: the agent proxy denies `vuln.go.dev` (403), so the vuln DB cannot be fetched. Run it in CI (promote the existing advisory `govulncheck` step, `.github/workflows/ci.yml`, to required once the baseline is clean).
+- [x] CAPABILITY-MATRIX / THREAT-MODEL bookkeeping consolidated for the edge decision in a single pass (this session).

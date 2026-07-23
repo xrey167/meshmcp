@@ -81,6 +81,28 @@ more than restricting it) while preserving a commercial layer.
    agreement / DCO, trademark policy) for counsel rather than resolving them
    here.
 
+## New direct dependency: `certmagic` (the `meshmcp edge` TLS path)
+
+The public edge ingress (`meshmcp edge`) promotes
+`github.com/caddyserver/certmagic` from an indirect dependency (already pulled
+in transitively by NetBird, so no new code enters the module graph) to a
+**direct** one, used only for the opt-in ACME auto-TLS mode. Its ACME dependency
+subtree was license-vetted for the permissive-only rule (MIT/BSD/Apache-2.0, no
+copyleft) before promotion:
+
+| Module | Version | License |
+|---|---|---|
+| `github.com/caddyserver/certmagic` | v0.21.3 | Apache-2.0 |
+| `github.com/mholt/acmez/v2` | v2.0.1 | Apache-2.0 |
+| `github.com/caddyserver/zerossl` | v0.1.3 | MIT |
+| `github.com/libdns/libdns` | v0.2.2 | MIT |
+
+All permissive, all compatible with every license option above. `govulncheck`
+against this subtree must be run in CI (it could not be run in the
+edge-development environment — the agent proxy denies `vuln.go.dev`). When the
+`NOTICE` / `THIRD-PARTY-NOTICES` file is assembled (step 3 above), add these
+four modules' attributions alongside NetBird / WireGuard.
+
 **Legal note:** this document is engineering guidance, not legal advice. The
 final license text and any dual-licensing/CLA arrangement should be reviewed by
 qualified counsel.

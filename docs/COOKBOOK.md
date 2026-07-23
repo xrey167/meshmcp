@@ -469,6 +469,82 @@ is governed too. See [examples/air-bindings.yaml](../examples/air-bindings.yaml)
 
 ---
 
+## 13. Connect claude.ai (a hosted MCP client) to a mesh tool
+
+Everything above assumes the caller can join the mesh. A **hosted** client —
+claude.ai's custom connectors run on Anthropic's servers — cannot. `meshmcp edge`
+is the one deliberate, off-by-default public door for exactly this case: it
+terminates OAuth 2.1 at the edge and exposes a **single tool-scoped backend**,
+with the hosted client mapped to an `oauth:<client_id>` identity that passes
+through the same default-deny policy, capability double-gate, and fail-closed
+audit as any mesh peer. See the recorded exposure-model decision in
+[spec/OAUTH-STANDARDS.md](spec/OAUTH-STANDARDS.md).
+
+```yaml
+# edge.yaml — the ONLY public listener; runs only when you start `meshmcp edge`.
+listen: "0.0.0.0:8443"                 # explicit bind (no default)
+public_url: "https://mcp.example.com"  # the DNS name claude.ai will reach; https only
+state_dir: /var/lib/meshmcp/edge
+audit_log: /var/lib/meshmcp/edge/audit.jsonl   # always fail-closed
+signing_key: /var/lib/meshmcp/edge/edge-authority.key
+signing_key_autogen: true
+
+tls:                                   # publicly-trusted cert required for claude.ai
+  acme:
+    domains: [mcp.example.com]
+    email: ops@example.com             # tls-alpn-01 by default (no extra port)
+
+registration:
+  mode: open-approval                  # claude.ai registers freely; you approve before it works
+
+oauth:
+  access_token_ttl: 15m                # <= 1h; the minted capability shares this TTL
+  sessions: true                       # full Streamable HTTP (Mcp-Session-Id + SSE)
+
+mesh:
+  setup_key_file: /etc/meshmcp/setup.key   # the edge joins the mesh to reach the backend
+
+backend:                               # exactly one backend is exposed at /mcp
+  name: docs-tools
+  addr: "gateway.internal.mesh:9101"   # a normal mesh MCP backend (stdio/resumable)
+  tools: ["search_*", "read_wiki"]     # the grant ceiling
+  policy:
+    default_allow: false               # deny by default (a startup error if true)
+    rules:
+      - peers: ["oauth:*"]             # any approved hosted client …
+        tools: ["search_*"]           # … may call read-only search tools
+        allow: true
+```
+
+```bash
+# 1. Start the edge (public). It joins the mesh and serves OAuth + /mcp over TLS.
+meshmcp edge --config edge.yaml
+
+# 2. In claude.ai, add a custom connector pointing at https://mcp.example.com/mcp.
+#    It auto-discovers the OAuth endpoints, registers itself, and starts the flow.
+
+# 3. Approve the newly-registered client, then approve its authorization request:
+meshmcp edge clients list  --state /var/lib/meshmcp/edge
+meshmcp edge clients approve --state /var/lib/meshmcp/edge <client_id>
+meshmcp edge authz   list   --state /var/lib/meshmcp/edge
+meshmcp edge authz   approve --state /var/lib/meshmcp/edge <request_id>
+
+# 4. The connector completes the flow and starts calling tools. Watch the ledger:
+meshmcp audit verify /var/lib/meshmcp/edge/audit.jsonl
+
+# 5. Revoke access at any time — kills the client's tokens, capabilities, sessions:
+meshmcp edge clients revoke --state /var/lib/meshmcp/edge <client_id>
+```
+
+Notes: the consent step is operator-in-the-loop — nobody types a password on a
+public page; approval happens here in the CLI. `tls.acme` needs a publicly-
+trusted certificate (claude.ai will not trust a self-signed one); a
+`cert_file`/`key_file` block using a full chain works too. The `/mcp` path never
+reaches any backend but the one configured — there is no path from the edge to
+the rest of the mesh.
+
+---
+
 ## Where to go next
 
 - **[AGENT-FIREWALL.md](AGENT-FIREWALL.md)** — the policy engine, signed audit, dashboard, replay, control plane, federation.

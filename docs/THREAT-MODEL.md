@@ -167,6 +167,51 @@ An adversary who can write the audit file (but lacks the signing key).
   Separation of duties beyond the role set, and optimistic-concurrency
   protection on policy replacement, are follow-ups.
 
+### 12. External OAuth registrant / hosted MCP client (edge only)
+
+A party on the public internet — e.g. a hosted MCP client such as a claude.ai
+custom connector, or anyone who finds the endpoint — talking to the optional,
+off-by-default `meshmcp edge` ingress. Until it completes registration,
+operator approval, and authorization, it holds **no identity meshmcp
+recognizes at all** — a genuinely new class: every other adversary here is at
+minimum a mesh peer. (This surface exists only when an operator explicitly
+runs `meshmcp edge`; see the recorded exposure-model decision in
+[docs/spec/OAUTH-STANDARDS.md](spec/OAUTH-STANDARDS.md).)
+
+- **Defended:** The edge is a separate, explicitly-configured TLS listener that
+  exposes exactly one tool-scoped MCP path plus the OAuth endpoints — never the
+  mesh, the control plane, or other backends. Registration is rate-limited
+  per IP and bounded (`max_pending` cap + pending TTL); a pending or denied
+  client can complete no authorization and obtain no token. Authorization
+  requires an explicit operator approval (pairing-style) plus PKCE (S256
+  only) with exact redirect-URI match. Every issued access token is opaque,
+  SHA-256-hashed at rest, TTL ≤ 1h, and bound at issuance to an Ed25519
+  `CapabilityClaims` (subject `oauth:<client_id>`, audience- and tool-bounded)
+  that is re-verified on every tool call; the policy engine additionally
+  applies default-deny per-identity rules. Every decision and lifecycle
+  transition lands in the edge's own fail-closed, hash-chained audit log.
+- **Limit:** Availability of the edge listener itself is exposed to the
+  internet (mitigated, not eliminated, by rate limits and body caps). An
+  approved client is trusted to the extent of its granted tools until revoked
+  — approval quality is the operator's judgment, as with any pairing.
+
+### 13. Holder of a stolen edge bearer token
+
+An adversary who exfiltrates a hosted client's access or refresh token (e.g.
+from the client's own infrastructure).
+
+- **Defended:** Access tokens expire in ≤ 1h and are audience- and tool-bounded
+  by their embedded capability; a stolen token cannot reach tools or backends
+  outside its grant, and every use is audited under the client's identity.
+  Refresh tokens rotate on every use; reuse of a rotated refresh token revokes
+  the entire token family (theft-detection semantics). Revoking the client
+  kills its tokens, capabilities (via the revocation store), and sessions.
+- **Limit:** Within its TTL and grant scope, a stolen access token authorizes
+  calls exactly as the legitimate client — bearer possession is the proof
+  (recorded as deviation D-C in the exposure-model decision). Short TTLs and
+  the audit trail bound the window and make abuse attributable, not
+  impossible.
+
 ---
 
 ## Audit: what "tamper-evident" means here

@@ -338,8 +338,14 @@ func TestAirLiveUniversalActionsWiring(t *testing.T) {
 		}
 	}
 
+	// selectorForNode delegates to the shared nodeSelector helper, which
+	// derives the durable full public-key selector from the node's transport
+	// identity ("pubkey:"+fullNodeKey) — never a name/fqdn fallback.
 	selector := section("function selectorForNode", "function sameVerifiedNode")
-	if !strings.Contains(selector, `return "pubkey:"+String(key)`) {
+	if !strings.Contains(selector, "nodeSelector(n)") {
+		t.Fatal("selectorForNode no longer delegates to the shared node selector")
+	}
+	if !strings.Contains(html, `function nodeSelector(n){var k=fullNodeKey(n);return k?"pubkey:"+k:""}`) {
 		t.Fatal("logical actions no longer prefer the durable full public-key selector")
 	}
 

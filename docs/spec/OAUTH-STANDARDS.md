@@ -324,6 +324,56 @@ verifier a first-class, reviewable artifact instead of an assumed dependency.
 
 ### The exposure-model question (must be answered before any of C0–C3 begin)
 
+> **DECISION RECORDED — 2026-07-23, owner sign-off.** The recommended
+> resolution below is **adopted, in an extended form ("extended Option A")**,
+> to additionally serve **hosted MCP clients** (e.g. claude.ai custom
+> connectors) — a consumer the original analysis below did not contemplate.
+> The façade ships as the **`meshmcp edge`** subcommand: a second,
+> deliberately separate, minimal, **off-by-default** TLS ingress with an
+> explicit operator-configured bind address and its own certificate, and its
+> own fail-closed hash-chained audit log. Four deviations from the original
+> Feature-C shape are recorded:
+>
+> - **D-A — the edge MAY carry exactly one tool-scoped MCP path.** The
+>   "no tool-call path, no proxying, ever" bullet below is **superseded for
+>   the edge listener only**: it may expose a single configured mesh backend
+>   at `/mcp`, guarded in order by per-IP pre-auth rate limits, bearer
+>   validation, per-client rate limits, the **unchanged** default-deny policy
+>   engine, and an Ed25519 capability double-gate, with every decision
+>   audited fail-closed. The mesh-internal invariant ("no open ports, ever"
+>   for backends/plugins) is unchanged; README positioning becomes "no public
+>   ingress **by default**; at most one explicit, off-by-default, tool-scoped
+>   edge."
+> - **D-B — open-approval DCR mode.** Hosted clients perform RFC 7591
+>   registration without an initial access token, so C1's IAT gate cannot
+>   apply to them. The edge supports two configurable modes: `token`
+>   (spec-literal C1 IAT gate) and `open-approval` (default): registration is
+>   open, but the client record lands **pending** and can complete no
+>   authorization and obtain no token until an operator approves it.
+>   Compensating controls replacing the IAT gate: per-IP registration rate
+>   limit, a global `max_pending` cap plus pending-TTL GC (bounds the
+>   disk-exhaustion → fail-closed-audit cascade this document calls out), and
+>   audited state transitions.
+> - **D-C — a new enumerated bearer exception: hosted-client access tokens.**
+>   claude.ai presents bearer access tokens (no DPoP). The bearer terminates
+>   at the edge: at issuance it is exchanged into an Ed25519
+>   `policy.CapabilityClaims` (Subject `oauth:<client_id>`, audience- and
+>   tool-bounded, TTL ≤ 1h per the `federationGrantMaxLifetime` precedent)
+>   which is re-verified on every tool call; the bearer itself is opaque,
+>   stored only as a SHA-256 hash, short-lived, refresh-rotated with family
+>   revocation on reuse, and never crosses into the mesh. This extends the
+>   "bearer-token exceptions" list; the central rule — every token accepted
+>   as authorization for a tool call is DPoP-bound or an Ed25519 meshmcp
+>   token — is preserved by the capability double-gate.
+> - **D-D — `CapabilityClaims.Subject` semantics widen** from "the caller's
+>   WireGuard public key" to "the transport-proven identity string" (for the
+>   edge: `oauth:<client_id>`, proven by possession of the unexpired,
+>   unrevoked access token the edge itself issued over TLS). The verifier
+>   compares subjects as opaque strings; no code change.
+>
+> The original analysis is preserved below for context; where it conflicts
+> with this record, this record wins.
+
 **This is a product-positioning decision, not an engineering detail, and it
 gates everything below.** Feature C's entire premise — serving "a partner
 organization that does not run a WireGuard mesh peer" — requires an HTTP
