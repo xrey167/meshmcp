@@ -83,7 +83,24 @@ when" becomes queryable for an entire agent fleet.
 > shipped the compile-time **plugin platform** (F13), HTTP-backend policy parity (F16),
 > group-based policy (F17), identity-bound sessions (F23), the mesh vault / scheduler / event
 > bus (F26–F28), an attestation pack (F32), client-hook adapters (F33), and most of the
-> hardening sweep — flagships F13–F33 (F25/F30 still open; F31 first slice shipped) + minors S11–S60.
+> hardening sweep — flagships F13–F33 (F30 still open; F25 and F31 first slices shipped) + minors S11–S60.
+>
+> **F25 (multi-tenant control plane) — first slice shipped.** The control plane
+> partitions its own state (policy, registry, enrollment, audit) into tenants
+> keyed on the transport-proven WireGuard key, resolved inside the one
+> authorization chokepoint and never named by a request — cross-tenant access is
+> absent by construction, with per-tenant RBAC (no cross-tenant super-role) and
+> one tamper-evident audit chain per tenant. A single-tenant deployment is
+> byte-identical to before. Honest v1 boundary: enrollment shares one NetBird
+> PAT/account (per-tenant groups + audit attribution, not account isolation), and
+> the anchor witness stays shared. See
+> **[MULTI-TENANT.md](MULTI-TENANT.md)** and THREAT-MODEL adversary 14.
+>
+> **F31 (SSO/OIDC mapping) — first slice shipped.** A verified OIDC token maps to
+> additive `group:<name>` attribution over the transport-authenticated mesh key
+> (never a replacement), presented on the gateway control endpoint and verified
+> against statically pinned issuer keys in fail-closed order. See
+> **[SSO.md](SSO.md)** and THREAT-MODEL adversary 15.
 
 ## Where it goes — wilder (still grounded in the primitives)
 

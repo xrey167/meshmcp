@@ -305,4 +305,4 @@ registry, and bidirectional MCP; stdio + HTTP backends; a CLI (`ls/call/read/pro
 
 **Still open:**
 - **Replicated store backend:** shipped for PostgreSQL (`pgstore`, `session_store: postgres://...`); Redis/etcd remain drop-in options behind the same `SessionStore`/`LeaseStore` interfaces.
-- Flagships F25 (multi-tenant), F30 (future live-session handoff, distinct from shipped Context Capsule continuation), F31 (federated SSO mapping).
+- Flagships F30 (future live-session handoff, distinct from shipped Context Capsule continuation), F31 (federated SSO mapping). F25 (multi-tenant control plane) shipped its first slice — per-tenant policy/registry/enrollment/audit keyed on the transport identity, one audit chain per tenant, single-tenant byte-identical; shared-PAT enrollment is the honest v1 boundary (see [MULTI-TENANT.md](MULTI-TENANT.md)).

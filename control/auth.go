@@ -99,10 +99,24 @@ func (a *StaticAuthorizer) HasRole(pubKey string, role Role) bool {
 	return set[RoleAdmin] || set[role]
 }
 
-// aclFile is the on-disk ACL: a mapping of WireGuard public key (hex) to the
-// list of roles it holds.
+// aclFile is the on-disk ACL. In the single-tenant (flat) form it carries a
+// top-level Grants map (WireGuard public key -> roles). In the multi-tenant form
+// it carries Tenants instead — a named group of grants per tenant. The two are
+// mutually exclusive; LoadControlACL auto-detects which is present. Both fields
+// are declared here so strict decoding (KnownFields) accepts either shape while
+// still rejecting an unknown top-level key.
 type aclFile struct {
-	Grants map[string][]Role `yaml:"grants"`
+	Grants  map[string][]Role    `yaml:"grants"`
+	Tenants map[string]tenantACL `yaml:"tenants"`
+}
+
+// tenantACL is one tenant's block in a multi-tenant ACL: the grants that DEFINE
+// the tenant (which keys hold which roles — a tenant is defined ONLY by the keys
+// it lists, never by a field a request can reach) plus optional per-tenant
+// NetBird auto_groups used at enrollment.
+type tenantACL struct {
+	Grants       map[string][]Role `yaml:"grants"`
+	EnrollGroups []string          `yaml:"enroll_groups"`
 }
 
 // LoadAuthorizer parses an operator ACL (strict YAML) into a StaticAuthorizer.
