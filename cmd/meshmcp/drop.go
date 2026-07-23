@@ -70,12 +70,27 @@ type recvInfo struct {
 	Path   string // where it was installed on disk
 }
 
+// sendHooks lets a sender observe/steer the file stream without changing the
+// wire format. skip (if set) is consulted before each file; sent (if set) runs
+// after the file's bytes have been flushed to the underlying writer (used for
+// per-file progress). A flush is NOT delivery — receipts for --receipts/
+// --resume are recorded only after receiver confirmation (see dropresume.go).
+type sendHooks struct {
+	skip func(name, path string, fi os.FileInfo) (bool, error)
+	sent func(name, path string, fi os.FileInfo, sha string) error
+}
+
 // sendFiles streams each path to w as header + content + trailer records. A
 // path that is a directory is walked recursively; each file is sent with a
 // name relative to the directory's parent, so the tree (e.g. "photos/a.jpg")
 // is reproduced on the receiver. The receiver already creates parent
 // directories and rejects path traversal (see sanitizeDest / recvOne).
 func sendFiles(w io.Writer, paths []string) error {
+	return sendFilesWith(w, paths, sendHooks{})
+}
+
+// sendFilesWith is sendFiles with per-file hooks.
+func sendFilesWith(w io.Writer, paths []string, hooks sendHooks) error {
 	bw := bufio.NewWriter(w)
 	for _, p := range paths {
 		p = filepath.Clean(p)
@@ -84,12 +99,12 @@ func sendFiles(w io.Writer, paths []string) error {
 			return fmt.Errorf("stat %s: %w", p, err)
 		}
 		if fi.IsDir() {
-			if err := sendDir(bw, p); err != nil {
+			if err := sendDir(bw, p, hooks); err != nil {
 				return err
 			}
 			continue
 		}
-		if err := sendOneFile(bw, p, filepath.Base(p), fi); err != nil {
+		if err := sendOneFileHooked(bw, p, filepath.Base(p), fi, hooks); err != nil {
 			return err
 		}
 	}
@@ -100,7 +115,7 @@ func sendFiles(w io.Writer, paths []string) error {
 // its path relative to dir's parent so the directory name is preserved.
 // Non-regular entries (symlinks, devices) are skipped, so a drop never follows
 // a link out of the tree.
-func sendDir(bw *bufio.Writer, dir string) error {
+func sendDir(bw *bufio.Writer, dir string, hooks sendHooks) error {
 	root := filepath.Dir(dir)
 	return filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -117,36 +132,63 @@ func sendDir(bw *bufio.Writer, dir string) error {
 		if err != nil {
 			return err
 		}
-		return sendOneFile(bw, path, filepath.ToSlash(rel), fi)
+		return sendOneFileHooked(bw, path, filepath.ToSlash(rel), fi, hooks)
 	})
 }
 
+// sendOneFileHooked applies hooks around sendOneFile: an approved skip sends
+// nothing; after a send, the buffer is flushed BEFORE the sent hook so the
+// hook observes a fully-written file rather than partially buffered bytes.
+func sendOneFileHooked(bw *bufio.Writer, path, name string, fi os.FileInfo, hooks sendHooks) error {
+	if hooks.skip != nil {
+		skip, err := hooks.skip(name, path, fi)
+		if err != nil {
+			return err
+		}
+		if skip {
+			return nil
+		}
+	}
+	sum, err := sendOneFile(bw, path, name, fi)
+	if err != nil {
+		return err
+	}
+	if hooks.sent != nil {
+		if err := bw.Flush(); err != nil {
+			return err
+		}
+		return hooks.sent(name, path, fi, sum)
+	}
+	return nil
+}
+
 // sendOneFile writes one file's header + content + trailer to bw under the
-// given wire name.
-func sendOneFile(bw *bufio.Writer, path, name string, fi os.FileInfo) error {
+// given wire name and returns the content's sha256 (hex).
+func sendOneFile(bw *bufio.Writer, path, name string, fi os.FileInfo) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return fmt.Errorf("open %s: %w", path, err)
+		return "", fmt.Errorf("open %s: %w", path, err)
 	}
 	defer f.Close()
 	hdr := dropHeader{Name: name, Size: fi.Size(), Mode: uint32(fi.Mode().Perm())}
 	hb, _ := json.Marshal(hdr)
 	if _, err := bw.Write(append(hb, '\n')); err != nil {
-		return err
+		return "", err
 	}
 	h := sha256.New()
 	n, err := io.CopyN(io.MultiWriter(bw, h), f, fi.Size())
 	if err != nil {
-		return fmt.Errorf("read %s: %w", path, err)
+		return "", fmt.Errorf("read %s: %w", path, err)
 	}
 	if n != fi.Size() {
-		return fmt.Errorf("%s: short read (%d of %d bytes)", path, n, fi.Size())
+		return "", fmt.Errorf("%s: short read (%d of %d bytes)", path, n, fi.Size())
 	}
-	tb, _ := json.Marshal(dropTrailer{SHA256: hex.EncodeToString(h.Sum(nil))})
+	sum := hex.EncodeToString(h.Sum(nil))
+	tb, _ := json.Marshal(dropTrailer{SHA256: sum})
 	if _, err := bw.Write(append(tb, '\n')); err != nil {
-		return err
+		return "", err
 	}
-	return nil
+	return sum, nil
 }
 
 // placer decides the final on-disk path for a received file given its header
@@ -438,6 +480,8 @@ func cmdDrop(args []string) error {
 	o := meshFlags(fs)
 	control := fs.String("control", "", "sender: Air control gateway used to resolve a Nearby name, FQDN, or full public key")
 	cfgPath := fs.String("config", "", "run a drop receiver from this config file (instead of sending)")
+	receipts := fs.String("receipts", "", "sender: record a JSONL receipt per file once the receiver confirms installation (durable across runs; enables --resume)")
+	resume := fs.Bool("resume", false, "sender: skip files already receipted for this target (requires --receipts)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -445,7 +489,13 @@ func cmdDrop(args []string) error {
 		if *control != "" {
 			return errors.New("drop: --control is only valid when sending")
 		}
+		if *receipts != "" || *resume {
+			return errors.New("drop: --receipts/--resume are sender flags, not valid with --config")
+		}
 		return dropReceive(*cfgPath)
+	}
+	if *resume && *receipts == "" {
+		return errors.New("drop: --resume requires --receipts <file> (the receipt log to resume from)")
 	}
 	if fs.NArg() < 2 {
 		return errors.New("usage: meshmcp drop [flags] <target> <file...>   (use --control <gateway> for a Nearby selector; or: meshmcp drop --config drop.yaml)")
@@ -469,10 +519,44 @@ func cmdDrop(args []string) error {
 		return fmt.Errorf("drop: %w", err)
 	}
 
-	pr, pw := io.Pipe()
-	go func() { pw.CloseWithError(sendFiles(pw, files)) }()
-
 	dial := func(ctx context.Context) (net.Conn, error) { return client.Dial(ctx, "tcp", target) }
+
+	// Receipted sends go through the receiver-confirmed completion handshake:
+	// receipts are recorded only after the receiver reported exact installed
+	// totals, never on a mere flush into the session layer's send buffer.
+	if *receipts != "" {
+		entries, err := enumerateSendable(files)
+		if err != nil {
+			return err
+		}
+		rec, err := openReceiptLog(*receipts, target)
+		if err != nil {
+			return err
+		}
+		defer rec.close()
+		sent, err := runReceiptedSend(entries, rec, *resume, nil,
+			func(writePayloads func(w io.Writer) error, payloads int, totalBytes int64) error {
+				log.Printf("dropping %d file(s) to %s (receiver-confirmed)", payloads, target)
+				return runDropWithCompletion(context.Background(), dial, writePayloads, payloads, totalBytes, log.Printf)
+			})
+		if err != nil {
+			return fmt.Errorf("drop to %s: %w", target, err)
+		}
+		if sent == 0 {
+			log.Printf("drop complete: all %d file(s) already receipted for %s", len(entries), target)
+		} else {
+			log.Printf("drop complete: receiver confirmed %d file(s)", sent)
+		}
+		return nil
+	}
+
+	total, err := countSendable(files)
+	if err != nil {
+		return err
+	}
+	pr, pw := io.Pipe()
+	go func() { pw.CloseWithError(sendFilesWith(pw, files, progressHooks(total, nil))) }()
+
 	sc := session.NewClient(dial, log.Printf)
 	log.Printf("dropping %d file(s) to %s", len(files), target)
 	if err := sc.Run(context.Background(), sendStream{r: pr}); err != nil {

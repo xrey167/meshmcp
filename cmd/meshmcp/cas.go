@@ -144,13 +144,26 @@ func serveFetchListener(client *embed.Client, port int, store casStore, checker 
 }
 
 // cmdFetch retrieves a blob by hash from a peer's content-addressed store.
+// With --gc it instead prunes a LOCAL store under explicit age/size bounds
+// (dry-run unless --apply; see casgc.go for the no-reference-model rationale).
 func cmdFetch(args []string) error {
 	fs := flag.NewFlagSet("fetch", flag.ExitOnError)
 	o := meshFlags(fs)
 	out := fs.String("out", "", "write the blob here (default: <hash> in the current directory)")
 	maxBytes := fs.Int64("max-bytes", defaultFetchMaxBytes, "reject a blob larger than this many bytes (0 = no limit)")
+	gc := fs.Bool("gc", false, "garbage-collect a local CAS directory instead of fetching (dry run unless --apply)")
+	gcDir := fs.String("dir", "", "with --gc: the local CAS directory to prune")
+	gcMaxAge := fs.Duration("max-age", 0, "with --gc: delete blobs not modified within this duration (e.g. 720h)")
+	gcMaxTotal := fs.Int64("max-total-bytes", 0, "with --gc: after age pruning, delete oldest blobs until the store fits this many bytes")
+	gcApply := fs.Bool("apply", false, "with --gc: actually delete (default is a dry run)")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *gc {
+		if fs.NArg() != 0 {
+			return errors.New("usage: meshmcp fetch --gc --dir <cas-dir> [--max-age 720h] [--max-total-bytes N] [--apply]")
+		}
+		return cmdFetchGC(*gcDir, *gcMaxAge, *gcMaxTotal, *gcApply)
 	}
 	if fs.NArg() != 2 {
 		return errors.New("usage: meshmcp fetch [flags] <peer-ip:port> <sha256>")

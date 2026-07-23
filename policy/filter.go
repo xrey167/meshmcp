@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 )
 
 // Caller identifies the mesh peer whose traffic a filter is enforcing.
@@ -472,7 +473,7 @@ func (f *Filter) handleToolCall(line []byte, tool string, id, args json.RawMessa
 		if reason == "" {
 			reason = "denied by mesh policy"
 		}
-		f.writeDenial(id, fmt.Sprintf("tool %q blocked for peer %s: %s", tool, f.caller.Peer, reason))
+		f.writeDenialRetry(id, fmt.Sprintf("tool %q blocked for peer %s: %s", tool, f.caller.Peer, reason), dec.RetryAfter)
 		return nil
 	}
 }
@@ -543,14 +544,30 @@ func (f *Filter) record(method, tool, rpcID string, dec Decision) AuditRecord {
 
 // writeDenial emits a JSON-RPC error toward the peer for a blocked request.
 func (f *Filter) writeDenial(id json.RawMessage, message string) {
+	f.writeOut(DenialBody(id, message, 0))
+}
+
+// writeDenialRetry is writeDenial carrying rate-limit retry metadata.
+func (f *Filter) writeDenialRetry(id json.RawMessage, message string, retryAfter time.Duration) {
+	f.writeOut(DenialBody(id, message, retryAfter))
+}
+
+// DenialBody renders the JSON-RPC error a gateway returns for a blocked
+// request. A positive retryAfter (a rate-limit deny) is attached as
+// error.data.retryAfterMs so an agent can back off for exactly the window the
+// engine computed instead of guessing.
+func DenialBody(id json.RawMessage, message string, retryAfter time.Duration) []byte {
 	if len(id) == 0 {
 		id = json.RawMessage("null")
 	}
 	msg, _ := json.Marshal(message)
-	resp := fmt.Sprintf(
-		`{"jsonrpc":"2.0","id":%s,"error":{"code":-32001,"message":%s}}`+"\n",
-		id, msg)
-	f.writeOut([]byte(resp))
+	data := ""
+	if retryAfter > 0 {
+		data = fmt.Sprintf(`,"data":{"retryAfterMs":%d}`, retryAfter.Milliseconds())
+	}
+	return []byte(fmt.Sprintf(
+		`{"jsonrpc":"2.0","id":%s,"error":{"code":-32001,"message":%s%s}}`+"\n",
+		id, msg, data))
 }
 
 // pumpInner copies backend output to the read side, framed on newlines so
