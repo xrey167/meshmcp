@@ -44,11 +44,16 @@ var airSteerMethods = map[string]bool{
 }
 
 // airControlHandler builds the control surface. identify resolves the caller's
-// (pubkey, fqdn); allow gates who may reach the endpoint; onBehalfAllow is the
-// SEPARATE, dedicated list of proxy identities (the air-serve relay) permitted
-// to attest an X-Air-On-Behalf browser identity — it is NOT the general allow
-// list, so an ordinary allowed caller cannot forge attribution, and it fails
-// closed when empty (no peer may attest). audit records accepted actions.
+// (pubkey, fqdn); allow gates who may reach the endpoint. The control surface is
+// privileged (list sessions, steer, mutate presence), so — unlike a backend's
+// open-by-omission ACL — an EMPTY allow means default-deny, never allow-all: the
+// gates below check allow.empty() first. This matters because the ACL is
+// hot-swappable (SIGHUP), so the surface must fail closed even if a reload ever
+// leaves it empty, not only rely on loadConfig's startup non-empty guarantee.
+// onBehalfAllow is the SEPARATE, dedicated list of proxy identities (the
+// air-serve relay) permitted to attest an X-Air-On-Behalf browser identity — it
+// is NOT the general allow list, so an ordinary allowed caller cannot forge
+// attribution, and it too fails closed when empty. audit records accepted actions.
 func airControlHandler(c airController, identify func(*http.Request) (pubkey, fqdn string), allow, onBehalfAllow acl, audit func(rec airSteerAudit)) http.Handler {
 	mux := http.NewServeMux()
 
@@ -80,7 +85,7 @@ func airControlHandler(c airController, identify func(*http.Request) (pubkey, fq
 			return
 		}
 		pubKey, fqdn := identify(r)
-		if !allow.allows(pubKey, fqdn) {
+		if allow.empty() || !allow.allows(pubKey, fqdn) {
 			if audit != nil {
 				audit(airSteerAudit{Peer: fqdnOr(fqdn), PeerKey: pubKey, Method: "air/sessions", OK: false})
 			}
@@ -105,7 +110,7 @@ func airControlHandler(c airController, identify func(*http.Request) (pubkey, fq
 	// may never create or remove another identity's card.
 	mux.HandleFunc("/v1/presence", func(w http.ResponseWriter, r *http.Request) {
 		pubKey, fqdn := identify(r)
-		if !allow.allows(pubKey, fqdn) {
+		if allow.empty() || !allow.allows(pubKey, fqdn) {
 			if audit != nil {
 				audit(airSteerAudit{Peer: fqdnOr(fqdn), PeerKey: pubKey, Method: presenceMethod(r.Method), OK: false})
 			}
@@ -188,7 +193,7 @@ func airControlHandler(c airController, identify func(*http.Request) (pubkey, fq
 			return
 		}
 		pubKey, fqdn := identify(r)
-		if !allow.allows(pubKey, fqdn) {
+		if allow.empty() || !allow.allows(pubKey, fqdn) {
 			if audit != nil {
 				audit(airSteerAudit{Peer: fqdnOr(fqdn), PeerKey: pubKey, Method: "air/steer", OK: false})
 			}

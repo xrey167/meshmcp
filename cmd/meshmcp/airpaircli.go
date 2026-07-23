@@ -63,13 +63,13 @@ func cmdAirJoin(args []string) error {
 		return fmt.Errorf("air join: %w", err)
 	}
 	if !*asJSON {
-		fmt.Fprintln(os.Stderr, okLine("requesting access as %s", bold(sanitizeCell(you)))+dim(" · "+control))
+		fmt.Fprintln(os.Stderr, okLine(tr("requesting access as %s"), bold(sanitizeCell(you)))+dim(" · "+control))
 	}
 	if air.PairStatus(status) == air.StatusApproved {
 		return reportJoinApproved(you, *asJSON)
 	}
 	if !*asJSON {
-		fmt.Fprintln(os.Stderr, dim("waiting for approval… (Ctrl-C to stop)"))
+		fmt.Fprintln(os.Stderr, dim(tr("waiting for approval… (Ctrl-C to stop)")))
 	}
 
 	ticker := time.NewTicker(*interval)
@@ -103,11 +103,11 @@ func cmdAirJoin(args []string) error {
 				return printJSONValue(map[string]string{"status": "declined", "you": you, "reason": st.Reason})
 			}
 			if st.Reason != "" {
-				fmt.Fprintln(os.Stderr, amber("✗ your request was declined: ")+st.Reason)
+				fmt.Fprintln(os.Stderr, amber(tr("✗ your request was declined: "))+st.Reason)
 			} else {
-				fmt.Fprintln(os.Stderr, amber("✗ your request was declined."))
+				fmt.Fprintln(os.Stderr, amber(tr("✗ your request was declined.")))
 			}
-			fmt.Fprintln(os.Stderr, dim("  If you think this is a mistake, contact the gateway's operator, then run `air join` again — a fresh request re-queues for approval."))
+			fmt.Fprintln(os.Stderr, dim("  "+tr("If you think this is a mistake, contact the gateway's operator, then run `air join` again — a fresh request re-queues for approval.")))
 			return errors.New("air join: request declined")
 		case air.StatusNone:
 			// A request we watched go pending has vanished without a recorded
@@ -117,8 +117,8 @@ func cmdAirJoin(args []string) error {
 				if *asJSON {
 					return printJSONValue(map[string]string{"status": "declined", "you": you})
 				}
-				fmt.Fprintln(os.Stderr, amber("✗ your request was declined."))
-				fmt.Fprintln(os.Stderr, dim("  Contact the gateway's operator, then run `air join` again to re-queue."))
+				fmt.Fprintln(os.Stderr, amber(tr("✗ your request was declined.")))
+				fmt.Fprintln(os.Stderr, dim("  "+tr("Contact the gateway's operator, then run `air join` again to re-queue.")))
 				return errors.New("air join: request declined")
 			}
 		}
@@ -129,10 +129,10 @@ func reportJoinApproved(you string, asJSON bool) error {
 	if asJSON {
 		return printJSONValue(map[string]string{"status": "approved", "you": you})
 	}
-	fmt.Println(okLine("approved — you're recognized on the mesh as %s", bold(sanitizeCell(you))))
+	fmt.Println(okLine(tr("approved — you're recognized on the mesh as %s"), bold(sanitizeCell(you))))
 	// State the boundary so the peer does not mistake recognition for access:
 	// being recognized is an identity, not a capability.
-	fmt.Fprintln(os.Stderr, dim("recognition is not access — ask the operator to grant the specific tools you need."))
+	fmt.Fprintln(os.Stderr, dim(tr("recognition is not access — ask the operator to grant the specific tools you need.")))
 	return nil
 }
 

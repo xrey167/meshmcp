@@ -80,7 +80,10 @@ func startParityGateway(t *testing.T, b *Backend, pb *parityBackend) (*httptest.
 	}
 	b.HTTP = bs.URL
 	b.httpURL = u
-	enf := newHTTPEnforcer(b, policy.NewAuditLog(io.Discard, func() string { return "T" }))
+	enf, err := newHTTPEnforcer(b, policy.NewAuditLog(io.Discard, func() string { return "T" }))
+	if err != nil {
+		t.Fatal(err)
+	}
 	identify := func(r *http.Request) (string, string) {
 		return r.Header.Get("X-Test-Peer-Key"), r.Header.Get("X-Test-Peer")
 	}
@@ -567,7 +570,10 @@ func TestHTTPCapabilityOnlyDecisionsAudited(t *testing.T) {
 		t.Fatal(err)
 	}
 	b.HTTP, b.httpURL = bs.URL, u
-	enf := newHTTPEnforcer(b, audit)
+	enf, err := newHTTPEnforcer(b, audit)
+	if err != nil {
+		t.Fatal(err)
+	}
 	gw := httptest.NewServer(httpBackendHandler(b, enf, func(r *http.Request) (string, string) {
 		return r.Header.Get("X-Test-Peer-Key"), r.Header.Get("X-Test-Peer")
 	}))
@@ -596,6 +602,83 @@ func TestHTTPCapabilityOnlyDecisionsAudited(t *testing.T) {
 	if got := bytes.Count(data, []byte(`"tool":"read_file"`)); got != 2 {
 		t.Fatalf("expected 2 audited tools/call decisions, got %d in: %s", got, data)
 	}
+}
+
+// mintSingleUse issues a SingleUse capability bound to key/backend for the given
+// tool glob — mintCapability's one-shot sibling.
+func mintSingleUse(t *testing.T, signer *policy.Signer, key, backend, tool string) string {
+	t.Helper()
+	tok, err := signer.IssueCapability(policy.CapabilityClaims{
+		Subject: key, Audience: backend, Tools: []string{tool}, Issuer: "test",
+		SingleUse: true, ExpiresAt: time.Now().Add(time.Hour).Unix(),
+	}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tok
+}
+
+// TestHTTPSingleUseCapabilityParity pins the HTTP enforcer's deferred single-use
+// consumption at parity with the stdio filter (FoldCapability returns claims;
+// the caller consumes only after its final allow): a one-shot grant authorizes
+// exactly once, a replay is refused, and a co-sign hold does NOT burn it (the
+// approved-tool retry still has it). Without the deferred Consume the HTTP path
+// would either never consume (replay slips through) or burn on the hold.
+func TestHTTPSingleUseCapabilityParity(t *testing.T) {
+	signer, err := policy.GenerateSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("consumed once, replay denied", func(t *testing.T) {
+		b := &Backend{Name: "b", Capabilities: &CapabilitiesConfig{
+			Required: true, TrustedPublicKeys: []string{signer.PubKeyHex()}}}
+		pb := &parityBackend{}
+		gw, _ := startParityGateway(t, b, pb)
+		tok := mintSingleUse(t, signer, "KA", "b", "read_*")
+
+		if _, body := postMCP(t, gw, "alice", "KA", "", withMeta(toolCallBody(1, "read_file", ""), tok)); !strings.Contains(body, `"result"`) {
+			t.Fatalf("first use of a single-use grant must be allowed, got: %s", body)
+		}
+		if pb.hits() != 1 {
+			t.Fatalf("the allowed call must reach the backend exactly once, saw %d", pb.hits())
+		}
+		if _, body := postMCP(t, gw, "alice", "KA", "", withMeta(toolCallBody(2, "read_file", ""), tok)); !strings.Contains(body, "already been used") {
+			t.Fatalf("a single-use replay over HTTP must be refused, got: %s", body)
+		}
+		if pb.hits() != 1 {
+			t.Fatalf("the replay must not reach the backend, saw %d", pb.hits())
+		}
+	})
+
+	t.Run("co-sign hold does not burn the grant", func(t *testing.T) {
+		b := &Backend{Name: "b", Policy: &policy.Policy{DefaultAllow: false, Rules: []policy.Rule{
+			{Peers: []string{"*"}, Tools: []string{"read_secret"}, Allow: true, RequireCosign: true},
+		}}, Capabilities: &CapabilitiesConfig{TrustedPublicKeys: []string{signer.PubKeyHex()}}}
+		pb := &parityBackend{}
+		gw, _ := startParityGateway(t, b, pb)
+		tok := mintSingleUse(t, signer, "KA", "b", "read_*")
+
+		// A require_cosign call holds — the grant is verified but NOT consumed.
+		if _, body := postMCP(t, gw, "alice", "KA", "", withMeta(toolCallBody(1, "read_secret", ""), tok)); !strings.Contains(body, "co-sign") {
+			t.Fatalf("expected a co-sign hold, got: %s", body)
+		}
+		if pb.hits() != 0 {
+			t.Fatalf("a held call must not reach the backend, saw %d", pb.hits())
+		}
+		// The grant survived: a default-deny tool it also covers is upgraded to
+		// allow, consuming the grant only now.
+		if _, body := postMCP(t, gw, "alice", "KA", "", withMeta(toolCallBody(2, "read_file", ""), tok)); !strings.Contains(body, `"result"`) {
+			t.Fatalf("a co-sign hold must not burn the single-use grant, got: %s", body)
+		}
+		if pb.hits() != 1 {
+			t.Fatalf("the surviving grant's call must reach the backend, saw %d", pb.hits())
+		}
+		// …and it is consumed after that allow: the replay is refused.
+		if _, body := postMCP(t, gw, "alice", "KA", "", withMeta(toolCallBody(3, "read_file", ""), tok)); !strings.Contains(body, "already been used") {
+			t.Fatalf("the grant must be consumed after its final allow, got: %s", body)
+		}
+	})
 }
 
 // TestHTTPSessionStoreBounds: the label table denies (never evicts) at the
@@ -851,7 +934,10 @@ func httpCapReaches(t *testing.T, pol *policy.Policy, pubHex string, required bo
 	t.Helper()
 	b := &Backend{Name: "b", Policy: pol,
 		Capabilities: &CapabilitiesConfig{Required: required, TrustedPublicKeys: []string{pubHex}}}
-	enf := newHTTPEnforcer(b, policy.NewAuditLog(io.Discard, func() string { return "T" }))
+	enf, err := newHTTPEnforcer(b, policy.NewAuditLog(io.Discard, func() string { return "T" }))
+	if err != nil {
+		t.Fatal(err)
+	}
 	req, err := http.NewRequest(http.MethodPost, "http://x/mcp", strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
@@ -891,7 +977,10 @@ func TestRemoteBackendSecretParity(t *testing.T) {
 	rc := &remoteClient{name: "r", endpoint: u, clientID: "c", httpClient: upstream.Client(), now: time.Now}
 
 	b := secretsBackend(t, "r", []string{"API_KEY"}, nil, nil)
-	enf := newHTTPEnforcer(b, policy.NewAuditLog(io.Discard, func() string { return "T" }))
+	enf, err := newHTTPEnforcer(b, policy.NewAuditLog(io.Discard, func() string { return "T" }))
+	if err != nil {
+		t.Fatal(err)
+	}
 	identify := func(r *http.Request) (string, string) {
 		return r.Header.Get("X-Test-Peer-Key"), r.Header.Get("X-Test-Peer")
 	}

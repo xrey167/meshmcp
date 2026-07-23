@@ -312,7 +312,13 @@ func RunSessionStoreConformance(t *testing.T, open func(t *testing.T) session.Se
 			Owner: "gw1",
 			// CreatorKey is the identity check on failover reattach; a store
 			// that drops it breaks (or worse, bypasses) that check.
-			CreatorKey:      "wg-pubkey-of-creator",
+			CreatorKey: "wg-pubkey-of-creator",
+			// PeerFQDN/PeerAddr feed a standby adoption's backend respawn; a
+			// store that drops them silently downgrades the adopted session's
+			// policy identity (or, with the sweep's guard, makes every record
+			// unadoptable).
+			PeerFQDN:        "laptop.mesh.example",
+			PeerAddr:        "100.64.0.7:41641",
 			SendSeq:         5,
 			Acked:           2,
 			RecvSeq:         3,
@@ -337,6 +343,7 @@ func RunSessionStoreConformance(t *testing.T, open func(t *testing.T) session.Se
 		}
 		if got.SendSeq != 5 || got.Acked != 2 || got.RecvSeq != 3 || got.Owner != "gw1" ||
 			got.CreatorKey != "wg-pubkey-of-creator" ||
+			got.PeerFQDN != "laptop.mesh.example" || got.PeerAddr != "100.64.0.7:41641" ||
 			string(got.Replay) != "handshake" || got.ReplayResponses != 1 ||
 			got.Generation != 7 || got.LeaseExpiry != ps.LeaseExpiry {
 			t.Fatalf("round-trip mismatch: %+v", got)

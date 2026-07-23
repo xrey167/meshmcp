@@ -172,3 +172,33 @@ backends:
 		t.Errorf("config was mutated despite the refusal: %+v", loaded.Control.Allow)
 	}
 }
+
+// TestResidualControlFQDNs proves revoke-device surfaces the FQDN-glob allow
+// entries it deliberately leaves in place (removing a glob would over-revoke) so
+// a lost device matching one is a named next step, not a silent gap — and that
+// pubkey entries and a missing control block never produce a false alarm.
+func TestResidualControlFQDNs(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  *Config
+		want []string
+	}{
+		{"nil config", nil, nil},
+		{"no control", &Config{}, nil},
+		{"only pubkeys", &Config{Control: &ControlConfig{Allow: []string{"pubkey:A", "pubkey:B"}}}, nil},
+		{"mixed", &Config{Control: &ControlConfig{Allow: []string{"pubkey:A", "laptop-*.mesh", "phone.mesh"}}}, []string{"laptop-*.mesh", "phone.mesh"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := residualControlFQDNs(tc.cfg)
+			if len(got) != len(tc.want) {
+				t.Fatalf("residualControlFQDNs = %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("residualControlFQDNs = %v, want %v", got, tc.want)
+				}
+			}
+		})
+	}
+}

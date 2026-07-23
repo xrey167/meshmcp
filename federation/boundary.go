@@ -40,6 +40,15 @@ type Mapping struct {
 	TrustDomain string `yaml:"trust_domain"`
 }
 
+// Audit-record identifiers for boundary crossings. The metering read side
+// (meter.go) keys on the same constants, so the audit trail and the usage
+// export can never drift apart.
+const (
+	boundaryAuditBackend = "federation-boundary"
+	boundaryMethodTool   = "federation/tools/call"
+	boundaryMethodCorpus = "federation/corpus/query"
+)
+
 // Boundary authorizes and audits cross-org tool calls.
 type Boundary struct {
 	grants      map[string][]string // org -> tool globs
@@ -262,10 +271,10 @@ func (b *Boundary) recordCorpus(org, corpus string, allow bool, reason string) {
 		decision = "allow"
 	}
 	b.audit.Append(policy.AuditRecord{
-		Backend:      "federation-boundary",
+		Backend:      boundaryAuditBackend,
 		Peer:         org,
 		PeerSpiffeID: b.spiffeForOrg(org),
-		Method:       "federation/corpus/query",
+		Method:       boundaryMethodCorpus,
 		Tool:         corpus,
 		Decision:     decision,
 		Reason:       reason,
@@ -281,10 +290,10 @@ func (b *Boundary) record(org, tool string, allow bool, reason string) {
 		decision = "allow"
 	}
 	b.audit.Append(policy.AuditRecord{
-		Backend:      "federation-boundary",
+		Backend:      boundaryAuditBackend,
 		Peer:         org,
 		PeerSpiffeID: b.spiffeForOrg(org),
-		Method:       "federation/tools/call",
+		Method:       boundaryMethodTool,
 		Tool:         tool,
 		Decision:     decision,
 		Reason:       reason,

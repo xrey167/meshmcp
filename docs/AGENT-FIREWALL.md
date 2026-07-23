@@ -112,8 +112,24 @@ meshmcp audit verify audit.jsonl --checkpoints cps.jsonl --pubkey <key>
 Because the Merkle root is *signed*, editing any covered record fails
 verification (`Merkle root mismatch`) and the attacker cannot re-sign without
 the private key — even with full write access to the file. Checkpoints
-optionally **anchor** to an external witness (`audit_anchor`), defending even
-against an insider who also holds the signing key. Full format:
+optionally **anchor** to an external witness, defending even against an
+insider who also holds the signing key: `audit_anchor` appends each checkpoint
+to a self-linked local anchor file, and `audit_anchor_url` POSTs it to a peer
+gateway's witness (`meshmcp control --anchor-witness <file> --anchor-signers
+<hexpub>`), which pins the signer key and stores checkpoints append-only.
+
+```bash
+meshmcp audit verify audit.jsonl --checkpoints cps.jsonl --pubkey <key> --anchors witness.jsonl
+#     ANCHORED: all 10 checkpoint(s) match the external witness
+# …or, after an insider rolls log+checkpoints back together (still "sealed" internally):
+# ANCHOR MISMATCH: the witness recorded checkpoint 10 but the checkpoints file does not contain it …  (non-zero exit)
+meshmcp audit anchor --checkpoints cps.jsonl --url http://control:9600/v1/anchor  # replay after a witness outage (idempotent)
+```
+
+A witness outage never blocks a checkpoint or an audited call: peer delivery
+is asynchronous (a bounded in-order background queue; a slow or dead witness
+delays *witnessing* only, and the failure is logged) and the gap shows up
+honestly as `anchor_partial` until replayed. Full format:
 [docs/spec/AUDIT-RECORD.md](spec/AUDIT-RECORD.md).
 
 ---

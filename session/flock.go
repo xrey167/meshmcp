@@ -90,6 +90,24 @@ func (l *fileLock) acquire() error {
 	}
 }
 
+// stillHeld reports whether the lock file still carries this holder's token —
+// i.e. the lock was NOT stolen as stale while this process was paused inside
+// its critical section. Store mutations check it immediately before their
+// commit (rename/remove): the owner token otherwise guards only release-time
+// deletion, and a holder paused past the staleness window would resume and
+// blindly commit a stale image over whatever the stealing process committed —
+// regressing the lease generation, the one split-brain the CAS exists to
+// forbid. The read shrinks the unguarded span from the whole critical section
+// to the instant between this check and the commit; that residual is why
+// FileStore remains single-host/dev-only and the standby sweep refuses to run
+// over it. A read failure reports not-held: failing safe means aborting the
+// commit (the caller surfaces a store error and retries), never overwriting
+// state we cannot prove is still fenced to us.
+func (l *fileLock) stillHeld() bool {
+	got, err := os.ReadFile(l.path)
+	return err == nil && bytes.Equal(got, []byte(l.token))
+}
+
 // release removes the lock only when the lock file still carries this
 // holder's token (read-verify-delete). A holder whose stale lock was stolen
 // observes the new owner's token — or no file at all — and silently no-ops,

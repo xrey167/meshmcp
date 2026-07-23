@@ -3,6 +3,7 @@ package policy
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -35,12 +36,30 @@ type CapabilityClaims struct {
 	// subgraphs this capability may query (globs; empty = no corpus restriction).
 	// Auto-signed (signingBytes marshals the whole struct); a knowledge backend
 	// checks it with AllowsCorpus in addition to the tool-glob check.
-	Corpora   []string `json:"corpora,omitempty"`
-	IssuedAt  int64    `json:"iat"`
-	NotBefore int64    `json:"nbf,omitempty"`
-	ExpiresAt int64    `json:"exp"`
-	PubKey    string   `json:"pubkey"` // hex authority key — a HINT; must be pinned by the verifier
-	Sig       string   `json:"sig,omitempty"`
+	Corpora []string `json:"corpora,omitempty"`
+	// SingleUse marks the grant one-shot: the verifier consumes the token's ID
+	// (jti) on the first successful Verify and refuses any replay. Requires the
+	// verifier to have a replay cache (WithReplayCache) — a SingleUse token
+	// presented to a verifier without one fails closed. Omitempty, so existing
+	// multi-use tokens are byte-identical and keep verifying.
+	SingleUse bool   `json:"one,omitempty"`
+	IssuedAt  int64  `json:"iat"`
+	NotBefore int64  `json:"nbf,omitempty"`
+	ExpiresAt int64  `json:"exp"`
+	PubKey    string `json:"pubkey"` // hex authority key — a HINT; must be pinned by the verifier
+	Sig       string `json:"sig,omitempty"`
+
+	// DelegatePub authorizes the HOLDER of this capability to mint sub-grants:
+	// it is the hex Ed25519 public key whose private half may sign a direct
+	// child token (see DelegateCapability). Empty = this capability cannot be
+	// delegated. Omitempty, so existing tokens are byte-identical.
+	DelegatePub string `json:"delegate_pub,omitempty"`
+	// Parent carries the ENCODED parent token of a sub-grant. The verifier
+	// walks the chain root-first: the root must be signed by a pinned
+	// authority, each child by its parent's DelegatePub key, and every hop
+	// must be strictly narrower (tool/corpus subset, same audience, expiry no
+	// later than the parent's). Empty = authority-issued root token.
+	Parent string `json:"parent,omitempty"`
 }
 
 func (c CapabilityClaims) signingBytes() []byte {
@@ -66,6 +85,12 @@ func (s *Signer) IssueCapability(claims CapabilityClaims, now time.Time) (string
 	}
 	if claims.Subject == "" || claims.Audience == "" || len(claims.Tools) == 0 {
 		return "", fmt.Errorf("capability needs subject, audience, and at least one tool")
+	}
+	if claims.Parent != "" {
+		return "", fmt.Errorf("an authority-issued capability cannot carry a parent (sub-grants are minted with DelegateCapability)")
+	}
+	if err := validateDelegatePub(claims); err != nil {
+		return "", err
 	}
 	// Reject a malformed glob at issue time; otherwise it silently never matches
 	// and the authority mints a token that can never authorize anything.
@@ -93,6 +118,7 @@ type CapabilityVerifier struct {
 	now            func() time.Time
 	revoked        func(id string) bool
 	subjectRevoked func(sub string) bool
+	used           NonceStore // jti replay cache for SingleUse grants (nil = no single-use support, fail closed)
 }
 
 // NewCapabilityVerifier pins the given hex authority public keys.
@@ -130,20 +156,51 @@ func (v *CapabilityVerifier) WithSubjectRevocation(revoked func(sub string) bool
 	return v
 }
 
+// WithReplayCache adds the jti replay cache that makes SingleUse grants
+// enforceable: the first Consume of a SingleUse token burns its ID (retained
+// until the token's own expiry, so retention is bounded by the 24h lifetime
+// ceiling); any later presentation is refused. The store is consulted only
+// after every other check passes — and, on the tools/call filter path, only
+// once the call's final outcome is allow — so a failed or held call never
+// burns the grant. MemNonceStore covers a single process; a multi-gateway HA
+// deployment needs a shared store (e.g. a pgstore-backed NonceStore, the same
+// seam as the delegation nonce store).
+func (v *CapabilityVerifier) WithReplayCache(used NonceStore) *CapabilityVerifier {
+	v.used = used
+	return v
+}
+
 // Verify decodes and validates a token for a specific caller, backend, and
-// tool. It fails closed: any decode, trust, signature, binding, time, or
-// revocation problem returns an error and no claims.
+// tool, and — for a SingleUse token — consumes its jti. It fails closed: any
+// decode, trust, signature, binding, time, or revocation problem returns an
+// error and no claims, and a failed Verify never burns a single-use grant.
+// Call sites where verification and execution are one step (edge, pubsub) use
+// Verify directly; the tools/call filter instead verifies with verifyClaims
+// and defers Consume until the call's final outcome is known, so a co-sign
+// hold or a downstream deny does not burn the grant.
 func (v *CapabilityVerifier) Verify(token, peerKey, backend, tool string) (CapabilityClaims, error) {
-	raw, err := base64.RawURLEncoding.DecodeString(token)
+	c, err := v.verifyClaims(token, peerKey, backend, tool)
 	if err != nil {
-		return CapabilityClaims{}, fmt.Errorf("capability is not valid base64url")
+		return CapabilityClaims{}, err
 	}
-	var c CapabilityClaims
-	if err := json.Unmarshal(raw, &c); err != nil {
-		return CapabilityClaims{}, fmt.Errorf("capability is not valid JSON")
+	if err := v.Consume(c); err != nil {
+		return CapabilityClaims{}, err
 	}
-	if c.Version != 1 {
-		return CapabilityClaims{}, fmt.Errorf("unsupported capability version %d", c.Version)
+	return c, nil
+}
+
+// verifyClaims runs every check EXCEPT single-use consumption. A SingleUse
+// token presented to a verifier without a replay cache still fails closed
+// here, so it can never authorize anything by omission.
+func (v *CapabilityVerifier) verifyClaims(token, peerKey, backend, tool string) (CapabilityClaims, error) {
+	c, err := decodeCapability(token)
+	if err != nil {
+		return CapabilityClaims{}, err
+	}
+	// A sub-grant (Parent set) is verified by walking its chain — the root must
+	// be authority-pinned and every hop strictly narrower. See capability_delegation.go.
+	if c.Parent != "" {
+		return v.verifyDelegated(c, peerKey, backend, tool)
 	}
 	// Trust root: the embedded key MUST be pinned.
 	key, ok := v.trusted[c.PubKey]
@@ -181,7 +238,44 @@ func (v *CapabilityVerifier) Verify(token, peerKey, backend, tool string) (Capab
 	if v.subjectRevoked != nil && v.subjectRevoked(c.Subject) {
 		return CapabilityClaims{}, fmt.Errorf("capability subject (device) has been revoked")
 	}
+	// No replay cache configured = fail closed: a SingleUse token cannot be
+	// honored as multi-use by omission (consumption itself happens in Consume).
+	if c.SingleUse && v.used == nil {
+		return CapabilityClaims{}, fmt.Errorf("capability is single-use but this verifier has no replay cache (fail closed)")
+	}
 	return c, nil
+}
+
+// Consume burns a SingleUse grant's jti in the replay cache (retained until
+// the token's own expiry, so retention is bounded by the 24h lifetime
+// ceiling); a second Consume of the same jti fails. Multi-use claims are a
+// no-op. Callers that split verification from execution (the tools/call
+// filter) call this only once the call's final outcome is allow, so a held or
+// denied call never burns the grant.
+//
+// A delegated leaf's replay key is derived from its SIGNATURE, not its ID: a
+// sub-grant's ID is holder-chosen (a malicious delegate can hand-sign a token
+// with any ID), so keying by ID would let a delegate mint a colliding ID and
+// burn ANOTHER token's single-use grant. The Ed25519 signature is unique per
+// token content, so re-presenting the same token still burns exactly once
+// while distinct tokens can never collide. Authority-issued roots keep the
+// jti key (the authority controls those IDs).
+func (v *CapabilityVerifier) Consume(c CapabilityClaims) error {
+	if !c.SingleUse {
+		return nil
+	}
+	if v.used == nil {
+		return fmt.Errorf("capability is single-use but this verifier has no replay cache (fail closed)")
+	}
+	key := "cap-jti:" + c.ID
+	if c.Parent != "" {
+		sum := sha256.Sum256([]byte(c.Sig))
+		key = "cap-sig:" + hex.EncodeToString(sum[:])
+	}
+	if !v.used.Use(key, time.Unix(c.ExpiresAt, 0), v.now()) {
+		return fmt.Errorf("capability %s has already been used (single-use)", c.ID)
+	}
+	return nil
 }
 
 // AllowsCorpus reports whether this capability may query the named corpus /
@@ -218,7 +312,12 @@ func (f *Filter) SetCapabilityVerifier(v *CapabilityVerifier, required bool) {
 // delegates to FoldCapability, the single shared implementation both the stdio
 // filter and the Streamable-HTTP enforcer use (the ClassifyRPC precedent), so
 // the two transports cannot drift on capability semantics.
-func (f *Filter) applyCapability(dec Decision, token, tool string) Decision {
+//
+// A SingleUse grant is NOT consumed here: the returned claims (non-nil only
+// when the token was load-bearing) are consumed by handleToolCall once the
+// call's final outcome is allow, so a co-sign hold or a downstream
+// delegation/hook deny never burns the grant.
+func (f *Filter) applyCapability(dec Decision, token, tool string) (Decision, *CapabilityClaims) {
 	return FoldCapability(dec, f.capVerifier, f.capRequired, token, f.caller.PeerKey, f.caller.Backend, tool)
 }
 
@@ -232,37 +331,51 @@ func (f *Filter) applyCapability(dec Decision, token, tool string) Decision {
 // It is the SHARED implementation used by the stdio filter and the
 // Streamable-HTTP enforcer, so both transports make the same capability
 // decision for the same (policy, token) input.
-func FoldCapability(dec Decision, v *CapabilityVerifier, required bool, token, peerKey, backend, tool string) Decision {
+//
+// A SingleUse grant is NOT consumed here: precedence runs first, and the
+// returned claims (non-nil only when the token was load-bearing — it upgraded
+// a default-deny, or the surface is capability-required) are consumed by the
+// caller once the call's final outcome is allow. A co-sign hold, an explicit
+// deny, a delegation/hook deny, or a call the policy allowed on its own never
+// burns the grant — so a cosign-approved retry still has it.
+func FoldCapability(dec Decision, v *CapabilityVerifier, required bool, token, peerKey, backend, tool string) (Decision, *CapabilityClaims) {
 	if token == "" {
 		if required {
-			return Decision{Outcome: OutcomeDeny, RuleID: dec.RuleID, Reason: "capability required but none presented"}
+			return Decision{Outcome: OutcomeDeny, RuleID: dec.RuleID, Reason: "capability required but none presented"}, nil
 		}
-		return dec
+		return dec, nil
 	}
 	if v == nil {
 		// A token was presented but there is nothing pinned to verify it
 		// against: fail closed rather than silently ignoring it.
-		return Decision{Outcome: OutcomeDeny, RuleID: dec.RuleID, Reason: "invalid capability: no verifier configured"}
+		return Decision{Outcome: OutcomeDeny, RuleID: dec.RuleID, Reason: "invalid capability: no verifier configured"}, nil
 	}
-	claims, err := v.Verify(token, peerKey, backend, tool)
+	claims, err := v.verifyClaims(token, peerKey, backend, tool)
 	if err != nil {
-		return Decision{Outcome: OutcomeDeny, RuleID: dec.RuleID, Reason: "invalid capability: " + err.Error()}
+		return Decision{Outcome: OutcomeDeny, RuleID: dec.RuleID, Reason: "invalid capability: " + err.Error()}, nil
 	}
-	// A capability never bypasses an explicit deny or a required co-sign.
+	// A capability never bypasses an explicit deny or a required co-sign —
+	// checked BEFORE any consumption, so neither burns a single-use grant.
 	if dec.Outcome == OutcomeCosign {
-		return dec
+		return dec, nil
 	}
 	if dec.Outcome == OutcomeDeny && dec.RuleID != -1 {
-		return dec
+		return dec, nil
 	}
+	loadBearing := claims.SingleUse && (required || dec.Outcome != OutcomeAllow)
 	// Grant: upgrade a default-deny, or keep an existing allow.
-	return Decision{
+	grant := Decision{
 		Allow:     true,
 		Outcome:   OutcomeAllow,
 		RuleID:    dec.RuleID,
 		Reason:    "capability " + claims.ID + " (" + claims.Issuer + ")",
 		AddLabels: dec.AddLabels,
 	}
+	if !loadBearing {
+		return grant, nil
+	}
+	c := claims
+	return grant, &c
 }
 
 // stripCapability removes a presented capability token from a tools/call line's

@@ -20,6 +20,9 @@ func scanPersisted(id, owner string, gen, exp int64, payload []byte) (session.Pe
 }
 
 func (s *Store) Save(ps session.PersistedSession) error {
+	// Stamp the format version like FileStore.Save, so an older build reading
+	// this row after a schema bump can recognize it as too new to trust.
+	ps.SchemaVersion = session.SessionSchemaVersion
 	payload, err := json.Marshal(ps)
 	if err != nil {
 		return err
@@ -49,6 +52,12 @@ func (s *Store) Load(id string) (session.PersistedSession, bool, error) {
 	ps, err := scanPersisted(id, owner, gen, exp, payload)
 	if err != nil {
 		return session.PersistedSession{}, false, err
+	}
+	if ps.SchemaVersion > session.SessionSchemaVersion {
+		// Written by a newer build: treat as no resumable session so the client
+		// reconnects fresh (mirror FileStore) rather than resuming against a
+		// format this build may misread.
+		return session.PersistedSession{}, false, nil
 	}
 	return ps, true, nil
 }
@@ -82,7 +91,11 @@ func (s *Store) List() ([]session.PersistedSession, error) {
 		if err := rows.Scan(&id, &owner, &gen, &exp, &payload); err != nil {
 			return nil, err
 		}
-		if ps, err := scanPersisted(id, owner, gen, exp, payload); err == nil && ps.ID != "" {
+		// Skip newer-format rows like any unreadable one (mirror FileStore):
+		// the standby sweep adopts from List, and an older build must never
+		// respawn a session from a checkpoint it may misread.
+		if ps, err := scanPersisted(id, owner, gen, exp, payload); err == nil && ps.ID != "" &&
+			ps.SchemaVersion <= session.SessionSchemaVersion {
 			out = append(out, ps)
 		}
 	}

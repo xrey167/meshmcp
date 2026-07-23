@@ -31,8 +31,12 @@ type FederateConfig struct {
 	Mappings []federation.Mapping `yaml:"mappings"`
 }
 
-// cmdFederate runs a federation boundary as a mesh peer.
+// cmdFederate runs a federation boundary as a mesh peer, or dispatches the
+// `usage` metering subcommand (S58).
 func cmdFederate(args []string) error {
+	if len(args) > 0 && args[0] == "usage" {
+		return cmdFederateUsage(args[1:])
+	}
 	fs := flag.NewFlagSet("federate", flag.ExitOnError)
 	cfgPath := fs.String("config", "federate.yaml", "path to the federation config")
 	if err := fs.Parse(args); err != nil {

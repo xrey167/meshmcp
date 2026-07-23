@@ -13,6 +13,7 @@ package policy
 import (
 	"path"
 	"strings"
+	"time"
 )
 
 // Outcome is a three-valued policy verdict. Beyond allow/deny, a call can be
@@ -46,6 +47,10 @@ type Decision struct {
 	Reason    string   // human-readable why (for audit + the denial message)
 	AddLabels []string // data-flow labels this allowed call adds to the session
 	Cost      int      // cost/quota units this call consumed (from the matched rate rule; 0 if untracked)
+	// RetryAfter is set only on a rate-limit deny: the time until the bucket
+	// refills enough for this call's cost, computed from the actual token-bucket
+	// state (not a guess). Zero on every other outcome.
+	RetryAfter time.Duration
 }
 
 // Rule authorizes (or denies) a set of tools OR a set of JSON-RPC methods

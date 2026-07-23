@@ -25,6 +25,17 @@ var errSessionNotFound = errors.New("session: requested resume session is no lon
 // ErrNoSession is returned by Steer when no live session has the given id.
 var ErrNoSession = errors.New("session: no such session")
 
+// errTakeoverRaced marks a rehydrate whose TakeoverLease lost the generation
+// CAS: a concurrent adopt/takeover moved the generation between Load and the
+// CAS. It is transient — attach re-Loads and retries — and must never surface
+// to the client, whose transport treats any attach rejection as terminal.
+var errTakeoverRaced = errors.New("session: lost the takeover race")
+
+// takeoverAttempts bounds attach's re-Load+retry on a takeover CAS loss. The
+// standby sweep's adopt claims at most once per candidate, so one retry
+// normally suffices; three absorbs a cross-gateway adopt landing in between.
+const takeoverAttempts = 3
+
 // Server manages resumable sessions for one backend definition. Each
 // session keeps its backend subprocess alive across client reconnects for
 // up to TTL, buffering both directions so no MCP message is lost.
@@ -32,10 +43,17 @@ type Server struct {
 	factory  BackendFactory
 	ttl      time.Duration
 	logf     func(string, ...any)
-	store    SessionStore  // optional: enables cross-gateway session migration
-	lease    LeaseStore    // set when store also supports CAS ownership leases
-	migMode  MigrationMode // how a resumed backend is reconstructed
-	instance string        // this gateway's lease owner id
+	store    SessionStore   // optional: enables cross-gateway session migration
+	lease    LeaseStore     // set when store also supports CAS ownership leases
+	migMode  MigrationMode  // how a resumed backend is reconstructed
+	instance string         // this gateway's lease owner id
+	failover FailoverConfig // standby sweep settings (renewal is always on with a lease)
+
+	// maintDone is closed when the maintenance goroutine exits; Shutdown waits
+	// on it (after the caller closed the stop channel) so an in-flight sweep
+	// adoption can never register a session after the drain. Set once by
+	// StartLeaseMaintenance before any Shutdown, both on the serving goroutine.
+	maintDone chan struct{}
 
 	mu       sync.Mutex
 	sessions map[sessionID]*serverSession
@@ -215,20 +233,38 @@ func (s *Server) attach(id sessionID, meta Meta) (*serverSession, bool, error) {
 			return sess, true, nil
 		}
 		// Unknown here but known to the store: another gateway created it.
-		// Rehydrate and take over (session migration / failover).
+		// Rehydrate and take over (session migration / failover). A takeover
+		// CAS loss is retried with a fresh Load: the standby sweep's adopt can
+		// bump the generation between our Load and our TakeoverLease, and
+		// returning that transient race to the client would permanently close
+		// its endpoint (the client treats attach rejection as terminal) while
+		// the session sits warm on the adopter — the opposite of failover.
 		if s.store != nil {
-			if ps, ok, _ := s.store.Load(id.String()); ok {
+			var lastErr error
+			for attempt := 0; attempt < takeoverAttempts; attempt++ {
+				ps, ok, _ := s.store.Load(id.String())
+				if !ok {
+					lastErr = nil // record gone: genuinely not resumable
+					break
+				}
 				// The same identity binding holds across a failover: the
 				// rehydrating gateway must reject a reattach from any identity
-				// other than the one that originally opened the session.
+				// other than the one that originally opened the session. It is
+				// re-checked on every re-Load.
 				if ps.CreatorKey != meta.PeerKey {
 					return nil, false, errSessionIdentity
 				}
 				sess, err := s.rehydrate(ps, meta)
-				if err != nil {
+				if err == nil {
+					return sess, true, nil
+				}
+				if !errors.Is(err, errTakeoverRaced) {
 					return nil, false, err
 				}
-				return sess, true, nil
+				lastErr = err
+			}
+			if lastErr != nil {
+				return nil, false, lastErr
 			}
 		}
 		return nil, false, errSessionNotFound
@@ -288,10 +324,24 @@ func (s *Server) rehydrate(ps PersistedSession, meta Meta) (*serverSession, erro
 			return nil, err
 		}
 		if !ok {
-			return nil, fmt.Errorf("session %s: lost the takeover race", ps.ID)
+			return nil, fmt.Errorf("session %s: %w", ps.ID, errTakeoverRaced)
 		}
 		leaseGen = l.Generation
 	}
+	sess, err := s.resumeFromPersisted(ps, ep, meta, leaseGen, 1)
+	if err != nil {
+		return nil, err
+	}
+	s.logf("session %s: rehydrated from store (gateway failover, mode=%d)", ep.id, s.migMode)
+	return sess, nil
+}
+
+// resumeFromPersisted spawns a fresh backend for a persisted session, replays
+// the captured client->backend bytes per the migration mode, and registers the
+// live session. Shared by rehydrate (client-driven reattach, active=1) and the
+// standby sweep's adopt (no client attached yet, active=0). The caller holds
+// s.mu and has already secured the ownership lease (leaseGen).
+func (s *Server) resumeFromPersisted(ps PersistedSession, ep *endpoint, meta Meta, leaseGen uint64, active int) (*serverSession, error) {
 	// Tell the fresh backend which session it is, so a backend-managed
 	// (EventStore) backend can restore its own state.
 	meta.SessionID = ps.ID
@@ -320,7 +370,7 @@ func (s *Server) rehydrate(ps PersistedSession, meta Meta) (*serverSession, erro
 		backend:     backend,
 		creatorKey:  ps.CreatorKey,
 		reader:      reader,
-		active:      1,
+		active:      active,
 		meta:        meta,
 		createdAt:   time.Now(),
 		replay:      ps.Replay,
@@ -329,8 +379,7 @@ func (s *Server) rehydrate(ps PersistedSession, meta Meta) (*serverSession, erro
 	}
 	s.sessions[ep.id] = sess
 	s.pump(sess)
-	s.checkpoint(sess) // claim the lease under this gateway's instance id
-	s.logf("session %s: rehydrated from store (gateway failover, mode=%d)", ep.id, s.migMode)
+	s.checkpoint(sess) // persist under this gateway's instance id
 	return sess, nil
 }
 
@@ -348,6 +397,11 @@ func (s *Server) checkpoint(sess *serverSession) {
 	ps := sess.ep.snapshot(replay, countRequests(replay))
 	ps.Owner = s.instance
 	ps.CreatorKey = sess.creatorKey
+	// The creator's mesh identity travels with the checkpoint so a standby
+	// sweep can respawn the backend under the same policy identity (sess.meta
+	// is written once, before the session is published — never mutated after).
+	ps.PeerFQDN = sess.meta.PeerFQDN
+	ps.PeerAddr = sess.meta.PeerAddr
 
 	// Lease-gated store: write only while we still hold the lease. If SaveIfOwned
 	// reports we no longer own it, another gateway took the session over — we are
@@ -356,7 +410,17 @@ func (s *Server) checkpoint(sess *serverSession) {
 	// have already been dispatched to the backend before this fence is detected
 	// (backend.Write precedes checkpoint — see pump). MigrateBackend avoids this
 	// residual by making the backend the authoritative state source.
-	if s.lease != nil && sess.leaseGen > 0 {
+	if s.lease != nil {
+		if sess.leaseGen == 0 {
+			// Degraded session (lease acquire failed at create): we hold no
+			// fencing generation, so an unfenced Save into this CAS-gated store
+			// could overwrite a record another gateway now owns at generation
+			// >= 1 (TakeoverLease accepts generation-0 records), regressing the
+			// monotonic generation and fencing the LIVE owner out of its own
+			// session. Never write: the session serves without migration,
+			// exactly as logged at create.
+			return
+		}
 		ok, err := s.lease.SaveIfOwned(ps, s.instance, sess.leaseGen)
 		if err != nil {
 			s.logf("session %s: checkpoint write error: %v", sess.ep.id, err)
@@ -368,7 +432,7 @@ func (s *Server) checkpoint(sess *serverSession) {
 		}
 		return
 	}
-	// No lease support (or lease not held): best-effort save, no fencing.
+	// Store without lease support: best-effort save, no fencing exists at all.
 	_ = s.store.Save(ps)
 }
 

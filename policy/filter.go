@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 )
 
 // Caller identifies the mesh peer whose traffic a filter is enforcing.
@@ -379,8 +380,9 @@ func (f *Filter) handleToolCall(line []byte, tool string, id, args json.RawMessa
 	// require_cosign rule is satisfied only by a signed, single-use approval for
 	// precisely these arguments, which DecideToolCallBound consumes atomically.
 	dec := f.eng.DecideToolCallBound(f.caller.Peer, f.caller.PeerKey, f.caller.Backend, tool, args, f.labelSnapshot())
+	var pendingCap *CapabilityClaims
 	if f.capVerifier != nil {
-		dec = f.applyCapability(dec, capToken, tool)
+		dec, pendingCap = f.applyCapability(dec, capToken, tool)
 	}
 	// Router delegation runs AFTER the capability fold, so a capability held by
 	// the connecting router can never upgrade a delegation deny (a delegation
@@ -396,6 +398,15 @@ func (f *Filter) handleToolCall(line []byte, tool string, id, args json.RawMessa
 		dec = applyDecisionHooks(f.hooks, ToolCallInfo{
 			Caller: f.caller, Tool: tool, Arguments: args, Labels: f.labelSnapshot(),
 		}, dec)
+	}
+	// Consume a load-bearing single-use grant only now that the final outcome
+	// is known: a cosign hold or a delegation/hook deny must not burn it. A
+	// replayed jti surfaces here and turns the allow into a deny, so the audit
+	// record below reflects the true verdict.
+	if pendingCap != nil && dec.Outcome == OutcomeAllow {
+		if err := f.capVerifier.Consume(*pendingCap); err != nil {
+			dec = Decision{Outcome: OutcomeDeny, RuleID: dec.RuleID, Reason: "invalid capability: " + err.Error()}
+		}
 	}
 	rec := f.record("tools/call", tool, string(id), dec)
 	if da.relevant {
@@ -462,7 +473,7 @@ func (f *Filter) handleToolCall(line []byte, tool string, id, args json.RawMessa
 		if reason == "" {
 			reason = "denied by mesh policy"
 		}
-		f.writeDenial(id, fmt.Sprintf("tool %q blocked for peer %s: %s", tool, f.caller.Peer, reason))
+		f.writeDenialRetry(id, fmt.Sprintf("tool %q blocked for peer %s: %s", tool, f.caller.Peer, reason), dec.RetryAfter)
 		return nil
 	}
 }
@@ -533,14 +544,30 @@ func (f *Filter) record(method, tool, rpcID string, dec Decision) AuditRecord {
 
 // writeDenial emits a JSON-RPC error toward the peer for a blocked request.
 func (f *Filter) writeDenial(id json.RawMessage, message string) {
+	f.writeOut(DenialBody(id, message, 0))
+}
+
+// writeDenialRetry is writeDenial carrying rate-limit retry metadata.
+func (f *Filter) writeDenialRetry(id json.RawMessage, message string, retryAfter time.Duration) {
+	f.writeOut(DenialBody(id, message, retryAfter))
+}
+
+// DenialBody renders the JSON-RPC error a gateway returns for a blocked
+// request. A positive retryAfter (a rate-limit deny) is attached as
+// error.data.retryAfterMs so an agent can back off for exactly the window the
+// engine computed instead of guessing.
+func DenialBody(id json.RawMessage, message string, retryAfter time.Duration) []byte {
 	if len(id) == 0 {
 		id = json.RawMessage("null")
 	}
 	msg, _ := json.Marshal(message)
-	resp := fmt.Sprintf(
-		`{"jsonrpc":"2.0","id":%s,"error":{"code":-32001,"message":%s}}`+"\n",
-		id, msg)
-	f.writeOut([]byte(resp))
+	data := ""
+	if retryAfter > 0 {
+		data = fmt.Sprintf(`,"data":{"retryAfterMs":%d}`, retryAfter.Milliseconds())
+	}
+	return []byte(fmt.Sprintf(
+		`{"jsonrpc":"2.0","id":%s,"error":{"code":-32001,"message":%s%s}}`+"\n",
+		id, msg, data))
 }
 
 // pumpInner copies backend output to the read side, framed on newlines so

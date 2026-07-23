@@ -26,6 +26,7 @@ import (
 func main() {
 	root := flag.String("root", ".", "filesystem sandbox root for file tools")
 	allowCmd := flag.String("allow-cmd", "", "comma-separated allow-list for the run_command tool (e.g. echo,git)")
+	limitsPath := flag.String("limits", "", "yaml file with global/per-tool timeout + max_concurrent limits (see limits.go)")
 	flag.Parse()
 
 	absRoot, err := filepath.Abs(*root)
@@ -44,6 +45,12 @@ func main() {
 	// Honor the router's conveyed _meta idempotency key (single-process demo:
 	// in-memory claims, default TTL). Calls without a key pass through.
 	s.Use(mcp.Idempotency(mcp.NewMemClaimStore(), 0))
+	// Config-driven execution limits (Timeout / LimitConcurrency middleware),
+	// registered after Idempotency so a limited call is still deduplicated.
+	if err := applyLimitsFile(s, *limitsPath); err != nil {
+		fmt.Fprintln(os.Stderr, "mcpserver:", err)
+		os.Exit(1)
+	}
 	tools.Register(s, tools.Config{Root: absRoot, AllowedCommands: allowed})
 	resources.Register(s, resources.Config{Root: absRoot})
 	prompts.Register(s)

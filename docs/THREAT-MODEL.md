@@ -192,12 +192,43 @@ An adversary who can write the audit file (but lacks the signing key).
   second, rehydrate + lease takeover — run against `MemStore` on every test
   run and against live PostgreSQL (`pgstore`) when `MESHMCP_TEST_PG_DSN` is
   set.
-- **Limit:** takeover is *reattach-driven only* — a standby gateway never
-  claims an expired lease on its own (`RenewLease`/`ReleaseLease` are unused;
-  a long-lived session's lease lapses and the fencing generation is what keeps
-  writes safe). There is no exactly-once tool execution across a failover
-  (§8). `FileStore`'s CAS holds only on a single host / lock-correct shared
-  filesystem; cross-host deployments need the PostgreSQL store
+- **Defended (expiry-driven standby):** takeover is no longer reattach-driven
+  only. The server renews every held lease at ~TTL/3 (so expiry means "owner
+  alive"), releases leases on clean shutdown (owner cleared, generation and
+  state preserved), and — when `session_failover: standby` is configured — a
+  standby sweep adopts sessions whose lease is released or expired past a
+  conservative 2×TTL margin (≥3×TTL of total owner silence), respawning the
+  backend under the creator's persisted identity before the client returns.
+  The claim is `AcquireLease`'s generation CAS — `TakeoverLease` remains
+  reserved for the identity-verified creator reattach — so exactly one
+  claimer wins and a paused-not-dead owner is fenced out of
+  `SaveIfOwned`/`RenewLease` the instant the claim commits (its renewal then
+  fails and it yields). The margin tunes availability only; no interleaving
+  can produce two unfenced writers, and the identity binding on client
+  reattach is unchanged (the sweep never talks to a client). Records written
+  by pre-upgrade builds (no persisted `peer_fqdn`) and degraded generation-0
+  sessions (whose owner never held a lease and is therefore unfenceable) are
+  categorically never adopted (degraded sessions also never checkpoint on a
+  lease-capable store, so an unfenced write can never regress a record a peer
+  has since taken over), as are records stamped with a newer schema version
+  than the running build (pgstore stamps and filters `SchemaVersion` exactly
+  like `FileStore`). The sweep requires a PostgreSQL session store: config
+  validation rejects `session_failover: standby` over a file store, and the
+  server independently disables the sweep over `FileStore`, because a file
+  lock stolen from a paused-not-dead holder could regress the generation an
+  adoption committed (every `FileStore` mutation now re-verifies its lock
+  token immediately before the commit rename, narrowing that hole for the
+  reattach-driven path that remains supported there). Proven by renew/sweep
+  race tests (`session/sweep_race_test.go`) plus the end-to-end
+  paused-gateway flow.
+- **Limit:** there is no exactly-once tool execution across a failover (§8),
+  and adoption resumes from the owner's last checkpoint — a failover taken
+  mid-request keeps handshake-mode's existing in-flight-response window.
+  `FileStore`'s CAS holds only on a single host / lock-correct shared
+  filesystem, and only for crash-or-alive holders (a process paused past the
+  10s lock-staleness window has its lock stolen; the pre-commit token check
+  shrinks, but cannot close, the resulting write-back window) — cross-host
+  deployments and the standby sweep need the PostgreSQL store
   (`session_store: postgres://...`).
 
 ### 10. Malformed / adversarial JSON-RPC
@@ -270,8 +301,29 @@ against a pinned public key for the sealed portion. It does **not** prove that
 every real-world action was observed, and gateway signatures are **not** caller
 non-repudiation (the gateway signs, not the caller). A key-holding insider who
 controls both the log and its local checkpoints can roll both back together;
-defense against that requires **external anchoring** (the `Anchor` /
-`FileAnchor` interface exists; a witnessed external anchor is Labs).
+defense against that requires **external anchoring**, which is now implemented:
+every signed checkpoint can be witnessed outside the gateway — appended to a
+self-linked local anchor file (`audit_anchor`) and/or POSTed to a peer
+gateway's witness endpoint (`audit_anchor_url` → `meshmcp control
+--anchor-witness`, which pins the signer key, verifies the signature, and
+records checkpoints append-only with per-signer dedup). `meshmcp audit verify
+--anchors` cross-checks the checkpoints against the witness and exits non-zero
+on disagreement **even when the chain verifies sealed internally** — the
+rollback case signatures alone cannot catch. The four verification states are
+unchanged; the anchor verdict (`anchored` / `anchor_partial` /
+`anchor_mismatch`) is orthogonal, added evidence.
+
+**Witness-trust assumption, stated plainly:** anchoring converts "trust the
+gateway host" into "trust that the gateway host and the witness do not collude
+(or are not controlled by the same insider)." A witness on the same host, or
+writable by the same insider, adds nothing — run it on an independently
+administered peer. Peer delivery is asynchronous and best-effort — a slow or
+unreachable witness delays witnessing but never blocks a checkpoint or an
+audited call — so checkpoints not yet witnessed (`anchor_partial`, e.g. during
+a witness outage or in the short delivery window) remain rollable until the
+witness records them or `meshmcp audit anchor` replays them; the verifier
+reports that window honestly rather than hiding it. RFC 3161 timestamping
+remains future work behind the same `Anchor` interface.
 
 ## Delivery vs. execution guarantees (summary)
 

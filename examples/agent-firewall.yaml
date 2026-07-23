@@ -30,7 +30,12 @@ backends:
     audit_checkpoints: ./agent-firewall-cps.jsonl
     audit_signing_key: ./audit-signing-key.json
     audit_checkpoint_every: 64
-    # audit_anchor: ./agent-firewall-anchor.jsonl   # external witness (optional)
+    # External anchoring (optional): witness every checkpoint outside the
+    # gateway, so even a key-holding insider who rolls the log and checkpoints
+    # back together is caught by
+    #   meshmcp audit verify <log> --checkpoints <f> --pubkey <hex> --anchors <witness-file>
+    # audit_anchor: ./agent-firewall-anchor.jsonl        # local append-only, self-linked anchor file
+    # audit_anchor_url: http://control:9600/v1/anchor    # peer witness (meshmcp control --anchor-witness)
     # Shared directory where human co-sign approvals land (see `meshmcp approve`).
     cosign_store: ./cosign
     cosign_ttl_seconds: 3600

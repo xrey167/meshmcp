@@ -55,13 +55,13 @@ type httpEnforcer struct {
 // newHTTPEnforcer builds the enforcer for an HTTP/remote backend that declares
 // a policy or capabilities. audit may be the gateway-wide shared ledger or a
 // per-backend sink. Security wiring failures (unloadable approval key,
-// uncreatable revocation store, unusable secrets store) are fatal at startup,
-// matching the stdio path — never a silent downgrade.
-func newHTTPEnforcer(b *Backend, audit *policy.AuditLog) *httpEnforcer {
+// uncreatable revocation store, unusable secrets store) are returned as an
+// error at startup, matching the stdio path — never a silent downgrade.
+func newHTTPEnforcer(b *Backend, audit *policy.AuditLog) (*httpEnforcer, error) {
 	var cosign policy.CosignStore
 	var pending *policy.FilePending
+	ttl := time.Duration(b.CosignTTLSeconds) * time.Second
 	if b.CosignStore != "" {
-		ttl := time.Duration(b.CosignTTLSeconds) * time.Second
 		cosign = &policy.FileCosign{Dir: b.CosignStore, TTL: ttl}
 		pending = &policy.FilePending{Dir: b.CosignStore, TTL: ttl}
 	}
@@ -76,29 +76,39 @@ func newHTTPEnforcer(b *Backend, audit *policy.AuditLog) *httpEnforcer {
 	if len(b.groups) > 0 {
 		eng.SetGroupResolver(policy.StaticGroups(b.groups))
 	}
-	// Request-bound approvals (Phase 3), loaded fail-closed like the stdio path:
-	// a configured-but-unreadable key is a security-config error, never a silent
-	// downgrade to the weaker ambient co-sign.
+	// Request-bound approvals (Phase 3), at parity with the stdio path
+	// (backendFactory): with a shared approval signing key configured, a
+	// require_cosign call is released only by a signed, single-use token bound to
+	// its exact arguments — and a configured-but-unreadable key is a hard startup
+	// error, never a silent fall-back to the ambient (peer, tool) grant.
 	if b.ApprovalSigningKey != "" {
 		signer, err := policy.LoadSigner(b.ApprovalSigningKey)
 		if err != nil {
-			log.Fatalf("backend %q: approval_signing_key %s: %v", b.Name, b.ApprovalSigningKey, err)
+			return nil, fmt.Errorf("backend %q: approval_signing_key %s: %w", b.Name, b.ApprovalSigningKey, err)
 		}
-		eng.SetRequestApprovals(policy.NewFileApprovalStore(b.CosignStore, time.Duration(b.CosignTTLSeconds)*time.Second, signer))
+		eng.SetRequestApprovals(policy.NewFileApprovalStore(b.CosignStore, ttl, signer))
+		log.Printf("backend %q: request-bound approvals enabled over HTTP (approver key %s…); ambient co-sign no longer releases held calls", b.Name, signer.PubKeyHex()[:16])
 	}
 	e := &httpEnforcer{eng: eng, audit: audit, pending: pending, backend: b.Name,
 		trustDomain: b.trustDomain, sessions: newHTTPSessionStore(nil)}
 	if b.Capabilities != nil {
 		v, err := policy.NewCapabilityVerifier(b.Capabilities.TrustedPublicKeys, func() time.Time { return time.Now() })
 		if err != nil {
-			log.Fatalf("backend %q: capabilities: %v", b.Name, err)
+			return nil, fmt.Errorf("backend %q: capabilities: %w", b.Name, err)
 		}
+		// Single-use (jti) replay cache, shared across the backend's HTTP
+		// connections so a one-shot grant is one-shot per backend — parity with the
+		// stdio path (backendFactory), so a SingleUse capability is enforced
+		// identically on both transports (without it, a SingleUse token would fail
+		// closed here and could never authorize over HTTP). Per-process only: a
+		// multi-gateway HA deployment needs a shared NonceStore.
+		v = v.WithReplayCache(policy.NewMemNonceStore())
 		if b.Capabilities.RevocationStore != "" {
 			// Create the store at startup so IsRevoked can later fail closed on a
 			// vanished/unavailable store (stdio precedent).
 			rev, err := policy.NewFileRevocation(b.Capabilities.RevocationStore)
 			if err != nil {
-				log.Fatalf("backend %q: capability revocation store %s: %v", b.Name, b.Capabilities.RevocationStore, err)
+				return nil, fmt.Errorf("backend %q: capability revocation store %s: %w", b.Name, b.Capabilities.RevocationStore, err)
 			}
 			v = v.WithRevocation(rev.IsRevoked).WithSubjectRevocation(rev.IsSubjectRevoked)
 			log.Printf("backend %q: capability revocation store: %s", b.Name, b.Capabilities.RevocationStore)
@@ -109,7 +119,7 @@ func newHTTPEnforcer(b *Backend, audit *policy.AuditLog) *httpEnforcer {
 	if b.Secrets != nil {
 		store, err := secretStore(b.Secrets)
 		if err != nil {
-			log.Fatalf("backend %q: secrets store: %v", b.Name, err)
+			return nil, fmt.Errorf("backend %q: secrets store: %w", b.Name, err)
 		}
 		e.secrets = secrets.New(store, b.Secrets.Grants, audit)
 		for _, g := range b.Secrets.Grants {
@@ -118,7 +128,7 @@ func newHTTPEnforcer(b *Backend, audit *policy.AuditLog) *httpEnforcer {
 			}
 		}
 	}
-	return e
+	return e, nil
 }
 
 // sessionsRequired reports whether per-session label state must be tracked for
@@ -267,8 +277,20 @@ func (e *httpEnforcer) decide(peer, peerKey string, r *http.Request) (ok bool, s
 	}
 
 	dec := e.eng.DecideToolCallBound(peer, peerKey, e.backend, class.Tool, class.Args, labels)
+	var pendingCap *policy.CapabilityClaims
 	if e.capVerifier != nil {
-		dec = policy.FoldCapability(dec, e.capVerifier, e.capRequired, capToken, peerKey, e.backend, class.Tool)
+		dec, pendingCap = policy.FoldCapability(dec, e.capVerifier, e.capRequired, capToken, peerKey, e.backend, class.Tool)
+	}
+	// Consume a load-bearing single-use grant only now that the final outcome is
+	// known — HTTP has no delegation/hook stage, so the fold's outcome is final —
+	// so a co-sign hold or a policy deny never burns it (parity with the stdio
+	// filter's deferred Consume). A replayed jti turns the allow into a deny, and
+	// consumption runs BEFORE the audit append so the record reflects the true
+	// verdict; the grant is spent before secrets are injected.
+	if pendingCap != nil && dec.Outcome == policy.OutcomeAllow {
+		if err := e.capVerifier.Consume(*pendingCap); err != nil {
+			dec = policy.Decision{Outcome: policy.OutcomeDeny, RuleID: dec.RuleID, Reason: "invalid capability: " + err.Error()}
+		}
 	}
 	auditErr := e.audit.Append(e.record("tools/call", class.Tool, string(class.ID), dec, peer, peerKey))
 	switch dec.Outcome {
@@ -333,7 +355,7 @@ func (e *httpEnforcer) decide(peer, peerKey string, r *http.Request) (ok bool, s
 		if reason == "" {
 			reason = "denied by mesh policy"
 		}
-		return false, http.StatusOK, jsonRPCError(class.ID, fmt.Sprintf("tool %q blocked for peer %s: %s", class.Tool, peer, reason))
+		return false, http.StatusOK, policy.DenialBody(class.ID, fmt.Sprintf("tool %q blocked for peer %s: %s", class.Tool, peer, reason), dec.RetryAfter)
 	}
 }
 
