@@ -33,7 +33,7 @@ func openTestStore(t *testing.T) *Store {
 		t.Fatalf("open: %v", err)
 	}
 	t.Cleanup(func() {
-		for _, tbl := range []string{st.sessions, st.nonces, st.dpopNonces, st.dpopJTIs} {
+		for _, tbl := range []string{st.sessions, st.nonces, st.dpopNonces, st.dpopJTIs, st.idemClaims} {
 			st.db.Exec("DROP TABLE IF EXISTS " + tbl)
 		}
 		st.Close()

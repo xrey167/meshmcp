@@ -41,6 +41,9 @@ func main() {
 		os.Getenv("MESHMCP_PEER"), absRoot, allowed)
 
 	s := mcp.New("meshmcp-demo", "0.1.0")
+	// Honor the router's conveyed _meta idempotency key (single-process demo:
+	// in-memory claims, default TTL). Calls without a key pass through.
+	s.Use(mcp.Idempotency(mcp.NewMemClaimStore(), 0))
 	tools.Register(s, tools.Config{Root: absRoot, AllowedCommands: allowed})
 	resources.Register(s, resources.Config{Root: absRoot})
 	prompts.Register(s)
