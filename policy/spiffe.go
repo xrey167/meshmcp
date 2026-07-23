@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"regexp"
+	"strings"
 )
 
 // SpiffeLabel is a derived, additive identity label
@@ -13,6 +14,11 @@ import (
 // is expected is a compile error, not a silent grep-miss: the WireGuard
 // public key remains the only thing enforcement decisions key on.
 type SpiffeLabel string
+
+// maxSpiffeKeyBase64 bounds the peer-key input SpiffeID will label. A real
+// WireGuard public key is exactly 44 bytes of padded standard base64; anything
+// far beyond that is not a mesh peer key and must not grow an audit label.
+const maxSpiffeKeyBase64 = 128
 
 // trustDomainPattern matches a syntactically valid SPIFFE trust domain:
 // lowercase, dot-separated DNS labels, no scheme, no path.
@@ -41,11 +47,28 @@ func ValidTrustDomain(s string) bool {
 // Only the padded standard form is accepted on input; unpadded/URL-safe
 // variants are rejected rather than silently decoded, so the same key never
 // round-trips to two different-looking labels depending on input form.
+// Inputs are bounded and sanitized here, not just at config load: a trust
+// domain that fails ValidTrustDomain (bad shape, control chars, >255 bytes)
+// yields "" rather than a malformed URI, and a key longer than
+// maxSpiffeKeyBase64 yields "" rather than an unbounded label (a WireGuard
+// public key is 44 bytes of padded base64; the cap is generous headroom).
 func SpiffeID(trustDomain string, peerKeyBase64 string) SpiffeLabel {
 	if trustDomain == "" || peerKeyBase64 == "" {
 		return ""
 	}
-	raw, err := base64.StdEncoding.DecodeString(peerKeyBase64)
+	if !ValidTrustDomain(trustDomain) || len(peerKeyBase64) > maxSpiffeKeyBase64 {
+		return ""
+	}
+	// base64.StdEncoding silently skips \r\n, which would let two spellings of
+	// a key round-trip to one label — the exact ambiguity the padded-input-only
+	// rule above exists to prevent. Reject them like any other malformation.
+	// (Strict() below still ignores CR/LF per its docs, so this check stays.)
+	if strings.ContainsAny(peerKeyBase64, "\r\n") {
+		return ""
+	}
+	// Strict() rejects non-zero trailing padding bits (e.g. "AB==" vs "AA=="),
+	// closing the last way two key spellings could map to one label.
+	raw, err := base64.StdEncoding.Strict().DecodeString(peerKeyBase64)
 	if err != nil {
 		return ""
 	}

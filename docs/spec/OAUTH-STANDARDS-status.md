@@ -60,74 +60,74 @@ task).
 
 ## Feature A — SPIFFE identity labels
 
-**Overall: 🟡 Partial — and materially less complete than the implementing
-agent's summary claims.** The core primitive (`SpiffeID`/`ValidTrustDomain`)
-is real, tested, and correct. But the feature's actual purpose — labels
-*surfaced in audit records and federation crossings* — is not wired to
-anything: `Config.TrustDomain` does not exist, `federation/boundary.go` has
-zero SPIFFE/TrustDomain content, and grepping the whole repo for a call to
-`SpiffeID(` outside its own definition and tests returns nothing. **No
-SPIFFE label is emitted anywhere in this codebase today.** The agent's JSON
-reported `federation/boundary.go`/`federation/boundary_test.go` as edited
-with 5 new passing tests and `config.go`/`config_test.go` as edited with a
-`TestConfigTrustDomainValidation` test — none of this exists on disk; it was
-most likely lost to the concurrent-agent git churn later agents' own
-`openIssues` describe, and never reapplied.
+**Overall: ✅ Done (branch `task/28-spiffe`) — labels are emitted when
+configured, on both the local gateway path and federation crossings.** The
+earlier "primitive exists but never emits" state described by previous
+revisions of this document is resolved. What "done" means precisely: emission
+is opt-in (no trust domain configured ⇒ no label, records byte-identical to a
+pre-field build), and the label is consumed by nothing — by design it is a
+label only; no enforcement or federation decision reads it.
 
 **Code**
-- ❌ `config.go`: `Config.TrustDomain string` — **absent.** Grepped the
-  `Config` struct in full; no such field. `Backend.Remote` (Feature B) is
-  present, so this isn't a stale read — the field genuinely isn't there.
-- ✅ `policy/spiffe.go` (new file, not `policy/audit.go` as the DoD's
-  "or" allows): `type SpiffeLabel string`; `SpiffeID(trustDomain,
-  peerKeyBase64 string) SpiffeLabel` — plain return, no error; decodes
-  `base64.StdEncoding`, re-encodes `base64.RawURLEncoding`; malformed
-  key/empty trust domain → `SpiffeLabel("")`. Matches spec.
-- ✅ `AuditRecord` gains `PeerSpiffeID SpiffeLabel
-  \`json:"peer_spiffe_id,omitempty"\`` appended after `Hash` — verified in
-  `policy/audit.go`, correct position, correct tag. (Note: the code comment
-  on this field states plainly it was added by the *Feature C0* agent "to
-  unblock the policy package's test compilation," not by Feature A's own
-  session — corroborating that Feature A's original edit to this file was
-  lost and a different agent re-added only the minimum needed.)
-- ❌ `federation/boundary.go`: `Mapping.TrustDomain`, org→trust-domain map in
-  `NewBoundary`, collision check, `Boundary.SpiffeID(org, peerKey)` — **all
-  absent.** Read the full file; it has no trust-domain or SPIFFE content at
-  all, only the pre-existing `Grant`/`Mapping`/`OrgFor`/`Principal` plus the
-  separately-landed Feature C2 `OrgForIssuer`.
-- ❌ Which-trust-domain-applies call-site rule — **not applicable / not met**,
-  since neither call site exists to enforce the rule at.
-- ✅ No existing exported signature changed (trivially true — additive-only
-  everywhere it landed).
+- ✅ `config.go`: `Config.TrustDomain string \`yaml:"trust_domain"\`` —
+  present, strict-decode safe, validated at load with
+  `policy.ValidTrustDomain` (malformed = startup error), plumbed to every
+  backend. `TestConfigTrustDomainValidation` passes.
+- ✅ `policy/spiffe.go`: `SpiffeLabel`, `SpiffeID(trustDomain, peerKeyBase64)`
+  (StdEncoding in → RawURLEncoding path segment, "" on any malformation, no
+  error), `ValidTrustDomain`. Hardened: the primitive itself now also
+  rejects a malformed trust domain and bounds the key input (128 bytes), so
+  hostile inputs can never produce a malformed or unbounded URI even if a
+  call site skips config validation. `TestSpiffeID_HostileInputsBounded`
+  (derivation table) passes.
+- ✅ `AuditRecord.PeerSpiffeID` appended after `Hash` (before the
+  later-appended `SchemaVersion`), `omitempty` — position and tag verified;
+  the stale "added only to unblock test compilation" comment now documents
+  the real emit sites.
+- ✅ Local emission: `policy/filter.go` — `Caller.SpiffeID` is stamped onto
+  every record in `Filter.record()` (the single stdio choke point);
+  derivation stays at the edge in `serve.go`
+  (`policy.SpiffeID(b.trustDomain, meta.PeerKey)`). HTTP/remote backends get
+  the same label via `httpEnforcer.record()` (F16 parity).
+- ✅ Federation emission: `federation/boundary.go` — `Mapping.TrustDomain`,
+  collision detection in `NewBoundary` + `TrustDomainCollisions()`,
+  `Boundary.SpiffeID`/`spiffeForOrg`, stamped into both boundary audit
+  records; `cmd/meshmcp/federate.go` validates mapping trust domains at load
+  and warns on collisions. `federation/boundary_spiffe_test.go` passes.
+- ✅ Which-trust-domain-applies call-site rule — enforced by construction:
+  `Config.TrustDomain` reaches only the local filter/httpEnforcer callers;
+  `Mapping.TrustDomain` reaches only boundary crossings. Neither path can
+  see the other's domain.
+- ✅ No existing exported signature changed (additive fields only:
+  `Caller.SpiffeID`, `Config.TrustDomain`).
 
 **Docs / schema**
-- 🟡 `docs/spec/AUDIT-RECORD.md` — updated with the `peer_spiffe_id` row, but
-  **missing the required mixed-fleet compatibility note** (grepped for
-  "mixed-fleet"/"old verifier"/"upgraded together" — no match anywhere in the
-  file).
-- ✅ `docs/spec/audit-record.schema.json` — `peer_spiffe_id` added
-  (`"type":"string"`, pattern-constrained); `TestAuditRecordSchema_AllowsPeerSpiffeID`
-  passes.
-- ❌ `docs/CAPABILITY-MATRIX.md` Planned→Beta row — missing (global caveat 3).
+- ✅ `docs/spec/AUDIT-RECORD.md` — `peer_spiffe_id` row plus the required
+  mixed-fleet compatibility note (§1.4: additive placement after `hash`,
+  old-verifier hash-mismatch semantics, upgrade-verifiers-first guidance).
+- ✅ `docs/spec/audit-record.schema.json` — `peer_spiffe_id` present;
+  `TestAuditRecordSchema_AllowsPeerSpiffeID` passes.
+- ✅ `docs/CAPABILITY-MATRIX.md` — Beta row for "SPIFFE identity labels
+  (`peer_spiffe_id`)" added alongside the other core-table capabilities.
 
 **Invariants preserved**
-- 🟡 "Record with `PeerSpiffeID` unset verifies identically" — plausible by
-  construction (`omitempty`, zero value) but the specific regression test the
-  DoD calls for (`TestAuditRecord_HashChainUnaffectedByNewField`,
+- ✅ All four DoD-named chain tests exist and pass in
+  `policy/audit_spiffe_chain_test.go`:
+  `TestAuditRecord_HashChainUnaffectedByNewField`,
   `TestAuditRecord_PeerSpiffeIDOmittedWhenEmpty`,
   `TestAuditRecord_HashChainWithSpiffeIDPresent`,
-  `TestAuditRecord_MixedFleetHashMismatchIsExpected`) **does not exist
-  anywhere in the repo** — grepped by exact name, zero hits, despite being
-  listed in the agent's `testsAdded`. Not verified, only asserted.
-- ✅ Enforcement decisions don't read `PeerSpiffeID`/`SpiffeID()` — true, but
-  vacuously: grepped every `.go` file for a call to `SpiffeID(`; the only
-  hits are the definition and its own tests. There is no enforcement (or any
-  other) call site to have gotten this wrong at.
+  `TestAuditRecord_MixedFleetHashMismatchIsExpected`.
+- ✅ End-to-end off-switch/on-switch: `policy/filter_spiffe_test.go` proves a
+  labeled record verifies in a chain
+  (`TestFilter_EmitsPeerSpiffeIDWhenCallerLabeled`) and that an unset trust
+  domain leaves audit bytes — every Hash/PrevHash — byte-identical
+  (`TestFilter_NoTrustDomainLeavesRecordsByteIdentical`).
+- ✅ Enforcement decisions don't read `PeerSpiffeID`/`SpiffeID()` — the emit
+  sites only ever write the field; no decision path consumes it.
 
-**Sign-off:** not met. Trust-domain collision check is not exercised (the
-collision-detection code doesn't exist). Schema round-trip is verified;
-hash-chain regression suite is unaffected but not through a dedicated new
-test as specified.
+**Sign-off:** met at the feature level on this branch (collision detection
+exercised, schema round-trip verified, dedicated chain-regression tests
+present and green), subject to the repo-wide `-race` global caveat above.
 
 ---
 
@@ -409,7 +409,7 @@ exactly the intended state pending the product decision.
 
 | Feature | Implemented | Tested | Build+Vet Clean | Open Issues Count |
 |---|---|---|---|---|
-| A — SPIFFE labels | 🟡 Partial (primitive only; not wired to config or federation; no label ever emitted) | 🟡 Partial (11 tests pass; 4+ DoD-required regression tests don't exist) | ✅ Yes | 6 |
+| A — SPIFFE labels | ✅ Done on `task/28-spiffe` (emitted when configured: local gateway via `trust_domain`, federation via mapping `trust_domain`; label-only, consumed by nothing — by design) | ✅ Yes (primitive, derivation table, config, filter emission, federation, and all 4 DoD chain tests pass) | ✅ Yes | 0 |
 | B — Outbound DPoP/OAuth client | 🟡 Partial (all code items verified) | ✅ Yes (all named unit/integration tests pass; optional E2E test absent) | ✅ Yes | 3 |
 | C0 — DPoP verifier | ✅ Done (modulo `-race`) | ✅ Yes (all 14 named tests + interop test pass) | ✅ Yes | 2 |
 | C1 — DCR store | 🟡 Partial (code solid; docs + fuzz target missing) | ✅ Yes (all 13 named tests pass) | ✅ Yes | 3 |
@@ -429,11 +429,12 @@ caveat 1; it means the named tests exist and pass under
 **Bottom line for a project owner:** Features C0–C2 are the strong result of
 this round — real, tested, security-invariant-verified code, gated correctly
 behind C3's non-wiring. Feature B is essentially done at the code level with
-only documentation debt outstanding. **Feature A is the one that needs
-another pass, not just bookkeeping**: its headline capability (SPIFFE labels
-on audit records and federation crossings) does not exist in any operative
-sense today — only the pure-function primitive and an unused struct field
-do. Two process items apply across the board: the Feature C exposure-model
+only documentation debt outstanding. **Feature A's second pass has landed on
+`task/28-spiffe`**: SPIFFE labels are now emitted on local audit records
+(when `trust_domain` is configured) and on federation crossings (per-org
+mapping `trust_domain`), with the chain-safety and derivation tests in place
+and the capability-matrix row added. Two process items apply across the
+board: the Feature C exposure-model
 sign-off was never recorded even though C0–C2 were built (global caveat 4),
 and nothing in this round has been verified under the repo's own `-race`
 gate (global caveat 1) — both should be closed before any of this is called
