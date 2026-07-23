@@ -132,3 +132,46 @@ func runAirAcceptLoop(ln net.Listener, identity func(net.Addr) (string, string),
 		go srv.Handle(conn, session.Meta{PeerFQDN: fqdn, PeerAddr: conn.RemoteAddr().String(), PeerKey: pubKey})
 	}
 }
+
+func mergeHostedScreen(ann air.Announcement, port int) (air.Announcement, error) {
+	return mergeHostedService(ann, air.Service{Kind: air.ServiceScreen, Port: port})
+}
+
+func mergeHostedCast(ann air.Announcement, port int) (air.Announcement, error) {
+	return mergeHostedService(ann, air.Service{Kind: air.ServiceCast, Port: port})
+}
+
+// hostFrameService starts a screen/cast frame receiver on the node's own mesh
+// identity: sender ACL, per-sender rolling current-frame file (bounded disk),
+// image-only placement, optional audit. verb is "screen" or "cast" — the two
+// share the frame wire; the announced service kind is the caller's choice.
+func hostFrameService(client *embed.Client, port int, dir string, allow []string, auditPath, verb string) (func(), error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("create dir %s: %w", dir, err)
+	}
+	var audit *policy.AuditLog
+	var auditClose func()
+	if auditPath != "" {
+		f, err := os.OpenFile(auditPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if err != nil {
+			return nil, fmt.Errorf("open audit log %s: %w", auditPath, err)
+		}
+		auditClose = func() { f.Close() }
+		audit = policy.NewAuditLog(f, func() string { return time.Now().UTC().Format(time.RFC3339) })
+	}
+	ln, err := client.ListenTCP(fmt.Sprintf(":%d", port))
+	if err != nil {
+		if auditClose != nil {
+			auditClose()
+		}
+		return nil, fmt.Errorf("listen on mesh port %d: %w", port, err)
+	}
+	identity := func(addr net.Addr) (string, string) { return peerIdentity(client, addr) }
+	go runAirAcceptLoop(ln, identity, newACL(allow), newScreenFactory(dir, audit), verb, log.Printf)
+	return func() {
+		ln.Close()
+		if auditClose != nil {
+			auditClose()
+		}
+	}, nil
+}
