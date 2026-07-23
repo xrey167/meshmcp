@@ -48,16 +48,16 @@ type Config struct {
 	// AuditWebhook POSTs audit records to an external URL (SIEM / Slack /
 	// PagerDuty) via a best-effort observer sink. AuditWebhookAll forwards every
 	// record; by default only deny/cosign records are sent.
-	AuditWebhook    string       `yaml:"audit_webhook"`
-	AuditWebhookAll bool         `yaml:"audit_webhook_all"`
+	AuditWebhook    string `yaml:"audit_webhook"`
+	AuditWebhookAll bool   `yaml:"audit_webhook_all"`
 	// MetricsListen serves Prometheus text-format metrics (aggregated from the
 	// shared audit ledger; metadata-only labels, never a peer identity or
 	// payload) on GET /metrics at this address. Bind it to localhost or a mesh
 	// IP — the endpoint is unauthenticated by Prometheus convention. Empty
 	// disables it. Requires audit_log (the sink observes the shared ledger).
-	MetricsListen string `yaml:"metrics_listen"`
-	Trace           *TraceConfig `yaml:"trace"`
-	Registry        string       `yaml:"registry"` // dir: register backends for router discovery
+	MetricsListen string       `yaml:"metrics_listen"`
+	Trace         *TraceConfig `yaml:"trace"`
+	Registry      string       `yaml:"registry"` // dir: register backends for router discovery
 	// Groups maps a group name to member patterns (pubkey:<key> or FQDN glob)
 	// so policy rules can match `group:<name>` (F17). Shared by all backends.
 	Groups map[string][]string `yaml:"groups"`
@@ -247,6 +247,16 @@ type Backend struct {
 	// capability upgrades a policy-default-deny call to allow; required:true
 	// makes the backend a capability-only surface. Only valid for stdio.
 	Capabilities *CapabilitiesConfig `yaml:"capabilities"`
+	// RouterDelegation pins router delegation-authority keys ("meshmcp router
+	// keygen"): a tools/call presenting a valid signed DelegationToken is
+	// authorized as the INTERSECTION of the original caller's and the router's
+	// permissions under this backend's policy; required:true makes every
+	// tools/call carry a valid token. Delegation gates tools/call ONLY (v1):
+	// other JSON-RPC methods (resources/read, prompts/get, tools/list, ...)
+	// bypass it and stay governed by the policy's methods rules — add methods
+	// rules to restrict those surfaces. Only valid for stdio backends with a
+	// policy. Replay protection is per-gateway-process (in-memory nonce store).
+	RouterDelegation *RouterDelegationConfig `yaml:"router_delegation"`
 	// DLP declares content rules scanned against every tools/call's arguments:
 	// a match can deny the call or emit a data-flow label (F18). Implemented as
 	// a plugin decision hook; only valid for stdio backends with a policy.
@@ -285,6 +295,23 @@ type RemoteBackendConfig struct {
 	// RefreshTokenName is the secret holding the current refresh token
 	// (default "oauth_refresh_token"); rotated tokens are persisted back.
 	RefreshTokenName string `yaml:"refresh_token_name"`
+}
+
+// RouterDelegationConfig configures signed router-delegation verification for
+// a backend (docs/spec/ROUTER-DELEGATION.md). Deny-by-default: a token signed
+// by an unpinned authority never verifies, and required:true refuses any
+// tools/call without a valid token.
+type RouterDelegationConfig struct {
+	// Required makes every tools/call present a valid delegation token.
+	// false verifies+intersects a call WITH a token and lets a token-less call
+	// fall through to the ordinary single-hop policy path (mixed direct+routed
+	// backends). NOTE: required gates tools/call only — it does NOT make the
+	// whole backend router-only; non-tools/call methods bypass delegation and
+	// need their own methods rules (see the RouterDelegation field doc).
+	Required bool `yaml:"required"`
+	// TrustedPublicKeys are the hex Ed25519 router-authority keys this gateway
+	// pins; a token never supplies its own trust root.
+	TrustedPublicKeys []string `yaml:"trusted_public_keys"`
 }
 
 // CapabilitiesConfig configures signed-capability admission for a backend.
@@ -467,6 +494,28 @@ func loadConfig(path string) (*Config, error) {
 			// policy would make it a silent no-op.
 			if !b.Capabilities.Required && (b.Policy == nil || b.Policy.DefaultAllow) {
 				return nil, fmt.Errorf("backend %q: capabilities with required:false need a deny-by-default policy (a capability only upgrades a policy-default call)", b.Name)
+			}
+		}
+		if b.RouterDelegation != nil {
+			// v1 scope: stdio only (the HTTP enforcer has no body-rewrite strip
+			// yet) — reject rather than silently not enforce.
+			if !hasStdio {
+				return nil, fmt.Errorf("backend %q: router_delegation is only valid for stdio backends (HTTP parity is a follow-up)", b.Name)
+			}
+			// The delegated decision is the intersection of caller AND router
+			// under this backend's OWN policy — without one there is nothing to
+			// intersect and no call could ever be allowed.
+			if b.Policy == nil {
+				return nil, fmt.Errorf("backend %q: router_delegation requires a policy (the upstream authorizes caller ∩ router under its own rules)", b.Name)
+			}
+			if len(b.RouterDelegation.TrustedPublicKeys) == 0 {
+				return nil, fmt.Errorf("backend %q: router_delegation needs at least one trusted_public_keys entry (an empty pin never verifies)", b.Name)
+			}
+			for _, k := range b.RouterDelegation.TrustedPublicKeys {
+				raw, err := hex.DecodeString(k)
+				if err != nil || len(raw) != ed25519.PublicKeySize {
+					return nil, fmt.Errorf("backend %q: router_delegation trusted_public_keys entry %q is not a %d-byte hex Ed25519 key", b.Name, k, ed25519.PublicKeySize)
+				}
 			}
 		}
 		if b.Secrets != nil {

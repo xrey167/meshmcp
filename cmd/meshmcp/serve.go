@@ -209,7 +209,7 @@ func cmdServe(args []string) error {
 		var httpEnf *httpEnforcer
 		if len(b.Stdio) > 0 {
 			var eng *policy.Engine
-			factory, eng = backendFactory(b, audit, tracer, hookSink)
+			factory, eng = backendFactory(b, audit, tracer, hookSink, meshPubKey)
 			if eng != nil {
 				engines[b.Name] = eng
 			}
@@ -540,7 +540,11 @@ func reloadPolicies(cfgPath string, engines map[string]*policy.Engine) {
 // tracer is configured; with neither, the raw subprocess is used.
 // It also returns the per-backend policy Engine (nil when the backend has no
 // policy/capabilities) so the caller can hot-swap its policy on SIGHUP.
-func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer, hook policy.EventHook) (session.BackendFactory, *policy.Engine) {
+// meshPubKey is this gateway's own mesh identity — the AUDIENCE a presented
+// router-delegation token must name (empty is fatal when router_delegation is
+// configured: every verify would fail closed at the first call, so fail at
+// startup with a clear error instead).
+func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer, hook policy.EventHook, meshPubKey string) (session.BackendFactory, *policy.Engine) {
 	exec := session.ExecBackendFactory(b.Stdio[0], b.Stdio[1:], os.Environ())
 	if b.Policy == nil && tracer == nil && b.Capabilities == nil {
 		return exec, nil
@@ -585,6 +589,25 @@ func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer, h
 			log.Printf("backend %q: capability revocation store: %s", b.Name, b.Capabilities.RevocationStore)
 		}
 		capVerifier = v
+	}
+	// Router-delegation verifier: pins the router-authority keys, binds this
+	// gateway's own mesh identity as the audience, and shares ONE in-memory
+	// nonce store across the backend's connections (never nil — a nil store
+	// would skip replay protection). Per-process only: a multi-gateway HA
+	// deployment gets per-gateway replay windows (a shared/pg store is a
+	// follow-up, matching the SessionStore precedent).
+	var delegVerifier *policy.DelegationVerifier
+	if b.RouterDelegation != nil {
+		if meshPubKey == "" {
+			log.Fatalf("backend %q: router_delegation is configured but the gateway's mesh public key is unavailable — no audience to verify tokens against (fail closed at startup, not at first call)", b.Name)
+		}
+		v, err := policy.NewDelegationVerifier(b.RouterDelegation.TrustedPublicKeys, meshPubKey, policy.NewMemNonceStore(), nil)
+		if err != nil {
+			log.Fatalf("backend %q: router_delegation: %v", b.Name, err)
+		}
+		delegVerifier = v
+		log.Printf("backend %q: router-delegation enforcement on (required=%v, %d pinned authority key(s); replay window per-gateway-process)",
+			b.Name, b.RouterDelegation.Required, len(b.RouterDelegation.TrustedPublicKeys))
 	}
 	// Held-request registry lives in the cosign directory, so an approver
 	// (a human identity / a phone on the mesh) sees pending calls next to the
@@ -656,6 +679,9 @@ func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer, h
 		}
 		if capVerifier != nil {
 			f.SetCapabilityVerifier(capVerifier, b.Capabilities.Required)
+		}
+		if delegVerifier != nil {
+			f.SetDelegationVerifier(delegVerifier, b.RouterDelegation.Required)
 		}
 		if dlpHook != nil {
 			f.AddDecisionHook(dlpHook)

@@ -35,6 +35,9 @@ record's hash, forming a hash chain.
 | `seq` | number | yes | 1-based monotonic sequence number. |
 | `prev_hash` | string | yes | Hex SHA-256 of the previous record (`""` for `seq` 1). |
 | `hash` | string | yes | Hex SHA-256 of this record (see 1.2). |
+| `delegated_caller` | string | no | Router delegation (Phase 4): the VERIFIED `DelegationToken`'s original-caller claim. Empty/absent when no decodable token was presented. |
+| `delegation_router` | string | no | Router delegation: the transport-proven connecting router — recorded explicitly (alongside `peer_key`) so a forwarded call preserves BOTH identities per ROUTER-DELEGATION.md. |
+| `delegation_nonce` | string | no | Router delegation: the token's single-use replay nonce. |
 
 ### 1.2 Record hash
 

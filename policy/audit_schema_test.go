@@ -77,3 +77,54 @@ func TestAuditRecordSchema_AllowsPeerSpiffeID(t *testing.T) {
 		t.Fatalf("expected at least one written record to carry peer_spiffe_id")
 	}
 }
+
+// TestAuditRecordSchema_AllowsDelegationFields guards the same schema/doc
+// pairing for the Phase-4 router-delegation attribution fields: a record
+// carrying delegated_caller / delegation_router / delegation_nonce must stay
+// schema-valid under additionalProperties:false.
+func TestAuditRecordSchema_AllowsDelegationFields(t *testing.T) {
+	schemaBytes, err := os.ReadFile("../docs/spec/audit-record.schema.json")
+	if err != nil {
+		t.Fatalf("read schema: %v", err)
+	}
+	var schema struct {
+		Required             []string                   `json:"required"`
+		AdditionalProperties bool                       `json:"additionalProperties"`
+		Properties           map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(schemaBytes, &schema); err != nil {
+		t.Fatalf("parse schema: %v", err)
+	}
+	for _, field := range []string{"delegated_caller", "delegation_router", "delegation_nonce"} {
+		if _, ok := schema.Properties[field]; !ok {
+			t.Fatalf("schema must declare %s under additionalProperties:false, or every delegated record becomes schema-invalid", field)
+		}
+	}
+
+	var buf bytes.Buffer
+	a := NewAuditLog(&buf, func() string { return "T" })
+	a.write(AuditRecord{
+		Backend: "svc", Peer: "router.mesh", Method: "tools/call", Decision: "allow", Rule: 0,
+		DelegatedCaller: "CALLER", DelegationRouter: "ROUTER", DelegationNonce: "n1",
+	})
+	line := strings.TrimSpace(buf.String())
+	var asMap map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(line), &asMap); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"delegated_caller", "delegation_router", "delegation_nonce"} {
+		if _, ok := asMap[field]; !ok {
+			t.Errorf("written record is missing %s: %s", field, line)
+		}
+	}
+	for k := range asMap {
+		if _, ok := schema.Properties[k]; !ok {
+			t.Errorf("record field %q has no matching schema property (additionalProperties:false would reject it): %s", k, line)
+		}
+	}
+	for _, req := range schema.Required {
+		if _, ok := asMap[req]; !ok {
+			t.Errorf("record is missing schema-required field %q: %s", req, line)
+		}
+	}
+}
