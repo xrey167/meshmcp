@@ -55,8 +55,13 @@ type Config struct {
 	// payload) on GET /metrics at this address. Bind it to localhost or a mesh
 	// IP — the endpoint is unauthenticated by Prometheus convention. Empty
 	// disables it. Requires audit_log (the sink observes the shared ledger).
-	MetricsListen string       `yaml:"metrics_listen"`
-	Trace         *TraceConfig `yaml:"trace"`
+	MetricsListen string `yaml:"metrics_listen"`
+	// AuditOTLP exports committed audit records to an OTLP/HTTP logs endpoint
+	// (an OpenTelemetry collector) via a best-effort observer sink — batched,
+	// non-blocking, metadata-only. Requires audit_log (the sink observes the
+	// shared ledger). See AuditOTLPConfig in otlpsink.go.
+	AuditOTLP *AuditOTLPConfig `yaml:"audit_otlp"`
+	Trace     *TraceConfig     `yaml:"trace"`
 	Registry      string       `yaml:"registry"` // dir: register backends for router discovery
 	// TrustDomain is this gateway's SPIFFE trust domain (Feature A). When set,
 	// every local audit record is additively labeled with the caller's derived
@@ -375,6 +380,17 @@ func loadConfig(path string) (*Config, error) {
 	// silently derive empty labels from later. Empty stays valid (labels off).
 	if cfg.TrustDomain != "" && !policy.ValidTrustDomain(cfg.TrustDomain) {
 		return nil, fmt.Errorf("config %s: invalid trust_domain %q (want lowercase DNS-label form, e.g. mesh.example.org)", path, cfg.TrustDomain)
+	}
+	// OTLP export sink: validate FORM at startup (a malformed endpoint is a
+	// config error); reachability is deliberately not checked — the collector
+	// is an observer and may come up after the gateway.
+	if cfg.AuditOTLP != nil {
+		if cfg.AuditLog == "" {
+			return nil, fmt.Errorf("config %s: audit_otlp requires audit_log (the OTLP sink observes the shared ledger)", path)
+		}
+		if err := cfg.AuditOTLP.validate(); err != nil {
+			return nil, fmt.Errorf("config %s: %w", path, err)
+		}
 	}
 	seen := map[int]string{}
 	seenNames := map[string]bool{}
