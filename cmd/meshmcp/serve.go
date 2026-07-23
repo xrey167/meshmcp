@@ -96,6 +96,7 @@ func cmdServe(args []string) error {
 	// A gateway-wide shared audit ledger (one hash chain across all backends),
 	// so a unified live view reads a single, verifiable stream.
 	var sharedAudit *policy.AuditLog
+	var otlpExporter *otlpSink
 	if cfg.AuditLog != "" {
 		seq, lastHash, serr := seedAuditFromExisting(cfg.AuditLog)
 		if serr != nil {
@@ -118,6 +119,12 @@ func cmdServe(args []string) error {
 		if cfg.AuditWebhook != "" {
 			sharedAudit.AddSink(newWebhookSink(cfg.AuditWebhook, !cfg.AuditWebhookAll))
 			log.Printf("audit webhook sink: %s (deny/cosign only=%v)", cfg.AuditWebhook, !cfg.AuditWebhookAll)
+		}
+		if cfg.AuditOTLP != nil {
+			otlpExporter = newOTLPSink(cfg.AuditOTLP, version)
+			sharedAudit.AddSink(otlpExporter)
+			log.Printf("audit OTLP sink: %s (deny/cosign only=%v, batch=%d, flush=%s)",
+				otlpExporter.logsURL, otlpExporter.denyOnly, otlpExporter.batch, otlpExporter.flush)
 		}
 		if cfg.MetricsListen != "" {
 			sink := newMetricsSink()
@@ -401,9 +408,16 @@ waitForShutdown:
 		gatewayHookSink.Close()
 	}
 	// Seal the final partial checkpoint batch so no audit records are left
-	// uncommitted by a clean shutdown.
+	// uncommitted by a clean shutdown. This runs BEFORE the OTLP drain: the
+	// ledger is the control and its seal must never wait on a best-effort
+	// observer flushing to a possibly-dead collector.
 	for _, a := range auditLogs {
 		a.Flush()
+	}
+	// Flush the OTLP exporter's final partial batch (best-effort, bounded) and
+	// report any drops before the process exits.
+	if otlpExporter != nil {
+		otlpExporter.Close()
 	}
 	return nil
 }

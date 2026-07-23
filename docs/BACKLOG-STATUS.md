@@ -27,7 +27,7 @@ content lands in BACKLOG.md.
 | 15 | S33 govulncheck in CI | **blocked-CI** | Workflow YAML can be pre-staged; unverifiable until 1 |
 | 16 | Witnessed audit anchoring | **done** | Self-linked FileAnchor + governed PeerAnchor witness + verify cross-check; review fixed hot-path stall |
 | 17 | Backend secret-egress restriction | todo | Containment scope per threat model |
-| 18 | OTel/OTLP exporter | todo | |
+| 18 | OTel/OTLP exporter | **done** | Zero-dep OTLP/HTTP logs sink; drop-not-block proven; bounded shutdown drain |
 | 19 | Wave-2 minors | in-progress | Batch A done (S19 jti replay, S21 bounded dash tail, S51 audit rotation, S49 config lint); batch B queued |
 | 20 | Placeholder modules | todo | Doctor implementable; sibling modules have no git remote — local + documented |
 | 21 | Router delegation wiring | **done** | Minted per-call, verified when pinned, caller from token; review fixed side-effecting caller-leg |
