@@ -108,13 +108,20 @@ func pairControlHandler(store *air.PairedStore, identify func(*http.Request) (pu
 		writeJSONResp(w, http.StatusOK, map[string]any{"status": store.Status(pubKey), "you": fqdnOr(fqdn)})
 	})
 
-	// GET /v1/pair/status — open; reports only the caller's own standing.
+	// GET /v1/pair/status — open; reports only the caller's own standing (and,
+	// when the last request was declined, the operator's reason — revealed only
+	// to the identity it concerns).
 	mux.HandleFunc("/v1/pair/status", func(w http.ResponseWriter, r *http.Request) {
 		if !getOnly(w, r) {
 			return
 		}
 		pubKey, fqdn := identify(r)
-		writeJSONResp(w, http.StatusOK, map[string]any{"status": store.Status(pubKey), "you": fqdnOr(fqdn)})
+		st, reason := store.StatusDetail(pubKey)
+		resp := map[string]any{"status": st, "you": fqdnOr(fqdn)}
+		if reason != "" {
+			resp["reason"] = reason
+		}
+		writeJSONResp(w, http.StatusOK, resp)
 	})
 
 	// GET /v1/pair/pending — operator-gated; lists pending + recognized peers.
@@ -156,6 +163,9 @@ func pairMutation(store *air.PairedStore, identify func(*http.Request) (string, 
 		}
 		var body struct {
 			PublicKey string `json:"pubkey"`
+			// Reason is deny-only: the operator's short "why" that the requester
+			// sees on its next status poll (guided recovery, not a silent vanish).
+			Reason string `json:"reason,omitempty"`
 		}
 		if !decodeJSONBody(w, r, &body) {
 			return
@@ -182,7 +192,7 @@ func pairMutation(store *air.PairedStore, identify func(*http.Request) (string, 
 			emitPairAudit(audit, rec)
 			writeJSONResp(w, http.StatusOK, map[string]any{"status": "approved", "peer": peer})
 		case "deny":
-			removed, err := store.Deny(body.PublicKey)
+			removed, err := store.Deny(body.PublicKey, body.Reason, time.Now())
 			if err != nil {
 				rec.OK = false
 				rec.Reason = "deny failed: " + err.Error()
@@ -192,6 +202,9 @@ func pairMutation(store *air.PairedStore, identify func(*http.Request) (string, 
 			}
 			rec.OK = true
 			rec.Reason = "denied pending pair request"
+			if body.Reason != "" {
+				rec.Reason += ": " + body.Reason
+			}
 			emitPairAudit(audit, rec)
 			writeJSONResp(w, http.StatusOK, map[string]any{"status": "denied", "removed": removed})
 		case "revoke":

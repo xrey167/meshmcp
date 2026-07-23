@@ -38,12 +38,17 @@ activity — steers, drops, catalog reads, policy decisions — and renders it l
 as it lands. It is the terminal-native counterpart to the served Receipts page.
 
 - **Shipped as the second step of this doc:** `air stream <audit.jsonl>` follows the ledger
-  live, colour-coded by decision, rotation-aware (`airstream.go`).
+  live, colour-coded by decision, rotation-aware — and `air stream --bus <peer-ip:port>`
+  subscribes to the gateway's hook bus (the serve `hooks:` config) over the mesh and renders
+  the same decision-coloured rows, no ledger file needed (`airstream.go`). The bus
+  subscription is identity-gated and rides the resumable `session/` channel (a roam does not
+  drop the stream); the broker's connection ACL and per-topic policy decide admission, and
+  the bus carries only the hook events the gateway is configured to publish (default
+  deny + cosign).
 - **Primitives:** the hash-chained audit ledger (already tailed by `tailAuditRecords` and the
   Receipts view), the governed pub/sub event bus (`cmd/bus`, F28), the style layer.
-- **Deeper:** subscribe to a *governed* event stream by identity — an agent receives only the
-  events its labels permit (reactive agents without a broker to expose), and the stream
-  survives a network roam because it rides the resumable `session/` channel.
+- **Deeper:** label-scoped delivery — an agent receives only the events its data-flow labels
+  permit (reactive agents without a broker to expose).
 - **The meshmcp angle:** subscription is a capability; every delivery is attributable; a
   stream is deny-by-default like every other surface.
 

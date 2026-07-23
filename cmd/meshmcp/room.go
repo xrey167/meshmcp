@@ -150,7 +150,7 @@ func cmdRoom(args []string) error {
 
 	fmt.Fprintf(os.Stderr, "meshmcp control room on http://%s (audit: %s)\n", *addr, *auditPath)
 	fmt.Fprintf(os.Stderr, "open the room with this token-bearing URL (keep it secret):\n  http://%s/?token=%s\n", *addr, tok)
-	return newLocalHTTPServer(*addr, guardLoopback(mux, *addr)).ListenAndServe()
+	return serveGracefully(newLocalHTTPServer(*addr, guardLoopback(mux, *addr)), nil)
 }
 
 func loopbackAddr(addr string) bool {

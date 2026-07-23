@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/xrey167/meshmcp/mcp"
+	"github.com/xrey167/meshmcp/pgstore"
 )
 
 // job is one scheduled tool call.
@@ -152,15 +153,45 @@ func (s *scheduleStore) cancel(id string) (bool, error) {
 
 func main() {
 	path := "schedule.jsonl"
+	// Idempotency claim store: in-process by default; --idempotency-pg (or
+	// MESHMCP_IDEMPOTENCY_PG_DSN) shares claims across replicas via pgstore,
+	// which is what makes the router's cross-replica retry actually safe.
+	idemPG := os.Getenv("MESHMCP_IDEMPOTENCY_PG_DSN")
+	idemTTL := time.Duration(0) // 0 = mcp.DefaultIdempotencyTTL
 	for i, a := range os.Args {
-		if a == "--store" && i+1 < len(os.Args) {
+		if i+1 >= len(os.Args) {
+			break
+		}
+		switch a {
+		case "--store":
 			path = os.Args[i+1]
+		case "--idempotency-pg":
+			idemPG = os.Args[i+1]
+		case "--idempotency-ttl":
+			d, err := time.ParseDuration(os.Args[i+1])
+			if err != nil || d <= 0 {
+				fmt.Fprintln(os.Stderr, "scheduler: bad --idempotency-ttl (want a positive Go duration, e.g. 10m)")
+				os.Exit(1)
+			}
+			idemTTL = d
 		}
 	}
 	st, err := openScheduleStore(path, time.Now)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "scheduler:", err)
 		os.Exit(1)
+	}
+	var claims mcp.ClaimStore = mcp.NewMemClaimStore()
+	if idemPG != "" {
+		// A configured-but-unreachable store fails startup, not silently
+		// falls back: in-memory claims would not be shared across replicas.
+		ps, err := pgstore.Open(idemPG)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "scheduler:", err)
+			os.Exit(1)
+		}
+		defer ps.Close()
+		claims = ps
 	}
 	peer := os.Getenv("MESHMCP_PEER_KEY")
 	if peer == "" {
@@ -169,6 +200,9 @@ func main() {
 	fmt.Fprintf(os.Stderr, "scheduler: started for peer %q, store %s\n", peer, path)
 
 	s := mcp.New("meshmcp-scheduler", "0.1.0")
+	// Enforce the router's conveyed _meta idempotency key: a re-dispatched
+	// schedule/cancel with the same key executes at most once per TTL.
+	s.Use(mcp.Idempotency(claims, idemTTL))
 	registerScheduler(s, st, peer)
 	if err := s.Serve(context.Background(), os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, "scheduler:", err)

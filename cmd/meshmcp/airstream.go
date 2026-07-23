@@ -4,29 +4,47 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
+	"log"
+	"net"
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/xrey167/meshmcp/air"
+	"github.com/xrey167/meshmcp/pubsub"
+	"github.com/xrey167/meshmcp/session"
 )
 
-// cmdAirStream tails a meshmcp audit ledger and renders each governed action as
-// it lands — a live, terminal-native counterpart to the served Receipts page
-// and the first step of the Air · Stream vision (docs/AIR-VISION.md). It reads a
-// local JSONL audit file (append-only, rotation-aware); the deeper form —
-// subscribing to the governed event bus over the mesh — is the next step.
+// cmdAirStream renders each governed action as it lands — a live,
+// terminal-native counterpart to the served Receipts page and the Air · Stream
+// vision (docs/AIR-VISION.md). Two sources feed one renderer: a local JSONL
+// audit file (append-only, rotation-aware tail), or — with --bus — the
+// gateway-hooks event bus, subscribed over the mesh through the identity-gated
+// pub/sub client. On the bus the broker still decides admission (its
+// connection ACL and per-topic policy), and it carries only the hook events
+// the gateway is configured to publish (default deny + cosign).
 func cmdAirStream(args []string) error {
 	fs := flag.NewFlagSet("air stream", flag.ExitOnError)
-	fromStart := fs.Bool("from-start", false, "render existing records first, then follow (default: only new)")
-	interval := fs.Duration("interval", 500*time.Millisecond, "poll interval for new records")
+	fromStart := fs.Bool("from-start", false, "file mode: render existing records first, then follow (default: only new)")
+	interval := fs.Duration("interval", 500*time.Millisecond, "file mode: poll interval for new records")
 	asJSON := fs.Bool("json", false, "print each matched record as its raw JSONL line instead of a rendered row")
+	bus := fs.String("bus", "", "subscribe to a gateway hook bus at <peer-ip:port> over the mesh instead of tailing a file (identity-gated; the broker's ACL and topic policy decide admission)")
+	var topics stringList
+	fs.Var(&topics, "topic", "bus mode: topic glob to subscribe (repeatable; default gateway.*)")
+	since := fs.Uint64("since", 0, "bus mode: replay retained events with sequence greater than this first")
+	capFlag := fs.String("capability", "", "bus mode: present a signed capability grant; @file reads the token from a file")
+	o := meshFlags(fs)
 	// Field filters — the same glob matcher `air bind` triggers on, so a terminal
 	// tail can narrow to "only denials", "only this peer", "only this tool".
+	// Note: over the bus, only the gateway's configured hooks.events are
+	// published (default deny + cosign), so --decision allow shows nothing
+	// unless the gateway emits allow events.
 	var m bindMatch
 	fs.StringVar(&m.Decision, "decision", "", "show only records with this decision (allow|deny|cosign; glob)")
 	fs.StringVar(&m.Backend, "backend", "", "show only records for this backend (glob)")
@@ -36,8 +54,35 @@ func cmdAirStream(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	// A flag from the other mode is a mistake, not a no-op: reject it so the
+	// user is not silently missing the behaviour they asked for (mirrors
+	// cmdSubscribe rejecting --group with --since).
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	if *bus != "" {
+		if fs.NArg() != 0 {
+			return fmt.Errorf("air stream: --bus and a local <audit.jsonl> are mutually exclusive — pass exactly one source")
+		}
+		if set["from-start"] || set["interval"] {
+			return fmt.Errorf("air stream: --from-start and --interval are file-mode flags and have no effect with --bus (use --since to replay retained events)")
+		}
+		capToken, err := readCapabilityToken(*capFlag)
+		if err != nil {
+			return err
+		}
+		if len(topics) == 0 {
+			topics = stringList{"gateway.*"}
+		}
+		if err := streamBus(o, *bus, topics, *since, capToken, m, *asJSON, os.Stdout); err != nil {
+			return fmt.Errorf("air stream: %w", err)
+		}
+		return nil
+	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: meshmcp air stream [flags] <audit.jsonl>")
+		return fmt.Errorf("usage: meshmcp air stream [flags] <audit.jsonl>  |  meshmcp air stream --bus <peer-ip:port> [flags]")
+	}
+	if set["topic"] || set["since"] || set["capability"] {
+		return fmt.Errorf("air stream: --topic, --since, and --capability are bus-mode flags; pass --bus <peer-ip:port> to subscribe")
 	}
 	path := fs.Arg(0)
 
@@ -66,6 +111,122 @@ func streamAudit(ctx context.Context, path string, fromStart bool, filter bindMa
 		}
 		fmt.Fprintln(w, formatStreamRow(r))
 	})
+}
+
+// streamBus subscribes to a gateway's hook bus over the mesh and renders each
+// decision event through the same filter + row model as the file tail. It
+// reuses the pub/sub subscribe client (helloFrame + clientStream over the
+// resumable session channel): the connection is identity-gated by WireGuard
+// key, and the broker's connection ACL and per-topic policy decide admission —
+// this command only asks. Ctrl-C ends the subscription cleanly.
+func streamBus(o *meshOptions, target string, topics []string, since uint64, capToken string, filter bindMatch, asJSON bool, w io.Writer) error {
+	hello, _ := json.Marshal(helloFrame{Role: "sub", Topics: topics, Since: since, Backpressure: "drop_oldest", Capability: capToken})
+	stream := &clientStream{out: append(hello, '\n'), done: make(chan struct{})}
+
+	// subErr is written in the session inbound goroutine (via onLine) and read
+	// here after Run returns; guard it since that goroutine is not joined.
+	var mu sync.Mutex
+	var subErr error
+	stream.onLine = busLineHandler(filter, asJSON, w, func(ack ackFrame) {
+		if ack.Error != "" {
+			mu.Lock()
+			subErr = fmt.Errorf("broker rejected subscribe: %s", ack.Error)
+			mu.Unlock()
+			stream.finish()
+			return
+		}
+		if ack.Truncated {
+			fmt.Fprintln(os.Stderr, dim(fmt.Sprintf("replay from seq %d was truncated; some events aged out of retention", since)))
+		}
+		fmt.Fprintln(os.Stderr, dim("streaming ")+bold(strings.Join(topics, " "))+dim(" on ")+bold(target)+dim(" · Ctrl-C to stop"))
+	})
+
+	o.BlockInbound = true
+	client, err := startMesh(o, os.Stderr)
+	if err != nil {
+		return err
+	}
+	defer stopMesh(client)
+
+	ctx, stop := signal.NotifyContext(context.Background(), shutdownSignals...)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		stream.finish()
+	}()
+
+	dial := func(ctx context.Context) (net.Conn, error) { return client.Dial(ctx, "tcp", target) }
+	err = session.NewClient(dial, log.Printf).Run(ctx, stream)
+	mu.Lock()
+	se := subErr
+	mu.Unlock()
+	if se != nil {
+		return se
+	}
+	if err != nil && ctx.Err() == nil {
+		return fmt.Errorf("subscribe to %s: %w", target, err)
+	}
+	return nil
+}
+
+// busLineHandler builds the inbound-line handler for a hook-bus subscription:
+// the first line is the broker's subscribe ack (handed to onAck), every later
+// line is a bus event decoded and rendered through the shared row model. It is
+// the seam under streamBus, so tests can feed synthetic wire lines through the
+// exact handler — no live mesh needed.
+func busLineHandler(filter bindMatch, asJSON bool, w io.Writer, onAck func(ackFrame)) func(line []byte) {
+	first := true
+	return func(line []byte) {
+		if first {
+			first = false
+			var ack ackFrame
+			_ = json.Unmarshal(line, &ack)
+			onAck(ack)
+			return
+		}
+		streamBusLine(line, filter, asJSON, w)
+	}
+}
+
+// streamBusLine renders one bus-carried event line that matches filter — as a
+// coloured row, or (asJSON) its raw event line for a scripting consumer.
+// Non-decision lines (foreign payloads, junk) are skipped silently.
+func streamBusLine(line []byte, filter bindMatch, asJSON bool, w io.Writer) {
+	r, ok := parseBusRecord(line)
+	if !ok || !matchRecord(filter, r) {
+		return
+	}
+	if asJSON {
+		fmt.Fprintln(w, string(bytes.TrimSpace(line)))
+		return
+	}
+	fmt.Fprintln(w, formatStreamRow(r))
+}
+
+// parseBusRecord decodes one bus event line — a pubsub.Event whose payload is
+// a gateway hookPayload — into the shared stream row model. The hook payload
+// names the decision `event` and carries no timestamp, so the row takes its
+// time from the broker-stamped event envelope. Unknown fields in either layer
+// are tolerated (ignored), so a newer gateway can add fields without breaking
+// an older stream. Reports false for lines that are not decision events.
+func parseBusRecord(line []byte) (streamRecord, bool) {
+	var ev pubsub.Event
+	if err := json.Unmarshal(line, &ev); err != nil || len(ev.Payload) == 0 {
+		return streamRecord{}, false
+	}
+	var p hookPayload
+	if err := json.Unmarshal(ev.Payload, &p); err != nil || p.Event == "" {
+		return streamRecord{}, false
+	}
+	return streamRecord{
+		Time:     ev.Time,
+		Decision: p.Event,
+		Backend:  p.Backend,
+		Peer:     p.Peer,
+		Method:   p.Method,
+		Tool:     p.Tool,
+		Reason:   p.Reason,
+	}, true
 }
 
 // followAudit tails an append-only audit ledger, invoking handle once per
@@ -177,7 +338,7 @@ func formatStreamRow(r streamRecord) string {
 		what += " · " + r.Tool
 	}
 	row := fmt.Sprintf("%s  %s  %s  %s",
-		dim(streamTime(r.Time)), dec, bold(sanitizeCell(r.Peer)), sanitizeCell(what))
+		dim(sanitizeCell(streamTime(r.Time))), dec, bold(sanitizeCell(r.Peer)), sanitizeCell(what))
 	if r.Backend != "" {
 		row += "  " + cyan(sanitizeCell(r.Backend))
 	}

@@ -35,21 +35,17 @@ jobs:
         run: go build ./...
       - name: go vet
         run: go vet ./...
-      # Two pre-existing timing-flaky steer tests are quarantined so the suite
-      # gives a reliable signal:
-      #   - TestSteerDeliveryRequiresApplicationAck (cmd/meshmcp): under -race the
-      #     one-shot steer client can race its own graceful close against a
-      #     net.Pipe EOF and try to resume a just-finalized session ("requested
-      #     resume session is no longer available"). A session-reconnect corner
-      #     case, self-healing over a real mesh; proper fix tracked in session/.
-      #   - TestTaskSteer (mcp): the original quarantine. It now passes locally
-      #     under -race -count=20, so it is a candidate to un-quarantine once
-      #     confirmed green across ubuntu/macos/windows here — kept skipped for
-      #     now so this suite is deterministically green.
+      # No quarantined tests. The formerly-flaky steer tests
+      # (TestSteerDeliveryRequiresApplicationAck, TestTaskSteer) were fixed at
+      # the root, twice over: session/endpoint.go's sendClose commits the close
+      # atomically with the CLOSE write (the redial can no longer fire —
+      # regression: TestGracefulDrainCloseNeverReattaches), and
+      # session/client.go's reconnectLoop additionally tolerates a redial that
+      # finds a cleanly finalized session — verified green under -race -count=25.
       - name: go test
-        run: go test -skip '^(TestSteerDeliveryRequiresApplicationAck|TestTaskSteer)$' ./...
+        run: go test ./...
       - name: go test -race
-        run: go test -race -skip '^(TestSteerDeliveryRequiresApplicationAck|TestTaskSteer)$' ./...
+        run: go test -race ./...
 
   # Formatting, static analysis, vulnerability scanning, module verification,
   # and a fuzz smoke test — Linux only (bash), keeps the matrix fast.
@@ -76,12 +72,13 @@ jobs:
       - name: go mod verify
         run: go mod verify
 
-      # staticcheck and govulncheck are ADVISORY during v0.1 hardening: they run
-      # and annotate, but do not fail the build yet, because the pre-existing
-      # baseline (and a bleeding-edge go1.26 toolchain / heavy transitive deps)
-      # still has findings to burn down. Promote both to required once green.
-      # @latest so the tool is built with the runner's go1.26 toolchain (older
-      # pinned versions cannot parse go1.26 source).
+      # staticcheck and govulncheck are ADVISORY, and cannot be promoted yet for
+      # a hard reason (verified 2026-07): the released staticcheck (v0.7.0) pins
+      # go1.25 and refuses every package in this repo with "requires newer Go
+      # version go1.26" — a required job would fail on the toolchain mismatch,
+      # not on findings. Promote staticcheck the moment honnef.co/go/tools
+      # supports go1.26; govulncheck stays advisory until its DB is reachable
+      # from the runner.
       - name: staticcheck (advisory)
         continue-on-error: true
         run: go run honnef.co/go/tools/cmd/staticcheck@latest ./...

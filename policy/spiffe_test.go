@@ -3,6 +3,7 @@ package policy
 import (
 	"encoding/base64"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -85,6 +86,37 @@ func TestSpiffeID_StandardPaddedInputOnly(t *testing.T) {
 	urlSafe := "76SpfHTmmNI0CvRjH_y2ntoe0zdzeACvkl-IKrHlqYA="
 	if id := SpiffeID("meshmcp.example.org", urlSafe); id != "" {
 		t.Fatalf("URL-safe input must not be silently accepted, got %q", id)
+	}
+}
+
+// TestSpiffeID_HostileInputsBounded is the derivation table: well-formed
+// inputs produce exactly one URI shape, and every hostile input — malformed
+// or oversized domain or key, control characters, scheme/path smuggling —
+// yields "" (no label, never a malformed or unbounded URI, never an error).
+func TestSpiffeID_HostileInputsBounded(t *testing.T) {
+	cases := []struct {
+		name, domain, key string
+		want              SpiffeLabel
+	}{
+		{"well-formed", "mesh.example.org", netbirdShapedKey,
+			"spiffe://mesh.example.org/peer/76SpfHTmmNI0CvRjH_y2ntoe0zdzeACvkl-IKrHlqYA"},
+		{"empty domain", "", netbirdShapedKey, ""},
+		{"empty key", "mesh.example.org", "", ""},
+		{"uppercase domain", "Mesh.Example.Org", netbirdShapedKey, ""},
+		{"domain with scheme", "spiffe://mesh.example.org", netbirdShapedKey, ""},
+		{"domain with path", "mesh.example.org/evil", netbirdShapedKey, ""},
+		{"domain with space", "mesh example.org", netbirdShapedKey, ""},
+		{"domain with newline", "mesh.example.org\n", netbirdShapedKey, ""},
+		{"domain over 255 bytes", strings.Repeat("a", 256), netbirdShapedKey, ""},
+		{"key with newline", "mesh.example.org", "AAAA\nAAAA", ""},
+		{"key with non-zero trailing padding bits", "mesh.example.org", "AB==", ""},
+		{"key not base64", "mesh.example.org", "!!not-base64!!", ""},
+		{"oversized key", "mesh.example.org", strings.Repeat("A", 400), ""},
+	}
+	for _, tc := range cases {
+		if got := SpiffeID(tc.domain, tc.key); got != tc.want {
+			t.Errorf("%s: SpiffeID(%q, %q) = %q, want %q", tc.name, tc.domain, tc.key, got, tc.want)
+		}
 	}
 }
 

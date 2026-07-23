@@ -416,7 +416,7 @@ func cmdAirKGServe(args []string) error {
 	}
 	// Read/header timeouts even on the mesh so an admitted peer cannot hold the
 	// listener open with a slow request (Slowloris), matching the control endpoint.
-	return newLocalHTTPServer("", h).Serve(ln)
+	return serveGracefully(newLocalHTTPServer("", h), ln)
 }
 
 // parseKGGrants parses --grant "<id>=<corpus>[,<corpus>...]" flags into the

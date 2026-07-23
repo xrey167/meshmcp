@@ -9,6 +9,10 @@ reachable only over a private WireGuard mesh, with **no public application ingre
 cryptographic identity for every caller, an **agent firewall** that enforces what each agent may do,
 and a **gateway-signed, tamper-evident audit log** of every decision.
 
+> **New here?** Start with **[docs/GUIDE.md](docs/GUIDE.md)** — task-oriented recipes ("set up your
+> first gateway", "share a file with your other laptop", "approve a dangerous call from your phone")
+> that get you productive without reading a spec.
+
 > **Positioning:** a self-hosted agent firewall for private MCP servers — no public application
 > ingress **by default**, transport-bound workload identity, enforceable tool/method policy, and a
 > gateway-signed tamper-evident decision log. See **[docs/THREAT-MODEL.md](docs/THREAT-MODEL.md)** for

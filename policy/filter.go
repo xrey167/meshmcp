@@ -15,6 +15,13 @@ type Caller struct {
 	Peer     string
 	PeerKey  string
 	PeerAddr string
+	// SpiffeID is the caller's derived, additive SPIFFE identity label
+	// (Feature A), stamped verbatim onto every audit record this filter
+	// writes. Derivation happens at the edge (the serve wiring calls
+	// SpiffeID(trustDomain, peerKey)); the filter itself stays ignorant of
+	// trust domains. Empty means no label (no trust domain configured), and
+	// the audit field is elided. A label only — enforcement keys on PeerKey.
+	SpiffeID SpiffeLabel
 }
 
 // Filter wraps a backend MCP server's stdio and enforces a Policy on the
@@ -519,6 +526,8 @@ func (f *Filter) record(method, tool, rpcID string, dec Decision) AuditRecord {
 		Reason:   dec.Reason,
 		Rule:     dec.RuleID,
 		Cost:     dec.Cost,
+
+		PeerSpiffeID: f.caller.SpiffeID,
 	}
 }
 

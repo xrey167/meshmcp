@@ -81,7 +81,7 @@ func cmdApprovals(args []string) error {
 	if *addr != "" {
 		h := approvalsHandler(ps, func(*http.Request) string { return "operator@local" }, nil, time.Now, opts...)
 		log.Printf("approvals on http://%s (LOCAL — approver is 'operator@local')", *addr)
-		return newLocalHTTPServer(*addr, h).ListenAndServe()
+		return serveGracefully(newLocalHTTPServer(*addr, h), nil)
 	}
 
 	// Mesh mode: the approver is the caller's cryptographic mesh identity.
@@ -133,7 +133,7 @@ func cmdApprovals(args []string) error {
 	defer ln.Close()
 	log.Printf("approvals on mesh port %d (open it from a phone on the mesh; approver = your mesh identity)", *port)
 	srv := newLocalHTTPServer("", approvalsHandler(ps, approver, authorized, time.Now, opts...))
-	return srv.Serve(ln)
+	return serveGracefully(srv, ln)
 }
 
 // approvalsOpts are optional add-ons for approvalsHandler (push-wake).
