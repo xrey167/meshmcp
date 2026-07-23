@@ -310,3 +310,113 @@ func assertChain(t *testing.T, buf *bytes.Buffer, wantN int) {
 		t.Fatalf("audit records = %d, want %d", res.Count, wantN)
 	}
 }
+
+// releasePolicy is a fetch tool that is both cosign-gated and a taint source
+// with a rule cost — the shape whose release must still bind its effects.
+func releasePolicy() *policy.Policy {
+	return &policy.Policy{DefaultAllow: false, Rules: []policy.Rule{
+		{Peers: []string{"*"}, Tools: []string{"fetch"}, Allow: true, RequireCosign: true,
+			TaintSource: true, Rate: &policy.RateLimit{Max: 100, Per: "24h", Cost: 5}},
+	}}
+}
+
+// TestReleaseFoldsRuleEffects proves a human release executes under the SAME
+// bounds as an allow: the parked rule's emit-labels taint the run, its cost is
+// spent, the returned decision carries both, and the release lands an allow
+// record on the chain next to the park's cosign record.
+func TestReleaseFoldsRuleEffects(t *testing.T) {
+	var buf bytes.Buffer
+	g := NewGateway(policy.NewEngine(releasePolicy(), nil, nil), newAudit(&buf), 100)
+
+	var parked bool
+	dec, _, err := g.Call(caller, "web", "fetch", nil, okExec(&parked))
+	if err != nil || parked || dec.Outcome != policy.OutcomeCosign {
+		t.Fatalf("expected an unexecuted cosign park: %+v ran=%v err=%v", dec, parked, err)
+	}
+
+	var ran bool
+	rel, result, err := g.Release(caller, "fetch", dec, okExec(&ran))
+	if err != nil || !ran || string(result) != "ok" {
+		t.Fatalf("release failed: rel=%+v result=%q err=%v", rel, result, err)
+	}
+	if rel.Outcome != policy.OutcomeAllow || rel.Cost != 5 || len(rel.AddLabels) != 1 || rel.AddLabels[0] != "tainted" {
+		t.Fatalf("release decision missing the rule's effects: %+v", rel)
+	}
+	if g.Spent() != 5 || !g.Labels()["tainted"] {
+		t.Fatalf("release did not bind effects into the run: spent=%d labels=%v", g.Spent(), g.Labels())
+	}
+	assertChain(t, &buf, 2) // cosign park + release allow
+}
+
+// TestReleaseFailClosed covers the release guards: a non-cosign decision and a
+// stale rule id refuse without executing, and a failed execute refunds the
+// reserved cost and adds no taint.
+func TestReleaseFailClosed(t *testing.T) {
+	g := NewGateway(policy.NewEngine(releasePolicy(), nil, nil), nil, 100)
+
+	var ran bool
+	if _, _, err := g.Release(caller, "fetch", policy.Decision{Outcome: policy.OutcomeDeny, RuleID: 0}, okExec(&ran)); err == nil || ran {
+		t.Fatalf("release of a non-cosign decision must refuse: ran=%v err=%v", ran, err)
+	}
+	if _, _, err := g.Release(caller, "fetch", policy.Decision{Outcome: policy.OutcomeCosign, RuleID: 99}, okExec(&ran)); err == nil || ran {
+		t.Fatalf("release with a rule id outside the policy must refuse: ran=%v err=%v", ran, err)
+	}
+
+	dec, _, _ := g.Call(caller, "web", "fetch", nil, okExec(new(bool)))
+	boom := errors.New("backend down")
+	if _, _, err := g.Release(caller, "fetch", dec, func() ([]byte, error) { return nil, boom }); !errors.Is(err, boom) {
+		t.Fatalf("execute error not surfaced: %v", err)
+	}
+	if g.Spent() != 0 || len(g.Labels()) != 0 {
+		t.Fatalf("failed release left residue: spent=%d labels=%v", g.Spent(), g.Labels())
+	}
+}
+
+// TestReleaseBudgetHalt proves the run cap outranks a human release: a released
+// call whose cost would breach the budget is halted (denied, unexecuted, zero
+// spend) exactly like any governed call.
+func TestReleaseBudgetHalt(t *testing.T) {
+	g := NewGateway(policy.NewEngine(releasePolicy(), nil, nil), nil, 3) // cap 3 < cost 5
+
+	dec, _, _ := g.Call(caller, "web", "fetch", nil, okExec(new(bool)))
+	var ran bool
+	halt, result, err := g.Release(caller, "fetch", dec, okExec(&ran))
+	if err == nil || ran || result != nil {
+		t.Fatalf("breaching release not halted: dec=%+v result=%v ran=%v err=%v", halt, result, ran, err)
+	}
+	if halt.Outcome != policy.OutcomeDeny {
+		t.Fatalf("halt outcome = %v, want deny", halt.Outcome)
+	}
+	if g.Spent() != 0 || len(g.Labels()) != 0 {
+		t.Fatalf("halted release mutated the run: spent=%d labels=%v", g.Spent(), g.Labels())
+	}
+}
+
+// TestTaintSeedsDecisions proves externally-merged taint (Gateway.Taint — the
+// resume re-seed / human-release path) influences the very next decision
+// exactly as Call-accumulated taint does: an egress tool that blocks "pii" is
+// denied after Taint("pii") without any governed call having emitted it.
+func TestTaintSeedsDecisions(t *testing.T) {
+	pol := &policy.Policy{DefaultAllow: false, Rules: []policy.Rule{
+		{Peers: []string{"*"}, Tools: []string{"egress"}, Allow: true, BlockLabels: []string{"pii"}},
+	}}
+	g := NewGateway(policy.NewEngine(pol, nil, nil), nil, 100)
+
+	var ran bool
+	if dec, _, err := g.Call(caller, "mail", "egress", nil, okExec(&ran)); dec.Outcome != policy.OutcomeAllow || err != nil {
+		t.Fatalf("pre-taint egress should allow: %+v err=%v", dec, err)
+	}
+
+	g.Taint("pii", "") // blank labels are ignored; real ones merge monotonically
+	if !g.Labels()["pii"] {
+		t.Fatalf("Taint did not merge the label: %v", g.Labels())
+	}
+	ran = false
+	dec, _, err := g.Call(caller, "mail", "egress", nil, okExec(&ran))
+	if dec.Outcome != policy.OutcomeDeny || err == nil {
+		t.Fatalf("post-taint egress must deny: %+v err=%v", dec, err)
+	}
+	if ran {
+		t.Fatal("denied egress executed")
+	}
+}

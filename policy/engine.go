@@ -362,6 +362,25 @@ func ruleCost(r Rule) int {
 	return 1
 }
 
+// RuleEffects returns the emit-labels and cost a call matched by rule ruleID
+// carries when it actually executes, with ok=false for an id that names no rule
+// in the CURRENT policy (the -1 default, or a stale index after a policy swap).
+//
+// A cosign Decision deliberately carries no AddLabels/Cost — nothing has
+// executed and nothing is charged while a call is held — so the component that
+// later executes the parked call under a consumed human approval (the egress
+// gateway's Release) recovers the matched rule's effects here and folds them
+// exactly as the engine's own co-signed allow branches would have. Callers must
+// fail closed on ok=false: unknown effects means do not execute.
+func (e *Engine) RuleEffects(ruleID int) (addLabels []string, cost int, ok bool) {
+	pol := e.pol.Load()
+	if pol == nil || ruleID < 0 || ruleID >= len(pol.Rules) {
+		return nil, 0, false
+	}
+	r := pol.Rules[ruleID]
+	return r.emitSet(), ruleCost(r), true
+}
+
 // firstPresent returns the first label in want that is set in have, or "".
 func firstPresent(want []string, have map[string]bool) string {
 	for _, l := range want {

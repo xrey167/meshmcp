@@ -62,7 +62,7 @@ func newGrantRig(t *testing.T, allow, operator []string) *grantRig {
 
 // kgFor builds a kg handler that identifies its caller as (pubKey, fqdn).
 func (r *grantRig) kgFor(pubKey, fqdn string) http.Handler {
-	return kgControlHandler(r.facade, fixedIdentify(pubKey, fqdn), r.allow, r.bridge, r.audit)
+	return kgControlHandler(r.facade, fixedIdentify(pubKey, fqdn), r.allow, r.bridge, nil, r.audit)
 }
 
 // grantFor builds the operator grant-admin handler identifying as (pubKey, fqdn).
