@@ -152,8 +152,8 @@ func TestDeltaSince_Watermark(t *testing.T) {
 func TestApplyDelta_RefusesMalformedRecords(t *testing.T) {
 	st := openTemp(t)
 	n, err := st.ApplyDelta([]Record{
-		{Op: "assert", ID: ""},               // no id
-		{Op: "compact", ID: "x"},             // unknown op
+		{Op: "assert", ID: ""},                           // no id
+		{Op: "compact", ID: "x"},                         // unknown op
 		{Op: "assert", ID: "ok", S: "s", P: "p", O: "o"}, // the one valid record
 	})
 	if err != nil || n != 1 {
