@@ -46,6 +46,8 @@ func cmdAir(args []string) error {
 		return cmdAirPair(args[1:])
 	case "operator", "operators":
 		return cmdAirOperator(args[1:])
+	case "remove", "uninstall":
+		return cmdUninstall(args[1:])
 	case "grant":
 		return cmdAirGrant(args[1:])
 	case "nearby":
@@ -136,6 +138,7 @@ func airUsage() error {
 	fmt.Fprintln(os.Stderr, "                  "+dim("operator side: approve peers onto the mesh — no YAML editing (identity only, not tool access)"))
 	fmt.Fprintln(os.Stderr, "  "+b("air operator")+"    list|add|remove --pubkey <key> [--fqdn f] [--config cfg]")
 	fmt.Fprintln(os.Stderr, "                  "+dim("add a second operator (control/steer + pairing-approver) without hand-editing control.allow"))
+	fmt.Fprintln(os.Stderr, "  "+b("air remove")+"      [--config f] [--yes] [--purge]     "+dim("leave the mesh: remove this gateway's local identity + state (dry-run without --yes)"))
 	fmt.Fprintln(os.Stderr, "  "+b("air grant")+"       list|allow|deny|revoke <control-ip:port> [peer-key] [scope] [--once|--always]")
 	fmt.Fprintln(os.Stderr, "                  "+dim("operator side: turn a recognized peer's denied request into a one-tap grant (Allow once / Always / Deny)"))
 	fmt.Fprintln(os.Stderr)
