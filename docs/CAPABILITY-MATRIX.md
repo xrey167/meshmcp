@@ -61,12 +61,8 @@ continuously tested.
 | Request-bound, signed, single-use approval objects | 3 |
 | ~~Wire the signed delegation-token primitive into the router/upstream proxy path + caller ACL~~ — **shipped**: router mints per-call tokens (`delegation_key` + per-upstream `audience` pins), stdio gateways verify + intersect (`router_delegation`), audit carries both identities + nonce. Remaining follow-ups: HTTP-backend parity, non-tools/call methods, shared (pg) nonce store for HA | 4 |
 | Restart-safe audit append (seed from verified tail; refuse unverifiable) | 5 |
-<<<<<<< HEAD
-| External audit anchoring interface (witnessed) | 5 |
+| ~~External audit anchoring interface (witnessed)~~ — **shipped**: see the Witnessed external audit anchoring capability row | 5 |
 | ~~Lease renewal + expiry-driven automatic failover~~ — **shipped**: lease renewal heartbeat (~TTL/3) + release-on-clean-shutdown are always on with a lease store; opt-in `session_failover: standby` (PostgreSQL session store only — a stolen file lock from a paused holder could regress an adoption's generation) sweeps the store and adopts released/expired-past-2×TTL-margin sessions via the `AcquireLease` generation CAS (single winner; paused owner fenced), respawning the backend under the creator's persisted `peer_fqdn`/`peer_addr` identity before the client returns. Remaining: idempotency-key enforcement (row below) | 6 |
-=======
-| Lease renewal + expiry-driven automatic failover (today a standby only takes over on the creator's reattach; the CAS/fencing lease primitive and its server wiring are done and migration-proven) | 6 |
->>>>>>> origin/main
 | Backend-side idempotency-key ENFORCEMENT (the router ships operator retry classification via `retry_tools` + a stable conveyed `_meta` idempotency key; the backend half now exists for framework-built servers — `mcp.Idempotency` single-flight claim middleware with result replay, in-memory + PostgreSQL claim stores, conformance-tested, wired into `cmd/scheduler` and the demo server; remaining: adoption across the other in-mesh servers, and foreign backends stay conveyed-only) | 6 |
 | Extend stdio/HTTP parity to per-session controls (taint/secrets/capabilities); classification + tool/method decisions are done + conformance-tested | 7 |
 | Backend egress restriction for secrets (response-side redaction is done) | 8 |
