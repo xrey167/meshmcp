@@ -20,6 +20,14 @@ func presentError(err error) {
 	if errors.Is(err, errSetupKeyMissing) {
 		os.Exit(1)
 	}
+	// A group fan-out that ran carries its designed exit code (2 = partial
+	// delivery, 3 = zero delivered). The per-member truth was already printed;
+	// this line is the one-sentence outcome, and the code is the contract.
+	var fanout *fanoutExitError
+	if errors.As(err, &fanout) {
+		fmt.Fprintln(os.Stderr, amber("✗")+" "+err.Error())
+		os.Exit(fanout.code)
+	}
 	fmt.Fprintln(os.Stderr, amber("✗")+" "+err.Error())
 	if hint := hintFor(err); hint != "" {
 		fmt.Fprintln(os.Stderr, dim("  → "+hint))

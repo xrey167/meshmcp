@@ -2,10 +2,13 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/xrey167/meshmcp/air"
 )
 
 func writeConfig(t *testing.T, body string) string {
@@ -332,5 +335,105 @@ func TestExampleGatewayConfigsLoadStrictly(t *testing.T) {
 		if _, err := loadConfig(f); err != nil {
 			t.Errorf("gateway example %s no longer loads under strict decode: %v", filepath.Base(f), err)
 		}
+	}
+}
+
+// TestConfigGroupsValidation pins the load-time bounds of the top-level
+// `groups:` map, which feeds BOTH policy `group:` peers (F17) and the
+// /v1/groups fan-out roster: names must fit the `group:<name>` selector
+// grammar (no ":", bounded, control-free) and every member pattern must be a
+// usable acl pattern. A defined-but-EMPTY pattern list stays legal — the loud
+// no-op lives at fan-out time, not at load time.
+func TestConfigGroupsValidation(t *testing.T) {
+	base := `
+backends:
+  - name: fs
+    port: 9101
+    stdio: ["echo"]
+`
+	if err := writeAndLoad(t, base+`
+groups:
+  oncall: ["pubkey:KEY-A", "*.lab.mesh"]
+  quiet: []
+`); err != nil {
+		t.Fatalf("valid groups (including a defined-but-empty one) must load: %v", err)
+	}
+
+	cases := []struct{ name, yaml, want string }{
+		{"colon in name", `
+groups:
+  "on:call": ["*"]
+`, `":"`},
+		{"control char in name", "\ngroups:\n  \"on\tcall\": [\"*\"]\n", "control"},
+		{"padded name", `
+groups:
+  " oncall ": ["*"]
+`, "surrounding whitespace"},
+		{"name over bound", `
+groups:
+  ` + strings.Repeat("g", 65) + `: ["*"]
+`, "at most"},
+		{"empty member pattern", `
+groups:
+  oncall: ["pubkey:KEY-A", "  "]
+`, "pattern #2: group pattern must be non-empty"},
+		{"pubkey pattern without a key", `
+groups:
+  oncall: ["pubkey:  "]
+`, "requires a key"},
+		{"pattern over bound", `
+groups:
+  oncall: ["` + strings.Repeat("p", 257) + `"]
+`, "at most 256 bytes"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := writeAndLoad(t, base+tc.yaml); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected error containing %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
+// TestValidateGroupsBounds covers the map-level caps directly (a YAML fixture
+// with 257 groups would only obscure the rule).
+func TestValidateGroupsBounds(t *testing.T) {
+	many := map[string][]string{}
+	for i := 0; i < maxGroups; i++ {
+		many[fmt.Sprintf("g%03d", i)] = []string{"*"}
+	}
+	if err := validateGroups(many); err != nil {
+		t.Fatalf("%d groups must be accepted: %v", maxGroups, err)
+	}
+	many["one-more"] = []string{"*"}
+	if err := validateGroups(many); err == nil || !strings.Contains(err.Error(), "max is 256") {
+		t.Fatalf("group-count cap = %v", err)
+	}
+
+	patterns := make([]string, maxGroupMembers)
+	for i := range patterns {
+		patterns[i] = fmt.Sprintf("node-%02d.mesh", i)
+	}
+	if err := validateGroups(map[string][]string{"wide": patterns}); err != nil {
+		t.Fatalf("%d member patterns must be accepted: %v", maxGroupMembers, err)
+	}
+	if err := validateGroups(map[string][]string{"wide": append(patterns, "extra.mesh")}); err == nil || !strings.Contains(err.Error(), "max is 64") {
+		t.Fatalf("member-pattern cap = %v", err)
+	}
+
+	// The pattern caps alias the air envelope bounds, so config and wire can
+	// never skew.
+	if maxGroupMembers != air.MaxFanoutMembers {
+		t.Fatalf("maxGroupMembers (%d) must alias air.MaxFanoutMembers (%d)", maxGroupMembers, air.MaxFanoutMembers)
+	}
+	if maxGroupPatternBytes != air.MaxGroupPatternBytes {
+		t.Fatalf("maxGroupPatternBytes (%d) must alias air.MaxGroupPatternBytes (%d)", maxGroupPatternBytes, air.MaxGroupPatternBytes)
+	}
+
+	// A C1 control character (multi-byte in UTF-8, invisible in most terminals)
+	// must be rejected exactly like a C0 one: the envelope's unmatched echo
+	// rejects it, so the loader must never accept it.
+	if err := validateGroups(map[string][]string{"oncall": {"gh\u0085ost.*"}}); err == nil || !strings.Contains(err.Error(), "control") {
+		t.Fatalf("C1-control pattern = %v, want control-character rejection", err)
 	}
 }

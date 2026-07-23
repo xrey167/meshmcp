@@ -2,9 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,6 +35,7 @@ type airController interface {
 	nearby(now time.Time) []air.Presence
 	announce(pubKey, fqdn, observedIP string, a air.Announcement, now time.Time) (air.Presence, bool, error)
 	leave(pubKey string) bool
+	groups(pubKey, fqdn, name string, now time.Time) (airGroupsReply, error)
 }
 
 // airSteerMethods is the allowlist of server->client notification methods a
@@ -187,6 +190,53 @@ func airControlHandler(c airController, identify func(*http.Request) (pubkey, fq
 		}
 	})
 
+	// Group rosters: resolve the operator-defined `groups:` map against the
+	// live presence directory SERVER-SIDE, so every client shares one pattern
+	// semantics (pubkey exact / FQDN glob — the acl language) and never
+	// re-implements glob matching. A group is a name-resolution convenience
+	// only: the reply carries member cards, and every subsequent per-member
+	// action still enters its destination's own ACL/policy with its own audit
+	// record. Gated exactly like /v1/sessions — the roster (names and keys) is
+	// the same disclosure tier — default-deny on an empty allow, read-only, and
+	// audited per request.
+	mux.HandleFunc("/v1/groups", func(w http.ResponseWriter, r *http.Request) {
+		if !getOnly(w, r) {
+			return
+		}
+		pubKey, fqdn := identify(r)
+		name := strings.TrimSpace(r.URL.Query().Get("name"))
+		record := func(ok bool) {
+			if audit != nil {
+				audit(airSteerAudit{Peer: fqdnOr(fqdn), PeerKey: pubKey, Session: name, Method: "air/groups", OK: ok})
+			}
+		}
+		if allow.empty() || !allow.allows(pubKey, fqdn) {
+			record(false)
+			http.Error(w, "not permitted", http.StatusForbidden)
+			return
+		}
+		reply, err := c.groups(pubKey, fqdn, name, time.Now())
+		if err != nil {
+			record(false)
+			var unknown *unknownGroupError
+			var oversize *oversizeGroupError
+			switch {
+			case errors.As(err, &unknown):
+				http.Error(w, err.Error(), http.StatusNotFound)
+			case errors.As(err, &oversize):
+				// Refuse an over-wide resolution loudly; a truncated roster
+				// would silently drop members from the fan-out.
+				http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+			default:
+				http.Error(w, err.Error(), http.StatusBadRequest)
+			}
+			return
+		}
+		record(true)
+		reply.You = fqdnOr(fqdn)
+		writeJSONResp(w, http.StatusOK, reply)
+	})
+
 	mux.HandleFunc("/v1/steer", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
@@ -304,6 +354,13 @@ type gatewayAirControl struct {
 	backends []AirCatalogEntry // canonical cards; live steerability is added per response
 	gateway  string            // this gateway's mesh FQDN, for the catalog
 	presence *air.Registry     // TTL directory: one identity-stamped card per peer key
+	// groupPatterns is the startup `groups:` map served by /v1/groups. It is
+	// deliberately the SAME startup-frozen map policy F17 resolves against
+	// (StaticGroups is bound once at startup and reloadPolicies does not
+	// re-bind it), so fan-out resolution and the policies each fanned-out call
+	// enters can never skew apart. Swapping both atomically on SIGHUP is a
+	// follow-up.
+	groupPatterns map[string][]string
 }
 
 func (g *gatewayAirControl) backendAllows(backend, pubKey, fqdn string) bool {
