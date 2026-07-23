@@ -333,8 +333,10 @@ hooks:
     auth_header: "Bearer ${SIEM_TOKEN}"
 ```
 
-Every policy decision then flows to `gateway.deny` / `gateway.cosign` /
-`gateway.allow`. Watch it live from any authorized peer:
+Every stdio-backend policy decision then flows to `gateway.deny` /
+`gateway.cosign` / `gateway.allow`. (HTTP/remote backend decisions land in the
+audit ledger but are not yet emitted on the bus — an honest parity gap.) Watch
+it live from any authorized peer:
 
 ```sh
 meshmcp subscribe <gateway-mesh-ip>:9130 'gateway.*'

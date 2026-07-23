@@ -18,7 +18,7 @@ content lands in BACKLOG.md.
 | 6 | Spaces / `group:` fan-out | todo | |
 | 7 | Idempotency-key enforcement | **done** | mcp.Idempotency middleware + Mem/PG claim stores; review fixed (tool,key) scoping |
 | 8 | Lease renewal + standby sweep | todo | |
-| 9 | HTTP per-session policy parity | todo | |
+| 9 | HTTP per-session policy parity | **done** | Taint + secrets + capabilities on Streamable HTTP; per-session state, SSE redaction; refused features still refused |
 | 10 | AKS pillars 1–3 | todo | Phase 4 stays deferred by design |
 | 11 | F25 multi-tenant control plane | todo | |
 | 12 | F31 SSO/OIDC mapping | todo | |

@@ -55,6 +55,12 @@ func canonicalArgsHash(args []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// CanonicalArgsHash is the exported form of canonicalArgsHash, shared with the
+// Streamable-HTTP enforcer so a pending co-sign record carries the SAME
+// argument binding on every transport (an approver mints a request-bound
+// approval against it).
+func CanonicalArgsHash(args []byte) string { return canonicalArgsHash(args) }
+
 // ApprovalRequest is the exact operation being authorized. ArgsHash is the
 // canonical hash of the tool call arguments.
 type ApprovalRequest struct {

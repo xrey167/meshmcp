@@ -214,20 +214,37 @@ func (f *Filter) SetCapabilityVerifier(v *CapabilityVerifier, required bool) {
 	f.capRequired = required
 }
 
-// applyCapability folds a presented capability into the policy decision:
+// applyCapability folds a presented capability into the policy decision. It
+// delegates to FoldCapability, the single shared implementation both the stdio
+// filter and the Streamable-HTTP enforcer use (the ClassifyRPC precedent), so
+// the two transports cannot drift on capability semantics.
+func (f *Filter) applyCapability(dec Decision, token, tool string) Decision {
+	return FoldCapability(dec, f.capVerifier, f.capRequired, token, f.caller.PeerKey, f.caller.Backend, tool)
+}
+
+// FoldCapability folds a presented capability into the policy decision:
 //   - required + no valid token        → deny (capability-only surface);
 //   - a presented but invalid token    → deny (fail closed);
 //   - a valid token cannot override an explicit deny or a co-sign requirement;
 //   - a valid token upgrades a policy-DEFAULT deny (RuleID -1) to allow, and
 //     otherwise leaves an already-allowed call allowed.
-func (f *Filter) applyCapability(dec Decision, token, tool string) Decision {
+//
+// It is the SHARED implementation used by the stdio filter and the
+// Streamable-HTTP enforcer, so both transports make the same capability
+// decision for the same (policy, token) input.
+func FoldCapability(dec Decision, v *CapabilityVerifier, required bool, token, peerKey, backend, tool string) Decision {
 	if token == "" {
-		if f.capRequired {
+		if required {
 			return Decision{Outcome: OutcomeDeny, RuleID: dec.RuleID, Reason: "capability required but none presented"}
 		}
 		return dec
 	}
-	claims, err := f.capVerifier.Verify(token, f.caller.PeerKey, f.caller.Backend, tool)
+	if v == nil {
+		// A token was presented but there is nothing pinned to verify it
+		// against: fail closed rather than silently ignoring it.
+		return Decision{Outcome: OutcomeDeny, RuleID: dec.RuleID, Reason: "invalid capability: no verifier configured"}
+	}
+	claims, err := v.Verify(token, peerKey, backend, tool)
 	if err != nil {
 		return Decision{Outcome: OutcomeDeny, RuleID: dec.RuleID, Reason: "invalid capability: " + err.Error()}
 	}
@@ -254,6 +271,16 @@ func (f *Filter) applyCapability(dec Decision, token, tool string) Decision {
 // present the line is returned unchanged.
 func stripCapability(line []byte) (token string, out []byte) {
 	return stripMetaToken(line, capMetaKey)
+}
+
+// StripCapabilityToken is the exported form of stripCapability, shared with the
+// Streamable-HTTP enforcer: it removes a presented capability token from a
+// JSON-RPC body's params._meta and returns the token plus the rewritten body,
+// so the token never reaches the backend, trace, or audit on ANY transport.
+// Output framing follows input framing (a trailing newline is preserved, and
+// never added to a body that had none).
+func StripCapabilityToken(line []byte) (token string, out []byte) {
+	return stripCapability(line)
 }
 
 // stripMetaToken removes the string-valued security token at the given
@@ -297,5 +324,10 @@ func stripMetaToken(line []byte, key string) (token string, out []byte) {
 	pb, _ := json.Marshal(pm)
 	msg["params"] = pb
 	ob, _ := json.Marshal(msg)
-	return token, append(ob, '\n')
+	// Preserve the input's framing: a stdio line keeps its trailing newline,
+	// while an HTTP body without one never gains one.
+	if len(line) > 0 && line[len(line)-1] == '\n' {
+		ob = append(ob, '\n')
+	}
+	return token, ob
 }

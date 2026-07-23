@@ -33,9 +33,9 @@ type SecretsConfig struct {
 type Config struct {
 	Mesh MeshConfig `yaml:"mesh"`
 	// AuditLog, when set, is a single gateway-wide tamper-evident audit ledger
-	// shared by every policy-enabled backend — one hash chain for the whole
-	// gateway, which is what a unified live view (dash / room) reads. When
-	// empty, each backend uses its own audit_log.
+	// shared by every policy- or capability-enabled backend — one hash chain for
+	// the whole gateway, which is what a unified live view (dash / room) reads.
+	// When empty, each backend uses its own audit_log.
 	AuditLog string `yaml:"audit_log"`
 	// AuditFailClosed makes the gateway-wide shared ledger a hard control:
 	// a record that cannot be written denies the call. Off by default.
@@ -199,9 +199,12 @@ type Backend struct {
 	// restores its own state from MESHMCP_SESSION_ID).
 	SessionStoreMode string `yaml:"session_store_mode"`
 	// Policy authorizes individual tools/call requests by caller identity. For
-	// stdio backends the gateway parses the JSON-RPC stream; for HTTP backends
-	// it parses each request body (F16). Rate limits, time windows, co-sign,
-	// and audit apply to both; taint/secret injection/capabilities are stdio.
+	// stdio backends the gateway parses the JSON-RPC stream; for HTTP/remote
+	// backends it parses each request body (F16). Rate limits, time windows,
+	// co-sign, audit, taint labels, secret injection, and capabilities apply on
+	// all three transports (HTTP/remote taint keys on Mcp-Session-Id; see the
+	// Secrets/Capabilities field docs). DLP, shadow policies, and router
+	// delegation remain stdio-only.
 	Policy *policy.Policy `yaml:"policy"`
 	// AuditLog is a file path for JSONL tool-call audit records. Empty
 	// sends audit records to stderr. The log is a tamper-evident hash chain
@@ -249,12 +252,16 @@ type Backend struct {
 	ApprovalSigningKey string `yaml:"approval_signing_key"`
 	// Secrets configures the credential broker: agents reference secrets by
 	// name ({{secret:NAME}}) and the gateway injects the value by identity,
-	// so the agent never holds the raw credential. Only valid for stdio
-	// backends with a policy.
+	// so the agent never holds the raw credential. Valid for stdio, http, and
+	// remote backends with a policy. On http/remote, injected values are also
+	// scrubbed from responses (JSON and SSE) per peer, and a response the
+	// gateway cannot scan (compressed/oversized) is refused, never forwarded.
 	Secrets *SecretsConfig `yaml:"secrets"`
 	// Capabilities pins authority keys for signed capability grants. A valid
 	// capability upgrades a policy-default-deny call to allow; required:true
-	// makes the backend a capability-only surface. Only valid for stdio.
+	// makes the backend a capability-only surface. Valid for stdio, http, and
+	// remote backends; the presented token is stripped from the body before it
+	// reaches the backend on every transport.
 	Capabilities *CapabilitiesConfig `yaml:"capabilities"`
 	// RouterDelegation pins router delegation-authority keys ("meshmcp router
 	// keygen"): a tools/call presenting a valid signed DelegationToken is
@@ -509,9 +516,6 @@ func loadConfig(path string) (*Config, error) {
 			return nil, fmt.Errorf("backend %q: audit_checkpoints requires a policy (nothing to audit otherwise)", b.Name)
 		}
 		if b.Capabilities != nil {
-			if !hasStdio {
-				return nil, fmt.Errorf("backend %q: capabilities are only valid for stdio backends", b.Name)
-			}
 			if len(b.Capabilities.TrustedPublicKeys) == 0 {
 				return nil, fmt.Errorf("backend %q: capabilities need at least one trusted_public_keys entry", b.Name)
 			}
@@ -551,9 +555,6 @@ func loadConfig(path string) (*Config, error) {
 			}
 		}
 		if b.Secrets != nil {
-			if !hasStdio {
-				return nil, fmt.Errorf("backend %q: secrets injection is only valid for stdio backends", b.Name)
-			}
 			if b.Policy == nil {
 				return nil, fmt.Errorf("backend %q: secrets requires a policy (injection happens at the enforcement point)", b.Name)
 			}
