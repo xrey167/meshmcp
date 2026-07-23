@@ -13,7 +13,7 @@ content lands in BACKLOG.md.
 | 1 | GitHub Actions billing | **blocked** | Account/billing action — operator only |
 | 2 | Dependabot #19 cosign-installer | **done** | Merged 2026-07-23 |
 | 3 | Approvals hosting decision | **done** | Decided: gateway-colocated; rationale in AIR-ECOSYSTEM.md |
-| 4 | Steer hosting decision | todo | Direction: document "agent-runtime concern" rationale |
+| 4 | Steer hosting decision | **done** | Decided (a): agent-runtime concern; rationale in AIR-ECOSYSTEM.md (shipped with task 3) |
 | 5 | Transactional Handoff v2 | todo | After 7+8; the flagship |
 | 6 | Spaces / `group:` fan-out | todo | |
 | 7 | Idempotency-key enforcement | todo | mcp framework middleware + pgstore table |
