@@ -72,6 +72,19 @@ jobs:
       - name: go mod verify
         run: go mod verify
 
+      # Fork-pin audit (S33): surface every `replace` directive so a reviewer
+      # sees exactly which forks the build pulls and at what pin. Advisory, not
+      # a gate — Go resolves every replace version to an immutable form (a semver
+      # tag or a commit pseudo-version; a floating branch cannot appear here), so
+      # there is nothing mechanical left to fail on. The value is visibility: a
+      # changed pin shows up in this step's output and in the diff for review.
+      - name: fork-pin audit (advisory)
+        run: |
+          go mod edit -json | python3 -c 'import json,sys
+          rs=json.load(sys.stdin).get("Replace") or []
+          print("fork replace directives ("+str(len(rs))+"):")
+          [print("  ", r["New"]["Path"], r["New"].get("Version","(local path)")) for r in rs]'
+
       # staticcheck and govulncheck are ADVISORY, and cannot be promoted yet for
       # a hard reason (verified 2026-07): the released staticcheck (v0.7.0) pins
       # go1.25 and refuses every package in this repo with "requires newer Go
@@ -89,3 +102,32 @@ jobs:
 
       - name: fuzz smoke (policy classification boundary)
         run: go test ./policy/ -run '^$' -fuzz FuzzFilterClassification -fuzztime 30s
+
+  # PostgreSQL-backed conformance: exercises the distributed CAS lease store,
+  # cross-gateway migration + live session move, the idempotency claim store,
+  # and the DPoP/replay stores against a real Postgres (S22). These suites
+  # t.Skip when MESHMCP_TEST_PG_DSN is unset (as in the matrix job above), so
+  # this job is where they actually run.
+  postgres:
+    name: postgres CAS conformance
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: meshmcp
+          POSTGRES_DB: meshmcp
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      MESHMCP_TEST_PG_DSN: "postgres://postgres:meshmcp@127.0.0.1:5432/meshmcp?sslmode=disable"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: pgstore + session + mcp conformance against live Postgres
+        run: go test ./pgstore/... ./session/... ./mcp/... -count=1
