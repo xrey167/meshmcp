@@ -36,7 +36,7 @@ content lands in BACKLOG.md.
 | 24 | FileStore lock-steal hardening | todo | |
 | 25 | Thin policy test spots | todo | |
 | 26 | Steer close/resume race fix | todo | Local fix + re-enable; cross-OS confirm rides 1 |
-| 27 | Manifest gating decision | todo | Direction: (b) document distribution-only scope |
+| 27 | Manifest gating decision | **done** | Decided (b): distribution-only; boundary documented in MARKETPLACE.md |
 | 28 | SpiffeLabel schema/doc pairing | todo | |
 | 29 | `air stream` over the mesh | todo | |
 | 30 | `frameAttack` rename | **done** | Shipped 2026-07-23 |
