@@ -116,7 +116,7 @@ func cmdRevokeDevice(args []string) error {
 		} else {
 			// Also clear any still-pending request so the identity cannot sit in
 			// the queue waiting for a mistaken approval.
-			if dropped, _ := ps.Deny(pubKey); dropped {
+			if dropped, _ := ps.Deny(pubKey, "device revoked", time.Now()); dropped {
 				done("pairing", "pending request cleared in "+cfg.Control.PairStore)
 				record("pairing", "allow", "pending pair request cleared")
 			} else {

@@ -61,6 +61,18 @@ hardening:
 - Do not claim a stronger guarantee than the code and tests establish (e.g. no
   "exactly-once execution" without an end-to-end idempotency protocol).
 
+### Error copy
+
+- **Every user-facing error names a next step.** One sentence of what failed,
+  then the command or fix that resolves it — never a bare plumbing chain as the
+  whole message. The command boundary (`presentError` in `cmd/meshmcp/errors.go`)
+  adds hints for the common failure shapes; a new failure mode that users will
+  hit should either carry its own guidance (the way the missing-setup-key path
+  does) or add a shape to `hintFor`.
+- A denial must say why and what would change the outcome (see the pairing
+  decline reason); a refusal that names no path forward is a dead end, not
+  security.
+
 ## Commits and PRs
 
 - Keep commits narrow and reviewable; one security fix per commit where possible.
