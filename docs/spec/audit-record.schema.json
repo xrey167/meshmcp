@@ -24,6 +24,9 @@
     "seq": { "type": "integer", "minimum": 1 },
     "prev_hash": { "type": "string", "pattern": "^([0-9a-f]{64})?$" },
     "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-    "schema_version": { "type": "integer", "minimum": 1, "description": "audit-record on-disk format version; a record newer than the reader's supported version is refused (fail closed)" }
+    "schema_version": { "type": "integer", "minimum": 1, "description": "audit-record on-disk format version; a record newer than the reader's supported version is refused (fail closed)" },
+    "delegated_caller": { "type": "string", "description": "router delegation (Phase 4): the VERIFIED DelegationToken's original-caller claim; empty/absent when no decodable token was presented" },
+    "delegation_router": { "type": "string", "description": "router delegation: the transport-proven connecting router (recorded explicitly alongside peer_key per ROUTER-DELEGATION.md)" },
+    "delegation_nonce": { "type": "string", "description": "router delegation: the token's single-use replay nonce" }
   }
 }

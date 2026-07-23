@@ -67,14 +67,26 @@ The model or agent process is adversarial but sits behind the gateway.
 
 An aggregating router forwards a caller's request upstream.
 
-- **Status: experimental.** Today the router forwards using its own WireGuard
-  identity and conveys the downstream caller only as unsigned `_meta`, which is
-  informational and must never be trusted as identity. A signed short-lived
+- **Defended (when pinned).** With `delegation_key` on the router and
+  `router_delegation.trusted_public_keys` pinned on the upstream backend, every
+  forwarded `tools/call` carries a signed, short-lived (≤5 min), single-use
   delegation token bound to (caller, router, audience, backend, tool, request
-  hash, expiry, nonce), with upstream policy computing the intersection of
-  caller ∩ router ∩ delegation scope, is the intended design (Phase 4, not yet
-  implemented). Until then, treat router aggregation as **Labs**: put a
-  default-deny caller ACL on the router and do not rely on delegated identity.
+  hash, expiry, nonce), and the upstream authorizes the **intersection** of
+  caller ∩ router ∩ delegation scope — a compromised router cannot widen a
+  caller's authority, and a caller cannot exceed what the router itself may do.
+  `required: true` refuses any token-less `tools/call` (it gates `tools/call`
+  only — other JSON-RPC methods such as `resources/read` stay governed by the
+  backend policy's `methods` rules); a mint failure denies at the router rather
+  than forwarding unsigned; both identities + the nonce land in the audit
+  record. Unsigned origin `_meta` remains informational and is never trusted as
+  identity. See `docs/spec/ROUTER-DELEGATION.md`.
+- **No-authority fallback:** without the key/pin pair there is NO delegated
+  identity — the router forwards under its own WireGuard identity exactly as
+  before, defended only by its default-deny caller ACL and (optional) router
+  policy. Registry-discovered upstreams have no audience pin and always take
+  this unsigned path. Limits when pinned: `tools/call` on stdio backends only,
+  and replay protection is a **per-gateway-process** nonce store (per-gateway
+  replay windows in a multi-gateway HA deployment).
 
 ### 4. Compromised gateway
 

@@ -50,6 +50,17 @@ type RouterConfig struct {
 	// (the router is not a co-sign enforcement point). Optional; when unset the
 	// router only does mesh + caller-ACL admission (prior behavior).
 	Policy *policy.Policy `yaml:"policy"`
+	// DelegationKey is the router's delegation-authority Ed25519 key file
+	// (create it with "meshmcp router keygen"). When set, the router mints a
+	// signed, short-lived, per-call DelegationToken for every forwarded
+	// tools/call to an audience-pinned upstream, carried in
+	// params._meta["com.meshmcp/delegation"]; a pinned upstream gateway
+	// verifies it and authorizes the intersection of the ORIGINAL caller's and
+	// the router's permissions (docs/spec/ROUTER-DELEGATION.md). A configured
+	// but missing/unreadable key is FATAL at startup (S13 pattern) — never a
+	// silent downgrade to unsigned forwarding. Requires every static upstream
+	// to carry an `audience` pin.
+	DelegationKey string `yaml:"delegation_key"`
 }
 
 // toolEnforcer authorizes one forwarded tools/call by its namespaced name and
@@ -75,6 +86,13 @@ type Upstream struct {
 	// deduplicate. Unlisted tools keep the deny-default: never auto-retried
 	// after dispatch.
 	RetryTools []string
+	// Audience is the upstream gateway's mesh public key, pinned by the
+	// operator (settles ROUTER-DELEGATION.md decision (a): the router learns
+	// each upstream's identity by pin, not discovery). It becomes the `aud`
+	// claim of every delegation token minted for this upstream, so a token for
+	// one upstream never verifies at another. Required on every static
+	// upstream when delegation_key is set.
+	Audience string
 }
 
 func (u *Upstream) UnmarshalYAML(value *yaml.Node) error {
@@ -91,13 +109,15 @@ func (u *Upstream) UnmarshalYAML(value *yaml.Node) error {
 	var m struct {
 		Addrs      []string `yaml:"addrs"`
 		RetryTools []string `yaml:"retry_tools"`
+		Audience   string   `yaml:"audience"`
 	}
 	if err := value.Decode(&m); err == nil && len(m.Addrs) > 0 {
 		u.Addrs = m.Addrs
 		u.RetryTools = m.RetryTools
+		u.Audience = m.Audience
 		return nil
 	}
-	return fmt.Errorf("upstream must be a string, a list of strings, or a mapping with addrs (+ optional retry_tools)")
+	return fmt.Errorf("upstream must be a string, a list of strings, or a mapping with addrs (+ optional retry_tools, audience)")
 }
 
 // upstreamSet copies the static upstream map so discovery can merge registry
@@ -132,12 +152,25 @@ func loadRouterConfig(path string) (*RouterConfig, error) {
 		if len(up.Addrs) == 0 {
 			return nil, fmt.Errorf("upstream %q: at least one address required", name)
 		}
+		// Fail-closed cross-validation, both directions: with a delegation key,
+		// a static upstream without an audience pin would silently be called
+		// UNSIGNED — refuse at startup instead. An audience pin without the key
+		// is a token that can never be minted — also a config error.
+		if cfg.DelegationKey != "" && up.Audience == "" {
+			return nil, fmt.Errorf("upstream %q: delegation_key is set but this upstream has no audience pin — every static upstream must pin its gateway's mesh public key (audience: <key>), or calls to it would be forwarded unsigned", name)
+		}
+		if cfg.DelegationKey == "" && up.Audience != "" {
+			return nil, fmt.Errorf("upstream %q: audience is pinned but delegation_key is not set — the router cannot mint delegation tokens without its authority key (run 'meshmcp router keygen')", name)
+		}
 	}
 	return &cfg, nil
 }
 
-// cmdRouter runs the aggregating router.
+// cmdRouter runs the aggregating router (or its keygen subcommand).
 func cmdRouter(args []string) error {
+	if len(args) > 0 && args[0] == "keygen" {
+		return routerKeygen(args[1:])
+	}
 	fs := flag.NewFlagSet("router", flag.ExitOnError)
 	cfgPath := fs.String("config", "router.yaml", "path to the router config file")
 	if err := fs.Parse(args); err != nil {
@@ -148,15 +181,36 @@ func cmdRouter(args []string) error {
 		return err
 	}
 
+	// Load the delegation authority key BEFORE joining the mesh: a configured
+	// but missing/unreadable key is FATAL (S13 pattern), never a silent
+	// downgrade to unsigned forwarding.
+	var delegSigner *policy.Signer
+	if cfg.DelegationKey != "" {
+		delegSigner, err = policy.LoadSigner(cfg.DelegationKey)
+		if err != nil {
+			return fmt.Errorf("router delegation_key %s: %w — run 'meshmcp router keygen --out %s' to create the router authority key", cfg.DelegationKey, err, cfg.DelegationKey)
+		}
+	}
+
 	client, err := startMesh(cfg.Mesh.options(), os.Stderr)
 	if err != nil {
 		return err
 	}
 	defer stopMesh(client)
 
+	routerKey := ""
 	if st, err := client.Status(); err == nil {
+		routerKey = st.LocalPeerState.PubKey
 		log.Printf("router up: %s (%s) — %d upstreams on port %d",
 			st.LocalPeerState.IP, st.LocalPeerState.FQDN, len(cfg.Upstreams), cfg.ListenPort)
+	}
+	if delegSigner != nil && routerKey == "" {
+		// A token with an empty router claim cannot be minted (IssueDelegation
+		// rejects it); fail at startup with a clear error, not at first call.
+		return fmt.Errorf("router delegation: the mesh reports no local public key — cannot mint delegation tokens (the token's router claim would be empty)")
+	}
+	if delegSigner != nil {
+		log.Printf("router: delegation active (authority %s…) — every tools/call to an audience-pinned upstream carries a signed per-call token", delegSigner.PubKeyHex()[:16])
 	}
 
 	ln, err := client.ListenTCP(fmt.Sprintf(":%d", cfg.ListenPort))
@@ -172,6 +226,11 @@ func cmdRouter(args []string) error {
 			return fmt.Errorf("registry %s: %w", cfg.Registry, err)
 		}
 		log.Printf("router: dynamic discovery via registry %s", cfg.Registry)
+		if delegSigner != nil {
+			// Registry-discovered upstreams have no operator audience pin, so no
+			// token can be minted for them: calls take the legacy unsigned path.
+			log.Printf("router: registry-discovered upstreams carry no audience pin — calls to them are NOT delegated (legacy unsigned path)")
+		}
 	}
 	discover := func() map[string]Upstream {
 		m := cfg.upstreamSet()
@@ -205,7 +264,7 @@ func cmdRouter(args []string) error {
 			log.Println("router shutting down")
 			return nil
 		}
-		go handleRouterConn(client, conn, discover(), allow, eng)
+		go handleRouterConn(client, conn, discover(), allow, eng, delegSigner, routerKey)
 	}
 }
 
@@ -227,7 +286,10 @@ type dialFunc func(ctx context.Context, addr string) (net.Conn, error)
 
 // handleRouterConn serves one downstream client: it discovers every
 // upstream, presents their union, and routes calls until the client leaves.
-func handleRouterConn(client *embed.Client, conn net.Conn, upstreams map[string]Upstream, allow acl, eng *policy.Engine) {
+// delegSigner/routerKey, when set, make every forwarded tools/call to an
+// audience-pinned upstream carry a signed per-call DelegationToken binding
+// THIS client's transport-proven identity as the original caller.
+func handleRouterConn(client *embed.Client, conn net.Conn, upstreams map[string]Upstream, allow acl, eng *policy.Engine, delegSigner *policy.Signer, routerKey string) {
 	defer conn.Close()
 	ctx := context.Background()
 
@@ -266,9 +328,71 @@ func handleRouterConn(client *embed.Client, conn net.Conn, upstreams map[string]
 	dial := func(ctx context.Context, addr string) (net.Conn, error) {
 		return client.Dial(ctx, "tcp", addr)
 	}
-	s, cleanup := buildAggregate(ctx, dial, upstreams, origin, enforce)
+	// The minter binds this connection's transport-proven caller identity —
+	// never anything the client sent in-band.
+	var minter *delegationMinter
+	if delegSigner != nil {
+		minter = &delegationMinter{signer: delegSigner, routerKey: routerKey, callerKey: pubKey}
+	}
+	s, cleanup := buildAggregate(ctx, dial, upstreams, origin, enforce, minter)
 	defer cleanup()
 	_ = s.Serve(ctx, conn, conn)
+}
+
+// delegationMinter mints per-call DelegationTokens for one downstream client:
+// signer is the router's delegation authority key, routerKey the router's own
+// mesh public key (the token's router claim), and callerKey the ORIGINAL
+// caller's transport-proven key (the token's caller claim).
+type delegationMinter struct {
+	signer    *policy.Signer
+	routerKey string
+	callerKey string
+}
+
+// withDelegation returns a copy of tools/call params carrying a freshly minted
+// delegation token in _meta["com.meshmcp/delegation"]. The token's req_hash
+// covers exactly the arguments being forwarded (canonically hashed), so _meta
+// injection cannot perturb it. Any failure is an error — the caller must DENY
+// the call rather than forward it unsigned (fail-closed).
+func (m *delegationMinter) withDelegation(params any, audience, backend string) (any, error) {
+	pm, ok := params.(map[string]any)
+	if !ok {
+		return nil, errors.New("tools/call params are not an object")
+	}
+	name, _ := pm["name"].(string)
+	if name == "" {
+		return nil, errors.New("tools/call params carry no tool name")
+	}
+	// Marshal the exact arguments being forwarded; a nil/absent value hashes as
+	// JSON null, matching what the upstream classifier will see on the wire.
+	args, err := json.Marshal(pm["arguments"])
+	if err != nil {
+		return nil, fmt.Errorf("marshal arguments: %w", err)
+	}
+	tok, err := m.signer.IssueDelegation(policy.DelegationClaims{
+		Caller: m.callerKey, Router: m.routerKey, Audience: audience,
+		Backend: backend, Tool: name, Args: args,
+	}, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	enc, err := policy.EncodeDelegation(tok)
+	if err != nil {
+		return nil, err
+	}
+	cp := make(map[string]any, len(pm)+1)
+	for k, v := range pm {
+		cp[k] = v
+	}
+	meta := map[string]any{}
+	if prior, ok := cp["_meta"].(map[string]any); ok {
+		for k, v := range prior {
+			meta[k] = v
+		}
+	}
+	meta[policy.DelegationMetaKey] = enc
+	cp["_meta"] = meta
+	return cp, nil
 }
 
 // replicaCooldown is how long a failed replica is skipped before a retry.
@@ -288,6 +412,8 @@ type upstreamPool struct {
 	dial       dialFunc
 	origin     map[string]any
 	retryTools []string // operator-classified retry-safe tool globs (see Upstream)
+	minter     *delegationMinter
+	audience   string // operator-pinned upstream gateway key ("" = no delegation)
 	notify     func(method string, params json.RawMessage)
 	relay      func(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, *mcpclient.RPCError)
 
@@ -296,11 +422,12 @@ type upstreamPool struct {
 	next     int
 }
 
-func newUpstreamPool(name string, up Upstream, dial dialFunc, origin map[string]any,
+func newUpstreamPool(name string, up Upstream, dial dialFunc, origin map[string]any, minter *delegationMinter,
 	notify func(string, json.RawMessage),
 	relay func(context.Context, string, json.RawMessage) (json.RawMessage, *mcpclient.RPCError)) *upstreamPool {
 	p := &upstreamPool{
-		name: name, dial: dial, origin: origin, notify: notify, relay: relay,
+		name: name, dial: dial, origin: origin, minter: minter, audience: up.Audience,
+		notify: notify, relay: relay,
 		retryTools: append([]string(nil), up.RetryTools...),
 	}
 	for _, a := range up.Addrs {
@@ -400,6 +527,21 @@ func (p *upstreamPool) call(ctx context.Context, method string, params any) (jso
 	defer p.mu.Unlock()
 	if len(p.replicas) == 0 {
 		return nil, fmt.Errorf("upstream %q: no replicas", p.name)
+	}
+	// Delegation: mint ONE token per logical tools/call, before the replica
+	// loop, so every dispatch attempt of this call presents the same token and
+	// nonce (a token is single-use at the upstream — replay is keyed on the
+	// nonce, and today's nonce stores are per-gateway-process, so a failover to
+	// a DIFFERENT gateway re-presents it cleanly; a future shared store would
+	// fail closed on such a failover). A mint failure DENIES the call — it is
+	// never forwarded unsigned. Only static, audience-pinned upstreams are
+	// delegated; registry-discovered ones (no pin) keep the legacy path.
+	if method == "tools/call" && p.minter != nil && p.audience != "" {
+		decorated, err := p.minter.withDelegation(params, p.audience, p.name)
+		if err != nil {
+			return nil, fmt.Errorf("upstream %q: delegation token not minted — call denied (fail-closed, never forwarded unsigned): %w", p.name, err)
+		}
+		params = decorated
 	}
 	retryable := safeToRetryAfterDispatch(method)
 	if !retryable && p.retryEligibleToolCall(method, params) {
@@ -540,7 +682,7 @@ func (p *upstreamPool) runHealth(stop <-chan struct{}) {
 // name; resources keyed by URI, first owner wins). Calls are load-balanced
 // and failed over across replicas; upstream notifications are forwarded to
 // the client and origin identity is stamped into every request's _meta.
-func buildAggregate(ctx context.Context, dial dialFunc, upstreams map[string]Upstream, origin map[string]any, enforce toolEnforcer) (*mcp.Server, func()) {
+func buildAggregate(ctx context.Context, dial dialFunc, upstreams map[string]Upstream, origin map[string]any, enforce toolEnforcer, minter *delegationMinter) (*mcp.Server, func()) {
 	s := mcp.New("meshmcp-router", "0.1.0")
 	var pools []*upstreamPool
 	seenURI := map[string]bool{}
@@ -556,7 +698,7 @@ func buildAggregate(ctx context.Context, dial dialFunc, upstreams map[string]Ups
 	}
 
 	for name, up := range upstreams {
-		pool := newUpstreamPool(name, up, dial, origin, func(method string, params json.RawMessage) {
+		pool := newUpstreamPool(name, up, dial, origin, minter, func(method string, params json.RawMessage) {
 			s.Notify(method, json.RawMessage(params))
 		}, relay)
 		pools = append(pools, pool)
@@ -654,6 +796,28 @@ func registerProxyResource(s *mcp.Server, r mcpclient.Resource, pool *upstreamPo
 			return out.Contents[0], nil
 		},
 	})
+}
+
+// routerKeygen generates the router's delegation-authority Ed25519 key and
+// prints the public key upstream gateways pin (router_delegation.trusted_public_keys).
+func routerKeygen(args []string) error {
+	fs := flag.NewFlagSet("router keygen", flag.ContinueOnError)
+	out := fs.String("out", "router-delegation.key", "path to write the router authority key (0600)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	s, err := policy.GenerateSigner()
+	if err != nil {
+		return err
+	}
+	if err := s.SaveSigner(*out); err != nil {
+		return err
+	}
+	fmt.Printf("wrote router delegation authority key to %s\n", *out)
+	fmt.Printf("public key: %s\n", s.PubKeyHex())
+	fmt.Printf("\nrouter config:\n  delegation_key: %s\n", *out)
+	fmt.Printf("\npin it on an upstream gateway backend:\n  router_delegation:\n    trusted_public_keys: [\"%s\"]\n    required: true\n", s.PubKeyHex())
+	return nil
 }
 
 func registerProxyPrompt(s *mcp.Server, ns string, p mcpclient.Prompt, pool *upstreamPool) {

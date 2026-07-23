@@ -64,6 +64,18 @@ type AuditRecord struct {
 	// verifying. Written records carry the current version; the chain covers it
 	// like any other field.
 	SchemaVersion int `json:"schema_version,omitempty"`
+
+	// Router-delegation attribution (Phase 4): when a tools/call presented (or
+	// was required to present) a signed DelegationToken, the record preserves
+	// BOTH identities and the replay nonce, so a forwarded call is attributable
+	// end to end. DelegatedCaller is the VERIFIED token's caller claim (empty
+	// when no/undecodable token); DelegationRouter is the transport-proven
+	// connecting peer (redundant with PeerKey, recorded explicitly per spec
+	// ROUTER-DELEGATION.md). Appended (never inserted) and omitempty, so
+	// existing chains and hashes are unaffected.
+	DelegatedCaller  string `json:"delegated_caller,omitempty"`
+	DelegationRouter string `json:"delegation_router,omitempty"`
+	DelegationNonce  string `json:"delegation_nonce,omitempty"`
 }
 
 // auditSchemaVersion is the current audit-record on-disk format version. A
@@ -240,6 +252,11 @@ func (a *AuditLog) write(rec AuditRecord) error {
 	rec.Tool = clipField(rec.Tool)
 	rec.Method = clipField(rec.Method)
 	rec.RPCID = clipField(rec.RPCID)
+	// The delegation fields decode from a presented (attacker-influenced)
+	// token, so bound them the same way.
+	rec.DelegatedCaller = clipField(rec.DelegatedCaller)
+	rec.DelegationRouter = clipField(rec.DelegationRouter)
+	rec.DelegationNonce = clipField(rec.DelegationNonce)
 
 	// Self-describe the record's format so a future incompatible format is
 	// refused by an older verifier rather than misread. Set before hashing so the

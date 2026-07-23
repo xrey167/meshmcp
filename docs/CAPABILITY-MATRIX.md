@@ -37,7 +37,7 @@ continuously tested.
 
 | Capability | Level | Why Labs |
 |---|---|---|
-| Router aggregation / delegated identity | Experimental | Router forwards under its own identity; downstream caller is unsigned `_meta`. Signed delegation (Phase 4) not yet implemented — potential confused deputy. Use a default-deny caller ACL. |
+| Router aggregation / delegated identity | Defended when pinned (Phase 4 wired) | With `delegation_key` (router) + `router_delegation` pins (gateway backend), every forwarded `tools/call` carries a signed per-call DelegationToken and the upstream authorizes caller ∩ router ∩ delegation (see ROUTER-DELEGATION.md). Without the key/pin pair the router still forwards under its own identity (default-deny caller ACL is the guard). v1 limits: tools/call on stdio backends only; per-gateway-process replay window. |
 | Federation (cross-org) | Experimental | Same delegation/identity-intersection gaps as the router at the org boundary. |
 | Air (agent orchestration) | Experimental | Control-endpoint hardening in progress (see PR #9); not a core security surface. |
 | Air Component Cards v1 | Experimental | Caller-filtered discovery metadata with stable ID, kind, version, advertised owner, canonical features, and lifecycle. Cards are validated and backward-compatible, but unsigned and advisory: live transport identity, ACL, policy, and capability verification remain authoritative. |
@@ -58,7 +58,7 @@ continuously tested.
 | Capability | Phase |
 |---|---|
 | Request-bound, signed, single-use approval objects | 3 |
-| Wire the signed delegation-token primitive (done + tested) into the router/upstream proxy path + caller ACL | 4 |
+| ~~Wire the signed delegation-token primitive into the router/upstream proxy path + caller ACL~~ — **shipped**: router mints per-call tokens (`delegation_key` + per-upstream `audience` pins), stdio gateways verify + intersect (`router_delegation`), audit carries both identities + nonce. Remaining follow-ups: HTTP-backend parity, non-tools/call methods, shared (pg) nonce store for HA | 4 |
 | Restart-safe audit append (seed from verified tail; refuse unverifiable) | 5 |
 | External audit anchoring interface (witnessed) | 5 |
 | Lease renewal + expiry-driven automatic failover (today a standby only takes over on the creator's reattach; the CAS/fencing lease primitive and its server wiring are done and migration-proven) | 6 |

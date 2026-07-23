@@ -253,6 +253,15 @@ func (f *Filter) applyCapability(dec Decision, token, tool string) Decision {
 // never reach the backend, trace, audit, or secret injection. If no token is
 // present the line is returned unchanged.
 func stripCapability(line []byte) (token string, out []byte) {
+	return stripMetaToken(line, capMetaKey)
+}
+
+// stripMetaToken removes the string-valued security token at the given
+// params._meta key from a JSON-RPC line, returning the token plus the rewritten
+// line. Shared by the capability and router-delegation strips: a presented
+// token must never reach the backend, trace, audit, or secret injection. If no
+// token is present the line is returned unchanged.
+func stripMetaToken(line []byte, key string) (token string, out []byte) {
 	var msg map[string]json.RawMessage
 	if json.Unmarshal(line, &msg) != nil {
 		return "", line
@@ -273,12 +282,12 @@ func stripCapability(line []byte) (token string, out []byte) {
 	if json.Unmarshal(metaRaw, &meta) != nil {
 		return "", line
 	}
-	capRaw, ok := meta[capMetaKey]
+	capRaw, ok := meta[key]
 	if !ok {
 		return "", line
 	}
 	_ = json.Unmarshal(capRaw, &token)
-	delete(meta, capMetaKey)
+	delete(meta, key)
 	if len(meta) == 0 {
 		delete(pm, "_meta")
 	} else {

@@ -30,7 +30,7 @@ content lands in BACKLOG.md.
 | 18 | OTel/OTLP exporter | todo | |
 | 19 | Wave-2 minors | todo | Thematic batches: policy UX / transfer UX / client builds / misc |
 | 20 | Placeholder modules | todo | Doctor implementable; sibling modules have no git remote — local + documented |
-| 21 | Router delegation wiring | todo | **Security priority — first meaty task** |
+| 21 | Router delegation wiring | **done** | Minted per-call, verified when pinned, caller from token; review fixed side-effecting caller-leg |
 | 22 | Postgres CAS in CI | **blocked-CI** | Workflow YAML can be pre-staged; unverifiable until 1 |
 | 23 | Fenced-dispatch regression test | **done** | Bound proven in handshake + backend modes |
 | 24 | FileStore lock-steal hardening | **done** | Owner-token release; steal contract preserved |

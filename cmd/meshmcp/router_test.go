@@ -33,7 +33,7 @@ func TestRouterAggregatesAndRoutes(t *testing.T) {
 	defer stopB()
 
 	agg, cleanup := buildAggregate(context.Background(), loopbackDial,
-		map[string]Upstream{"svca": {Addrs: []string{addrA}}, "svcb": {Addrs: []string{addrB}}}, nil, nil)
+		map[string]Upstream{"svca": {Addrs: []string{addrA}}, "svcb": {Addrs: []string{addrB}}}, nil, nil, nil)
 	defer cleanup()
 
 	mc := clientTo(agg)
@@ -101,7 +101,7 @@ func TestRouterFailsOverToHealthyReplica(t *testing.T) {
 	dl.Close()
 
 	agg, cleanup := buildAggregate(context.Background(), loopbackDial,
-		map[string]Upstream{"svc": {Addrs: []string{deadAddr, addrGood}}}, nil, nil)
+		map[string]Upstream{"svc": {Addrs: []string{deadAddr, addrGood}}}, nil, nil, nil)
 	defer cleanup()
 
 	mc := clientTo(agg)
@@ -135,7 +135,7 @@ func TestPoolHealthCheckRecoversReplica(t *testing.T) {
 	})
 	defer stop()
 
-	pool := newUpstreamPool("svc", Upstream{Addrs: []string{addr}}, loopbackDial, nil,
+	pool := newUpstreamPool("svc", Upstream{Addrs: []string{addr}}, loopbackDial, nil, nil,
 		func(string, json.RawMessage) {}, nil)
 	defer pool.closeAll()
 
@@ -205,7 +205,7 @@ func TestRouterDoesNotRetryMutatingCallAfterAmbiguousFailure(t *testing.T) {
 		}
 		return c, nil
 	}
-	pool := newUpstreamPool("svc", Upstream{Addrs: []string{addrFlaky, addrGood}}, dial, nil,
+	pool := newUpstreamPool("svc", Upstream{Addrs: []string{addrFlaky, addrGood}}, dial, nil, nil,
 		func(string, json.RawMessage) {}, nil)
 	defer pool.closeAll()
 
@@ -254,7 +254,7 @@ func TestRouterFailsOverReadOnlyAfterDispatch(t *testing.T) {
 		}
 		return c, nil
 	}
-	pool := newUpstreamPool("svc", Upstream{Addrs: []string{addrFlaky, addrGood}}, dial, nil,
+	pool := newUpstreamPool("svc", Upstream{Addrs: []string{addrFlaky, addrGood}}, dial, nil, nil,
 		func(string, json.RawMessage) {}, nil)
 	defer pool.closeAll()
 
@@ -353,7 +353,7 @@ func TestRouterEnforcesToolPolicy(t *testing.T) {
 	}
 
 	agg, cleanup := buildAggregate(context.Background(), loopbackDial,
-		map[string]Upstream{"svc": {Addrs: []string{addr}}}, nil, enforce)
+		map[string]Upstream{"svc": {Addrs: []string{addr}}}, nil, enforce, nil)
 	defer cleanup()
 
 	mc := clientTo(agg)
@@ -454,7 +454,7 @@ func TestRouterRetriesOperatorClassifiedTool(t *testing.T) {
 		}
 		return c, nil
 	}
-	pool := newUpstreamPool("svc", Upstream{Addrs: []string{addrFlaky, addrGood}, RetryTools: []string{"sea*"}}, dial, nil,
+	pool := newUpstreamPool("svc", Upstream{Addrs: []string{addrFlaky, addrGood}, RetryTools: []string{"sea*"}}, dial, nil, nil,
 		func(string, json.RawMessage) {}, nil)
 	defer pool.closeAll()
 
@@ -524,7 +524,7 @@ func TestRouterUnclassifiedToolStillNotRetried(t *testing.T) {
 		}
 		return c, nil
 	}
-	pool := newUpstreamPool("svc", Upstream{Addrs: []string{addrFlaky, addrGood}, RetryTools: []string{"search", "read_*"}}, dial, nil,
+	pool := newUpstreamPool("svc", Upstream{Addrs: []string{addrFlaky, addrGood}, RetryTools: []string{"search", "read_*"}}, dial, nil, nil,
 		func(string, json.RawMessage) {}, nil)
 	defer pool.closeAll()
 

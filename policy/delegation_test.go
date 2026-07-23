@@ -1,6 +1,8 @@
 package policy
 
 import (
+	"crypto/ed25519"
+	"encoding/hex"
 	"strings"
 	"testing"
 	"time"
@@ -100,6 +102,43 @@ func TestDelegationExpired(t *testing.T) {
 	capped := issueTok(t, auth, c, now)
 	if capped.ExpiresAt > now.Add(maxDelegationLifetime).Unix() {
 		t.Fatal("delegation lifetime must be capped")
+	}
+}
+
+// signRawTok signs an arbitrary hand-built token with the authority key,
+// bypassing IssueDelegation's mint-time invariants — for verifying that the
+// VERIFIER independently re-rejects what the issuer would never mint.
+func signRawTok(s *Signer, tok DelegationToken) DelegationToken {
+	tok.PubKey = s.PubKeyHex()
+	tok.Sig = hex.EncodeToString(ed25519.Sign(s.priv, tok.signingBytes()))
+	return tok
+}
+
+// TestDelegationVerifierDefenseInDepth: the verifier re-rejects an over-long
+// lifetime and an unknown token version even when the pinned authority signed
+// them — the ceiling is not mint-time-only (same belt-and-suspenders as the
+// capability verifier).
+func TestDelegationVerifierDefenseInDepth(t *testing.T) {
+	auth := mustSigner(t)
+	now := time.Unix(1000, 0)
+	base := DelegationToken{
+		Version: 1, Nonce: "nonce-lifetime",
+		Caller: "callerKey", Router: "routerKey", Audience: "upstream1",
+		Backend: "payments", Tool: "transfer", ReqHash: canonicalArgsHash([]byte(`{"amount":10}`)),
+		IssuedAt: now.Unix(), ExpiresAt: now.Add(time.Hour).Unix(), // far past the 5m cap
+	}
+	overlong := signRawTok(auth, base)
+	if err := VerifyDelegation(overlong, auth.PubKeyHex(), baseReq(), now, NewMemNonceStore()); err == nil || !strings.Contains(err.Error(), "lifetime") {
+		t.Fatalf("an over-long lifetime must be rejected by the verifier, got %v", err)
+	}
+
+	v2 := base
+	v2.Version = 2
+	v2.Nonce = "nonce-version"
+	v2.ExpiresAt = now.Add(time.Minute).Unix()
+	badVersion := signRawTok(auth, v2)
+	if err := VerifyDelegation(badVersion, auth.PubKeyHex(), baseReq(), now, NewMemNonceStore()); err == nil || !strings.Contains(err.Error(), "version") {
+		t.Fatalf("an unsupported token version must be rejected, got %v", err)
 	}
 }
 
