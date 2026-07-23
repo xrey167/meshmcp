@@ -13,6 +13,9 @@ import (
 	"net/http/httputil"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -98,9 +101,12 @@ func cmdServe(args []string) error {
 		if serr != nil {
 			return fmt.Errorf("shared audit log: %w", serr)
 		}
-		f, err := os.OpenFile(cfg.AuditLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		f, err := openAuditWriter(cfg.AuditLog, cfg.AuditRotateBytes)
 		if err != nil {
 			return fmt.Errorf("open shared audit log %s: %w", cfg.AuditLog, err)
+		}
+		if cfg.AuditRotateBytes > 0 {
+			log.Printf("shared audit ledger: size rotation at %d bytes (sealed segments continue one chain; verify the full history by concatenating segments)", cfg.AuditRotateBytes)
 		}
 		sharedAudit = policy.NewAuditLog(f, func() string { return time.Now().UTC().Format(time.RFC3339) }).
 			WithFailClosed(cfg.AuditFailClosed).
@@ -601,6 +607,12 @@ func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer, h
 		if err != nil {
 			log.Fatalf("backend %q: capabilities: %v", b.Name, err)
 		}
+		// Single-use (jti) replay cache, shared across the backend's connections
+		// so a one-shot grant is one-shot per backend, not per connection.
+		// Per-process only: a multi-gateway HA deployment gets per-gateway replay
+		// windows — a shared pgstore-backed NonceStore is the follow-up, matching
+		// the delegation nonce-store precedent above.
+		v = v.WithReplayCache(policy.NewMemNonceStore())
 		if b.Capabilities.RevocationStore != "" {
 			// Create the store at startup so IsRevoked can later fail closed on a
 			// vanished/unavailable store; a store that cannot be created is a
@@ -766,24 +778,40 @@ func buildTracer(cfg *TraceConfig) (*policy.Tracer, error) {
 // instead of resetting to seq 1 with a fresh genesis. It refuses to append to a
 // malformed or tampered log (fail closed): silently starting a second chain in
 // the same file would produce a duplicate seq 1 and make the log unverifiable.
-// An absent or empty file returns (0, "", nil).
+// An absent or empty file returns (0, "", nil) — unless rotation archives
+// exist next to it, in which case the chain continues from the newest
+// archive's head (a fresh seq-1 genesis would collide with the archived
+// history and make the concatenated set unverifiable).
+//
+// Rotated ledgers (S51, audit_rotate_bytes): the active file is a chain
+// SEGMENT whose first record links into the newest sealed archive
+// (<path>.<timestamp>). Its linkage is verified against that archive's head;
+// full-history verification remains an offline concatenation of the segments
+// in name order.
 func seedAuditFromExisting(path string) (seq int, lastHash string, err error) {
 	if path == "" {
 		return 0, "", nil
 	}
+	// A rotated ledger seeds verification from the newest archive's head.
+	seedSeq, seedHash, serr := auditArchiveHead(path)
+	if serr != nil {
+		return 0, "", serr
+	}
 	data, rerr := os.ReadFile(path)
 	if os.IsNotExist(rerr) {
-		return 0, "", nil
+		return seedSeq, seedHash, nil
 	}
 	if rerr != nil {
 		return 0, "", rerr
 	}
 	if len(bytes.TrimSpace(data)) == 0 {
-		return 0, "", nil
+		return seedSeq, seedHash, nil
 	}
-	res, truncateTo, torn := policy.VerifyForRepair(data)
+	// With no archives (seedSeq 0) this verifies from genesis; a stray rotated
+	// segment whose archives were deleted then fails closed on its seq>1 start.
+	res, truncateTo, torn := policy.VerifyForRepairFrom(data, seedSeq, seedHash)
 	if res.OK {
-		return res.Count, res.LastHash, nil
+		return seedSeq + res.Count, res.LastHash, nil
 	}
 	if torn {
 		// A crash/power-loss left an incomplete trailing record. Everything
@@ -794,10 +822,62 @@ func seedAuditFromExisting(path string) (seq int, lastHash string, err error) {
 			return 0, "", fmt.Errorf("audit log %s: repairing torn tail: %w", path, err)
 		}
 		log.Printf("audit log %s: recovered an incomplete trailing record (%s); truncated to %d bytes, resuming from seq %d",
-			path, res.Reason, truncateTo, res.Count)
-		return res.Count, res.LastHash, nil
+			path, res.Reason, truncateTo, seedSeq+res.Count)
+		return seedSeq + res.Count, res.LastHash, nil
 	}
 	return 0, "", fmt.Errorf("existing audit log %s is unverifiable (break at seq %d: %s); refusing to append and reset the chain", path, res.BreakSeq, res.Reason)
+}
+
+// openAuditWriter opens an audit ledger file for append: plain O_APPEND when
+// rotateBytes is 0, else a size-rotating sink (S51, opt-in audit_rotate_bytes).
+// Both support Sync(), so WithSync durability applies either way.
+func openAuditWriter(path string, rotateBytes int64) (io.Writer, error) {
+	if rotateBytes > 0 {
+		return policy.OpenRotatingFileSink(path, rotateBytes, nil)
+	}
+	return os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+}
+
+// auditArchivePattern matches the suffix RotatingFileSink stamps on sealed
+// segments: .<UTC timestamp>[-NNN]. Deliberately narrow so unrelated siblings
+// (checkpoints, anchors) are never mistaken for archives.
+var auditArchivePattern = regexp.MustCompile(`\.\d{8}T\d{6}Z(-\d{3})?$`)
+
+// auditArchiveHead finds the newest rotation archive of path (if any) and
+// returns its last record's (seq, hash) — the seed the active segment's chain
+// must continue from. (0, "", nil) when no archives exist. The archive's own
+// interior is NOT re-verified here (full-history verification is an offline
+// concatenation); what restart proves is the ACTIVE segment's integrity and
+// its linkage into this head.
+func auditArchiveHead(path string) (seq int, hash string, err error) {
+	matches, gerr := filepath.Glob(path + ".*")
+	if gerr != nil || len(matches) == 0 {
+		return 0, "", nil
+	}
+	var archives []string
+	for _, m := range matches {
+		if auditArchivePattern.MatchString(m) {
+			archives = append(archives, m)
+		}
+	}
+	if len(archives) == 0 {
+		return 0, "", nil
+	}
+	sort.Strings(archives) // timestamp format is lexicographically chronological
+	newest := archives[len(archives)-1]
+	f, err := os.Open(newest)
+	if err != nil {
+		return 0, "", fmt.Errorf("audit archive %s: %w", newest, err)
+	}
+	defer f.Close()
+	seq, hash, err = policy.LastLink(f)
+	if err != nil {
+		return 0, "", fmt.Errorf("audit archive %s: %w", newest, err)
+	}
+	if seq == 0 {
+		return 0, "", fmt.Errorf("audit archive %s exists but holds no records; refusing to guess the chain head", newest)
+	}
+	return seq, hash, nil
 }
 
 // seedCheckpointFromExisting returns the last checkpoint's ordinal and hash from
@@ -878,7 +958,7 @@ func auditSink(b *Backend) (*policy.AuditLog, error) {
 		if serr != nil {
 			return nil, fmt.Errorf("backend %q audit log: %w", b.Name, serr)
 		}
-		f, err := os.OpenFile(b.AuditLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		f, err := openAuditWriter(b.AuditLog, b.AuditRotateBytes)
 		if err != nil {
 			return nil, fmt.Errorf("backend %q: open audit log %s: %w", b.Name, b.AuditLog, err)
 		}

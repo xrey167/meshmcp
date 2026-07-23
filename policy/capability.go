@@ -35,12 +35,18 @@ type CapabilityClaims struct {
 	// subgraphs this capability may query (globs; empty = no corpus restriction).
 	// Auto-signed (signingBytes marshals the whole struct); a knowledge backend
 	// checks it with AllowsCorpus in addition to the tool-glob check.
-	Corpora   []string `json:"corpora,omitempty"`
-	IssuedAt  int64    `json:"iat"`
-	NotBefore int64    `json:"nbf,omitempty"`
-	ExpiresAt int64    `json:"exp"`
-	PubKey    string   `json:"pubkey"` // hex authority key — a HINT; must be pinned by the verifier
-	Sig       string   `json:"sig,omitempty"`
+	Corpora []string `json:"corpora,omitempty"`
+	// SingleUse marks the grant one-shot: the verifier consumes the token's ID
+	// (jti) on the first successful Verify and refuses any replay. Requires the
+	// verifier to have a replay cache (WithReplayCache) — a SingleUse token
+	// presented to a verifier without one fails closed. Omitempty, so existing
+	// multi-use tokens are byte-identical and keep verifying.
+	SingleUse bool   `json:"one,omitempty"`
+	IssuedAt  int64  `json:"iat"`
+	NotBefore int64  `json:"nbf,omitempty"`
+	ExpiresAt int64  `json:"exp"`
+	PubKey    string `json:"pubkey"` // hex authority key — a HINT; must be pinned by the verifier
+	Sig       string `json:"sig,omitempty"`
 }
 
 func (c CapabilityClaims) signingBytes() []byte {
@@ -93,6 +99,7 @@ type CapabilityVerifier struct {
 	now            func() time.Time
 	revoked        func(id string) bool
 	subjectRevoked func(sub string) bool
+	used           NonceStore // jti replay cache for SingleUse grants (nil = no single-use support, fail closed)
 }
 
 // NewCapabilityVerifier pins the given hex authority public keys.
@@ -130,10 +137,43 @@ func (v *CapabilityVerifier) WithSubjectRevocation(revoked func(sub string) bool
 	return v
 }
 
+// WithReplayCache adds the jti replay cache that makes SingleUse grants
+// enforceable: the first Consume of a SingleUse token burns its ID (retained
+// until the token's own expiry, so retention is bounded by the 24h lifetime
+// ceiling); any later presentation is refused. The store is consulted only
+// after every other check passes — and, on the tools/call filter path, only
+// once the call's final outcome is allow — so a failed or held call never
+// burns the grant. MemNonceStore covers a single process; a multi-gateway HA
+// deployment needs a shared store (e.g. a pgstore-backed NonceStore, the same
+// seam as the delegation nonce store).
+func (v *CapabilityVerifier) WithReplayCache(used NonceStore) *CapabilityVerifier {
+	v.used = used
+	return v
+}
+
 // Verify decodes and validates a token for a specific caller, backend, and
-// tool. It fails closed: any decode, trust, signature, binding, time, or
-// revocation problem returns an error and no claims.
+// tool, and — for a SingleUse token — consumes its jti. It fails closed: any
+// decode, trust, signature, binding, time, or revocation problem returns an
+// error and no claims, and a failed Verify never burns a single-use grant.
+// Call sites where verification and execution are one step (edge, pubsub) use
+// Verify directly; the tools/call filter instead verifies with verifyClaims
+// and defers Consume until the call's final outcome is known, so a co-sign
+// hold or a downstream deny does not burn the grant.
 func (v *CapabilityVerifier) Verify(token, peerKey, backend, tool string) (CapabilityClaims, error) {
+	c, err := v.verifyClaims(token, peerKey, backend, tool)
+	if err != nil {
+		return CapabilityClaims{}, err
+	}
+	if err := v.Consume(c); err != nil {
+		return CapabilityClaims{}, err
+	}
+	return c, nil
+}
+
+// verifyClaims runs every check EXCEPT single-use consumption. A SingleUse
+// token presented to a verifier without a replay cache still fails closed
+// here, so it can never authorize anything by omission.
+func (v *CapabilityVerifier) verifyClaims(token, peerKey, backend, tool string) (CapabilityClaims, error) {
 	raw, err := base64.RawURLEncoding.DecodeString(token)
 	if err != nil {
 		return CapabilityClaims{}, fmt.Errorf("capability is not valid base64url")
@@ -181,7 +221,31 @@ func (v *CapabilityVerifier) Verify(token, peerKey, backend, tool string) (Capab
 	if v.subjectRevoked != nil && v.subjectRevoked(c.Subject) {
 		return CapabilityClaims{}, fmt.Errorf("capability subject (device) has been revoked")
 	}
+	// No replay cache configured = fail closed: a SingleUse token cannot be
+	// honored as multi-use by omission (consumption itself happens in Consume).
+	if c.SingleUse && v.used == nil {
+		return CapabilityClaims{}, fmt.Errorf("capability is single-use but this verifier has no replay cache (fail closed)")
+	}
 	return c, nil
+}
+
+// Consume burns a SingleUse grant's jti in the replay cache (retained until
+// the token's own expiry, so retention is bounded by the 24h lifetime
+// ceiling); a second Consume of the same jti fails. Multi-use claims are a
+// no-op. Callers that split verification from execution (the tools/call
+// filter) call this only once the call's final outcome is allow, so a held or
+// denied call never burns the grant.
+func (v *CapabilityVerifier) Consume(c CapabilityClaims) error {
+	if !c.SingleUse {
+		return nil
+	}
+	if v.used == nil {
+		return fmt.Errorf("capability is single-use but this verifier has no replay cache (fail closed)")
+	}
+	if !v.used.Use("cap-jti:"+c.ID, time.Unix(c.ExpiresAt, 0), v.now()) {
+		return fmt.Errorf("capability %s has already been used (single-use)", c.ID)
+	}
+	return nil
 }
 
 // AllowsCorpus reports whether this capability may query the named corpus /
@@ -220,32 +284,46 @@ func (f *Filter) SetCapabilityVerifier(v *CapabilityVerifier, required bool) {
 //   - a valid token cannot override an explicit deny or a co-sign requirement;
 //   - a valid token upgrades a policy-DEFAULT deny (RuleID -1) to allow, and
 //     otherwise leaves an already-allowed call allowed.
-func (f *Filter) applyCapability(dec Decision, token, tool string) Decision {
+//
+// A SingleUse grant is NOT consumed here: precedence runs first, and the
+// returned claims (non-nil only when the token was load-bearing — it upgraded
+// a default-deny, or the surface is capability-required) are consumed by
+// handleToolCall once the final outcome is allow. A co-sign hold, an explicit
+// deny, a delegation/hook deny, or a call the policy allowed on its own never
+// burns the grant — so a cosign-approved retry still has it.
+func (f *Filter) applyCapability(dec Decision, token, tool string) (Decision, *CapabilityClaims) {
 	if token == "" {
 		if f.capRequired {
-			return Decision{Outcome: OutcomeDeny, RuleID: dec.RuleID, Reason: "capability required but none presented"}
+			return Decision{Outcome: OutcomeDeny, RuleID: dec.RuleID, Reason: "capability required but none presented"}, nil
 		}
-		return dec
+		return dec, nil
 	}
-	claims, err := f.capVerifier.Verify(token, f.caller.PeerKey, f.caller.Backend, tool)
+	claims, err := f.capVerifier.verifyClaims(token, f.caller.PeerKey, f.caller.Backend, tool)
 	if err != nil {
-		return Decision{Outcome: OutcomeDeny, RuleID: dec.RuleID, Reason: "invalid capability: " + err.Error()}
+		return Decision{Outcome: OutcomeDeny, RuleID: dec.RuleID, Reason: "invalid capability: " + err.Error()}, nil
 	}
-	// A capability never bypasses an explicit deny or a required co-sign.
+	// A capability never bypasses an explicit deny or a required co-sign —
+	// checked BEFORE any consumption, so neither burns a single-use grant.
 	if dec.Outcome == OutcomeCosign {
-		return dec
+		return dec, nil
 	}
 	if dec.Outcome == OutcomeDeny && dec.RuleID != -1 {
-		return dec
+		return dec, nil
 	}
+	loadBearing := claims.SingleUse && (f.capRequired || dec.Outcome != OutcomeAllow)
 	// Grant: upgrade a default-deny, or keep an existing allow.
-	return Decision{
+	grant := Decision{
 		Allow:     true,
 		Outcome:   OutcomeAllow,
 		RuleID:    dec.RuleID,
 		Reason:    "capability " + claims.ID + " (" + claims.Issuer + ")",
 		AddLabels: dec.AddLabels,
 	}
+	if !loadBearing {
+		return grant, nil
+	}
+	c := claims
+	return grant, &c
 }
 
 // stripCapability removes a presented capability token from a tools/call line's

@@ -95,8 +95,18 @@ func VerifyChain(r io.Reader) (VerifyResult, error) {
 // only the single trailing line is ever dropped and it is by construction the
 // newest record, truncation can never remove a checkpoint-covered record.
 func VerifyForRepair(data []byte) (res VerifyResult, truncateTo int64, torn bool) {
-	prev := ""
-	expectSeq := 0
+	return VerifyForRepairFrom(data, 0, "")
+}
+
+// VerifyForRepairFrom is VerifyForRepair for a rotated chain SEGMENT: data's
+// first record is expected to carry seq seedSeq+1 and prev_hash seedHash — the
+// sealed head of the previous segment (see RotatingFileSink). res.Count is the
+// number of records in DATA (the caller adds seedSeq for the absolute
+// sequence); res.LastHash is seedHash when data holds no records. Seeds
+// (0, "") verify an unrotated log from genesis.
+func VerifyForRepairFrom(data []byte, seedSeq int, seedHash string) (res VerifyResult, truncateTo int64, torn bool) {
+	prev := seedHash
+	expectSeq := seedSeq
 	var offset int64
 	n := int64(len(data))
 	for offset < n {
