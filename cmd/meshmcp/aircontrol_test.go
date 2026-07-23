@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,9 +20,11 @@ import (
 type fakeAirControl struct {
 	list          []AirSession
 	steers        []string // "backend/id/method" of accepted steers
+	moves         []string // "backend/id/destKey/destAddr" of accepted moves
 	callers       []string // "pubKey/fqdn" seen by steer
 	err           error    // returned by steer
-	denyOnFqdn    string   // if set, steer/sessions deny this caller fqdn on backend "fs"
+	moveErr       error    // returned by move
+	denyOnFqdn    string   // if set, steer/sessions/move deny this caller fqdn on backend "fs"
 	presence      *air.Registry
 	groupPatterns map[string][]string // the operator `groups:` map served by /v1/groups
 }
@@ -55,6 +60,16 @@ func (f *fakeAirControl) steer(pubKey, fqdn, backend, id, method string, _ any) 
 	}
 	f.callers = append(f.callers, pubKey+"/"+fqdn)
 	f.steers = append(f.steers, backend+"/"+id+"/"+method)
+	return nil
+}
+func (f *fakeAirControl) move(pubKey, fqdn, backend, id, destKey, destAddr string) error {
+	if f.denyOnFqdn != "" && fqdn == f.denyOnFqdn && backend == "fs" {
+		return errBackendForbidden
+	}
+	if f.moveErr != nil {
+		return f.moveErr
+	}
+	f.moves = append(f.moves, backend+"/"+id+"/"+destKey+"/"+destAddr)
 	return nil
 }
 func (f *fakeAirControl) presenceRegistry() *air.Registry {
@@ -584,6 +599,217 @@ func TestBuildCatalogBackendsRejectsExplicitDerivedIDCollision(t *testing.T) {
 	}, "100.64.0.2", owner)
 	if err == nil || !strings.Contains(err.Error(), "collides") {
 		t.Fatalf("explicit/derived component id collision accepted: %v", err)
+	}
+}
+
+// ============================ /v1/move (live-session move trigger) ============================
+
+const moveBody = `{"backend":"fs","id":"9f2a","dest_key":"DESTKEY","dest_addr":"100.64.0.9:9600"}`
+
+// TestAirControlMoveRoutes: an allowed operator with a valid body triggers the
+// move with the EXACT args and gets 200 {status:"moved"}, audited as allow.
+func TestAirControlMoveRoutes(t *testing.T) {
+	c := &fakeAirControl{}
+	var recs []airSteerAudit
+	h := handlerWithIdentity(c, "key1", "op.mesh", func(r airSteerAudit) { recs = append(recs, r) })
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/move", strings.NewReader(moveBody)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body)
+	}
+	if len(c.moves) != 1 || c.moves[0] != "fs/9f2a/DESTKEY/100.64.0.9:9600" {
+		t.Fatalf("move not routed with exact args: %v", c.moves)
+	}
+	if !strings.Contains(rr.Body.String(), `"status":"moved"`) {
+		t.Fatalf("response missing moved status: %s", rr.Body)
+	}
+	if len(recs) != 1 || recs[0].Method != "air/move" || !recs[0].OK {
+		t.Fatalf("move not audited as allow: %+v", recs)
+	}
+}
+
+// TestAirControlMoveACLDeny: a caller not on the control allow is refused (403),
+// the move is NEVER called, and the attempt is audited as a deny.
+func TestAirControlMoveACLDeny(t *testing.T) {
+	c := &fakeAirControl{}
+	var recs []airSteerAudit
+	// Caller "key1"/"caller.mesh" is NOT on the allow list (someone-else only).
+	id := func(*http.Request) (string, string) { return "key1", "caller.mesh" }
+	h := airControlHandler(c, id, newACL([]string{"pubkey:someone-else"}), newACL(nil), func(r airSteerAudit) { recs = append(recs, r) })
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/move", strings.NewReader(moveBody)))
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rr.Code)
+	}
+	if len(c.moves) != 0 {
+		t.Fatalf("denied caller still moved: %v", c.moves)
+	}
+	if len(recs) != 1 || recs[0].Method != "air/move" || recs[0].OK {
+		t.Fatalf("deny not audited: %+v", recs)
+	}
+}
+
+// TestAirControlMoveEmptyACLFailsClosed: an empty control ACL (e.g. after a
+// SIGHUP reload) denies the move — fail-closed, never fail-open.
+func TestAirControlMoveEmptyACLFailsClosed(t *testing.T) {
+	c := &fakeAirControl{}
+	id := func(*http.Request) (string, string) { return "key1", "caller.mesh" }
+	h := airControlHandler(c, id, newACL(nil), newACL(nil), nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/move", strings.NewReader(moveBody)))
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("empty-ACL move = %d, want 403 (fail-closed)", rr.Code)
+	}
+	if len(c.moves) != 0 {
+		t.Fatalf("empty-ACL caller still moved: %v", c.moves)
+	}
+}
+
+// TestAirControlMoveBackendForbidden: control-allowed but denied by the TARGET
+// backend's own ACL → 403, audited as deny (control-allowed is not backend-allowed).
+func TestAirControlMoveBackendForbidden(t *testing.T) {
+	c := &fakeAirControl{denyOnFqdn: "outsider.mesh"}
+	var recs []airSteerAudit
+	h := handlerWithIdentity(c, "keyX", "outsider.mesh", func(r airSteerAudit) { recs = append(recs, r) })
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/move", strings.NewReader(moveBody)))
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("backend-forbidden move = %d, want 403", rr.Code)
+	}
+	if len(recs) != 1 || recs[0].OK {
+		t.Fatalf("backend-forbidden move not audited as deny: %+v", recs)
+	}
+}
+
+// TestAirControlMoveStatusMapping proves each move-engine outcome maps to the
+// HTTP status that tells the operator the truth about ownership.
+func TestAirControlMoveStatusMapping(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"unknown-backend", errNoBackend, http.StatusNotFound},
+		{"backend-forbidden", errBackendForbidden, http.StatusForbidden},
+		{"dial-failed", errMoveDialFailed, http.StatusBadGateway},
+		{"refused", errors.New("destination refused move: handshake-mode session is not at a quiescent boundary"), http.StatusConflict},
+		{"cas-lost", errors.New("destination could not commit move: commit CAS lost"), http.StatusConflict},
+		{"outcome-unknown", errors.New("move commit outcome unknown (source retains the session until fenced): EOF"), http.StatusBadGateway},
+		{"other", errors.New("some other failure"), http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &fakeAirControl{moveErr: tc.err}
+			h := handlerWithIdentity(c, "key1", "op.mesh", nil)
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/move", strings.NewReader(moveBody)))
+			if rr.Code != tc.want {
+				t.Fatalf("%s: status = %d, want %d (body %s)", tc.name, rr.Code, tc.want, rr.Body)
+			}
+		})
+	}
+}
+
+// TestAirControlMoveBadRequest: a missing required field is 400 and a GET is 405,
+// and neither reaches move().
+func TestAirControlMoveBadRequest(t *testing.T) {
+	c := &fakeAirControl{}
+	for _, body := range []string{
+		`{"backend":"fs","id":"9f2a","dest_key":"K"}`,       // no dest_addr
+		`{"backend":"fs","id":"9f2a","dest_addr":"a:1"}`,    // no dest_key
+		`{"id":"9f2a","dest_key":"K","dest_addr":"a:1"}`,    // no backend
+		`{"backend":"fs","dest_key":"K","dest_addr":"a:1"}`, // no id
+	} {
+		rr := httptest.NewRecorder()
+		newTestHandler(c, true).ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/move", strings.NewReader(body)))
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("body %s = %d, want 400", body, rr.Code)
+		}
+	}
+	rr := httptest.NewRecorder()
+	newTestHandler(c, true).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/v1/move", nil))
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET /v1/move = %d, want 405", rr.Code)
+	}
+	if len(c.moves) != 0 {
+		t.Fatalf("bad requests still moved: %v", c.moves)
+	}
+}
+
+// TestAirControlMoveOnBehalf proves the move honours on-behalf attestation from a
+// listed proxy exactly like steer (the receipt attributes the attested human).
+func TestAirControlMoveOnBehalf(t *testing.T) {
+	c := &fakeAirControl{}
+	var recs []airSteerAudit
+	h := handlerWithIdentity(c, "relaykey", "air-serve.mesh", func(r airSteerAudit) { recs = append(recs, r) })
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/move", strings.NewReader(moveBody))
+	req.Header.Set("X-Air-On-Behalf", "phone.mesh")
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body)
+	}
+	if len(recs) != 1 || recs[0].OnBehalf != "phone.mesh" {
+		t.Fatalf("on-behalf not attributed on move: %+v", recs)
+	}
+	if !strings.Contains(rr.Body.String(), "phone.mesh") {
+		t.Fatalf("response should attribute the human: %s", rr.Body)
+	}
+}
+
+// TestGatewayAirControlMove exercises the live gatewayAirControl.move wiring: it
+// resolves the local server, enforces the target backend's OWN ACL, and — only
+// then — dials the destination and hands off to session.Server.MoveSessionTo.
+// The move engine itself is covered by session/move_test.go; here we prove the
+// trigger reaches it (and fails closed before it when it must).
+func TestGatewayAirControlMove(t *testing.T) {
+	srv := &session.Server{} // zero server: MoveSessionTo returns ErrNoSession for an unknown id
+	dialed := false
+	g := &gatewayAirControl{
+		servers: map[string]*session.Server{"fs": srv},
+		acls:    map[string]acl{"fs": newACL([]string{"pubkey:op"})},
+		mu:      &sync.Mutex{},
+		dial: func(ctx context.Context, addr string) (net.Conn, error) {
+			dialed = true
+			c, _ := net.Pipe() // the source aborts on unknown-session before writing, so the peer end is unused
+			return c, nil
+		},
+	}
+
+	// A well-formed session id (16 bytes / 32 hex chars) so the call reaches the
+	// engine rather than tripping id parsing.
+	const sid = "9f2a0000000000000000000000000000"
+
+	// Unknown backend: errNoBackend, dial NEVER attempted.
+	if err := g.move("op", "op.mesh", "ghost", sid, "K", "a:1"); err != errNoBackend {
+		t.Fatalf("unknown backend err = %v, want errNoBackend", err)
+	}
+	if dialed {
+		t.Fatal("dialed for an unknown backend")
+	}
+
+	// Backend ACL denies: errBackendForbidden, dial NEVER attempted.
+	if err := g.move("intruder", "intruder.mesh", "fs", sid, "K", "a:1"); err != errBackendForbidden {
+		t.Fatalf("denied-backend err = %v, want errBackendForbidden", err)
+	}
+	if dialed {
+		t.Fatal("dialed for a backend-denied caller")
+	}
+
+	// Allowed caller on a resolvable backend: the trigger dials and reaches
+	// MoveSessionTo, which returns ErrNoSession for the unknown id (proving the
+	// call landed in the engine, not short-circuited).
+	err := g.move("op", "op.mesh", "fs", sid, "K", "a:1")
+	if !dialed {
+		t.Fatal("allowed move did not dial the destination")
+	}
+	if err != session.ErrNoSession {
+		t.Fatalf("allowed move err = %v, want session.ErrNoSession (reached MoveSessionTo)", err)
+	}
+
+	// dial not wired: fail closed as a dial failure (502 class), not a silent success.
+	g.dial = nil
+	if err := g.move("op", "op.mesh", "fs", sid, "K", "a:1"); !errors.Is(err, errMoveDialFailed) {
+		t.Fatalf("unwired dial err = %v, want errMoveDialFailed", err)
 	}
 }
 

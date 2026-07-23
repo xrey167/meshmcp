@@ -138,9 +138,9 @@ or fabricate a capability.
 |---|---|---|
 | **1 · Agent OS spine** | Unified Air Home shell + responsive nav; Presence/Activity drive Continue and Nearby. | `air-live.html`, `air home`, `air_nearby` |
 | **2 · Governance** | Approvals uses the same tokens/components while retaining direct browser-to-approver identity. | `approvals.go`, Security area |
-| **3 · Observation** | Dashboard and Control Room become Activity/Operator views in the shared shell; raw shell stays explicit developer mode. | `dash.go`, `room.go` |
+| **3 · Observation** | Dashboard and Control Room become Activity/Operator views in the shared shell; raw shell stays explicit developer mode. The Control Room gains a **drag-to-handoff** gesture (shipped): with `--control <gateway>`, live sessions render as draggable rows and destination gateways as drop targets; a drop confirms and triggers a live-session move via the operator-gated `POST /v1/move`, surfacing the gateway's real verdict (delivered/refused/failed). | `dash.go`, `room.go` |
 | **4 · Logical actions** | **Core shipped:** Universal Actions carry verified Send/Drop/Ring recipients into the responsive node sheet and CLI logical targets; raw `host:port` remains an advanced compatible input. Resolved Send/Drop require receiver confirmation and return the shared Action Result across web, CLI, and assistant surfaces. Cast/Screen use the same CLI resolver. | Share, Steer, Ring, Cast, CLI |
-| **5 · Continuity** | Handoff v1 ships explicit offer/accept/governed continuation in the CLI; next, surface its inbox and receipts in Activities/Home, then add checkpoint-capable prepare/ready/commit as a separate transactional v2. | `air handoff`, Activities, Home action sheet |
+| **5 · Continuity** | Handoff v1 ships explicit offer/accept/governed continuation in the CLI; next, surface its inbox and receipts in Activities/Home. Transactional v2 (checkpoint-capable prepare/ready/commit) is now operator-triggerable — `POST /v1/move` and the Control Room drag-to-handoff gesture. | `air handoff`, `room.go` drag-to-handoff, Activities, Home action sheet |
 | **6 · Native shells** | The same objects, states, and navigation map to iOS/macOS/Android without redefining behavior. | `mobile/`, native apps |
 
 ## New experience features

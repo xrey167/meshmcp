@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -214,6 +215,43 @@ func cmdServe(args []string) error {
 			return fmt.Errorf("backend %q: listen on mesh port %d: %w", b.Name, b.Port, err)
 		}
 		listeners = append(listeners, ln)
+
+		// Live-session MOVE destination listener (F30). A backend that opts in with
+		// move_port accepts inbound move-control connections that hand it ownership
+		// of a live session (prepare->ready->commit). It is PER-BACKEND because the
+		// move protocol carries a session id but not a backend name, and
+		// ServeMoveControl binds to one *session.Server — this backend's. The
+		// grant store is opened here so a bad path fails LOUD at startup (like the
+		// backend listener), not silently at the first move. Config validation
+		// guarantees move_port ⇒ resumable + session_store + move_grant_store.
+		var moveLn net.Listener
+		var moveGrants *air.GrantStore
+		if b.Resumable && b.MovePort > 0 {
+			moveLn, err = client.ListenTCP(fmt.Sprintf(":%d", b.MovePort))
+			if err != nil {
+				close(shutdown)
+				for _, l := range listeners {
+					l.Close()
+				}
+				wg.Wait()
+				return fmt.Errorf("backend %q: move listen on mesh port %d: %w", b.Name, b.MovePort, err)
+			}
+			listeners = append(listeners, moveLn)
+			moveGrants, err = air.OpenGrantStore(b.MoveGrantStore)
+			if err != nil {
+				close(shutdown)
+				for _, l := range listeners {
+					l.Close()
+				}
+				wg.Wait()
+				return fmt.Errorf("backend %q: open move grant store %s: %w", b.Name, b.MoveGrantStore, err)
+			}
+			note := ""
+			if meshPubKey == "" {
+				note = " (WARNING: no mesh identity — every move commit will be refused)"
+			}
+			log.Printf("backend %q: live-session move destination on mesh port %d (grants: %s, dest key %s)%s", b.Name, b.MovePort, b.MoveGrantStore, shortKey(meshPubKey), note)
+		}
 		allow := "any mesh peer"
 		if len(b.Allow) > 0 {
 			allow = fmt.Sprintf("%v", b.Allow)
@@ -287,7 +325,7 @@ func cmdServe(args []string) error {
 		}
 
 		wg.Add(1)
-		go func(b *Backend, ln net.Listener, factory session.BackendFactory, httpEnf *httpEnforcer, rc *remoteClient) {
+		go func(b *Backend, ln net.Listener, factory session.BackendFactory, httpEnf *httpEnforcer, rc *remoteClient, moveLn net.Listener, moveGrants *air.GrantStore) {
 			defer wg.Done()
 			switch {
 			case b.Remote != nil:
@@ -299,11 +337,11 @@ func cmdServe(args []string) error {
 					serversMu.Lock()
 					servers[b.Name] = srv
 					serversMu.Unlock()
-				})
+				}, moveLn, moveGrants, meshPubKey)
 			default:
 				serveStdio(client, b, ln, shutdown, factory)
 			}
-		}(b, ln, factory, httpEnf, rc)
+		}(b, ln, factory, httpEnf, rc, moveLn, moveGrants)
 	}
 
 	// Control-surface ACL handles, retained (when the endpoint is enabled) so a
@@ -344,6 +382,11 @@ func cmdServe(args []string) error {
 		}
 		ctl := &gatewayAirControl{
 			servers: servers, acls: backendACLs, mu: &serversMu,
+			// The live-session MOVE trigger's outbound gateway->gateway dial: an
+			// identity-pinned mesh connection to the destination's move-control
+			// listener. This is the only place the control endpoint reaches OFF this
+			// gateway; steer stays local.
+			dial:     func(ctx context.Context, addr string) (net.Conn, error) { return client.Dial(ctx, "tcp", addr) },
 			backends: cards,
 			gateway:  meshFQDN,
 			presence: air.NewRegistry(air.DefaultPresenceRegistryMax),
@@ -406,7 +449,7 @@ func cmdServe(args []string) error {
 		if len(cfg.Control.OnBehalfAllow) > 0 {
 			obNote = fmt.Sprintf(" · on-behalf proxies: %v", cfg.Control.OnBehalfAllow)
 		}
-		log.Printf("Air control endpoint on mesh port %d (GET/POST/DELETE /v1/presence · GET /v1/sessions · GET /v1/groups · POST /v1/steer · GET %s)%s", cfg.Control.Port, airCatalogPath, obNote)
+		log.Printf("Air control endpoint on mesh port %d (GET/POST/DELETE /v1/presence · GET /v1/sessions · GET /v1/groups · POST /v1/steer · POST /v1/move · GET %s)%s", cfg.Control.Port, airCatalogPath, obNote)
 		wg.Add(1)
 		// Read/header timeouts: a mesh peer must not be able to hold the control
 		// listener open with a slow/half-open request (Slowloris).
@@ -494,6 +537,32 @@ func serveStdio(client *embed.Client, b *Backend, ln net.Listener, shutdown <-ch
 	}
 }
 
+// serveMoveControl runs the per-backend live-session move-control accept loop:
+// each inbound connection is one source gateway handing this backend a live
+// session via session.Server.ServeMoveControl. authorize is the deny-by-default
+// commit gate (a consumed single-use grant). The loop exits when ln closes on
+// shutdown; per-connection handlers close their conn (which aborts any
+// warm-but-uncommitted session inside ServeMoveControl).
+func serveMoveControl(ln net.Listener, srv *session.Server, authorize func(string) (bool, error), shutdown <-chan struct{}, name string) {
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			select {
+			case <-shutdown:
+			default:
+				log.Printf("backend %q: move-control accept: %v", name, err)
+			}
+			return
+		}
+		go func(c net.Conn) {
+			defer c.Close()
+			if err := srv.ServeMoveControl(c, authorize); err != nil {
+				log.Printf("backend %q: move-control connection ended: %v", name, err)
+			}
+		}(conn)
+	}
+}
+
 // serveResumable exposes a stdio backend as a resumable session: the
 // backend subprocess is kept alive across client reconnects and missed
 // messages are replayed, so the logical MCP session survives the mesh
@@ -501,7 +570,7 @@ func serveStdio(client *embed.Client, b *Backend, ln net.Listener, shutdown <-ch
 // serveResumable runs the resumable accept loop until the listener closes. If
 // register is non-nil it is called with the *session.Server before the loop
 // starts, so the caller can wire it into the Air control endpoint (Sessions/Steer).
-func serveResumable(client *embed.Client, b *Backend, ln net.Listener, shutdown <-chan struct{}, factory session.BackendFactory, register func(*session.Server)) {
+func serveResumable(client *embed.Client, b *Backend, ln net.Listener, shutdown <-chan struct{}, factory session.BackendFactory, register func(*session.Server), moveLn net.Listener, moveGrants *air.GrantStore, meshPubKey string) {
 	checker := b.peerACL()
 	ttl := time.Duration(b.SessionTTLSeconds) * time.Second
 	srv := session.NewServer(factory, ttl, func(format string, a ...any) {
@@ -553,6 +622,29 @@ func serveResumable(client *embed.Client, b *Backend, ln net.Listener, shutdown 
 	if register != nil {
 		register(srv)
 	}
+
+	// Live-session MOVE destination: accept move-control connections for THIS
+	// backend's server. The commit gate is destination-side and deny-by-default —
+	// authorize consumes a single-use grant keyed to this gateway's own WireGuard
+	// key + the exact session id; a nil grant store (or an empty pubkey) refuses
+	// every commit. The listener stops when it (and the backend listener) close on
+	// shutdown; a control-conn drop before commit aborts the warm state inside
+	// ServeMoveControl.
+	var moveWG sync.WaitGroup
+	if moveLn != nil {
+		authorize := func(id string) (bool, error) {
+			if moveGrants == nil {
+				return false, nil
+			}
+			return air.ConsumeMoveGrant(moveGrants, meshPubKey, id, time.Now())
+		}
+		moveWG.Add(1)
+		go func() {
+			defer moveWG.Done()
+			serveMoveControl(moveLn, srv, authorize, shutdown, b.Name)
+		}()
+	}
+	defer moveWG.Wait()
 
 	for {
 		conn, err := ln.Accept()

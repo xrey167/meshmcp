@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -84,6 +86,101 @@ func TestRoomGuardBlocksRebindingAndCSRF(t *testing.T) {
 	check("127.0.0.1:9900", "https://evil.com", http.StatusForbidden)
 	// Wrong port on a loopback host.
 	check("127.0.0.1:1234", "", http.StatusForbidden)
+}
+
+const roomMoveBody = `{"backend":"fs","id":"9f2a","dest_key":"K","dest_addr":"100.64.0.9:9600"}`
+
+// TestRoomMoveRequiresToken: the browser->room hop is token-gated, so an
+// unauthenticated viewer cannot fire a handoff even before the gateway ACL.
+func TestRoomMoveRequiresToken(t *testing.T) {
+	rs := &roomServer{token: "secret", control: "100.64.0.9:9600"}
+	h := rs.requireToken(rs.handleMove)
+	rec := httptest.NewRecorder()
+	h(rec, httptest.NewRequest("POST", "/api/move", strings.NewReader(roomMoveBody))) // no token
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("move without token = %d, want 403", rec.Code)
+	}
+}
+
+// TestRoomMoveWithoutControlWired: with no --control the move endpoint fails
+// clearly (409), never a silent success.
+func TestRoomMoveWithoutControlWired(t *testing.T) {
+	rs := &roomServer{token: "secret"} // control unset
+	rec := httptest.NewRecorder()
+	rs.handleMove(rec, httptest.NewRequest("POST", "/api/move", strings.NewReader(roomMoveBody)))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("move without --control = %d, want 409", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "not wired") {
+		t.Fatalf("expected a not-wired message: %s", rec.Body)
+	}
+}
+
+// TestRoomSessionsWithoutControlWired: the live Sessions panel fails clearly when
+// the room is not wired to a control gateway.
+func TestRoomSessionsWithoutControlWired(t *testing.T) {
+	rs := &roomServer{}
+	rec := httptest.NewRecorder()
+	rs.handleSessions(rec, httptest.NewRequest("GET", "/api/sessions", nil))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("sessions without --control = %d, want 409", rec.Code)
+	}
+}
+
+// TestRoomMoveBadRequest: an incomplete body is 400 before any proxy.
+func TestRoomMoveBadRequest(t *testing.T) {
+	rs := &roomServer{control: "100.64.0.9:9600"}
+	rec := httptest.NewRecorder()
+	rs.handleMove(rec, httptest.NewRequest("POST", "/api/move", strings.NewReader(`{"backend":"fs"}`)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("incomplete move body = %d, want 400", rec.Code)
+	}
+}
+
+// TestRoomCapsControl: the control capability is false when unwired and true when
+// both --control and mesh credentials are present (so the SPA hides/shows the panel).
+func TestRoomCapsControl(t *testing.T) {
+	unwired := &roomServer{}
+	rec := httptest.NewRecorder()
+	unwired.handleCaps(rec, httptest.NewRequest("GET", "/api/caps", nil))
+	var caps map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &caps)
+	if caps["control"] != false {
+		t.Fatalf("unwired control cap = %v, want false", caps["control"])
+	}
+
+	wired := &roomServer{control: "100.64.0.9:9600", controlHC: &http.Client{}}
+	rec = httptest.NewRecorder()
+	wired.handleCaps(rec, httptest.NewRequest("GET", "/api/caps", nil))
+	json.Unmarshal(rec.Body.Bytes(), &caps)
+	if caps["control"] != true {
+		t.Fatalf("wired control cap = %v, want true", caps["control"])
+	}
+}
+
+// TestRoomMoveProxiesGatewayVerdict proves the room passes the source gateway's
+// status and reason THROUGH unchanged — a 409 refusal reaches the browser as a
+// 409 with its reason, so the tile can tell the truth (source still serving).
+func TestRoomMoveProxiesGatewayVerdict(t *testing.T) {
+	gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/move" || r.Method != http.MethodPost {
+			t.Errorf("unexpected upstream request %s %s", r.Method, r.URL.Path)
+		}
+		http.Error(w, "destination could not commit move: grant missing", http.StatusConflict)
+	}))
+	defer gw.Close()
+	addr := gw.Listener.Addr().String()
+	rs := &roomServer{control: addr, controlHC: &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) { return net.Dial("tcp", addr) },
+	}}}
+	rec := httptest.NewRecorder()
+	rs.handleMove(rec, httptest.NewRequest("POST", "/api/move", strings.NewReader(roomMoveBody)))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("proxied move status = %d, want 409 (passed through)", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "grant missing") {
+		t.Fatalf("refusal reason not passed through: %s", rec.Body)
+	}
 }
 
 func TestLoopbackAddr(t *testing.T) {

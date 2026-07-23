@@ -331,9 +331,41 @@ source gateway (owns @G, serving)        destination gateway
 - The prepare/ready/commit transfer is a **gateway-to-gateway** operation
   (`session.Server.MoveSessionTo` / `ServeMoveControl`), pinned to the exact
   destination key like Handoff. The CLI ships the one discrete operator action —
-  `air move grant` (the single-use destination authorization); wiring the
-  transfer trigger into the long-running gateway's control plane is the next
-  step.
+  `air move grant` (the single-use destination authorization). The transfer
+  trigger and destination listener are now **wired into the gateway control
+  plane** (see "Triggering a move" below).
+
+### Triggering a move (control-plane wiring, F30)
+
+The move engine is unchanged — F30 only *dials and calls* the two tested
+methods, so all four invariants stay entirely inside `session/move.go`.
+
+- **Source trigger — `POST /v1/move`** on the Air control endpoint
+  (`cmd/meshmcp/aircontrol.go`). Body `{backend, id, dest_key, dest_addr}`. It is
+  gated on the **same operator/control ACL as `/v1/steer`** (default-deny,
+  fail-closed on an empty allow even after a SIGHUP), audits both allow and deny
+  as `air/move`, and honours on-behalf attestation identically. After the ACL it
+  re-checks the *target backend's own* ACL, then dials `dest_addr` over the mesh
+  and runs `MoveSessionTo`. Status is truthful about ownership: `200 moved`
+  (destination owns), `409` refused/CAS-lost (source thawed, still serving),
+  `502` outcome-unknown (source retains until fenced), `403/404` for the ACL /
+  unknown-backend cases. **The source presents no credential** — authorization is
+  entirely destination-side, so a rogue trigger still cannot force a move.
+- **Destination listener — per-backend `move_port` + `move_grant_store`**
+  (`cmd/meshmcp/config.go`, `serve.go`). A backend opts in; each listener binds to
+  *its* `session.Server` (the move protocol carries a session id but not a backend
+  name, so routing is per-backend). The commit `authorize` closure consumes a
+  single-use grant keyed to **this gateway's** WireGuard key + the exact session
+  id (`air.ConsumeMoveGrant`); a nil store or empty identity refuses every commit
+  (deny-by-default). Requires `resumable` + `session_store` + a
+  handshake/backend mode.
+- **Room drag-to-handoff** (`cmd/meshmcp/room.go`, `--control <gateway-addr>`).
+  Token-gated `/api/sessions` and `/api/move` proxy the gateway's `/v1/sessions`
+  and `/v1/move` over the mesh under the room's **own** WireGuard identity (which
+  must be on the gateway's `control.allow`). The SPA renders live sessions as
+  draggable rows and destination gateways as drop targets; a drop confirms, then
+  POSTs the move and surfaces the gateway's verdict **unchanged** — delivered only
+  on a real `200 moved`, refused on `409`, failed otherwise.
 
 ### Tested
 
@@ -350,3 +382,14 @@ source gateway (owns @G, serving)        destination gateway
 - `air/move_grant_test.go`: the single-use grant is consumed exactly once,
   scoped to the exact (destination, session), deny-by-default, revocable, and
   durable.
+- `cmd/meshmcp/aircontrol_test.go`: the `POST /v1/move` trigger — allowed
+  operator routes with exact args, ACL deny (and empty-ACL fail-closed), backend
+  ACL deny, the full status mapping (moved/refused/cas-lost/outcome-unknown),
+  bad-request/405, on-behalf attribution, and the `gatewayAirControl.move` wiring
+  (server resolution + backend ACL before the dial; the dial reaches
+  `MoveSessionTo`; unwired dial fails closed).
+- `cmd/meshmcp/room_test.go`: drag-to-handoff `/api/move` and `/api/sessions` are
+  token-gated, 409 when the room is not wired to a `--control` gateway, and pass
+  the gateway's verdict (a 409 refusal + reason) through unchanged.
+- `cmd/meshmcp/config_test.go`: `move_port` requires resumable + `session_store`
+  + `move_grant_store` + a handshake/backend mode, and dedups against other ports.

@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -31,6 +33,14 @@ import (
 type airController interface {
 	sessions(pubKey, fqdn string) []AirSession
 	steer(pubKey, fqdn, backend, id, method string, params any) error
+	// move triggers a live-session ownership handoff of session id on backend to
+	// the destination gateway at destAddr (destKey is the destination's WireGuard
+	// key, carried for audit/log). It is operator/control-ACL gated exactly like
+	// steer, then re-checks the target backend's own ACL. The move itself runs the
+	// tested session.Server.MoveSessionTo (prepare->ready->commit); authorization
+	// of the commit is entirely destination-side (a single-use grant), so this
+	// trigger confers no power the destination has not already been granted.
+	move(pubKey, fqdn, backend, id, destKey, destAddr string) error
 	catalog(pubKey, fqdn string) AirCatalog
 	nearby(now time.Time) []air.Presence
 	announce(pubKey, fqdn, observedIP string, a air.Announcement, now time.Time) (air.Presence, bool, error)
@@ -291,7 +301,84 @@ func airControlHandler(c airController, identify func(*http.Request) (pubkey, fq
 		}
 	})
 
+	// Live-session MOVE trigger. This is a PRIVILEGED operator action — it hands a
+	// live session's ownership from this gateway to another — so it is gated on the
+	// SAME operator/control ACL as /v1/steer (default-deny, fail-closed on an empty
+	// allow even after a SIGHUP), audits both allow and deny, and honours on-behalf
+	// attestation identically. It never bypasses the move engine's invariants: the
+	// handler only resolves the caller and hands off to c.move, which dials the
+	// destination and runs the tested session.Server.MoveSessionTo. The commit is
+	// authorized destination-side by a single-use grant, so even a caller past this
+	// gate cannot force a move the destination was not separately granted.
+	mux.HandleFunc("/v1/move", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		pubKey, fqdn := identify(r)
+		if allow.empty() || !allow.allows(pubKey, fqdn) {
+			if audit != nil {
+				audit(airSteerAudit{Peer: fqdnOr(fqdn), PeerKey: pubKey, Method: "air/move", OK: false})
+			}
+			http.Error(w, "not permitted", http.StatusForbidden)
+			return
+		}
+		var body struct {
+			Backend  string `json:"backend"`
+			ID       string `json:"id"`
+			DestKey  string `json:"dest_key"`
+			DestAddr string `json:"dest_addr"`
+		}
+		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body) != nil ||
+			body.Backend == "" || body.ID == "" || body.DestKey == "" || body.DestAddr == "" {
+			http.Error(w, "backend, id, dest_key and dest_addr are required", http.StatusBadRequest)
+			return
+		}
+		onBehalf, onBehalfKey := onBehalfOf(r, onBehalfAllow, pubKey, fqdn)
+		err := c.move(pubKey, fqdn, body.Backend, body.ID, body.DestKey, body.DestAddr)
+		if audit != nil {
+			audit(airSteerAudit{Backend: body.Backend, Peer: fqdnOr(fqdn), PeerKey: pubKey, OnBehalf: onBehalf, OnBehalfKey: onBehalfKey, Session: body.ID, Method: "air/move", OK: err == nil})
+		}
+		if err == nil {
+			writeJSONResp(w, http.StatusOK, map[string]any{"status": "moved", "backend": body.Backend, "id": body.ID, "dest": body.DestKey, "by": actingIdentity(onBehalf, fqdn)})
+			return
+		}
+		status, msg := moveHTTPStatus(err)
+		http.Error(w, msg, status)
+	})
+
 	return mux
+}
+
+// moveHTTPStatus maps a move-trigger error to an HTTP status that tells the
+// caller the truth about ownership. A refusal or a lost commit CAS (409) means
+// the source THAWED and still serves — no lease moved; an unknown outcome (502)
+// means the source retains the session until its next fenced renew resolves it —
+// never reported as success. The distinct sentinels are matched first; the two
+// dynamic categories from session.MoveSessionTo are matched by their stable
+// message prefixes (a refuse/cas-lost reason, and the unknown-outcome wrap).
+func moveHTTPStatus(err error) (int, string) {
+	switch {
+	case err == nil:
+		return http.StatusOK, ""
+	case errors.Is(err, errNoBackend):
+		return http.StatusNotFound, err.Error()
+	case errors.Is(err, errBackendForbidden):
+		return http.StatusForbidden, err.Error()
+	case errors.Is(err, errMoveDialFailed):
+		return http.StatusBadGateway, err.Error()
+	}
+	s := err.Error()
+	switch {
+	case strings.Contains(s, "destination refused move"), strings.Contains(s, "destination could not commit move"):
+		// Pre-commit refusal or a lost CAS: the source thawed and keeps serving.
+		return http.StatusConflict, s
+	case strings.Contains(s, "move commit outcome unknown"):
+		// The commit may or may not have landed; the source has NOT yielded.
+		return http.StatusBadGateway, s
+	default:
+		return http.StatusBadRequest, s
+	}
 }
 
 // onBehalfOf returns the browser identity (FQDN and, when supplied, WireGuard
@@ -348,8 +435,14 @@ func (*backendForbiddenError) Error() string { return "not permitted for this ba
 // the target backend, not just the global control-endpoint Allow. A backend with
 // no entry falls back to a permissive ACL (mirrors an empty Allow = any peer).
 type gatewayAirControl struct {
-	servers  map[string]*session.Server
-	acls     map[string]acl
+	servers map[string]*session.Server
+	acls    map[string]acl
+	// dial opens an identity-pinned mesh connection to a destination gateway's
+	// move-control listener, for the live-session MOVE trigger. It is the FIRST
+	// outbound gateway->gateway call (steer only ever touches local servers);
+	// serve.go wires it to the embed mesh client's Dial. Nil ⇒ the gateway was
+	// built without move wiring and every /v1/move fails closed (502).
+	dial     func(context.Context, string) (net.Conn, error)
 	mu       *sync.Mutex
 	backends []AirCatalogEntry // canonical cards; live steerability is added per response
 	gateway  string            // this gateway's mesh FQDN, for the catalog
@@ -427,6 +520,47 @@ func (g *gatewayAirControl) steer(pubKey, fqdn, backend, id, method string, para
 		return errBackendForbidden
 	}
 	return srv.Steer(id, method, params)
+}
+
+// moveTriggerTimeout bounds one live-session move: prepare warms (spawns and, for
+// replay modes, handshake-replays) a backend on the destination, so the ceiling
+// is generous, but a move must not hold the control connection open forever.
+const moveTriggerTimeout = 60 * time.Second
+
+// errMoveDialFailed marks a failure to reach the destination gateway's
+// move-control listener (or a gateway built without move wiring), so the handler
+// maps it to 502 — distinct from the move engine's own refusal/outcome errors.
+var errMoveDialFailed = errors.New("could not reach destination gateway move-control listener")
+
+// move is the source-side live-session move trigger. It re-checks the target
+// backend's OWN ACL (control-allowed is not backend-allowed — mirrors steer),
+// dials the destination gateway's move-control listener, and runs the tested
+// session.Server.MoveSessionTo (prepare->ready->freeze->commit->yield). It adds
+// NO authorization of its own to the commit: the destination consumes a
+// single-use grant at its CommitMove, so a move only lands where the operator
+// pre-granted it. The four move invariants live entirely inside MoveSessionTo /
+// ServeMoveControl and are never touched here.
+func (g *gatewayAirControl) move(pubKey, fqdn, backend, id, destKey, destAddr string) error {
+	g.mu.Lock()
+	srv, ok := g.servers[backend]
+	g.mu.Unlock()
+	if !ok {
+		return errNoBackend
+	}
+	if !g.backendAllows(backend, pubKey, fqdn) {
+		return errBackendForbidden
+	}
+	if g.dial == nil {
+		return fmt.Errorf("%w: move trigger is not wired on this gateway", errMoveDialFailed)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), moveTriggerTimeout)
+	defer cancel()
+	conn, err := g.dial(ctx, destAddr)
+	if err != nil {
+		return fmt.Errorf("%w %s: %v", errMoveDialFailed, destAddr, err)
+	}
+	defer conn.Close()
+	return srv.MoveSessionTo(ctx, id, conn, destKey)
 }
 
 func (g *gatewayAirControl) nearby(now time.Time) []air.Presence {

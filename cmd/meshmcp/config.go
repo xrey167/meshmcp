@@ -459,6 +459,20 @@ type Backend struct {
 	// adoptable sessions (default 30, minimum 5). Only meaningful with
 	// session_failover: standby.
 	SessionSweepSeconds int `yaml:"session_sweep_seconds"`
+	// MovePort, when >0, makes this backend a live-session MOVE destination: it
+	// serves a move-control listener on this mesh port so a source gateway can
+	// hand it ownership of one live session (prepare->ready->commit, driven by
+	// session.Server.ServeMoveControl). It is per-backend because the move
+	// protocol carries a session id but not a backend name — each listener binds
+	// to THIS backend's session server. Requires resumable + a session_store (a
+	// move needs the CAS lease store) and a move-supported mode (handshake or
+	// backend; "full" re-executes the input log and cannot be reconstructed).
+	MovePort int `yaml:"move_port"`
+	// MoveGrantStore is the single-use destination grant store the move commit
+	// consumes (written by `air move grant`). Required when move_port is set:
+	// deny-by-default, a move lands only if the operator pre-granted THIS gateway
+	// (its WireGuard key) the exact session id, once.
+	MoveGrantStore string `yaml:"move_grant_store"`
 	// Policy authorizes individual tools/call requests by caller identity. For
 	// stdio backends the gateway parses the JSON-RPC stream; for HTTP/remote
 	// backends it parses each request body (F16). Rate limits, time windows,
@@ -810,6 +824,26 @@ func loadConfig(path string) (*Config, error) {
 			if b.SessionSweepSeconds < 5 {
 				return nil, fmt.Errorf("backend %q: session_sweep_seconds must be at least 5 (got %d)", b.Name, b.SessionSweepSeconds)
 			}
+		}
+		if b.MovePort != 0 {
+			if b.MovePort < 0 || b.MovePort > 65535 {
+				return nil, fmt.Errorf("backend %q: move_port must be 1-65535", b.Name)
+			}
+			if !b.Resumable || b.SessionStore == "" {
+				return nil, fmt.Errorf("backend %q: move_port requires resumable: true and a session_store (a live-session move needs the CAS lease store)", b.Name)
+			}
+			if b.SessionStoreMode == "full" {
+				return nil, fmt.Errorf("backend %q: move_port supports only session_store_mode handshake or backend (full re-executes the input log; a move cannot safely reconstruct it)", b.Name)
+			}
+			if strings.TrimSpace(b.MoveGrantStore) == "" {
+				return nil, fmt.Errorf("backend %q: move_port requires move_grant_store (the single-use destination authorization the commit consumes; deny-by-default)", b.Name)
+			}
+			if other, dup := seen[b.MovePort]; dup {
+				return nil, fmt.Errorf("backend %q: move_port %d already used by %q", b.Name, b.MovePort, other)
+			}
+			seen[b.MovePort] = b.Name
+		} else if strings.TrimSpace(b.MoveGrantStore) != "" {
+			return nil, fmt.Errorf("backend %q: move_grant_store requires move_port (the move-control listener that consumes the grant)", b.Name)
 		}
 		if len(b.DLP) > 0 {
 			if !hasStdio || b.Policy == nil {
