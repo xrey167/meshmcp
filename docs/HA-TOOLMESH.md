@@ -96,6 +96,18 @@ use: writes are atomic (temp + **fsync** + rename) and `Save`/`DeleteIfOwner`
 serialize across processes via a **cross-process advisory lock** (`flock.go`,
 exclusive lock file with stale-holder stealing), so the lease is enforced
 atomically even when two gateways contend. Tested: `flock_test.go`,
-`store_test.go`. The only genuinely-open work now is a *replicated* store
-backend (e.g. Redis/etcd behind the `SessionStore` interface) for
-multi-datacenter HA — a deployment choice, not a missing capability.
+`store_test.go`. That said, `FileStore`'s CAS holds only on a single host (or a
+lock-correct shared filesystem) — it remains the single-node default.
+
+**Replicated store backend — BUILT (store layer).** `pgstore/` implements
+`SessionStore` + `LeaseStore` (and the replay-protection stores) on PostgreSQL:
+every lease op is a row-locked transaction, so the CAS/fencing guarantees hold
+across hosts, not just across processes on one machine. Enable it by setting
+`session_store` to a DSN instead of a directory
+(`session_store: postgres://user:pass@host/db`); `serve` detects the DSN form
+and `meshmcp doctor` pings it and applies the schema. Conformance-proven by the
+shared harness in `session/storetest` (same single-winner / fencing subtests as
+`MemStore`/`FileStore`) against a live PostgreSQL. The genuinely-open work is
+the **server failover path**: lease-expiry-driven cross-gateway TAKEOVER wiring
+(capability-matrix Phase 6) is not done, so multi-host failover is not yet an
+end-to-end supported deployment.
