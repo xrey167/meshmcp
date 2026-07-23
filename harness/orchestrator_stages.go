@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xrey167/meshmcp/harness/hooks"
 	"github.com/xrey167/meshmcp/harness/provider"
 	"github.com/xrey167/meshmcp/harness/sandbox"
 	"github.com/xrey167/meshmcp/policy"
@@ -140,6 +141,16 @@ func (e *Engine) guard(rc *runCtx, kind ActionKind, target string, labels []stri
 		Actor: actor, Kind: kind, Target: target, Labels: labels,
 		RunID: string(rc.state.ID), Category: cat, Mode: mode,
 	}, sess)
+	// A pre-tool hook may block an otherwise-allowed action (safety guards:
+	// tainted egress, write-to-missing-file, stop-continuation). A hook block
+	// converts the verdict to a deny; the chain audits the hook effect itself.
+	if d.Outcome == policy.OutcomeAllow && e.hooks != nil {
+		ev := hooks.Event{Phase: hooks.PreTool, Tool: target, Labels: append(append([]string(nil), labels...), labelSlice(sess)...)}
+		if eff, _ := e.hooks.Run(ev); eff.Kind == hooks.Block {
+			d.Outcome = policy.OutcomeDeny
+			d.Reason = "hook blocked: " + eff.Reason
+		}
+	}
 	if d.Outcome == policy.OutcomeAllow && len(d.AddLabels) > 0 {
 		rc.mu.Lock()
 		for _, l := range d.AddLabels {

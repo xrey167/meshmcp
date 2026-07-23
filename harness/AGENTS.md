@@ -27,6 +27,8 @@ See `../docs/harness/DESIGN.md` and `SPEC.md`.
 | `continuity.go` | `Continuity` over `air/checkpoint.Store` (identity-bound, audited) + in-mem. |
 | `identity.go` | `Identity` + `Minter` (`MemMinter`; production via `control.NetBirdIssuer`). |
 | `provider/` `sandbox/` | Provider adapters (mock/CLI + fallback) and exec backends (local/worktree + fail-closed stubs). |
+| `hooks/` | Lifecycle hook engine: `(Event) → Effect` chain; safety hooks can't be disabled; a user hook that weakens a safety label is refused at load. Wired into `guard`. |
+| `skills/` | `SKILL.md` loader (front-matter + body), builtin/project/user scopes, trigger auto-match. |
 | `insight.go` | `Tuner`: profile→recommend→simulate→apply over the harness audit stream. |
 | `config.go` `budget.go` `label.go` `action.go` `types.go` | Typed config, budgets, data-flow labels, the `GovernedAction` envelope, and the persisted data model. |
 

@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/xrey167/meshmcp/harness/hooks"
 	"github.com/xrey167/meshmcp/harness/provider"
 	"github.com/xrey167/meshmcp/policy"
 )
@@ -34,6 +35,7 @@ type Engine struct {
 	verifier *Verifier
 	table    CategoryTable
 	cfg      Config
+	hooks    *hooks.Chain // optional lifecycle hook chain (nil → no hooks)
 	now      func() time.Time
 
 	mu   sync.Mutex
@@ -62,6 +64,7 @@ type EngineOpts struct {
 	Continuity Continuity
 	Minter     Minter
 	Config     Config
+	Hooks      *hooks.Chain // optional lifecycle hook chain
 	Now        func() time.Time
 }
 
@@ -106,6 +109,7 @@ func NewEngine(o EngineOpts) *Engine {
 		verifier: NewVerifier(reg),
 		table:    table,
 		cfg:      cfg,
+		hooks:    o.Hooks,
 		now:      now,
 		runs:     map[RunID]*runCtx{},
 	}
