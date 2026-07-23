@@ -57,7 +57,11 @@ every call audited on both sides, nothing else reachable. B2B tool-sharing with 
 surface.
 > **Status:** partially shipped — the governed plugin marketplace (**F14**, `meshmcp market`)
 > and the federation boundary (`federation/`, now with a wired DCR/token-exchange edge) ship;
-> SSO-mapped federation (**F31**) is not yet built.
+> SSO-mapped federation (**F31**) has shipped its **first slice**: a verified OIDC token
+> presented over an already-authenticated mesh connection attributes its `groups` claim to the
+> caller's WireGuard key, feeding `group:<name>` policy — additive attribution over the
+> transport root, never a replacement for it (see [SSO.md](SSO.md)). Static pinned issuer keys,
+> no JWKS fetch; a forged/expired/wrong-audience token maps to nothing (deny).
 
 **Phase 7 — observability plane.** `meshmcp status` → live sessions, peers, per-tool call
 rates; the audit stream shipped to any sink (OTel, a SIEM). "Who called what, from where,
@@ -73,11 +77,13 @@ when" becomes queryable for an entire agent fleet.
 > Phase 4 → **F21 ✓** (capability revocation lifecycle), Phase 5 → **F29 ✓** (cost & budget
 > governance), Phase 7 → **F15 ✓** (observability plane — `status` + webhook sink); Phase 6 →
 > **F14 ✓** (plugin marketplace — `meshmcp market`) shipped and **F31** (SSO-mapped
-> federation) remains **backlog**. Wave 2 also
+> federation) shipped its **first slice** — OIDC group attribution over the transport root
+> (see [SSO.md](SSO.md)); cross-org SSO mapping at the federation seam is the remaining work.
+> Wave 2 also
 > shipped the compile-time **plugin platform** (F13), HTTP-backend policy parity (F16),
 > group-based policy (F17), identity-bound sessions (F23), the mesh vault / scheduler / event
 > bus (F26–F28), an attestation pack (F32), client-hook adapters (F33), and most of the
-> hardening sweep — flagships F13–F33 (F30/F31 still open) + minors S11–S60.
+> hardening sweep — flagships F13–F33 (F30 still open; F25 and F31 first slices shipped) + minors S11–S60.
 >
 > **F25 (multi-tenant control plane) — first slice shipped.** The control plane
 > partitions its own state (policy, registry, enrollment, audit) into tenants
@@ -89,6 +95,12 @@ when" becomes queryable for an entire agent fleet.
 > PAT/account (per-tenant groups + audit attribution, not account isolation), and
 > the anchor witness stays shared. See
 > **[MULTI-TENANT.md](MULTI-TENANT.md)** and THREAT-MODEL adversary 14.
+>
+> **F31 (SSO/OIDC mapping) — first slice shipped.** A verified OIDC token maps to
+> additive `group:<name>` attribution over the transport-authenticated mesh key
+> (never a replacement), presented on the gateway control endpoint and verified
+> against statically pinned issuer keys in fail-closed order. See
+> **[SSO.md](SSO.md)** and THREAT-MODEL adversary 15.
 
 ## Where it goes — wilder (still grounded in the primitives)
 
@@ -132,9 +144,13 @@ when" becomes queryable for an entire agent fleet.
   (≈ a stdio reconnect) and idle label state expires after 24h. DLP, shadow policies,
   and router delegation remain stdio-only and are refused in config for HTTP/remote.
 - Policy matches FQDN, pubkey, and **`group:<name>`** rules (F17); groups are resolved from
-  config today (`groups:`, a static `GroupResolver`). Dynamic NetBird group membership isn't
-  available through the embed API — a management-API-backed resolver is a drop-in for the same
-  interface but isn't wired yet.
+  config (`groups:`, a static `GroupResolver`) **and**, when SSO is configured (F31 v1), from a
+  verified OIDC token's `groups` claim attributed to the caller's WireGuard key — the two are
+  OR-composed behind the engine's single resolver slot (see [SSO.md](SSO.md)). SSO groups are
+  additive attribution over the transport root, bounded by the token's lifetime; a forged or
+  expired token attributes nothing. Dynamic NetBird group membership still isn't available
+  through the embed API — a management-API-backed resolver is a drop-in for the same interface
+  but isn't wired yet.
 - The gateway binary is heavy (~44 MB, NetBird's dep tree) — a daemon, not something to
   embed in a tiny CLI. Clients that only `connect` could use a thinner build later.
 - One live roam (physically moving networks mid-session) is proven only by loopback drop +

@@ -80,7 +80,7 @@ func startParityGateway(t *testing.T, b *Backend, pb *parityBackend) (*httptest.
 	}
 	b.HTTP = bs.URL
 	b.httpURL = u
-	enf, err := newHTTPEnforcer(b, policy.NewAuditLog(io.Discard, func() string { return "T" }))
+	enf, err := newHTTPEnforcer(b, policy.NewAuditLog(io.Discard, func() string { return "T" }), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -570,7 +570,7 @@ func TestHTTPCapabilityOnlyDecisionsAudited(t *testing.T) {
 		t.Fatal(err)
 	}
 	b.HTTP, b.httpURL = bs.URL, u
-	enf, err := newHTTPEnforcer(b, audit)
+	enf, err := newHTTPEnforcer(b, audit, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -934,7 +934,7 @@ func httpCapReaches(t *testing.T, pol *policy.Policy, pubHex string, required bo
 	t.Helper()
 	b := &Backend{Name: "b", Policy: pol,
 		Capabilities: &CapabilitiesConfig{Required: required, TrustedPublicKeys: []string{pubHex}}}
-	enf, err := newHTTPEnforcer(b, policy.NewAuditLog(io.Discard, func() string { return "T" }))
+	enf, err := newHTTPEnforcer(b, policy.NewAuditLog(io.Discard, func() string { return "T" }), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -977,7 +977,7 @@ func TestRemoteBackendSecretParity(t *testing.T) {
 	rc := &remoteClient{name: "r", endpoint: u, clientID: "c", httpClient: upstream.Client(), now: time.Now}
 
 	b := secretsBackend(t, "r", []string{"API_KEY"}, nil, nil)
-	enf, err := newHTTPEnforcer(b, policy.NewAuditLog(io.Discard, func() string { return "T" }))
+	enf, err := newHTTPEnforcer(b, policy.NewAuditLog(io.Discard, func() string { return "T" }), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

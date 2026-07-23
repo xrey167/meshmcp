@@ -328,6 +328,39 @@ has one tenant and this class does not arise. See
   are named non-goals. As always, isolation is only as correct as the deployed
   ACL — a key granted under a tenant holds that tenant's roles.
 
+### 15. Presenter of a forged or misissued SSO/OIDC token (F31)
+
+An adversary who presents a fabricated, tampered, expired, or wrong-audience
+OIDC token to the SSO attestation surface (`POST /v1/sso/attest`), hoping to
+attribute a privileged `group:<name>` to themselves.
+
+- **Defended:** SSO group attribution is **additive over the transport root,
+  never a replacement for it.** The caller's WireGuard transport key is resolved
+  from the connection **first** (never from the token) and remains the only thing
+  policy enforcement keys on. A presented token is verified against **statically
+  pinned** issuer keys in strict, fail-closed order — accepted-algorithm gate
+  (rejecting `alg:none` and HS256 alg-confusion outright), pinned-issuer lookup
+  (exact `iss`, no glob/wildcard), header `alg` equal to the issuer's **pinned**
+  algorithm (never selected from the token), signature (ES256 r‖s or RS256
+  PKCS#1 v1.5), `aud` contains meshmcp's identity, then `exp`/`nbf`. Any failure
+  binds **nothing**: `InGroup` stays false, the `group:<name>` rule does not
+  match, and the caller falls to the default-deny behavior it had before. A valid
+  binding is bounded to `min(token exp, bind_ttl_max)` and evicted on expiry, and
+  is keyed strictly to the presenter's transport key — one peer can never
+  attribute a group to another peer's key. Every attest attempt (bind or reject)
+  is audited under the transport-verified key. With no `oidc:` configured the
+  surface does not exist and behavior is byte-identical to a build without the
+  feature.
+- **Limit:** meshmcp trusts the **pinned IdP** for group *membership*: a
+  legitimately-issued, currently-valid token that genuinely carries `group X`
+  does attribute `X` — meshmcp verifies the token is authentic and current, not
+  whether the IdP's assignment is "correct." Keys are pinned statically (JWKS
+  file or PEM); v1 does not fetch a `jwks_uri`, so key **rotation** is an operator
+  config update (a cached-fetch is the documented v2 extension). Bindings are
+  in-memory and per-gateway-process. As always, authorization is only as correct
+  as the deployed policy: an attributed group grants nothing unless a rule
+  references it.
+
 ---
 
 ## Audit: what "tamper-evident" means here

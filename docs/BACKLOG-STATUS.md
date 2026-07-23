@@ -21,7 +21,7 @@ content lands in BACKLOG.md.
 | 9 | HTTP per-session policy parity | **done** | Taint + secrets + capabilities on Streamable HTTP; per-session state, SSE redaction; refused features still refused |
 | 10 | AKS pillars 1–3 | **done** | Record-level subgraph scoping + provenance, supersede/alias, RAG entity-linking, governed graph loop; Phase 4 deferred |
 | 11 | F25 multi-tenant control plane | **v1 done** | Per-tenant policy/registry/enrollment/audit keyed on transport identity in the authorize chokepoint; per-tenant RBAC (no cross-tenant super-role); one hash chain per tenant; deny-by-default; single-tenant byte-identical. Full isolation matrix in control/tenant_test.go. Honest boundary: shared NetBird PAT (groups+attribution, not account isolation), shared anchor witness. See MULTI-TENANT.md |
-| 12 | F31 SSO/OIDC mapping | todo | |
+| 12 | F31 SSO/OIDC mapping | **done** | Verified OIDC claim -> transport-key-bound additive attribution; SSO groups drive policy group: rules; transport stays root; 0 review findings |
 | 13 | F30 drag-to-handoff | todo | Blocked on 5 until 5 ships |
 | 14 | Native mobile shell + APNs/FCM | **blocked** | Needs mobile toolchain + physical device |
 | 15 | S33 govulncheck in CI | **blocked-CI** | Workflow YAML can be pre-staged; unverifiable until 1 |

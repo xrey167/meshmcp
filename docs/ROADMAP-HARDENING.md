@@ -210,6 +210,18 @@ Map external IdP identities (OIDC) to mesh identities at the federation boundary
 mapping already in `federation/boundary.go`, so **org SSO drives policy**.
 > **Why it's revolutionary:** enterprise SSO meets cryptographic mesh identity — a user's directory role
 > becomes their tool-call authorization, end to end and audited.
+>
+> **Shipped (v1 — first slice):** SSO-mapped **group attribution**. A verified OIDC token presented over
+> an already-authenticated mesh connection (`POST /v1/sso/attest` on the control endpoint) attributes its
+> `groups` claim to the caller's WireGuard TRANSPORT key, feeding existing `group:<name>` policy on stdio
+> and HTTP backends. It reuses `federation/exchange.go`'s ordered, pinned-alg, fail-closed verifier model
+> (`policy/oidc.go` `OIDCVerifier`, RS256+ES256, `iss`/`aud`/`exp`/`nbf`, `alg:none`/alg-confusion
+> rejected) with keys pinned STATICALLY (JWKS file or PEM — no `jwks_uri` fetch on the verify path) and
+> the collision-safe exact-issuer mapping (`federation/boundary.go`'s `OrgForIssuer` pattern). The claim is
+> ADDITIVE over the transport root and never a replacement: enforcement still keys solely on the WireGuard
+> key, a binding is bounded to `min(token exp, bind_ttl_max)` and strictly per-transport-key, and every
+> forgery/expiry/audience/issuer/alg failure binds nothing (deny). See `docs/SSO.md`. Remaining F31 work:
+> cross-org SSO mapping at the federation seam and a cached `jwks_uri` fetch (v2).
 
 ### F32 · Compliance & attestation pack
 One command bundles a **verifiable evidence package**: the signed audit, its Merkle checkpoints, the
