@@ -43,6 +43,29 @@ func TestMergeHostedInbox(t *testing.T) {
 	}
 }
 
+func TestMergeHostedRing(t *testing.T) {
+	out, err := mergeHostedRing(air.Announcement{}, 9130)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Services) != 1 || out.Services[0].Kind != air.ServiceRing || out.Services[0].Port != 9130 {
+		t.Fatalf("hosted ring service = %v", out.Services)
+	}
+	conflicted := air.Announcement{Services: []air.Service{{Kind: air.ServiceRing, Port: 9001}}}
+	if _, err := mergeHostedRing(conflicted, 9130); err == nil || !strings.Contains(err.Error(), "conflicts") {
+		t.Fatalf("expected conflict error, got %v", err)
+	}
+	// Different kinds coexist: hosting both inbox and ring is one card.
+	withInbox, err := mergeHostedInbox(air.Announcement{}, 9110)
+	if err != nil {
+		t.Fatal(err)
+	}
+	both, err := mergeHostedRing(withInbox, 9130)
+	if err != nil || len(both.Services) != 2 {
+		t.Fatalf("inbox+ring merge: %v %v", both.Services, err)
+	}
+}
+
 // TestDropAcceptLoopACLGate proves the shared receiver loop admits only
 // ACL-listed identities: a denied peer's connection is closed before any
 // session traffic; an allowed peer's connection stays open for the handshake.
@@ -63,8 +86,8 @@ func TestDropAcceptLoopACLGate(t *testing.T) {
 		defer mu.Unlock()
 		return current.key, current.fqdn
 	}
-	go runDropAcceptLoop(ln, identity, newACL([]string{"allowed.mesh"}),
-		dirPlacer(t.TempDir()), dropLimits{}, nil, func(string, ...any) {})
+	go runAirAcceptLoop(ln, identity, newACL([]string{"allowed.mesh"}),
+		newDropFactory(dirPlacer(t.TempDir()), dropLimits{}, nil), "drop", func(string, ...any) {})
 
 	dial := func(key, fqdn string) net.Conn {
 		t.Helper()

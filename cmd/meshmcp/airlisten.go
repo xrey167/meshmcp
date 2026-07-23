@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"sync"
@@ -80,20 +81,9 @@ func cmdAirListen(args []string) error {
 	handle := func(n air.Notice, meta session.Meta) {
 		onRing(n, meta, limiter, audit, *bell, *asJSON, os.Stdout)
 	}
-	srv := session.NewServer(newListenFactory(handle), 2*time.Minute, log.Printf)
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			return nil // listener closed (Ctrl-C)
-		}
-		pubKey, fqdn := peerIdentity(client, conn.RemoteAddr())
-		if !checker.allows(pubKey, fqdn) {
-			log.Printf("ring DENIED from %s (%s): not in allow list", fqdn, shortKey(pubKey))
-			conn.Close()
-			continue
-		}
-		go srv.Handle(conn, session.Meta{PeerFQDN: fqdn, PeerAddr: conn.RemoteAddr().String(), PeerKey: pubKey})
-	}
+	identity := func(addr net.Addr) (string, string) { return peerIdentity(client, addr) }
+	runAirAcceptLoop(ln, identity, checker, newListenFactory(handle), "ring", log.Printf)
+	return nil
 }
 
 // onRing validates, rate-limits, renders, and audits one received notice.
