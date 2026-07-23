@@ -14,6 +14,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/xrey167/meshmcp/edge"
+	"github.com/xrey167/meshmcp/pgstore"
 )
 
 // cmdEdge runs the public OAuth ingress: `meshmcp edge --config edge.yaml`.
@@ -60,11 +61,27 @@ func cmdEdge(args []string) error {
 		return err
 	}
 
+	var opts edge.Options
+	// A configured shared DPoP replay store must open before anything else
+	// starts: an edge that silently fell back to per-process replay tracking
+	// would be a security downgrade, so open failure refuses startup.
+	if dsn := cfg.OAuth.DPoPReplayStore; dsn != "" {
+		if !isPostgresDSN(dsn) {
+			return fmt.Errorf("edge: oauth.dpop_replay_store must be a postgres:// or postgresql:// DSN")
+		}
+		store, err := pgstore.Open(dsn)
+		if err != nil {
+			return fmt.Errorf("edge: open dpop_replay_store %s: %w", redactDSN(dsn), err)
+		}
+		defer store.Close()
+		opts.DPoPReplay = store
+		fmt.Fprintf(os.Stderr, "meshmcp edge: dpop replay store %s (shared)\n", redactDSN(dsn))
+	}
+
 	// Join the mesh so the one configured backend (a mesh address) is reachable,
 	// exactly as `federate` does. When no setup key is configured, fall back to a
 	// plain TCP dial so an edge co-located with its backend (or a test) still
 	// works without a mesh.
-	var opts edge.Options
 	meshKey, err := resolveEdgeSetupKey(cfg.Mesh)
 	if err != nil {
 		return err

@@ -191,6 +191,13 @@ type OAuthConfig struct {
 	// Sessions enables full Streamable-HTTP sessions (Mcp-Session-Id + GET SSE).
 	// When false the MCP endpoint is stateless POST-only (spec-legal).
 	Sessions *bool `yaml:"sessions"`
+	// DPoPReplayStore, when set, is a postgres:// DSN backing the edge's DPoP
+	// replay store (jti + nonce tracking) with PostgreSQL, so replay protection
+	// holds across edge restarts and across multiple edge instances behind one
+	// public URL. Empty keeps the default in-process store (single-instance
+	// semantics). Any non-postgres value is a configuration error — never a
+	// silent fallback.
+	DPoPReplayStore string `yaml:"dpop_replay_store"`
 }
 
 // SessionsEnabled reports the effective session toggle (default true).
@@ -355,6 +362,10 @@ func (c Config) Validate() (Config, error) {
 	if c.OAuth.RefreshTokenTTL < c.OAuth.AccessTokenTTL {
 		return c, fmt.Errorf("edge: oauth.refresh_token_ttl must be >= access_token_ttl")
 	}
+	if c.OAuth.DPoPReplayStore != "" && !isPostgresDSN(c.OAuth.DPoPReplayStore) {
+		// The value is not echoed: a mistyped DSN may carry credentials.
+		return c, fmt.Errorf("edge: oauth.dpop_replay_store must be a postgres:// or postgresql:// DSN")
+	}
 
 	if c.Backend.Name == "" {
 		return c, fmt.Errorf("edge: backend.name is required")
@@ -367,6 +378,12 @@ func (c Config) Validate() (Config, error) {
 	}
 
 	return c, nil
+}
+
+// isPostgresDSN reports whether a store value selects a PostgreSQL backend.
+// Mirrors cmd/meshmcp's session_store helper of the same name.
+func isPostgresDSN(s string) bool {
+	return strings.HasPrefix(s, "postgres://") || strings.HasPrefix(s, "postgresql://")
 }
 
 func containsFold(hay []string, needle string) bool {
