@@ -71,8 +71,10 @@ meshmcp air node 100.x.y.z:9600 --name analyst --kind agent \
   --activity-title "Customer research" --progress 68      # heartbeat until Ctrl-C
 meshmcp air node 100.x.y.z:9600 --name analyst --kind agent \
   --inbox-port 9110 --inbox-dir ./inbox --inbox-allow "rey-*.mesh" \
-  # HOST the inbox too: one command runs the receiver (drop.complete.v1) on this
-  # node's identity and announces it — no separate `drop --config` process
+  --ring-port 9130 --ring-allow "rey-*.mesh" \
+  # HOST the inbox and ring too: one command runs the receivers (inbox with
+  # drop.complete.v1, ring rate-limited) on this node's identity and announces
+  # them — no separate `drop --config` / `air listen` processes
 meshmcp air catalog 100.x.y.z:9600   # what backends can I reach on this gateway?
 meshmcp air map 100.x.y.z:9600       # your reachable mesh as a tree (you → gateway → backends)
 meshmcp air browse 100.x.y.z:9101    # what tools/resources/prompts a backend exposes
