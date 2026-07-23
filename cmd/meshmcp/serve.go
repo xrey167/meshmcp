@@ -139,6 +139,10 @@ func cmdServe(args []string) error {
 		log.Printf("gateway hooks enabled (%s)", strings.Join(note, ", "))
 	}
 
+	// engines holds each policy-bearing backend's running Engine, keyed by name,
+	// so a SIGHUP can hot-swap its policy rules in place without a restart.
+	engines := map[string]*policy.Engine{}
+
 	for _, b := range cfg.Backends {
 		ln, err := client.ListenTCP(fmt.Sprintf(":%d", b.Port))
 		if err != nil {
@@ -187,9 +191,14 @@ func cmdServe(args []string) error {
 		var factory session.BackendFactory
 		var httpEnf *httpEnforcer
 		if len(b.Stdio) > 0 {
-			factory = backendFactory(b, audit, tracer, hookSink)
+			var eng *policy.Engine
+			factory, eng = backendFactory(b, audit, tracer, hookSink)
+			if eng != nil {
+				engines[b.Name] = eng
+			}
 		} else if b.Policy != nil {
 			httpEnf = newHTTPEnforcer(b, audit)
+			engines[b.Name] = httpEnf.eng
 			log.Printf("backend %q: HTTP policy enforcement on (%d rules)", b.Name, len(b.Policy.Rules))
 		}
 
@@ -314,7 +323,22 @@ func cmdServe(args []string) error {
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, shutdownSignals...)
-	<-sig
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, reloadSignals...)
+	if len(engines) > 0 {
+		log.Printf("send SIGHUP to hot-reload policy rules for %d backend(s) without a restart", len(engines))
+	}
+	// Serve until a shutdown signal; a SIGHUP in between re-reads the config and
+	// hot-swaps each backend's policy rules in place.
+waitForShutdown:
+	for {
+		select {
+		case <-hup:
+			reloadPolicies(*cfgPath, engines)
+		case <-sig:
+			break waitForShutdown
+		}
+	}
 
 	log.Println("shutting down")
 	close(shutdown)
@@ -445,13 +469,53 @@ func bridgeConn(conn net.Conn, backend session.Backend) {
 	<-done
 }
 
+// reloadPolicies re-reads the config at cfgPath and hot-swaps each backend's
+// policy RULES into its running Engine, matched by backend name (SIGHUP). It is
+// fail-safe: a config that no longer loads (a bad edit) leaves every running
+// policy untouched, so a typo can never disarm the gateway. Only policy rules
+// are reloaded — peer ACLs, listeners, capability trust roots, and other startup
+// wiring are captured once and are NOT changed here (that is a wider re-plumb).
+// A require_cosign approval bound to the old PolicyHash stops verifying after a
+// reload changes the rules, by design.
+func reloadPolicies(cfgPath string, engines map[string]*policy.Engine) {
+	newCfg, err := loadConfig(cfgPath)
+	if err != nil {
+		log.Printf("reload: config %s did not load — keeping the running policy: %v", cfgPath, err)
+		return
+	}
+	applied, present := 0, map[string]bool{}
+	for _, b := range newCfg.Backends {
+		present[b.Name] = true
+		eng, ok := engines[b.Name]
+		if !ok {
+			continue // backend has no running policy engine (or is newly added — needs a restart to listen)
+		}
+		pol := b.Policy
+		if pol == nil {
+			// A capabilities-only backend keeps its synthesized deny-by-default.
+			pol = &policy.Policy{DefaultAllow: false}
+		}
+		eng.SetPolicy(pol)
+		applied++
+		log.Printf("reload: backend %q policy updated (%d rules, default %s)", b.Name, len(pol.Rules), allowWord(pol.DefaultAllow))
+	}
+	for name := range engines {
+		if !present[name] {
+			log.Printf("reload: backend %q is gone from the config — its running policy is unchanged (remove needs a restart)", name)
+		}
+	}
+	log.Printf("reload: applied %d backend policy update(s) from %s", applied, cfgPath)
+}
+
 // backendFactory builds the per-session backend for a stdio backend. It
 // wraps the subprocess with the inspection filter when a policy is set OR a
 // tracer is configured; with neither, the raw subprocess is used.
-func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer, hook policy.EventHook) session.BackendFactory {
+// It also returns the per-backend policy Engine (nil when the backend has no
+// policy/capabilities) so the caller can hot-swap its policy on SIGHUP.
+func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer, hook policy.EventHook) (session.BackendFactory, *policy.Engine) {
 	exec := session.ExecBackendFactory(b.Stdio[0], b.Stdio[1:], os.Environ())
 	if b.Policy == nil && tracer == nil && b.Capabilities == nil {
-		return exec
+		return exec, nil
 	}
 	// One Engine per backend, shared across all its connections, so rate
 	// limits and co-sign approvals are per-identity rather than per-connection.
@@ -575,7 +639,7 @@ func backendFactory(b *Backend, audit *policy.AuditLog, tracer *policy.Tracer, h
 			f.SetEventHook(hook)
 		}
 		return f, nil
-	}
+	}, eng
 }
 
 // secretStore builds the Store for a backend's secrets config: a file layered

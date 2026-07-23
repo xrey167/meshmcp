@@ -18,3 +18,10 @@ import (
 // simply never delivered on Windows, where os.Interrupt maps to Ctrl-C), so this
 // compiles and is safe cross-platform.
 var shutdownSignals = []os.Signal{os.Interrupt, syscall.SIGTERM}
+
+// reloadSignals is the set of OS signals that ask a running gateway to re-read
+// its config and hot-swap policy rules in place, without a restart. SIGHUP is
+// the long-standing Unix convention for "reload your configuration"; it is a
+// defined constant on all platforms (never delivered on Windows), so referencing
+// it here compiles cross-platform, mirroring shutdownSignals' SIGTERM handling.
+var reloadSignals = []os.Signal{syscall.SIGHUP}

@@ -431,7 +431,7 @@ func (f *Filter) handleToolCall(line []byte, tool string, id, args json.RawMessa
 // audited and enforced only when a Methods rule matches; ungoverned methods
 // (initialize, tools/list, ...) pass through unaudited.
 func (f *Filter) handleMethod(line []byte, method string, id json.RawMessage) error {
-	dec := f.eng.pol.DecideMethod(f.caller.Peer, f.caller.PeerKey, method)
+	dec := f.eng.Policy().DecideMethod(f.caller.Peer, f.caller.PeerKey, method)
 	if dec.RuleID == -1 {
 		f.traceLine("c2s", line, "")
 		_, werr := f.inner.Write(line)
@@ -455,7 +455,7 @@ func (f *Filter) handleMethod(line []byte, method string, id json.RawMessage) er
 // is dropped (no id to answer). Ungoverned notifications pass through so
 // protocol-critical ones like notifications/initialized are never lost.
 func (f *Filter) handleNotification(line []byte, method string) error {
-	dec := f.eng.pol.DecideMethod(f.caller.Peer, f.caller.PeerKey, method)
+	dec := f.eng.Policy().DecideMethod(f.caller.Peer, f.caller.PeerKey, method)
 	if dec.RuleID == -1 {
 		f.traceLine("c2s", line, "")
 		_, werr := f.inner.Write(line)
