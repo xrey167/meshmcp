@@ -245,6 +245,41 @@ func TestTaskSteer(t *testing.T) {
 	}
 }
 
+// TestTaskManagerBoundedEviction proves the retained-task map is bounded: at the
+// cap the oldest FINISHED task is reclaimed, and when every retained task is
+// still in flight the manager reports it cannot reclaim (so start fails closed
+// rather than growing the map without bound).
+func TestTaskManagerBoundedEviction(t *testing.T) {
+	// A manager full of terminal tasks reclaims the oldest on demand.
+	full := newTaskManager()
+	for i := 0; i < maxTasks; i++ {
+		id := fmt.Sprintf("task-%d", i)
+		full.tasks[id] = &task{id: id, status: StatusCompleted}
+		full.order = append(full.order, id)
+	}
+	if !full.evictOldestTerminalLocked() {
+		t.Fatal("a manager full of finished tasks must be able to reclaim one")
+	}
+	if len(full.tasks) != maxTasks-1 || len(full.order) != maxTasks-1 {
+		t.Fatalf("eviction did not shrink: tasks=%d order=%d", len(full.tasks), len(full.order))
+	}
+	if _, ok := full.tasks["task-0"]; ok {
+		t.Fatal("eviction must reclaim the OLDEST task first")
+	}
+
+	// A manager whose every retained task is still working cannot reclaim any —
+	// this is the signal start() uses to fail closed at the cap.
+	busy := newTaskManager()
+	for i := 0; i < maxTasks; i++ {
+		id := fmt.Sprintf("w-%d", i)
+		busy.tasks[id] = &task{id: id, status: StatusWorking}
+		busy.order = append(busy.order, id)
+	}
+	if busy.evictOldestTerminalLocked() {
+		t.Fatal("a working task must never be evicted")
+	}
+}
+
 func TestTaskCancellation(t *testing.T) {
 	h := startHarness(t, taskServer())
 

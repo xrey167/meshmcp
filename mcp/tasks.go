@@ -34,6 +34,23 @@ func (t *task) snapshot() (status, errMsg string) {
 	return t.status, t.errMsg
 }
 
+// isTerminal reports whether the task has finished (completed/failed/cancelled)
+// and so is eligible for eviction when the retained-task cap is hit.
+func (t *task) isTerminal() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.status != StatusWorking
+}
+
+// maxTasks bounds the retained task records per server. Task records are
+// client-driven allocations (each tools/call with task:true adds one) and were
+// previously never reaped, so a peer could grow the map without bound until the
+// backend OOMs. This mirrors the bounds every other client-controlled
+// allocation carries (subscriptions maxSubscriptions, idempotency memClaimCap).
+// At the cap the manager first evicts the oldest FINISHED task; if none can be
+// reclaimed (all in flight) it fails closed and refuses the new task.
+const maxTasks = 4096
+
 // steerBuffer bounds a task's pending steer payloads. A non-blocking send drops
 // (and taskManager.steer reports "busy") once this many are unconsumed, so a
 // steer call can never block on a handler that isn't reading.
@@ -70,8 +87,14 @@ func newTaskManager() *taskManager {
 // the task's progress notifications can never precede its handle — then runs
 // the handler in a goroutine that records the outcome and emits a
 // notifications/tasks/status.
-func (m *taskManager) start(sess *Session, reqID json.RawMessage, toolName string, handler ToolHandler, meta, args json.RawMessage) {
+func (m *taskManager) start(sess *Session, reqID json.RawMessage, toolName string, handler ToolHandler, meta, args json.RawMessage) bool {
 	m.mu.Lock()
+	if len(m.tasks) >= maxTasks && !m.evictOldestTerminalLocked() {
+		// At the cap with every retained task still in flight: refuse rather than
+		// grow the map without bound (fail closed).
+		m.mu.Unlock()
+		return false
+	}
 	m.seq++
 	id := fmt.Sprintf("task-%d", m.seq)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -107,6 +130,26 @@ func (m *taskManager) start(sess *Session, reqID json.RawMessage, toolName strin
 		cancel() // release the context
 		sess.Notify("notifications/tasks/status", map[string]any{"taskId": id, "status": status})
 	}()
+	return true
+}
+
+// evictOldestTerminalLocked removes the oldest FINISHED task from the manager,
+// reclaiming its map and order-slice entry. It returns false when no retained
+// task has finished (every one is still working), in which case the caller must
+// fail closed rather than exceed the cap. Caller holds m.mu.
+func (m *taskManager) evictOldestTerminalLocked() bool {
+	for i, id := range m.order {
+		t := m.tasks[id]
+		if t == nil {
+			continue // stale order entry; skip
+		}
+		if t.isTerminal() {
+			delete(m.tasks, id)
+			m.order = append(m.order[:i], m.order[i+1:]...)
+			return true
+		}
+	}
+	return false
 }
 
 func (m *taskManager) get(id string) (*task, bool) {

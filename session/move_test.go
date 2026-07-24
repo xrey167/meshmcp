@@ -477,6 +477,64 @@ func TestMoveAbort_ControlConnDrop(t *testing.T) {
 	assertOwner(t, store, id, source.instance, g)
 }
 
+// TestMoveControl_OneWarmPerConnection: preparing a second, DIFFERENT session on
+// a single control connection supersedes the first rather than adding to it, so a
+// peer cannot strand spawned backends by preparing many sessions on one
+// connection and disconnecting (the disconnect-abort defer reaps only the last
+// preparedID). Defense-in-depth against move-control resource exhaustion.
+func TestMoveControl_OneWarmPerConnection(t *testing.T) {
+	store := NewMemStore()
+	source, addrA, stopA := startMoveServer(t, store, statefulFactory(nil), MigrateBackend)
+	dest, _, stopB := startMoveServer(t, store, statefulFactory(nil), MigrateBackend)
+	defer stopA()
+	defer stopB()
+
+	d := &switchDialer{addr: addrA}
+	idA, _, localA, cancelA := establishBackendSession(t, source, d)
+	defer cancelA()
+	defer localA.Close()
+	gA := sessionGen(source, idA)
+	idB, _, localB, cancelB := establishBackendSession(t, source, d)
+	defer cancelB()
+	defer localB.Close()
+	gB := sessionGen(source, idB)
+
+	srcConn, dstConn := net.Pipe()
+	mvErr := make(chan error, 1)
+	go func() { mvErr <- dest.ServeMoveControl(dstConn, denyAll) }()
+	w := bufio.NewWriter(srcConn)
+	r := bufio.NewReaderSize(srcConn, maxMoveFrameBytes+64)
+
+	prepare := func(id string, g uint64) {
+		t.Helper()
+		psx := loadPS(t, store, id)
+		if err := writeMoveFrame(w, moveFrame{Type: moveKindPrepare, SessionID: id, Gen: g, Mode: int(MigrateBackend), CreatorKey: psx.CreatorKey}); err != nil {
+			t.Fatalf("write prepare: %v", err)
+		}
+		ready, err := readMoveFrame(r)
+		if err != nil || ready.Type != moveKindReady || !ready.OK {
+			t.Fatalf("expected READY, got %+v err=%v", ready, err)
+		}
+	}
+
+	prepare(idA, gA)
+	if dest.warmingCount() != 1 {
+		t.Fatalf("after prepare A: warming=%d, want 1", dest.warmingCount())
+	}
+	prepare(idB, gB)
+	// The second prepare (a different id) on the SAME connection must supersede
+	// the first, not accumulate — otherwise a disconnect would strand A's backend.
+	if dest.warmingCount() != 1 {
+		t.Fatalf("after prepare B on same conn: warming=%d, want 1 (A superseded)", dest.warmingCount())
+	}
+
+	srcConn.Close()
+	<-mvErr
+	if dest.warmingCount() != 0 {
+		t.Fatalf("after control drop: warming=%d, want 0 (both reaped)", dest.warmingCount())
+	}
+}
+
 // ============================ crash-recovery matrix ============================
 
 // Each subtest injects a "crash" at a distinct point of the move (by abandoning

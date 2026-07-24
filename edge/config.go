@@ -138,6 +138,22 @@ type Config struct {
 	// block MUST be empty. Off by default.
 	BehindFront bool `yaml:"behind_front"`
 
+	// ForwardedHeader names the HTTP header the edge trusts for the caller's
+	// source IP when (and only when) BehindFront is set. In behind_front mode the
+	// edge binds loopback and every request's RemoteAddr is the local front, so
+	// the per-IP pre-auth rate limiters (token/authorize/registration) would
+	// otherwise collapse to a single global bucket keyed on the front — letting
+	// one caller exhaust the limit for all hosted clients. When this names a
+	// header the front sets from the real peer (e.g. "X-Forwarded-For"), the
+	// limiter keys on the right-most value of that header instead. It is honored
+	// ONLY behind a front (the operator attests the front sets it from the true
+	// peer and strips any client-supplied copy); trusting a forwarding header on a
+	// directly-exposed listener would let a caller spoof the key and evade the
+	// limit entirely, so it is a config error to set this without behind_front.
+	// Empty (the default) keeps the pre-front behavior: per-IP limits are global
+	// behind a front.
+	ForwardedHeader string `yaml:"forwarded_header"`
+
 	TLS          TLSConfig          `yaml:"tls"`
 	Registration RegistrationConfig `yaml:"registration"`
 	OAuth        OAuthConfig        `yaml:"oauth"`
@@ -354,7 +370,14 @@ func (c Config) Validate() (Config, error) {
 		if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
 			return c, fmt.Errorf("edge: behind_front listen must bind a loopback address (e.g. 127.0.0.1:8080) so OAuth bearers never cross a network in cleartext — got %q", c.Listen)
 		}
+		c.ForwardedHeader = strings.TrimSpace(c.ForwardedHeader)
 	} else {
+		// A forwarding header is only trustworthy from a loopback front the
+		// operator controls; honoring it on a directly-exposed listener would let
+		// a caller spoof the rate-limit key. Refuse the combination outright.
+		if strings.TrimSpace(c.ForwardedHeader) != "" {
+			return c, fmt.Errorf("edge: forwarded_header is only valid with behind_front — a directly-exposed edge must key rate limits on the connection's RemoteAddr")
+		}
 		// Exactly one TLS mode.
 		switch {
 		case c.TLS.files() && c.TLS.acme():

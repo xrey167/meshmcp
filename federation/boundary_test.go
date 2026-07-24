@@ -41,6 +41,24 @@ func TestOrgIdentityMapping(t *testing.T) {
 	}
 }
 
+func TestOrgFor_UnattributableCallerDeniedUnderWildcard(t *testing.T) {
+	// A "*" wildcard mapping must map only IDENTIFIED peers. An unattributable
+	// caller (both key and FQDN empty — e.g. a transient IdentityForIP gap) must
+	// resolve to no org, never to the wildcard-mapped org, or its calls would be
+	// admitted and misattributed to that org.
+	b := NewBoundary(
+		[]Grant{{Org: "partner", Tools: []string{"read_*"}}},
+		[]Mapping{{Match: "*", Org: "partner"}},
+		nil,
+	)
+	if org := b.OrgFor("gw.partner.net", "KEY"); org != "partner" {
+		t.Fatalf("identified peer should map to partner, got %q", org)
+	}
+	if org := b.OrgFor("", ""); org != "" {
+		t.Fatalf("unattributable caller must map to no org under a wildcard, got %q", org)
+	}
+}
+
 func TestCrossOrgCorpusGrant(t *testing.T) {
 	var buf bytes.Buffer
 	audit := policy.NewAuditLog(&buf, func() string { return "T" })

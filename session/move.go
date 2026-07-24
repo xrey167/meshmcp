@@ -648,6 +648,17 @@ func (s *Server) ServeMoveControl(conn net.Conn, authorize func(id string) (bool
 				continue
 			}
 			meta := Meta{PeerFQDN: ps.PeerFQDN, PeerAddr: ps.PeerAddr, PeerKey: ps.CreatorKey}
+			// One warm move per control connection: if this connection already
+			// prepared a DIFFERENT session that has not committed, abort it before
+			// warming another. Otherwise a peer could strand spawned backends by
+			// preparing many distinct sessions on a single connection and
+			// disconnecting — only the last preparedID would be reaped by the
+			// disconnect-abort defer. A same-id re-prepare is already superseded
+			// inside PrepareMove.
+			if preparedID != "" && preparedID != f.SessionID {
+				s.AbortMove(preparedID)
+				preparedID = ""
+			}
 			if err := s.PrepareMove(ps, meta); err != nil {
 				_ = writeMoveFrame(w, moveRefuse(f.SessionID, err.Error()))
 				continue

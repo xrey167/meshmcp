@@ -1351,3 +1351,115 @@ call sites gain a `nil` enforcer (no enforcement) and behave exactly as before.
 ### Commit
 
 `router: enforce tool policy per caller before forwarding`
+
+---
+
+## Wave 3 · Threat-model re-audit (defense-in-depth sweep) — FIXED
+
+A fresh pass over every core security surface (identity binding, the policy
+filter, control-plane RBAC, the approval plane, audit integrity, secret
+isolation, the SQL guard, session fencing, router/federation delegation, OAuth/
+DPoP, crypto usage, capability revocation, egress, DoS limits, tool input, and
+fail-closed config) against `docs/THREAT-MODEL.md`. Nine issues were reproduced
+by reading the code and fixed with a failing-first regression test each. After
+the fixes landed, an independent adversarial re-read of the **patched** tree
+could no longer confirm any of the nine as exploitable — each rejection cited the
+mitigating check added below.
+
+Most core surfaces (F-P1 policy filter, control RBAC, approval plane, audit
+integrity, secret isolation/redaction, capability revocation, crypto usage,
+egress fail-closed, F-P9.1 strict config, the ROADMAP P0-3 audit-write path) were
+re-confirmed intact — no regression.
+
+### W3-1 · SQL-guard column redaction bypassed by projection alias/expression — FIXED
+**Severity:** High (confidentiality break). **Component:** `air/sqlguard`.
+`CheckRedaction` scanned only tokens *after* the top-level `FROM`, so a redacted
+column in the projection under an alias or expression (`SELECT ssn AS x`,
+`lower(email)`, `ssn || ''`, `CASE WHEN ssn=? …`) was never inspected, and
+`ApplyRedaction` masks by the *output* column name — which the alias/expression
+renames. An authorized reader recovered the masked value verbatim.
+**Fix:** `CheckRedaction` now also scans the projection and permits a redacted
+column there only as a bare (optionally schema-qualified) column reference whose
+output name is the redacted name; any alias, function, operator, or projected
+subquery is rejected (`ErrRedactedNotBare`). Predicate and bare-projection
+behavior are unchanged. **Test:** `TestCheckRedaction_ForbidsRedactedColumnAliasedOrWrapped`.
+
+### W3-2 · Federation `OrgFor` fails open for an unattributable caller under a wildcard — FIXED
+**Severity:** Medium. **Component:** `federation/boundary.go`.
+A `Match:"*"` mapping resolved an org for a caller the transport could not
+attribute (both pubkey and FQDN empty), exposing the org's tool set and
+misattributing the crossing — inconsistent with `acl.allows`' S30 invariant and
+with `OrgForIssuer`'s own empty-issuer guard.
+**Fix:** `OrgFor` returns `""` when both `peerFQDN` and `peerKey` are empty.
+**Test:** `TestOrgFor_UnattributableCallerDeniedUnderWildcard`.
+
+### W3-3 · Audit `DelegatedCaller` populated from an UNVERIFIED delegation token — FIXED
+**Severity:** Low (audit over-claiming). **Component:** `policy/delegation_wire.go`.
+On a token that decoded but failed verification, `applyDelegation` still copied
+its attacker-chosen `Caller`/`Nonce` into the tamper-evident record, letting an
+admitted router emit deny records attributing attempts to arbitrary victim keys.
+**Fix:** caller/nonce are carried only from a token that verified (`err == nil`);
+a failed verification records an empty `DelegatedCaller` (the router is still
+attributed by its transport identity). **Test:** `TestFilterDelegationForgedCallerNotAudited`.
+
+### W3-4 · Session reattach identity binding fails open on an empty transport key — FIXED
+**Severity:** Medium. **Component:** `session/server.go`.
+The binding compared `creatorKey != meta.PeerKey`, so two peers the mesh admitted
+by FQDN only (no resolved pubkey, `PeerKey==""`) matched `"" == ""` and could take
+over each other's sessions — while the move/failover paths already fail closed on
+empty identity.
+**Fix:** a new `identityMatches` binds on the pubkey when either side has one,
+falls back to the mesh FQDN when both are key-less (so legitimate FQDN-only resume
+still works but a *different* FQDN cannot collide), and fails closed when either
+side is fully unattributable — mirroring `acl.allows`. **Tests:**
+`TestSessionReattachEmptyKeyFailsClosed` (+ existing binding/resume tests, incl.
+FQDN-only resume, stay green).
+
+### W3-5 · Move-control strands warm backends across differing prepares — FIXED
+**Severity:** Low (resource exhaustion). **Component:** `session/move.go`.
+`ServeMoveControl` tracked only the last `preparedID`, so `prepare(idA); prepare(idB)`
+on one connection left idA's spawned backend unreaped on disconnect.
+**Fix:** a new prepare for a different session aborts the prior un-committed one
+(one warm move per control connection). **Test:** `TestMoveControl_OneWarmPerConnection`.
+
+### W3-6 · Behind-front mode collapses per-IP OAuth rate limits to one global bucket — FIXED
+**Severity:** Medium (ingress DoS). **Component:** `edge`.
+In `behind_front` mode the edge binds loopback, so every caller's `RemoteAddr` is
+the local front and the per-IP pre-auth limiters (`token`/`authorize`/`register`)
+shared one bucket — one caller could 429 all hosted clients.
+**Fix:** an opt-in `forwarded_header` (valid *only* with `behind_front`; refused
+otherwise so a directly-exposed edge cannot be spoofed) makes the limiters key on
+the right-most value of that trusted header via `Server.rateLimitKey`. Audit still
+records the honest transport peer. **Tests:** `TestRateLimitKey`,
+`TestConfigValidateForwardedHeader`.
+
+### W3-7 · Unbounded task accumulation in the MCP framework — FIXED
+**Severity:** Medium (memory-exhaustion DoS). **Component:** `mcp/tasks.go`.
+Task records (one per `tools/call` with `task:true`) were never reaped, unlike
+every other client-driven allocation, so a peer could grow the map until OOM.
+**Fix:** a `maxTasks` cap; at the cap the oldest *finished* task is evicted, and
+if none can be reclaimed the new task is refused (fail closed). **Test:**
+`TestTaskManagerBoundedEviction`.
+
+### W3-8 · Unbounded request body in the framework HTTP transport — FIXED
+**Severity:** Low (defense-in-depth). **Component:** `mcp/http.go`.
+`HTTPHandler` did `io.ReadAll(r.Body)` with no cap, unlike every other HTTP
+ingress in the tree. **Fix:** the body is wrapped in `http.MaxBytesReader`
+(8 MiB, mirroring the stdio scanner cap) before reading; an oversized body returns
+413. **Test:** `TestHTTPBodyCap`.
+
+### W3-9 · fs sandbox does lexical-only containment (symlink escape) — FIXED
+**Severity:** Medium. **Component:** `cmd/mcpserver/prompt_mcp/tools`.
+`sandbox()` checked only that the *lexical* path was under `--root`, so a symlink
+that already exists inside root (`link -> /etc`) let `read_file`/`write_file`
+follow it out of the sandbox.
+**Fix:** after the lexical check the real (symlink-resolved) path of the longest
+existing prefix is re-verified to stay within the resolved root — covering both
+existing reads and to-be-created writes — while internal symlinks still work.
+**Test:** `TestSandboxRejectsSymlinkEscape`, `TestSandboxAllowsInternalPathsAndSymlinks`.
+
+### Verification
+
+`go build ./...` passes; the changed packages
+(`air/sqlguard`, `federation`, `policy`, `session`, `edge`, `mcp`,
+`cmd/mcpserver/prompt_mcp/tools`) pass `go test` and `go vet`.

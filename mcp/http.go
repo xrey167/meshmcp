@@ -21,6 +21,13 @@ func HTTPHeadersFrom(ctx context.Context) http.Header {
 	return h
 }
 
+// maxHTTPBodyBytes bounds a single JSON-RPC message read over the HTTP
+// transport, mirroring the stdio path's scanner cap (server.go: 8<<20) so a
+// single request cannot buffer an unbounded body into memory. Without it,
+// io.ReadAll would read a multi-gigabyte body whole before any parse or size
+// check — a memory-exhaustion vector on any http: backend serving HTTPHandler.
+const maxHTTPBodyBytes = 8 << 20
+
 // HTTPHandler serves the MCP server over a minimal Streamable-HTTP-style
 // transport: each POST carries one JSON-RPC message and receives one JSON
 // response. Notifications (no id) are accepted with 202 and no body. This is
@@ -31,9 +38,11 @@ func (s *Server) HTTPHandler() http.Handler {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
 			return
 		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxHTTPBodyBytes)
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			// A body past the cap trips MaxBytesReader; report it as too large.
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 			return
 		}
 		var req request

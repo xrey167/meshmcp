@@ -25,7 +25,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w, http.MethodPost)
 		return
 	}
-	if !s.preauthLimit.allow(clientIP(r)) {
+	if !s.preauthLimit.allow(s.rateLimitKey(r)) {
 		writeOAuthError(w, http.StatusTooManyRequests, "temporarily_unavailable", "rate limit exceeded")
 		return
 	}

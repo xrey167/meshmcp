@@ -293,6 +293,46 @@ func TestFilterDelegationInvalidTokenDenied(t *testing.T) {
 	}
 }
 
+// TestFilterDelegationForgedCallerNotAudited: a well-formed token that DECODES
+// (so it carries an attacker-chosen Caller/Nonce) but FAILS verification — here
+// signed by an unpinned key — must be denied AND must not leak its forged caller
+// claim into the tamper-evident audit record. Otherwise an admitted router could
+// emit deny records attributing delegation attempts to arbitrary victim keys
+// (audit over-claiming). The router is still attributed by its transport identity.
+func TestFilterDelegationForgedCallerNotAudited(t *testing.T) {
+	other, _ := GenerateSigner() // NOT the verifier's pinned signer
+	forged, err := other.IssueDelegation(DelegationClaims{
+		Caller: "VICTIM", Router: "ROUTER", Audience: "GW",
+		Backend: "fs", Tool: "read_file", Args: []byte(`{"path":"/a"}`),
+	}, wireBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc, err := EncodeDelegation(forged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply, saw, recs := runDelegCall(t, bothAllowed(), false, enc)
+	if !strings.Contains(reply, "delegation invalid") {
+		t.Fatalf("forged-signer token must be denied, got %q", reply)
+	}
+	if strings.Contains(saw, "read_file") {
+		t.Fatal("a denied call must never reach the backend")
+	}
+	if len(recs) != 1 || recs[0].Decision != "deny" {
+		t.Fatalf("want a single audited deny, got %+v", recs)
+	}
+	if recs[0].DelegatedCaller != "" {
+		t.Fatalf("audit must not attribute an unverified caller, got DelegatedCaller=%q", recs[0].DelegatedCaller)
+	}
+	if recs[0].DelegationNonce != "" {
+		t.Fatalf("audit must not record a nonce from an unverified token, got %q", recs[0].DelegationNonce)
+	}
+	if recs[0].DelegationRouter != "ROUTER" {
+		t.Fatalf("router transport identity must still be recorded: %+v", recs[0])
+	}
+}
+
 // TestFilterDelegationCostIsMax: the intersection charges the most restrictive
 // (maximum) cost of the two allowing legs.
 func TestFilterDelegationCostIsMax(t *testing.T) {

@@ -60,11 +60,11 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w, http.MethodPost)
 		return
 	}
-	ip := clientIP(r)
-	if !s.registerLimit.allow(ip) {
+	if !s.registerLimit.allow(s.rateLimitKey(r)) {
 		writeOAuthError(w, http.StatusTooManyRequests, "temporarily_unavailable", "registration rate limit exceeded")
 		return
 	}
+	ip := clientIP(r) // honest transport peer, for the registration audit record
 
 	var req authorization.ClientRegistrationRequest
 	dec := json.NewDecoder(io.LimitReader(r.Body, maxRegisterBody))

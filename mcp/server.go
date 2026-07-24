@@ -466,8 +466,12 @@ func (s *Server) callTool(ctx context.Context, req request, sess *Session, ok fu
 		}
 		// start sends the working handle (with this request id) before
 		// spawning the task, so progress never precedes it. The same compiled
-		// middleware chain runs for the task.
-		s.tasks.start(sess, req.ID, p.Name, handler, meta, args)
+		// middleware chain runs for the task. It refuses (fail-closed) when the
+		// retained-task cap is hit and no finished task can be reclaimed, so a
+		// peer cannot grow the task map without bound.
+		if !s.tasks.start(sess, req.ID, p.Name, handler, meta, args) {
+			return fail(codeInternal, "task limit reached; retry after outstanding tasks finish")
+		}
 		return response{skip: true}
 	}
 	ctx = withToolCall(ctx, ToolCallInfo{Tool: p.Name, RequestID: req.ID, Meta: meta})

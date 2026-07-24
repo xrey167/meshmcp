@@ -134,7 +134,17 @@ func (b *Boundary) spiffeForOrg(org string) policy.SpiffeLabel {
 
 // OrgFor resolves a remote peer identity to an org id. Returns "" if the peer
 // maps to no known org (an unrecognized org is denied everything).
+//
+// Fail closed on an unattributable caller: if the transport resolved neither a
+// public key nor an FQDN (both empty), the peer maps to NO org even under a "*"
+// wildcard mapping — a wildcard means "any identified peer", never an
+// unidentified one. This mirrors acl.allows' S30 invariant (an unattributable
+// caller is never admitted, even to an open backend) and keeps a transient
+// identity-resolution gap from being attributed to a wildcard-mapped org.
 func (b *Boundary) OrgFor(peerFQDN, peerKey string) string {
+	if peerFQDN == "" && peerKey == "" {
+		return ""
+	}
 	for _, m := range b.mappings {
 		if k, ok := strings.CutPrefix(m.Match, "pubkey:"); ok {
 			if k == peerKey && peerKey != "" {

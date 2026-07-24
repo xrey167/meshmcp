@@ -161,13 +161,25 @@ func (f *Filter) applyDelegation(dec Decision, token, tool string, args json.Raw
 		return dec, delegationAudit{}
 	}
 	tok, err := f.delegVerifier.Check(token, f.caller.PeerKey, f.caller.Backend, tool, args)
+	// A token that FAILS verification (bad signature, wrong audience, expired,
+	// replayed) still decodes to attacker-chosen fields — Check returns the decoded
+	// token alongside the error. Those fields must NEVER reach the tamper-evident
+	// record, or an admitted router could emit deny records attributing delegation
+	// attempts to arbitrary victim keys it never controlled (audit over-claiming).
+	// Only carry the caller/nonce from a token that actually verified; on failure
+	// the record's DelegatedCaller stays empty and the router is still attributed
+	// by its transport identity (DelegationRouter / PeerKey).
+	da := delegationAudit{relevant: true}
 	var callerDec Decision
-	if err == nil && dec.Outcome == OutcomeAllow {
-		// The ORIGINAL caller's identity for policy evaluation is the verified
-		// token's caller claim (a WireGuard public key): rules match it via
-		// pubkey:<key> / group membership.
-		callerDec = f.eng.DecideToolCallBound(tok.Caller, tok.Caller, f.caller.Backend, tool, args, f.labelSnapshot())
+	if err == nil {
+		da.caller = tok.Caller
+		da.nonce = tok.Nonce
+		if dec.Outcome == OutcomeAllow {
+			// The ORIGINAL caller's identity for policy evaluation is the verified
+			// token's caller claim (a WireGuard public key): rules match it via
+			// pubkey:<key> / group membership.
+			callerDec = f.eng.DecideToolCallBound(tok.Caller, tok.Caller, f.caller.Backend, tool, args, f.labelSnapshot())
+		}
 	}
-	return AuthorizeDelegated(callerDec, dec, err),
-		delegationAudit{relevant: true, caller: tok.Caller, nonce: tok.Nonce}
+	return AuthorizeDelegated(callerDec, dec, err), da
 }

@@ -89,6 +89,34 @@ func TestConfigValidateBehindFront(t *testing.T) {
 	}
 }
 
+// TestConfigValidateForwardedHeader proves forwarded_header is honored only with
+// behind_front: it is accepted (and trimmed) behind a front, and refused on a
+// directly-exposed edge where trusting a forwarding header would let a caller
+// spoof the rate-limit key.
+func TestConfigValidateForwardedHeader(t *testing.T) {
+	// Accepted behind a front, and trimmed.
+	c := validConfig()
+	c.BehindFront = true
+	c.TLS = TLSConfig{}
+	c.Listen = "127.0.0.1:8080"
+	c.ForwardedHeader = "  X-Forwarded-For  "
+	got, err := c.Validate()
+	if err != nil {
+		t.Fatalf("behind_front + forwarded_header rejected: %v", err)
+	}
+	if got.ForwardedHeader != "X-Forwarded-For" {
+		t.Fatalf("forwarded_header not trimmed: %q", got.ForwardedHeader)
+	}
+
+	// Refused without behind_front (a directly-exposed edge must not trust a
+	// spoofable header for the rate-limit key).
+	cd := validConfig() // direct TLS mode, BehindFront=false
+	cd.ForwardedHeader = "X-Forwarded-For"
+	if _, err := cd.Validate(); err == nil || !strings.Contains(err.Error(), "forwarded_header is only valid with behind_front") {
+		t.Fatalf("forwarded_header accepted without behind_front or wrong error: %v", err)
+	}
+}
+
 func TestConfigValidateAcceptsMinimal(t *testing.T) {
 	c, err := validConfig().Validate()
 	if err != nil {

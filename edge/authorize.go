@@ -155,7 +155,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w, http.MethodGet)
 		return
 	}
-	if !s.preauthLimit.allow(clientIP(r)) {
+	if !s.preauthLimit.allow(s.rateLimitKey(r)) {
 		http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
 		return
 	}

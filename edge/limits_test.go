@@ -1,6 +1,7 @@
 package edge
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -69,5 +70,43 @@ func TestClientIP(t *testing.T) {
 	r.RemoteAddr = "weird"
 	if got := clientIP(r); got != "weird" {
 		t.Fatalf("clientIP fallback = %q", got)
+	}
+}
+
+// TestRateLimitKey proves the pre-auth rate-limit key uses the trusted forwarding
+// header ONLY behind a front, so per-IP limits stay per-IP instead of collapsing
+// to one global bucket keyed on the loopback front.
+func TestRateLimitKey(t *testing.T) {
+	newReq := func(remote, xff string) *http.Request {
+		r := httptest.NewRequest("POST", "/token", nil)
+		r.RemoteAddr = remote
+		if xff != "" {
+			r.Header.Set("X-Forwarded-For", xff)
+		}
+		return r
+	}
+
+	// Behind a front with a configured trusted header: two callers arriving via
+	// the same loopback front get DISTINCT keys from the right-most XFF value.
+	front := &Server{cfg: Config{BehindFront: true, ForwardedHeader: "X-Forwarded-For"}}
+	if got := front.rateLimitKey(newReq("127.0.0.1:5000", "198.51.100.7")); got != "198.51.100.7" {
+		t.Fatalf("behind-front key = %q, want the forwarded client IP", got)
+	}
+	// A client-prepended spoof cannot shrink the key: the right-most entry (added
+	// by the trusted front) still wins.
+	if got := front.rateLimitKey(newReq("127.0.0.1:5000", "1.2.3.4, 198.51.100.7")); got != "198.51.100.7" {
+		t.Fatalf("spoofed prefix changed the key: %q", got)
+	}
+	// Header absent behind a front: fall back to RemoteAddr (the front) rather
+	// than an empty key.
+	if got := front.rateLimitKey(newReq("127.0.0.1:5000", "")); got != "127.0.0.1" {
+		t.Fatalf("missing-header fallback = %q, want RemoteAddr host", got)
+	}
+
+	// Direct-TLS edge (no behind_front): forwarding headers are ignored, so a
+	// caller cannot spoof the key — it is always RemoteAddr.
+	direct := &Server{cfg: Config{}}
+	if got := direct.rateLimitKey(newReq("203.0.113.9:44321", "10.0.0.1")); got != "203.0.113.9" {
+		t.Fatalf("direct edge honored a forwarding header: %q", got)
 	}
 }

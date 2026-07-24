@@ -3,6 +3,7 @@ package edge
 import (
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -106,14 +107,36 @@ func (b *tokenBucket) allow(key string) bool {
 	return true
 }
 
-// clientIP extracts a stable rate-limit key from a request's remote address.
-// It intentionally ignores forwarding headers: the edge terminates TLS directly
-// (or sits behind a trusted operator-run proxy that should be configured
-// separately), so RemoteAddr is the authority we can rely on here.
+// clientIP extracts the connection's remote host — the honest transport peer.
+// It intentionally ignores forwarding headers: for audit attribution the
+// authority is who actually connected (RemoteAddr). Rate-limit keying uses
+// rateLimitKey, which may honor a trusted front's forwarding header.
 func clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// rateLimitKey returns the per-caller key for the pre-auth rate limiters. In
+// behind_front mode the edge binds loopback, so RemoteAddr is the local front
+// for EVERY external caller and clientIP alone would collapse all per-IP buckets
+// into one global bucket keyed on the front — a trivial whole-ingress DoS (one
+// caller exhausts the limit for all). When the operator has named a trusted
+// forwarding header (only permitted with behind_front), key on the right-most
+// value of that header: with a single trusted front the right-most entry is the
+// address the front observed for the connection — the real peer — and a client
+// cannot shrink it by prepending spoofed entries. Falls back to clientIP when no
+// header is configured or the header is absent/empty.
+func (s *Server) rateLimitKey(r *http.Request) string {
+	if s.cfg.BehindFront && s.cfg.ForwardedHeader != "" {
+		if v := r.Header.Get(s.cfg.ForwardedHeader); v != "" {
+			parts := strings.Split(v, ",")
+			if ip := strings.TrimSpace(parts[len(parts)-1]); ip != "" {
+				return ip
+			}
+		}
+	}
+	return clientIP(r)
 }

@@ -28,6 +28,13 @@ var (
 	// anywhere after the top-level FROM (WHERE/JOIN/GROUP/ORDER/HAVING, or inside a
 	// subquery), which would let a caller infer a masked value.
 	ErrRedactedInPredicate = errors.New("sqlguard: a redacted column may appear only in the top-level projection")
+	// ErrRedactedNotBare is returned when a redacted column appears in the
+	// projection in any form other than a bare (optionally schema-qualified)
+	// column reference — aliased (`ssn AS x`), wrapped in a function or expression
+	// (`lower(ssn)`, `ssn || ''`), or inside a projected subquery. Result-side
+	// masking (ApplyRedaction) keys on the OUTPUT column name, so any of those
+	// forms renames the column and would return the masked value in clear.
+	ErrRedactedNotBare = errors.New("sqlguard: a redacted column may be projected only as a bare column, not aliased or wrapped in an expression")
 )
 
 // forbiddenKeywords are the reserved words a read-only guard rejects anywhere in
@@ -96,14 +103,28 @@ func Check(sql string) (tables []string, err error) {
 	return referencedTables(stmt), nil
 }
 
-// CheckRedaction rejects a statement that references any of the redacted columns
-// after its top-level FROM. Combined with masking the same columns in RESULTS
+// CheckRedaction rejects a statement that would let an authorized reader recover a
+// redacted column's value. Combined with masking the same columns in RESULTS
 // (ApplyRedaction), this makes redaction real information-flow control: a caller
-// may SELECT a redacted column (and receive [redacted]) but may not filter, join,
-// group or order on it to infer the value it never sees. A redacted column
-// appearing inside a subquery is likewise rejected (conservative, and honest:
-// the guard cannot prove a subquery does not leak the value onward). redact
-// entries are matched case-insensitively on the bare column name.
+// may SELECT a redacted column (and receive [redacted]) but may not otherwise
+// touch it. Two channels are closed:
+//
+//   - Predicate channel: a redacted column referenced anywhere after the top-level
+//     FROM (WHERE/JOIN/GROUP/ORDER/HAVING, or inside a subquery there) could infer
+//     the masked value, and is rejected (ErrRedactedInPredicate).
+//   - Projection channel: result-side masking keys on the OUTPUT column name, so a
+//     redacted column may be projected ONLY as a bare (optionally schema-qualified)
+//     column reference whose output name is the redacted name. Aliasing it
+//     (`ssn AS x`), wrapping it in a function or expression (`lower(ssn)`,
+//     `ssn || ''`, `CASE WHEN ssn=? ...`), or hiding it in a projected subquery all
+//     rename the output column so ApplyRedaction would not mask it — these are
+//     rejected (ErrRedactedNotBare). Without this the guard's masking is trivially
+//     defeated by `SELECT ssn AS x FROM t`.
+//
+// The "top-level FROM" is the first FROM at parenthesis depth 0; a FROM nested in a
+// projected subquery does not end the projection (its redacted references are
+// caught by the projection scan). redact entries are matched case-insensitively on
+// the bare column name.
 func CheckRedaction(sql string, redact []string) error {
 	if len(redact) == 0 {
 		return nil
@@ -118,22 +139,139 @@ func CheckRedaction(sql string, redact []string) error {
 			set[c] = true
 		}
 	}
-	fromIdx := -1
+	if len(set) == 0 {
+		return nil
+	}
+	// Locate the leading SELECT and the top-level (depth-0) FROM that ends the
+	// projection. A leading '(' (a parenthesized SELECT) is tolerated by scanning
+	// for the SELECT word itself.
+	selIdx := -1
 	for i, t := range toks {
-		if t.Kind == TokenWord && strings.EqualFold(t.Text, "from") {
-			fromIdx = i
+		if t.Kind == TokenWord && strings.EqualFold(t.Text, "select") {
+			selIdx = i
 			break
 		}
 	}
-	if fromIdx < 0 {
-		return nil // no FROM: nothing but a projection to reference
+	if selIdx < 0 {
+		return nil // not a SELECT — Check rejects these before this call
 	}
-	for _, t := range toks[fromIdx+1:] {
-		if (t.Kind == TokenWord || t.Kind == TokenQuotedIdent) && set[strings.ToLower(t.Text)] {
-			return ErrRedactedInPredicate
+	depth := 0
+	fromIdx := -1
+	for i := selIdx + 1; i < len(toks); i++ {
+		t := toks[i]
+		switch {
+		case t.Kind == TokenPunct && t.Text == "(":
+			depth++
+		case t.Kind == TokenPunct && t.Text == ")":
+			if depth > 0 {
+				depth--
+			}
+		case depth == 0 && t.Kind == TokenWord && strings.EqualFold(t.Text, "from"):
+			fromIdx = i
+		}
+		if fromIdx >= 0 {
+			break
+		}
+	}
+	// Predicate channel: anything after the top-level FROM.
+	projEnd := len(toks)
+	if fromIdx >= 0 {
+		projEnd = fromIdx
+		for _, t := range toks[fromIdx+1:] {
+			if (t.Kind == TokenWord || t.Kind == TokenQuotedIdent) && set[strings.ToLower(t.Text)] {
+				return ErrRedactedInPredicate
+			}
+		}
+	}
+	// Projection channel: [selIdx+1, projEnd). A redacted column may appear only as
+	// a bare column reference the result-side masking can still match by name.
+	proj := stripSelectQualifier(toks[selIdx+1 : projEnd])
+	for _, item := range splitTopLevelCommas(proj) {
+		if itemReferencesRedacted(item, set) && !itemIsBareRedactedRef(item, set) {
+			return ErrRedactedNotBare
 		}
 	}
 	return nil
+}
+
+// stripSelectQualifier drops a leading DISTINCT / ALL (and a `DISTINCT ON (...)`
+// group) from a projection token list so the select-items that follow can be
+// examined on their own.
+func stripSelectQualifier(proj []Token) []Token {
+	if len(proj) == 0 || proj[0].Kind != TokenWord {
+		return proj
+	}
+	if !strings.EqualFold(proj[0].Text, "distinct") && !strings.EqualFold(proj[0].Text, "all") {
+		return proj
+	}
+	i := 1
+	if i < len(proj) && proj[i].Kind == TokenWord && strings.EqualFold(proj[i].Text, "on") {
+		i++
+		if i < len(proj) && proj[i].Kind == TokenPunct && proj[i].Text == "(" {
+			i = skipParens(proj, i) + 1
+		}
+	}
+	return proj[i:]
+}
+
+// splitTopLevelCommas splits a projection into select-items on parenthesis-depth-0
+// commas (commas inside a function call or subquery are not item separators).
+func splitTopLevelCommas(proj []Token) [][]Token {
+	var items [][]Token
+	var cur []Token
+	depth := 0
+	for _, t := range proj {
+		switch {
+		case t.Kind == TokenPunct && t.Text == "(":
+			depth++
+		case t.Kind == TokenPunct && t.Text == ")":
+			if depth > 0 {
+				depth--
+			}
+		case depth == 0 && t.Kind == TokenPunct && t.Text == ",":
+			items = append(items, cur)
+			cur = nil
+			continue
+		}
+		cur = append(cur, t)
+	}
+	if len(cur) > 0 {
+		items = append(items, cur)
+	}
+	return items
+}
+
+// itemReferencesRedacted reports whether any word/quoted-identifier token in the
+// select-item names a redacted column.
+func itemReferencesRedacted(item []Token, set map[string]bool) bool {
+	for _, t := range item {
+		if (t.Kind == TokenWord || t.Kind == TokenQuotedIdent) && set[strings.ToLower(t.Text)] {
+			return true
+		}
+	}
+	return false
+}
+
+// itemIsBareRedactedRef reports whether the select-item is a bare, optionally
+// schema-qualified column reference — word ('.' word)* — whose FINAL component is a
+// redacted column. That is the only projection form where ApplyRedaction's
+// output-name masking still masks the value; any alias, function, operator, or
+// subquery renames the output column and must be rejected.
+func itemIsBareRedactedRef(item []Token, set map[string]bool) bool {
+	if len(item) == 0 || len(item)%2 == 0 {
+		return false // must be word ('.' word)* → an odd number of tokens
+	}
+	for i, t := range item {
+		if i%2 == 0 {
+			if t.Kind != TokenWord && t.Kind != TokenQuotedIdent {
+				return false
+			}
+		} else if t.Kind != TokenPunct || t.Text != "." {
+			return false
+		}
+	}
+	last := item[len(item)-1]
+	return set[strings.ToLower(last.Text)]
 }
 
 // splitStatements groups tokens by top-level semicolons, dropping empty groups

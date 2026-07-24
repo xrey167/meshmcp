@@ -158,6 +158,41 @@ func TestCheckRedaction_ForbidsRedactedColumnInPredicate(t *testing.T) {
 	}
 }
 
+func TestCheckRedaction_ForbidsRedactedColumnAliasedOrWrapped(t *testing.T) {
+	redact := []string{"ssn", "email"}
+	// Each of these projects a redacted column under a DIFFERENT output name, so
+	// result-side masking (which keys on the output column name) would not mask it
+	// — the value would be returned in clear. All must be rejected.
+	bypasses := []string{
+		"SELECT ssn AS x FROM customers",              // explicit alias
+		"SELECT ssn x FROM customers",                 // implicit alias
+		"SELECT lower(email) FROM customers",          // function wrapper
+		"SELECT email || '' FROM customers",           // string expression
+		"SELECT CASE WHEN ssn = ? THEN 1 END FROM t",  // predicate oracle in projection
+		"SELECT (SELECT ssn FROM customers LIMIT 1) x FROM t", // subquery in projection
+		"SELECT DISTINCT ssn AS s FROM customers",     // aliased under DISTINCT
+	}
+	for _, q := range bypasses {
+		if err := CheckRedaction(q, redact); !errors.Is(err, ErrRedactedNotBare) {
+			t.Errorf("bypass not rejected: %q -> err = %v, want ErrRedactedNotBare", q, err)
+		}
+	}
+	// The documented, allowed shape: a bare redacted column (optionally qualified)
+	// keeps its name and IS masked by ApplyRedaction — these must stay allowed.
+	allowed := []string{
+		"SELECT ssn FROM customers",
+		"SELECT ssn, name FROM customers",
+		"SELECT name, ssn, email FROM customers",
+		"SELECT c.ssn FROM customers c",
+		"SELECT DISTINCT ssn FROM customers",
+	}
+	for _, q := range allowed {
+		if err := CheckRedaction(q, redact); err != nil {
+			t.Errorf("bare redacted projection wrongly rejected: %q -> %v", q, err)
+		}
+	}
+}
+
 func TestCheckRedaction_NoRedactSetIsNoop(t *testing.T) {
 	if err := CheckRedaction("SELECT ssn FROM t WHERE ssn = ?", nil); err != nil {
 		t.Fatalf("empty redact set should be a no-op, got %v", err)

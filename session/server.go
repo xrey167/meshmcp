@@ -17,6 +17,34 @@ import (
 // session id alone can never authorize a takeover.
 var errSessionIdentity = errors.New("session: reattach identity does not match the session's creator")
 
+// identityMatches reports whether a reattach presented under meta is by the same
+// transport identity that opened the session (creatorKey/creatorFQDN).
+//
+// The mesh transport resolves a peer to a WireGuard public key and/or a mesh
+// FQDN; admission (acl.allows) admits an FQDN-only peer (no resolved pubkey) and
+// fails closed ONLY when BOTH are empty. The reattach binding must uphold that
+// exact boundary, so it:
+//
+//   - fails closed when either side is unattributable (both key and FQDN empty) —
+//     an unattributable caller must never match, so two peers the mesh could not
+//     attribute cannot take over each other's sessions;
+//   - binds on the cryptographic key when either side presents one (a keyed
+//     session is resumable only by that key; a keyless reattach never matches a
+//     keyed creator, and vice versa);
+//   - otherwise (both sides key-less) binds on the mesh FQDN, so a legitimate
+//     FQDN-only peer can still resume its own session while a DIFFERENT FQDN-only
+//     peer (a different name) cannot. A blanket empty-key rejection would instead
+//     break FQDN-only resume entirely.
+func identityMatches(creatorKey, creatorFQDN string, meta Meta) bool {
+	if (meta.PeerKey == "" && meta.PeerFQDN == "") || (creatorKey == "" && creatorFQDN == "") {
+		return false // unattributable on one side — never matches
+	}
+	if creatorKey != "" || meta.PeerKey != "" {
+		return creatorKey == meta.PeerKey // key present: both must be the same key
+	}
+	return creatorFQDN == meta.PeerFQDN // key-less on both sides: fall back to the FQDN
+}
+
 // errSessionNotFound refuses to turn a resume attempt into a fresh logical
 // session. Replaying an unacknowledged suffix into a new backend can duplicate
 // earlier side effects while making the new backend's totals look complete.
@@ -232,10 +260,10 @@ func (s *Server) attach(id sessionID, meta Meta) (*serverSession, bool, error) {
 	if !id.isZero() {
 		if sess, ok := s.sessions[id]; ok {
 			// Identity binding: a session may be reattached only by the
-			// cryptographic identity that opened it. Otherwise any mesh peer
-			// that learns a session id (they are logged and shared for
-			// migration) could take over the backend and its buffered output.
-			if sess.creatorKey != meta.PeerKey {
+			// transport identity that opened it. Otherwise any mesh peer that
+			// learns a session id (they are logged and shared for migration)
+			// could take over the backend and its buffered output.
+			if !identityMatches(sess.creatorKey, sess.meta.PeerFQDN, meta) {
 				return nil, false, errSessionIdentity
 			}
 			if sess.reaper != nil {
@@ -264,7 +292,7 @@ func (s *Server) attach(id sessionID, meta Meta) (*serverSession, bool, error) {
 				// rehydrating gateway must reject a reattach from any identity
 				// other than the one that originally opened the session. It is
 				// re-checked on every re-Load.
-				if ps.CreatorKey != meta.PeerKey {
+				if !identityMatches(ps.CreatorKey, ps.PeerFQDN, meta) {
 					return nil, false, errSessionIdentity
 				}
 				sess, err := s.rehydrate(ps, meta)
