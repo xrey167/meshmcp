@@ -115,6 +115,7 @@ Usage:
   meshmcp spotlight [flags] <query>             federated semantic search across authorized mesh backends (F19)
   meshmcp market <keygen|publish|list|verify|install>  governed plugin marketplace: signed bundle manifests, metered + audited installs (F14)
   meshmcp edge --config edge.yaml               public OAuth ingress for hosted MCP clients (e.g. claude.ai) — off by default, one tool-scoped path
+  meshmcp beacon --zone beacon.example.com      passthrough relay: gateways dial out, clients routed by SNI; TLS terminates on the gateway (experimental)
   meshmcp profile <set|show|clear>              remember a default control-ip:port so commands can omit it ($MESHMCP_CONTROL overrides)
   meshmcp uninstall [--config <f>] [--yes] [--purge]   remove this gateway's local state (mesh identity, ledgers, stores); dry-run without --yes
   meshmcp revoke-device [flags] <peer-pubkey>   lost-device kill-switch: revoke pairing, grants, capabilities, operator surface + NetBird peer in one audited pass
@@ -243,6 +244,8 @@ func main() {
 		err = cmdMarket(os.Args[2:])
 	case "edge":
 		err = cmdEdge(os.Args[2:])
+	case "beacon":
+		err = cmdBeacon(os.Args[2:])
 	case "profile":
 		err = cmdProfile(os.Args[2:])
 	case "uninstall":
