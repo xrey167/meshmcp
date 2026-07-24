@@ -163,12 +163,15 @@ minted identity as a worker subprocess with a **curated environment** — only t
 mesh-join credentials and identity markers, never the parent environment — so a
 worker joins the mesh as exactly its minted key and never inherits an unrelated
 secret (mirroring `cmd/meshmcp`'s `agentChildEnv`); it fails closed on an empty
-command or an unminted identity.
+command or an unminted identity. The scheduler runs execute-stage jobs as these
+subprocess workers when a `Spawner` + worker command are configured
+(`EngineOpts.Spawner`/`WorkerCommand`, or `harness run --worker-cmd`) — the task
+is injected via `MESHMCP_TASK`/`RUN`/`JOB` and the worker's output becomes the
+job result; otherwise the default in-process provider workers run.
 
 **Deferred (wiring, not design):** live provider CLIs require the binaries +
 broker keys; the `look_at` vision backend; browser/canvas/nodes/cron live
-backends (Phase 2/4); scheduler wiring to optionally run subprocess workers via
-`ExecSpawner` (the spawner itself is built); the non-webchat channel transports
+backends (Phase 2/4); the non-webchat channel transports
 (Phase 4 live wiring); Live Canvas / voice surfaces. Every deferred tool/channel is still *registered and
 governed* — a call passes the firewall and is audited, and it fails closed rather
 than silently succeeding.
