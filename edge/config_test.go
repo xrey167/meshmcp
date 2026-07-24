@@ -86,7 +86,7 @@ func TestGlobsOverlap(t *testing.T) {
 func TestPaymentDisjointWildcardGlobsAccepted(t *testing.T) {
 	c := validConfig()
 	c.Backend.Payment = PaymentConfig{
-		Enabled: true, Asset: "USDC", DevInsecureVerifier: true,
+		Enabled: true, Asset: "USDC", PayTo: "0xServer", DevInsecureVerifier: true,
 		Prices: map[string]string{"estimate_*": "1000", "verify_*": "5000"},
 	}
 	if _, err := c.Validate(); err != nil {
@@ -128,22 +128,35 @@ func TestConfigValidateRejections(t *testing.T) {
 			c.OAuth.DPoPReplayStore = "mysql://u:p@db/x"
 		}, "dpop_replay_store must be a postgres"},
 		{"payment no asset", func(c *Config) {
-			c.Backend.Payment = PaymentConfig{Enabled: true, Prices: map[string]string{"x": "1"}}
+			c.Backend.Payment = PaymentConfig{Enabled: true, PayTo: "0xS", Prices: map[string]string{"x": "1"}}
 		}, "payment.asset is required"},
+		{"payment no pay_to", func(c *Config) {
+			c.Backend.Payment = PaymentConfig{Enabled: true, Asset: "USDC", Prices: map[string]string{"x": "1"}}
+		}, "pay_to is required"},
 		{"payment no prices", func(c *Config) {
-			c.Backend.Payment = PaymentConfig{Enabled: true, Asset: "USDC"}
+			c.Backend.Payment = PaymentConfig{Enabled: true, Asset: "USDC", PayTo: "0xS"}
 		}, "no prices are set"},
 		{"payment empty price", func(c *Config) {
-			c.Backend.Payment = PaymentConfig{Enabled: true, Asset: "USDC", Prices: map[string]string{"search_docs": ""}}
-		}, "price must not be empty"},
+			c.Backend.Payment = PaymentConfig{Enabled: true, Asset: "USDC", PayTo: "0xS", Prices: map[string]string{"search_docs": ""}}
+		}, "positive integer"},
+		{"payment non-integer price", func(c *Config) {
+			c.Backend.Payment = PaymentConfig{Enabled: true, Asset: "USDC", PayTo: "0xS", Prices: map[string]string{"search_docs": "1.5"}}
+		}, "positive integer"},
+		{"payment zero price", func(c *Config) {
+			c.Backend.Payment = PaymentConfig{Enabled: true, Asset: "USDC", PayTo: "0xS", Prices: map[string]string{"search_docs": "0"}}
+		}, "positive integer"},
+		{"payment salt equals backend name", func(c *Config) {
+			c.Backend.Name = "docs"
+			c.Backend.Payment = PaymentConfig{Enabled: true, Asset: "USDC", PayTo: "0xS", Salt: "docs", Prices: map[string]string{"search_docs": "1"}}
+		}, "salt must not equal the backend name"},
 		{"payment bad glob", func(c *Config) {
-			c.Backend.Payment = PaymentConfig{Enabled: true, Asset: "USDC", Prices: map[string]string{"[bad": "1"}}
+			c.Backend.Payment = PaymentConfig{Enabled: true, Asset: "USDC", PayTo: "0xS", Prices: map[string]string{"[bad": "1"}}
 		}, "bad tool glob"},
 		{"payment overlapping globs", func(c *Config) {
-			c.Backend.Payment = PaymentConfig{Enabled: true, Asset: "USDC", Prices: map[string]string{"search_*": "1", "search_docs": "2"}}
+			c.Backend.Payment = PaymentConfig{Enabled: true, Asset: "USDC", PayTo: "0xS", Prices: map[string]string{"search_*": "1", "search_docs": "2"}}
 		}, "overlap"},
 		{"payment overlapping two-wildcard globs", func(c *Config) {
-			c.Backend.Payment = PaymentConfig{Enabled: true, Asset: "USDC", Prices: map[string]string{"read_*": "1", "read_file_*": "2"}}
+			c.Backend.Payment = PaymentConfig{Enabled: true, Asset: "USDC", PayTo: "0xS", Prices: map[string]string{"read_*": "1", "read_file_*": "2"}}
 		}, "overlap"},
 	}
 	for _, tc := range cases {

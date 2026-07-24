@@ -48,6 +48,11 @@ type PaymentEvidence struct {
 	// backend was not invoked, so PaymentRef/PayerRef are absent. It exists so a
 	// client can rehearse the exact evidence shape it will see when paying.
 	DryRun bool `json:"dry_run,omitempty"`
+	// Request binds the receipt to the EXACT call it paid for: a canonical hash of
+	// the tool arguments (CanonicalArgsHash). With the record's Tool and RPCID it
+	// makes the receipt non-repudiable for a specific request, so a settlement
+	// cannot later be claimed to have paid for a different call. Optional.
+	Request string `json:"request,omitempty"`
 }
 
 // Payment-evidence hash domains. Distinct prefixes keep the payment-ref and

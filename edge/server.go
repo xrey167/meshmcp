@@ -155,8 +155,19 @@ func New(cfg Config, opts Options) (*Server, error) {
 	}
 
 	// Payment gate: fail closed if enabled without a way to verify (see
-	// newPaymentGate). nil when payment is disabled.
-	payGate, err := newPaymentGate(cfg.Backend.Payment, cfg.Backend.Name, opts.PaymentVerifier)
+	// newPaymentGate). nil when payment is disabled. Resolve the SECRET evidence
+	// salt (generated+persisted if unset) and reseed the single-use set from the
+	// already-verified audit chain so a restart does not re-open every past
+	// payment to replay on a single instance.
+	paySalt, err := resolvePaymentSalt(cfg.Backend.Payment, cfg.StateDir)
+	if err != nil {
+		return nil, err
+	}
+	paySeed, err := seedRedeemedRefs(cfg.AuditLog, cfg.Backend.Payment.Enabled)
+	if err != nil {
+		return nil, err
+	}
+	payGate, err := newPaymentGate(cfg.Backend.Payment, paySalt, opts.PaymentVerifier, paySeed)
 	if err != nil {
 		return nil, err
 	}
@@ -297,6 +308,9 @@ func (s *Server) httpServer(tlsConf *tls.Config) *http.Server {
 		TLSConfig:         tlsConf,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
+		// Bound request headers (X-PAYMENT rides here, outside the body's
+		// MaxBytesReader). 64 KiB is ample for OAuth + a small x402 payload.
+		MaxHeaderBytes: 64 << 10,
 	}
 }
 

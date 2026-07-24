@@ -40,7 +40,8 @@
         "amount": { "type": "string", "description": "amount charged in the asset's minor units (string for exact precision)" },
         "payment_ref": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "one-way hash of the settlement reference; proves a settlement without exposing the on-chain transaction" },
         "payer_ref": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "one-way, per-deployment-salted hash of the payer; correlates repeat payers without exposing a wallet" },
-        "dry_run": { "type": "boolean", "description": "true when produced by the free dry-run route (no charge, backend not invoked)" }
+        "dry_run": { "type": "boolean", "description": "true when produced by the free dry-run route (no charge, backend not invoked)" },
+        "request": { "type": "string", "description": "canonical hash of the tool arguments this settlement paid for; with tool + rpc_id binds the receipt to the exact request" }
       }
     }
   }

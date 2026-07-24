@@ -174,15 +174,41 @@ func (s *Server) mcpPost(w http.ResponseWriter, r *http.Request) {
 		// ledger never implies the paid call was served. The payment is spent
 		// (single-use); recovery is a settlement matter, not a silent re-serve.
 		if paid != nil {
-			_ = s.auditPayment(au.clientID, class.Tool, "x402/backend-error", "deny", "paid call not served: backend unavailable after settlement", paid)
+			_ = s.auditPayment(au.clientID, class.Tool, class.ID, "x402/backend-error", "deny", "paid call not served: backend unavailable after settlement", paid)
 		}
 		s.writeJSONRPC(w, jsonRPCErrorResponse(class.ID, -32603, "backend unavailable: "+ferr.Error()))
 		return
+	}
+	// A settled paid call whose backend returned an error result (JSON-RPC error
+	// or a tools/call result with isError:true) was still charged. Record a
+	// compensating x402/tool-error so the ledger reflects the true outcome for
+	// dispute purposes; the payment is spent (pay-before-execute).
+	if paid != nil && toolCallErrored(resp) {
+		_ = s.auditPayment(au.clientID, class.Tool, class.ID, "x402/tool-error", "deny", "paid call: backend returned an error result", paid)
 	}
 	if sess != nil {
 		w.Header().Set(headerSessionID, sess.id)
 	}
 	s.writeJSONRPC(w, resp)
+}
+
+// toolCallErrored reports whether a JSON-RPC response is an error response or a
+// tools/call result marked isError:true — the outcomes a paid call should record
+// as not-successfully-served.
+func toolCallErrored(resp []byte) bool {
+	var env struct {
+		Error  json.RawMessage `json:"error"`
+		Result struct {
+			IsError bool `json:"isError"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil {
+		return false
+	}
+	if len(env.Error) > 0 && string(env.Error) != "null" {
+		return true
+	}
+	return env.Result.IsError
 }
 
 // enforceToolCall applies the capability + policy double-gate and audits the

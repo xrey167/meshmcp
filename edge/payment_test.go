@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -339,7 +340,7 @@ func TestPaymentEnabledWithoutVerifierFailsClosed(t *testing.T) {
 	cfg.StateDir = dir
 	cfg.AuditLog = dir + "/audit.jsonl"
 	cfg.SigningKey = dir + "/key.json"
-	cfg.Backend.Payment = PaymentConfig{Enabled: true, Asset: "USDC", Prices: map[string]string{"search_*": "1000"}}
+	cfg.Backend.Payment = PaymentConfig{Enabled: true, Asset: "USDC", PayTo: "0xS", Prices: map[string]string{"search_*": "1000"}}
 	// no PaymentVerifier injected, dev_insecure_verifier not set
 	_, err := New(cfg, Options{
 		Now: func() time.Time { return time.Now() }, Signer: mustSigner(t),
@@ -569,6 +570,167 @@ func TestPaidCallBackendFailureRecordsCompensation(t *testing.T) {
 	}
 	if pay, _ := comp["payment"].(map[string]any); pay["payment_ref"] == nil {
 		t.Fatalf("compensating record evidence must carry the (hashed) payment_ref: %v", comp)
+	}
+}
+
+// The evidence salt is a generated, persisted secret — never the public backend
+// name — and is stable across restarts (so reseeded refs stay comparable).
+func TestPaymentSaltIsGeneratedSecretAndStable(t *testing.T) {
+	dir := t.TempDir()
+	cfg := basicPayment()
+	cfg.Salt, cfg.SaltEnv, cfg.SaltFile = "", "", "" // force auto-generate
+	s1, err := resolvePaymentSalt(cfg, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s1 == "" || s1 == "docs" || s1 == cfg.Asset {
+		t.Fatalf("salt must be a generated secret, got %q", s1)
+	}
+	s2, err := resolvePaymentSalt(cfg, dir) // same state dir → same persisted salt
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s1 != s2 {
+		t.Fatalf("salt must persist across restart: %q != %q", s1, s2)
+	}
+	// Explicit env salt wins.
+	cfg.SaltEnv = "MESHMCP_TEST_SALT"
+	t.Setenv("MESHMCP_TEST_SALT", "explicit-secret")
+	if v, _ := resolvePaymentSalt(cfg, dir); v != "explicit-secret" {
+		t.Fatalf("SaltEnv should win, got %q", v)
+	}
+}
+
+// seedRedeemedRefs collects payment_ref hashes from x402/settle records only.
+func TestSeedRedeemedRefsCollectsSettleRefs(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/audit.jsonl"
+	lines := []string{
+		`{"time":"T","backend":"edge:x","peer":"oauth:c","method":"x402/settle","tool":"t","decision":"allow","rule":-1,"seq":1,"prev_hash":"","hash":"h1","payment":{"scheme":"x402","payment_ref":"REF-A"}}`,
+		`{"time":"T","backend":"edge:x","peer":"oauth:c","method":"x402/require","tool":"t","decision":"deny","rule":-1,"seq":2,"prev_hash":"h1","hash":"h2"}`,
+		`{"time":"T","backend":"edge:x","peer":"oauth:c","method":"x402/settle","tool":"t","decision":"allow","rule":-1,"seq":3,"prev_hash":"h2","hash":"h3","payment":{"scheme":"x402","payment_ref":"REF-B"}}`,
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	seed, err := seedRedeemedRefs(path, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(seed) != 2 {
+		t.Fatalf("want 2 settle refs, got %d: %v", len(seed), seed)
+	}
+	if _, ok := seed["REF-A"]; !ok {
+		t.Fatal("REF-A missing")
+	}
+	if _, ok := seed["REF-B"]; !ok {
+		t.Fatal("REF-B missing")
+	}
+	// Disabled payment reseeds nothing.
+	if s, _ := seedRedeemedRefs(path, false); len(s) != 0 {
+		t.Fatalf("disabled payment must not reseed, got %v", s)
+	}
+}
+
+// A gate constructed with a seed treats a seeded reference as already redeemed —
+// this is the restart-durability guarantee (single instance).
+func TestGateSeededReferenceIsReplay(t *testing.T) {
+	g, err := newPaymentGate(basicPayment(), "test-salt", devPaymentVerifier{}, map[string]struct{}{"seeded-ref": {}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first, full := g.redeem("seeded-ref"); first || full {
+		t.Fatalf("a seeded (already-redeemed-across-restart) ref must be a replay, got first=%v full=%v", first, full)
+	}
+	if first, full := g.redeem("fresh-ref"); !first || full {
+		t.Fatalf("a fresh ref must redeem, got first=%v full=%v", first, full)
+	}
+}
+
+// The gate cross-checks the settled amount against the price and fails closed if
+// it is short — it does not trust a verifier that reports success while settling
+// less than the price.
+func TestGateFailsClosedOnUnderSettledAmount(t *testing.T) {
+	var calls int64
+	v := stubVerifier{settle: Settlement{Amount: "1", Reference: "r"}} // price is 1000
+	pay := basicPayment()
+	pay.DevInsecureVerifier = false
+	ts, token, audit, _ := newPaidServerFull(t, pay, countingBackend(t, &calls), v, nil)
+	sid := initSession(t, ts.URL, token)
+	resp := callTool(t, ts.URL, token, sid, map[string]string{
+		headerPayment: xPaymentHeader("1000", "USDC", "0xP"),
+	})
+	status := resp.StatusCode
+	resp.Body.Close()
+	if status != http.StatusPaymentRequired {
+		t.Fatalf("under-settled amount must fail closed (402), got %d", status)
+	}
+	if atomic.LoadInt64(&calls) != 0 {
+		t.Fatal("under-settled call must not reach the backend")
+	}
+	if strings.Contains(audit.String(), "x402/settle") {
+		t.Fatalf("no settle record for an under-settled payment: %s", audit.String())
+	}
+}
+
+// An oversized X-PAYMENT header is rejected before decode.
+func TestOversizedPaymentHeaderRejected(t *testing.T) {
+	ts, token, _ := newPaidServer(t, basicPayment())
+	sid := initSession(t, ts.URL, token)
+	huge := strings.Repeat("A", (16<<10)+1)
+	resp := callTool(t, ts.URL, token, sid, map[string]string{headerPayment: huge})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusPaymentRequired {
+		t.Fatalf("oversized X-PAYMENT should be rejected with 402, got %d", resp.StatusCode)
+	}
+}
+
+// A settled paid call whose backend returns an isError result records a
+// compensating x402/tool-error, so the ledger reflects the true outcome.
+func TestPaidCallToolErrorRecordsCompensation(t *testing.T) {
+	errDial := func(ctx context.Context) (net.Conn, error) {
+		clientSide, serverSide := net.Pipe()
+		srv := mcp.New("errbackend", "1.0")
+		srv.AddTool(mcp.Tool{
+			Name: "search_docs",
+			Handler: func(ctx context.Context, args json.RawMessage) (mcp.ToolResult, error) {
+				return mcp.ToolResult{IsError: true, Content: []mcp.Content{mcp.Text("tool failed")}}, nil
+			},
+		})
+		go func() { _ = srv.Serve(context.Background(), serverSide, serverSide); serverSide.Close() }()
+		return clientSide, nil
+	}
+	ts, token, audit, _ := newPaidServerFull(t, basicPayment(), errDial, nil, nil)
+	sid := initSession(t, ts.URL, token)
+	resp := callTool(t, ts.URL, token, sid, map[string]string{
+		headerPayment: xPaymentHeader("1000", "USDC", "0xP"),
+	})
+	resp.Body.Close()
+	log := audit.String()
+	if !strings.Contains(log, "x402/settle") {
+		t.Fatalf("settle should be recorded: %s", log)
+	}
+	if !strings.Contains(log, "x402/tool-error") {
+		t.Fatalf("a paid call returning isError must record a compensating x402/tool-error: %s", log)
+	}
+}
+
+// A settled receipt binds to the exact request: it carries the rpc id and a
+// canonical args hash.
+func TestSettleRecordBindsRequest(t *testing.T) {
+	ts, token, audit, _ := newPaidServerFull(t, basicPayment(), startBackend(t), nil, nil)
+	sid := initSession(t, ts.URL, token)
+	resp := callTool(t, ts.URL, token, sid, map[string]string{
+		headerPayment: xPaymentHeader("1000", "USDC", "0xP"),
+	})
+	resp.Body.Close()
+	rec := findAuditRecord(t, audit.String(), "x402/settle")
+	if rec["rpc_id"] == nil || rec["rpc_id"] == "" {
+		t.Fatalf("settle record must bind the rpc id: %v", rec)
+	}
+	pay, _ := rec["payment"].(map[string]any)
+	if pay == nil || pay["request"] == nil || pay["request"] == "" {
+		t.Fatalf("settle evidence must bind a canonical args hash (request): %v", rec)
 	}
 }
 

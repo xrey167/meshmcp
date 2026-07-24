@@ -110,45 +110,103 @@ backend:
     facilitator: "https://facilitator.example/x402"   # advisory; the injected verifier does the work
     free_dry_run: true
     # dev_insecure_verifier: true    # local/demo ONLY — accepts unsettled payments; omit in production and inject a real verifier
-    salt: carbon-tools               # optional; scopes payer_ref (defaults to backend name)
+    # salt: "<secret>"               # SECRET; prefer salt_env/salt_file; auto-generated + persisted if unset
+    # salt_env: MESHMCP_PAYMENT_SALT
+    # salt_file: /run/secrets/payment_salt
     prices:                          # tool-name globs (path.Match), non-overlapping
-      "estimate_*": "1000"           # minor units, string
+      "estimate_*": "1000"           # POSITIVE INTEGER in minor units, string
       "verify_footprint": "5000"
 ```
 
-Validation rejects an enabled block with no `asset`, no prices, an empty price,
-a malformed glob, or **overlapping** price globs (overlap would make the charged
-price depend on non-deterministic map order). A disabled or absent block is
-inert.
+Validation rejects an enabled block with no `asset`, no `pay_to`, no prices, a
+price that is not a canonical positive integer in minor units, a malformed glob,
+**overlapping** price globs (overlap would make the charged price ambiguous), or
+a `salt` equal to the (public) backend name. A disabled or absent block is inert.
 
-## Non-goals / limits (v0.1)
+The evidence **salt is a secret** (see Privacy below): supply it via `salt_env`
+or `salt_file`, or leave all three unset and the edge generates a 32-byte secret
+once and persists it at `<state_dir>/payment_salt` (0600), reused across
+restarts. It is never defaulted to a public value.
 
-- On-chain settlement correctness is the facilitator's, not meshmcp's — the
-  built-in verifier is a dev stand-in.
-- **Single-use is enforced by the gate.** Each settlement reference is redeemable
-  exactly once (an in-process consumed-reference store), so one settled payment
-  authorizes exactly one call and a replayed `X-PAYMENT` is denied
-  (`x402/replay`) regardless of whether the verifier is idempotent. The store is
-  per-edge-instance and its lifetime; a shared, size-bounded store is the HA
-  hardening (mirrors the DPoP replay store), and the map is unbounded within a
-  process today.
-- **Redeem-before-forward.** The reference is redeemed before the backend call,
-  which is airtight against concurrent replay but means a backend failure *after*
-  settlement spends the payment: a compensating `x402/backend-error` record is
-  written (so the ledger never implies the paid call was served), and recovery is
-  a settlement matter, not a silent re-serve. Likewise, if the audit write fails
-  after settlement the call is denied and the payment is spent — a new call needs
-  a new payment.
-- **Fail-closed on incomplete verifier output.** A verifier that returns success
-  but no settlement reference is treated as a failure and re-challenged — a
-  "settled" record is never written without settlement proof.
-- **Verifier error text is confined.** A verifier's error string (which a real
-  facilitator might build from payload/settlement detail) is never written to the
-  audit log OR the process log — both get a fixed reason; raw detail lives only
-  in the facilitator.
-- `payer_ref` unlinkability is only as strong as the salt; a public/guessable
-  payer-id space plus a known salt is correlatable by brute force. Use a secret
-  salt where payer anonymity matters.
+## Verifier contract (normative)
+
+The gate delegates payment *validity* to the injected `PaymentVerifier` and
+enforces only what it can see. An injected production verifier **MUST**, before
+returning success:
+
+1. Verify the payment pays `req.PayTo` on `req.Network` in `req.Asset` for an
+   amount **≥** `req.MaxAmountRequired`.
+2. Verify the payment authorization's cryptographic proof (signature).
+3. **Settle** the authorization so it is single-use at the facilitator/on-chain
+   layer, and return a stable, unique settlement `Reference` (and, if known, the
+   opaque `Payer`). Returning success with an empty `Reference` is rejected by
+   the gate (fail-closed).
+
+What the gate enforces itself, independent of the verifier: single-use of the
+returned `Reference` (see below), a settled `Amount` **≥** the configured price
+(integer compare in minor units), a bounded verifier timeout, and a bounded
+`X-PAYMENT` size. What the gate does **not** check (and therefore fully trusts
+the verifier for): `PayTo`, `Network`, and the payment's signature. A
+mis-implemented verifier that skips (1)/(2) can accept wrong-recipient or forged
+payments — the verifier is a trusted security collaborator.
+
+## Privacy
+
+`payment_ref`/`payer_ref` are one-way salted hashes, but the payer-id and
+settlement-reference spaces are **public/enumerable** (wallet-derived ids, tx
+hashes). Their unlinkability therefore rests entirely on the **secrecy** of the
+salt: with a guessable salt, anyone holding the exported audit log can brute-force
+the hashes and de-anonymize payers. meshmcp treats the salt as a mandatory secret
+(auto-generated, persisted, never the backend name), which closes the default
+weakness — but do **not** rotate the salt in place: historical records hash under
+the salt in force when they were written, so rotation makes old `payment_ref`
+values incomparable (breaking restart-reseed) and old `payer_ref` values
+un-correlatable. A keyed/versioned salt set is planned. `Amount` is retained in
+evidence but is derivable from the priced tool, so it adds a small correlation
+surface only.
+
+## Single-use, durability, and scale
+
+- **Single-use is enforced by the gate**, keyed on the salted `payment_ref`.
+  One settled payment authorizes exactly one call; a replay is denied
+  (`x402/replay`) regardless of verifier idempotency.
+- **Restart durability (single instance):** on startup the gate reseeds its
+  consumed set from the `x402/settle` records in the already-verified audit
+  chain, so a restart does **not** re-open past payments to replay.
+- **Bounded:** the in-process set is size-capped and **fails closed** on overflow
+  (denies new payments) rather than evicting a still-replayable reference.
+- **Multi-instance is NOT yet safe:** the consumed set is per-process, so two
+  edge instances behind one URL have independent replay windows (double-spend
+  across instances). Until a shared store lands, **run payment behind a single
+  instance.** A `payment.single_use_store` (postgres, atomic claim, fail-closed
+  when configured-but-unsupplied — mirroring `oauth.dpop_replay_store`) is the
+  planned HA control.
+- **Redeem-before-forward:** redeemed before the backend call (airtight vs.
+  concurrent replay); a backend failure or error result *after* settlement writes
+  a compensating `x402/backend-error` / `x402/tool-error` record so the ledger
+  reflects the true outcome, but the payment is spent (a settlement matter, not a
+  silent re-serve). An audit-write failure after settlement likewise fails closed.
+
+## Non-goals / planned hardening
+
+- On-chain settlement correctness is the facilitator's, not meshmcp's — no
+  production facilitator client ships yet, so a production deployment must inject
+  one (enabling payment without a verifier is a fail-closed construction error).
+- **Scope:** only `tools/call` is billable. Non-tool methods (`resources/read`,
+  `prompts/get`, completion) are protocol plumbing and are **not** payment-gated —
+  expose billable work as a tool, not a resource/prompt. An unpriced tool (no
+  matching price glob) is free.
+- **Not bound to the caller / not fresh:** `X-PAYMENT` is a bearer instrument;
+  the gate binds a redemption to (tool, args-hash, rpc-id) in the receipt but does
+  not yet issue a per-challenge server nonce, so a leaked payment could be
+  presented by a different approved client before it is redeemed. Per-client
+  challenge nonces + expiry are planned.
+- **No idempotent retry:** a served response lost in transit cannot be recovered
+  by re-presenting the payment (it is now redeemed); a served-result cache keyed
+  by reference is planned.
+- **No automated reconciliation** of recorded settlements against
+  facilitator/on-chain truth; retain the raw settlement id in the facilitator
+  keyed to the salted `payment_ref` for out-of-band reconciliation.
 - Gating lives at the public edge (the paid-remote surface). The
   `PaymentEvidence` type is in `policy`, so a future mesh-gateway gate can emit
   the same evidence.

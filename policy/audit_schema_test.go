@@ -165,6 +165,7 @@ func TestAuditRecordSchema_AllowsPayment(t *testing.T) {
 	var buf bytes.Buffer
 	a := NewAuditLog(&buf, func() string { return "T" })
 	ev := NewPaymentEvidence("x402", "base-sepolia", "USDC", "1000", "settle-ref", "payer-id", "backend")
+	ev.Request = CanonicalArgsHash([]byte(`{"q":"hi"}`))
 	a.write(AuditRecord{
 		Backend: "edge:carbon", Peer: "oauth:c1", Method: "x402/settle", Tool: "estimate",
 		Decision: "allow", Rule: -1, Payment: &ev,

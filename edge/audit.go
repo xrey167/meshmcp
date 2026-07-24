@@ -2,6 +2,7 @@ package edge
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -77,6 +78,40 @@ func seedEdgeAudit(path string) (seq int, lastHash string, err error) {
 		return res.Count, res.LastHash, nil
 	}
 	return 0, "", fmt.Errorf("edge: existing audit_log %s is unverifiable (break at seq %d: %s); refusing to append", path, res.BreakSeq, res.Reason)
+}
+
+// seedRedeemedRefs reads the edge audit log and returns the set of settlement
+// payment_ref hashes already redeemed (from x402/settle records), so the payment
+// gate's in-process single-use set survives a restart on a single instance —
+// without this, every previously-settled payment would be replayable after a
+// restart. It runs only when payment is enabled, and only AFTER the ledger has
+// been opened (which already refuses to continue an unverifiable log), so it
+// reads a chain that was validated. A missing/empty log yields an empty set.
+func seedRedeemedRefs(path string, enabled bool) (map[string]struct{}, error) {
+	seed := map[string]struct{}{}
+	if !enabled || path == "" {
+		return seed, nil
+	}
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return seed, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("edge: reseed payment single-use from %s: %w", path, err)
+	}
+	for _, line := range bytes.Split(bytes.TrimSpace(data), []byte("\n")) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var rec policy.AuditRecord
+		if err := json.Unmarshal(line, &rec); err != nil {
+			continue // a torn trailing record; the ledger seed already handled integrity
+		}
+		if rec.Method == "x402/settle" && rec.Payment != nil && rec.Payment.PaymentRef != "" {
+			seed[rec.Payment.PaymentRef] = struct{}{}
+		}
+	}
+	return seed, nil
 }
 
 // append records one decision. The caller sets Decision ("allow"/"deny"/"cosign")

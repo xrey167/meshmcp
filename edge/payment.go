@@ -2,6 +2,7 @@ package edge
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -10,9 +11,13 @@ import (
 	"log"
 	"math/big"
 	"net/http"
+	"os"
 	"path"
+	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/xrey167/meshmcp/policy"
 )
@@ -39,6 +44,14 @@ const (
 	// headerDryRun requests the free dry-run route (any non-empty value).
 	headerDryRun = "X-Meshmcp-Dry-Run"
 )
+
+// maxPaymentHeaderBytes bounds the attacker-controlled X-PAYMENT header before
+// any decode work. A real x402 payload is small; this is generous headroom.
+const maxPaymentHeaderBytes = 16 << 10
+
+// paymentVerifyTimeout bounds a single verifier call so a slow or hung
+// facilitator cannot pin a request (and its goroutine) indefinitely.
+const paymentVerifyTimeout = 8 * time.Second
 
 // PaymentRequirements is the challenge body returned with HTTP 402: what a
 // client must pay, to whom, and where its payment will be verified. It is the
@@ -100,9 +113,10 @@ type paymentGate struct {
 // — only behind the explicit dev_insecure_verifier opt-in — the built-in dev
 // verifier. Enabling payment with neither is a fail-closed construction error,
 // never a silent downgrade to a verifier that accepts unsettled payments
-// (mirrors the DPoP replay-store and signing-key precedents). The payer-hash
-// salt defaults to the backend name.
-func newPaymentGate(cfg PaymentConfig, backend string, v PaymentVerifier) (*paymentGate, error) {
+// (mirrors the DPoP replay-store and signing-key precedents). salt is the
+// resolved SECRET for evidence hashing (see resolvePaymentSalt); seed preloads
+// the single-use set from durable state (see reseed on restart).
+func newPaymentGate(cfg PaymentConfig, salt string, v PaymentVerifier, seed map[string]struct{}) (*paymentGate, error) {
 	if !cfg.Enabled {
 		return nil, nil
 	}
@@ -112,24 +126,89 @@ func newPaymentGate(cfg PaymentConfig, backend string, v PaymentVerifier) (*paym
 		}
 		v = devPaymentVerifier{}
 	}
-	salt := cfg.Salt
 	if salt == "" {
-		salt = backend
+		return nil, fmt.Errorf("edge: payment salt resolved empty (internal) — refusing to hash evidence with no secret")
 	}
-	return &paymentGate{cfg: cfg, verifier: v, salt: salt, consumed: map[string]struct{}{}}, nil
+	consumed := map[string]struct{}{}
+	for k := range seed {
+		consumed[k] = struct{}{}
+	}
+	return &paymentGate{cfg: cfg, verifier: v, salt: salt, consumed: consumed}, nil
 }
 
-// redeem atomically claims a settlement reference for single use. It returns
-// true on the first (and only) redemption of that reference and false for every
-// subsequent replay.
-func (g *paymentGate) redeem(reference string) (firstUse bool) {
+// maxConsumedRefs bounds the in-process single-use set so a long-running or
+// attacked edge cannot grow it without limit. On overflow the gate fails closed
+// (denies new payments) rather than evicting a reference that would then be
+// replayable — an operator hitting this must front the edge with a shared,
+// size-bounded store (see docs/spec/PAYMENT-EVIDENCE.md). Sized generously so it
+// is reached only by genuinely high volume.
+const maxConsumedRefs = 1 << 20
+
+// resolvePaymentSalt resolves the SECRET salt for evidence hashing. Precedence:
+// an explicit inline Salt, then SaltEnv, then SaltFile, then a generated 32-byte
+// secret persisted at <stateDir>/payment_salt (0600) and reused across restarts.
+// It never returns a public/derivable value, so payer_ref/payment_ref stay
+// non-reversible. Disabled payment resolves to "".
+func resolvePaymentSalt(cfg PaymentConfig, stateDir string) (string, error) {
+	if !cfg.Enabled {
+		return "", nil
+	}
+	if cfg.Salt != "" {
+		return cfg.Salt, nil
+	}
+	if cfg.SaltEnv != "" {
+		v := os.Getenv(cfg.SaltEnv)
+		if v == "" {
+			return "", fmt.Errorf("edge: backend.payment.salt_env %q is set but the environment variable is empty", cfg.SaltEnv)
+		}
+		return v, nil
+	}
+	if cfg.SaltFile != "" {
+		b, err := os.ReadFile(cfg.SaltFile)
+		if err != nil {
+			return "", fmt.Errorf("edge: read backend.payment.salt_file: %w", err)
+		}
+		v := strings.TrimSpace(string(b))
+		if v == "" {
+			return "", fmt.Errorf("edge: backend.payment.salt_file %s is empty", cfg.SaltFile)
+		}
+		return v, nil
+	}
+	// Auto-generate and persist a per-deployment secret, once.
+	path := filepath.Join(stateDir, "payment_salt")
+	if b, err := os.ReadFile(path); err == nil {
+		if v := strings.TrimSpace(string(b)); v != "" {
+			return v, nil
+		}
+	}
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("edge: generate payment salt: %w", err)
+	}
+	salt := hex.EncodeToString(buf)
+	if err := os.WriteFile(path, []byte(salt), 0o600); err != nil {
+		return "", fmt.Errorf("edge: persist payment salt %s: %w", path, err)
+	}
+	return salt, nil
+}
+
+// redeem atomically claims a settlement reference for single use. refHash is the
+// SALTED payment_ref hash (equal to the value persisted in the audit evidence),
+// so the in-memory set is comparable to what a restart reseeds from disk. It
+// returns firstUse=true only on the first redemption; a replay returns
+// (false,false); reaching the capacity bound returns (false,true) so the caller
+// fails closed rather than evicting a still-replayable reference.
+func (g *paymentGate) redeem(refHash string) (firstUse, full bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if _, used := g.consumed[reference]; used {
-		return false
+	if _, used := g.consumed[refHash]; used {
+		return false, false
 	}
-	g.consumed[reference] = struct{}{}
-	return true
+	if len(g.consumed) >= maxConsumedRefs {
+		return false, true
+	}
+	g.consumed[refHash] = struct{}{}
+	return true, false
 }
 
 // priceFor returns the price for a tool and whether it is priced. Overlapping
@@ -190,7 +269,8 @@ func (s *Server) gatePayment(w http.ResponseWriter, r *http.Request, au authed, 
 	// evidence so it can rehearse the paid flow at no cost.
 	if g.cfg.FreeDryRun && r.Header.Get(headerDryRun) != "" {
 		ev := policy.DryRunEvidence(g.cfg.scheme(), g.cfg.Network, g.cfg.Asset, price)
-		if err := s.auditPayment(au.clientID, class.Tool, "x402/dry-run", "allow", "free dry-run", &ev); err != nil {
+		ev.Request = policy.CanonicalArgsHash(class.Args)
+		if err := s.auditPayment(au.clientID, class.Tool, class.ID, "x402/dry-run", "allow", "free dry-run", &ev); err != nil {
 			// Fail closed: an unrecorded decision is denied, even a free one.
 			s.writeJSONRPC(w, jsonRPCErrorResponse(class.ID, -32002, "dry-run blocked: audit sink unavailable (fail-closed)"))
 			return false, nil
@@ -203,13 +283,24 @@ func (s *Server) gatePayment(w http.ResponseWriter, r *http.Request, au authed, 
 	}
 
 	req := g.requirements(class.Tool, price, s.cfg.PublicURL+pathMCP+"#")
-	payload, ok := decodePaymentHeader(r.Header.Get(headerPayment))
-	if !ok {
-		_ = s.auditPayment(au.clientID, class.Tool, "x402/require", "deny", "payment required", nil)
+	rawHeader := r.Header.Get(headerPayment)
+	if len(rawHeader) > maxPaymentHeaderBytes {
+		// Bound the attacker-controlled X-PAYMENT before any decode work: a real
+		// x402 payload is small, so an oversized header is abuse.
+		_ = s.auditPayment(au.clientID, class.Tool, class.ID, "x402/require", "deny", "payment header too large", nil)
 		s.writePaymentRequired(w, req)
 		return false, nil
 	}
-	settle, err := g.verifier.VerifyPayment(r.Context(), req, payload)
+	payload, ok := decodePaymentHeader(rawHeader)
+	if !ok {
+		_ = s.auditPayment(au.clientID, class.Tool, class.ID, "x402/require", "deny", "payment required", nil)
+		s.writePaymentRequired(w, req)
+		return false, nil
+	}
+	// Bound the verifier so a slow/hung facilitator cannot pin a request.
+	vctx, cancel := context.WithTimeout(r.Context(), paymentVerifyTimeout)
+	defer cancel()
+	settle, err := g.verifier.VerifyPayment(vctx, req, payload)
 	if err != nil {
 		// The verifier's error may echo payload/settlement content (a real
 		// facilitator client can build errors naming an address or token). Keep
@@ -217,7 +308,7 @@ func (s *Server) gatePayment(w http.ResponseWriter, r *http.Request, au authed, 
 		// AND the process log: record a FIXED reason and log a FIXED line. Raw
 		// detail lives only in the facilitator.
 		log.Printf("edge: payment verify rejected for %s tool %q", oauthIdentity(au.clientID), class.Tool)
-		_ = s.auditPayment(au.clientID, class.Tool, "x402/require", "deny", "payment rejected by verifier", nil)
+		_ = s.auditPayment(au.clientID, class.Tool, class.ID, "x402/require", "deny", "payment rejected by verifier", nil)
 		s.writePaymentRequired(w, req)
 		return false, nil
 	}
@@ -226,29 +317,42 @@ func (s *Server) gatePayment(w http.ResponseWriter, r *http.Request, au authed, 
 	// a paid call — never emit a "settled" record without settlement proof.
 	if settle.Reference == "" {
 		log.Printf("edge: payment verifier returned no settlement reference for %s tool %q", oauthIdentity(au.clientID), class.Tool)
-		_ = s.auditPayment(au.clientID, class.Tool, "x402/require", "deny", "payment verifier returned no settlement reference", nil)
+		_ = s.auditPayment(au.clientID, class.Tool, class.ID, "x402/require", "deny", "payment verifier returned no settlement reference", nil)
 		s.writePaymentRequired(w, req)
 		return false, nil
 	}
-	// Single-use: redeem the settlement reference exactly once. A replayed
-	// X-PAYMENT (or any second use of the same settlement) is denied here, so one
-	// settled payment authorizes exactly one call regardless of verifier
-	// idempotency. Redeeming BEFORE forwarding keeps this airtight against
-	// concurrent replay; the cost is that a backend failure after redemption
-	// spends the payment (a compensating x402/backend-error record is written by
-	// the caller, and it is a settlement matter, not a re-serve).
-	if !g.redeem(settle.Reference) {
-		_ = s.auditPayment(au.clientID, class.Tool, "x402/replay", "deny", "payment already redeemed", nil)
+	// Defense in depth: the gate cross-checks the settled amount meets the price
+	// (it does not trust the verifier's amount blindly), comparing as integers in
+	// minor units. An unparseable or short amount fails closed.
+	amount, amountOK := meetsPrice(settle.Amount, price)
+	if !amountOK {
+		log.Printf("edge: settled amount below price for %s tool %q", oauthIdentity(au.clientID), class.Tool)
+		_ = s.auditPayment(au.clientID, class.Tool, class.ID, "x402/require", "deny", "settled amount does not meet the price", nil)
+		s.writePaymentRequired(w, req)
+		return false, nil
+	}
+	// Build the evidence first so its salted PaymentRef is the single-use key —
+	// identical to what is persisted, so a restart reseeds a comparable set. Bind
+	// the receipt to the exact request (tool + args hash + rpc id).
+	ev := policy.NewPaymentEvidence(g.cfg.scheme(), g.cfg.Network, g.cfg.Asset, amount, settle.Reference, settle.Payer, g.salt)
+	ev.Request = policy.CanonicalArgsHash(class.Args)
+	// Single-use: redeem the settlement exactly once, keyed on the salted
+	// PaymentRef. A replay is denied; reaching the capacity bound fails closed
+	// rather than evicting a still-replayable reference. Redeeming BEFORE
+	// forwarding is airtight against concurrent replay; a backend failure after
+	// redemption spends the payment (a compensating record is written by caller).
+	firstUse, full := g.redeem(ev.PaymentRef)
+	if full {
+		_ = s.auditPayment(au.clientID, class.Tool, class.ID, "x402/require", "deny", "single-use store at capacity", nil)
+		s.writeJSONRPC(w, jsonRPCErrorResponse(class.ID, -32002, "tool blocked: payment single-use store at capacity (fail-closed); front the edge with a shared payment store"))
+		return false, nil
+	}
+	if !firstUse {
+		_ = s.auditPayment(au.clientID, class.Tool, class.ID, "x402/replay", "deny", "payment already redeemed", nil)
 		s.writeJSONRPC(w, jsonRPCErrorResponse(class.ID, -32005, "payment already redeemed — a settled payment authorizes one call; obtain a fresh payment to call again"))
 		return false, nil
 	}
-
-	amount := settle.Amount
-	if amount == "" {
-		amount = price
-	}
-	ev := policy.NewPaymentEvidence(g.cfg.scheme(), g.cfg.Network, g.cfg.Asset, amount, settle.Reference, settle.Payer, g.salt)
-	if err := s.auditPayment(au.clientID, class.Tool, "x402/settle", "allow", "x402 settled", &ev); err != nil {
+	if err := s.auditPayment(au.clientID, class.Tool, class.ID, "x402/settle", "allow", "x402 settled", &ev); err != nil {
 		// Fail closed: a paid call whose evidence cannot be recorded is not
 		// forwarded. The reference is already redeemed (single-use), so this
 		// payment is spent; a new call requires a new payment.
@@ -272,21 +376,40 @@ func (s *Server) writePaymentRequired(w http.ResponseWriter, req PaymentRequirem
 	})
 }
 
-// auditPayment records a payment-lifecycle decision (require / settle / dry-run)
-// under the client's synthetic identity, with the payment evidence (when any)
-// on the SAME record as the mesh identity. Fail-closed like every edge write.
-func (s *Server) auditPayment(clientID, tool, method, decision, reason string, ev *policy.PaymentEvidence) error {
+// auditPayment records a payment-lifecycle decision (require / settle / replay /
+// dry-run / backend-error) under the client's synthetic identity, with the
+// payment evidence (when any) on the SAME record as the mesh identity. rpcID is
+// the originating JSON-RPC id (may be nil) so a settled receipt binds to the
+// exact request. Fail-closed like every edge write.
+func (s *Server) auditPayment(clientID, tool string, rpcID json.RawMessage, method, decision, reason string, ev *policy.PaymentEvidence) error {
 	return s.audit.append(policy.AuditRecord{
 		Backend:  "edge:" + s.cfg.Backend.Name,
 		Peer:     oauthIdentity(clientID),
 		PeerKey:  oauthIdentity(clientID),
 		Method:   method,
 		Tool:     tool,
+		RPCID:    string(rpcID),
 		Decision: decision,
 		Reason:   reason,
 		Rule:     -1,
 		Payment:  ev,
 	})
+}
+
+// meetsPrice cross-checks a settled amount against the required price (both as
+// integers in minor units). It returns the amount to record and whether it meets
+// the price. An empty settled amount defaults to the price (the verifier did not
+// echo one); a non-integer or short amount fails (ok=false).
+func meetsPrice(settledAmount, price string) (record string, ok bool) {
+	if settledAmount == "" {
+		return price, true
+	}
+	paid, okPaid := new(big.Int).SetString(settledAmount, 10)
+	need, okNeed := new(big.Int).SetString(price, 10)
+	if !okPaid || !okNeed || paid.Sign() <= 0 || paid.Cmp(need) < 0 {
+		return "", false
+	}
+	return settledAmount, true
 }
 
 // dryRunResult builds a well-formed tools/call result for the dry-run route: a

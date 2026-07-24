@@ -283,9 +283,23 @@ type PaymentConfig struct {
 	// precedents): a security-relevant collaborator is never silently
 	// downgraded. NEVER set this in production.
 	DevInsecureVerifier bool `yaml:"dev_insecure_verifier"`
-	// Salt scopes the payer-ref hash in emitted evidence to this deployment.
-	// Empty defaults to the backend name.
+	// Salt is the SECRET that scopes the payer_ref / payment_ref one-way hashes
+	// in emitted evidence. It MUST be secret and high-entropy: payer ids and
+	// settlement references live in a public/enumerable space (wallet-derived
+	// ids, tx hashes), so a non-secret salt lets anyone holding the exported
+	// audit log brute-force the hashes and de-anonymize payers. It is therefore
+	// NEVER defaulted to a public value (the backend name is rejected); when all
+	// of Salt/SaltEnv/SaltFile are empty, a random 32-byte secret is generated
+	// once and persisted at <state_dir>/payment_salt (0600) and reused across
+	// restarts. Prefer SaltEnv/SaltFile over an inline literal so the secret is
+	// not written to the config file.
 	Salt string `yaml:"salt"`
+	// SaltEnv reads the salt from the named environment variable (preferred over
+	// an inline Salt). Empty when unused.
+	SaltEnv string `yaml:"salt_env"`
+	// SaltFile reads the salt from a file (preferred over an inline Salt). Empty
+	// when unused.
+	SaltFile string `yaml:"salt_file"`
 }
 
 // scheme returns the effective payment scheme (default "x402").
@@ -441,7 +455,7 @@ func (c Config) Validate() (Config, error) {
 	if c.Backend.Policy.DefaultAllow {
 		return c, fmt.Errorf("edge: backend.policy.default_allow must be false — the public edge is deny-by-default")
 	}
-	if err := c.Backend.Payment.validate(); err != nil {
+	if err := c.Backend.Payment.validate(c.Backend.Name); err != nil {
 		return c, err
 	}
 
@@ -452,23 +466,31 @@ func (c Config) Validate() (Config, error) {
 // inert). An enabled block must name an asset, price at least one tool, and use
 // well-formed, non-overlapping tool globs (overlap would make pricing depend on
 // non-deterministic map iteration).
-func (p PaymentConfig) validate() error {
+func (p PaymentConfig) validate(backendName string) error {
 	if !p.Enabled {
 		return nil
 	}
 	if p.Asset == "" {
 		return fmt.Errorf("edge: backend.payment.asset is required when payment is enabled")
 	}
+	if p.PayTo == "" {
+		return fmt.Errorf("edge: backend.payment.pay_to is required when payment is enabled (the recipient address advertised in the 402 challenge)")
+	}
 	if len(p.Prices) == 0 {
 		return fmt.Errorf("edge: backend.payment.enabled is true but no prices are set (nothing would ever be charged)")
+	}
+	// A non-secret salt defeats payer_ref/payment_ref unlinkability; the backend
+	// name is public (it is the audit Backend field), so reject it explicitly.
+	if p.Salt != "" && p.Salt == backendName {
+		return fmt.Errorf("edge: backend.payment.salt must not equal the backend name — it must be a SECRET (payer_ref is brute-forceable otherwise); use salt_env/salt_file or leave it empty to auto-generate a persisted secret")
 	}
 	globs := make([]string, 0, len(p.Prices))
 	for pattern, price := range p.Prices {
 		if _, err := path.Match(pattern, ""); err != nil {
 			return fmt.Errorf("edge: backend.payment.prices: bad tool glob %q: %w", pattern, err)
 		}
-		if price == "" {
-			return fmt.Errorf("edge: backend.payment.prices[%q]: price must not be empty", pattern)
+		if !isCanonicalMinorUnits(price) {
+			return fmt.Errorf("edge: backend.payment.prices[%q]: price %q must be a positive integer in the asset's minor units (no sign, decimal point, underscores, exponent, or whitespace)", pattern, price)
 		}
 		globs = append(globs, pattern)
 	}
@@ -480,6 +502,25 @@ func (p PaymentConfig) validate() error {
 		}
 	}
 	return nil
+}
+
+// isCanonicalMinorUnits reports whether s is a positive integer with no leading
+// zero, sign, decimal point, exponent, underscore, or surrounding whitespace —
+// the exact form the 402 challenge's maxAmountRequired and the big.Int amount
+// comparison expect. Rejects "0", "1.5", "1_000", " 100 ", "1e3", "0x10", "-1".
+func isCanonicalMinorUnits(s string) bool {
+	if s == "" || s == "0" {
+		return false
+	}
+	if s[0] == '0' { // no leading zeros (canonical form)
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // globsOverlap reports whether two price globs could both match some tool name,
