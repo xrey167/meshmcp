@@ -284,3 +284,59 @@ func TestCapabilityTokenIsOpaqueBase64(t *testing.T) {
 		t.Fatal("token must not be raw JSON")
 	}
 }
+
+// TestCapabilitySingleUse proves S19: a single-use grant is redeemable at most
+// once, a replay is refused, and presenting one to a verifier with no replay
+// guard is refused (fail-closed). A rejected call never burns the token.
+func TestCapabilitySingleUse(t *testing.T) {
+	s, err := GenerateSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Unix(1_800_000_000, 0)
+	nowf := func() time.Time { return base }
+
+	tok, err := s.IssueCapability(CapabilityClaims{
+		Issuer: "a", Subject: "peerK", Audience: "fs", Tools: []string{"read_*"},
+		SingleUse: true, ExpiresAt: base.Add(time.Hour).Unix(),
+	}, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// No replay guard configured → a single-use grant is refused outright.
+	vNone, _ := NewCapabilityVerifier([]string{s.PubKeyHex()}, nowf)
+	if _, err := vNone.Verify(tok, "peerK", "fs", "read_x"); err == nil {
+		t.Fatalf("single-use grant with no replay guard must be refused")
+	}
+
+	// With a guard: first redemption succeeds, second is refused.
+	seen := map[string]bool{}
+	v, _ := NewCapabilityVerifier([]string{s.PubKeyHex()}, nowf)
+	v = v.WithReplayGuard(func(id string) bool {
+		if seen[id] {
+			return false
+		}
+		seen[id] = true
+		return true
+	})
+	if _, err := v.Verify(tok, "peerK", "fs", "read_x"); err != nil {
+		t.Fatalf("first redemption should succeed: %v", err)
+	}
+	if _, err := v.Verify(tok, "peerK", "fs", "read_x"); err == nil {
+		t.Fatalf("second redemption of a single-use grant must be refused")
+	}
+
+	// A REJECTED call (wrong tool) must NOT burn the token: the guard is the last
+	// gate, so a fresh single-use grant survives a failed check.
+	tok2, _ := s.IssueCapability(CapabilityClaims{
+		Issuer: "a", Subject: "peerK", Audience: "fs", Tools: []string{"read_*"},
+		SingleUse: true, ExpiresAt: base.Add(time.Hour).Unix(),
+	}, base)
+	if _, err := v.Verify(tok2, "peerK", "fs", "write_x"); err == nil {
+		t.Fatalf("wrong tool should fail")
+	}
+	if _, err := v.Verify(tok2, "peerK", "fs", "read_x"); err != nil {
+		t.Fatalf("a failed check must not consume the single-use token: %v", err)
+	}
+}

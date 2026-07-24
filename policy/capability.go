@@ -35,12 +35,17 @@ type CapabilityClaims struct {
 	// subgraphs this capability may query (globs; empty = no corpus restriction).
 	// Auto-signed (signingBytes marshals the whole struct); a knowledge backend
 	// checks it with AllowsCorpus in addition to the tool-glob check.
-	Corpora   []string `json:"corpora,omitempty"`
-	IssuedAt  int64    `json:"iat"`
-	NotBefore int64    `json:"nbf,omitempty"`
-	ExpiresAt int64    `json:"exp"`
-	PubKey    string   `json:"pubkey"` // hex authority key — a HINT; must be pinned by the verifier
-	Sig       string   `json:"sig,omitempty"`
+	Corpora []string `json:"corpora,omitempty"`
+	// SingleUse marks a grant that may be redeemed at most once. A verifier with
+	// a replay guard configured records the id on first use and refuses it
+	// thereafter; presenting a single-use grant to a verifier with no guard is
+	// itself refused (fail-closed).
+	SingleUse bool   `json:"single_use,omitempty"`
+	IssuedAt  int64  `json:"iat"`
+	NotBefore int64  `json:"nbf,omitempty"`
+	ExpiresAt int64  `json:"exp"`
+	PubKey    string `json:"pubkey"` // hex authority key — a HINT; must be pinned by the verifier
+	Sig       string `json:"sig,omitempty"`
 }
 
 func (c CapabilityClaims) signingBytes() []byte {
@@ -92,6 +97,7 @@ type CapabilityVerifier struct {
 	trusted map[string]ed25519.PublicKey
 	now     func() time.Time
 	revoked func(id string) bool
+	claim   func(id string) bool // records a single-use id; false ⇒ already used
 }
 
 // NewCapabilityVerifier pins the given hex authority public keys.
@@ -116,6 +122,15 @@ func NewCapabilityVerifier(publicKeysHex []string, now func() time.Time) (*Capab
 // WithRevocation adds an optional revocation predicate (by token ID).
 func (v *CapabilityVerifier) WithRevocation(revoked func(id string) bool) *CapabilityVerifier {
 	v.revoked = revoked
+	return v
+}
+
+// WithReplayGuard enables single-use capabilities (S19). claim atomically
+// records a capability id and returns true if this is its FIRST redemption,
+// false if it was already used. It is consulted only for SingleUse grants and
+// only after every other check passes, so a rejected call never burns the token.
+func (v *CapabilityVerifier) WithReplayGuard(claim func(id string) bool) *CapabilityVerifier {
+	v.claim = claim
 	return v
 }
 
@@ -166,6 +181,16 @@ func (v *CapabilityVerifier) Verify(token, peerKey, backend, tool string) (Capab
 	}
 	if v.revoked != nil && v.revoked(c.ID) {
 		return CapabilityClaims{}, fmt.Errorf("capability has been revoked")
+	}
+	// Single-use redemption is the LAST gate, so a token is consumed only when it
+	// would otherwise be accepted.
+	if c.SingleUse {
+		if v.claim == nil {
+			return CapabilityClaims{}, fmt.Errorf("single-use capability presented but no replay guard is configured")
+		}
+		if !v.claim(c.ID) {
+			return CapabilityClaims{}, fmt.Errorf("single-use capability has already been used")
+		}
 	}
 	return c, nil
 }
