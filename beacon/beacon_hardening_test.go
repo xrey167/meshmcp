@@ -69,6 +69,13 @@ func TestBeaconProxyProtoPassthrough(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := NewServer(zone)
+	// PROXY v2 asserts a source IP into the gateway's audit/limits, so it is only
+	// negotiated over an authenticated (TLS-pinned) control channel.
+	cert, pin, err := SelfSignedControlCert(zone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetControlCert(cert)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() { _ = s.Run(ctx, publicLn, controlLn) }()
@@ -76,13 +83,13 @@ func TestBeaconProxyProtoPassthrough(t *testing.T) {
 	id := newTestIdentity(t)
 	label := SubdomainLabel(id.PubKeyRaw())
 	fqdn := label + "." + zone
-	tun, err := Dial(ctx, controlLn.Addr().String(), id, plainDial)
+	tun, err := Dial(ctx, controlLn.Addr().String(), id, PinnedDial(plainDial, zone, pin))
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
 	defer tun.Close()
 
-	// PROXY v2 does not require TLS; wait until FEATURES negotiation lands.
+	// Wait until FEATURES negotiation lands (proxy-v2 confirmed over the pinned channel).
 	waitFor(t, "proxy-v2 negotiation", func() bool { return s.gwProxyNegotiated(label) })
 
 	// A public client connects and sends a ClientHello (SNI routes it). We only need
@@ -118,6 +125,50 @@ func TestBeaconProxyProtoPassthrough(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("gateway never accepted the spliced connection")
+	}
+}
+
+// TestProxyProtoNotNegotiatedOverPlaintext locks in the fail-safe: over an
+// unauthenticated (plaintext) control channel, neither PROXY v2 nor connID binding
+// is negotiated, so the gateway never trusts a beacon-asserted source IP that an
+// on-path attacker could forge.
+func TestProxyProtoNotNegotiatedOverPlaintext(t *testing.T) {
+	const zone = "beacon.test"
+	publicLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	controlLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := NewServer(zone) // no control cert => plaintext control channel
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = s.Run(ctx, publicLn, controlLn) }()
+
+	id := newTestIdentity(t)
+	label := SubdomainLabel(id.PubKeyRaw())
+	tun, err := Dial(ctx, controlLn.Addr().String(), id, plainDial)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer tun.Close()
+
+	// The gateway is registered before FEATURES is even sent; give the async
+	// negotiation ample time to (not) confirm anything.
+	waitFor(t, "gateway registration", func() bool {
+		s.mu.Lock()
+		_, ok := s.gateways[label]
+		s.mu.Unlock()
+		return ok
+	})
+	time.Sleep(100 * time.Millisecond)
+	if s.gwProxyNegotiated(label) {
+		t.Fatal("proxy-v2 was negotiated over a plaintext control channel (forgeable source IP)")
+	}
+	if s.gwConnIDBindNegotiated(label) {
+		t.Fatal("connid-bind was negotiated over a plaintext control channel")
 	}
 }
 

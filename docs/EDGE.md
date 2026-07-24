@@ -270,9 +270,11 @@ beacon without these flags behave exactly as before.
   Set that pin in the gateway's `beacon.pin`. Every control **and** data dial to the
   beacon is then TLS with the beacon's public key pinned (no PKI, so the beacon can
   rotate its leaf), so the routing protocol — connIDs, the connID-binding key, ACME
-  TXT publishes — cannot be observed or MITM'd. The beacon serves pinned (TLS) and
-  legacy (plaintext) gateways on the same port, so enabling it is not a flag day. BYO
-  cert with `--control-cert`/`--control-key` instead of `--control-tls-auto`.
+  TXT publishes — cannot be observed or MITM'd. The pin also unlocks the two features
+  below (connID binding and PROXY-v2 passthrough), both of which are negotiated
+  **only** over the authenticated channel. The beacon serves pinned (TLS) and legacy
+  (plaintext) gateways on the same port, so enabling it is not a flag day. BYO cert
+  with `--control-cert`/`--control-key` instead of `--control-tls-auto`.
 
 - **connID HMAC binding (automatic over a pinned channel).** Once the control
   channel is TLS, the beacon hands each gateway a per-session key and requires every
@@ -287,8 +289,11 @@ beacon without these flags behave exactly as before.
   used as a reflection/amplification vector. Loopback and TCP are exempt; Let's
   Encrypt validation (a few queries per resolver prefix) is well under the budget.
 
-> The PROXY-header source IP the gateway records is exactly as trustworthy as the
-> beacon that asserts it — pin the control channel in production. See the design doc.
+PROXY-v2 source-IP passthrough (so the gateway's rate limiters and audit see the
+real client, not the beacon) rides the **same pinned channel**: it is negotiated
+only when the control channel is TLS, because the header the beacon asserts is only
+as trustworthy as the beacon is authenticated. On an unpinned beacon it stays off
+and the gateway honestly reports the beacon's address rather than a forgeable one.
 
 > **Status:** experimental. The rendezvous, SNI-routed splice, gateway listener,
 > authoritative DNS server (RRL + TCP), ACME DNS-01 challenge brokering, PROXY v2

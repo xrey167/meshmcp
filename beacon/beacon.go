@@ -263,14 +263,16 @@ func (s *Server) acceptLoop(ln net.Listener, sem chan struct{}, handle func(net.
 // The read deadline set here bounds the optional TLS handshake, the first-line
 // read, and (for REGISTER) is re-armed around the proof-of-possession exchange.
 func (s *Server) handleTunnelConn(conn net.Conn) {
-	_ = conn.SetReadDeadline(time.Now().Add(peekTimeout))
+	// SetDeadline (not just read) so BOTH sides of the lazy TLS handshake and the
+	// first-line read are bounded — the server->client handshake flight is a write.
+	_ = conn.SetDeadline(time.Now().Add(peekTimeout))
 	conn, isTLS, err := s.maybeTLS(conn)
 	if err != nil {
 		conn.Close()
 		return
 	}
 	line, err := readLine(conn)
-	_ = conn.SetReadDeadline(time.Time{})
+	_ = conn.SetDeadline(time.Time{})
 	if err != nil {
 		conn.Close()
 		return
@@ -372,11 +374,16 @@ func (s *Server) handleRegister(conn net.Conn, isTLS bool, b64Key string) {
 		conn.Close()
 		return
 	}
-	if old != nil {
-		old.control.Close() // last registration (same key) wins; drop the stale tunnel
-	}
-	s.gateways[label] = gw
+	s.gateways[label] = gw // last registration (same key) wins
 	s.mu.Unlock()
+	// Drop the superseded tunnel OUTSIDE s.mu and asynchronously: a TLS control
+	// conn's Close() writes a close_notify alert that can block for seconds against a
+	// wedged peer, and s.mu is the global routing lock — closing under it would stall
+	// SNI routing, DATA pairing, and DNS for every tenant. The map already points at
+	// gw, so old's own register loop no-ops in deregister (s.gateways[label] != old).
+	if old != nil {
+		go old.control.Close()
+	}
 
 	if _, err := fmt.Fprintf(conn, "OK %s.%s\n", label, s.zone); err != nil {
 		s.deregister(gw)
@@ -433,7 +440,12 @@ func (s *Server) handleFeatures(gw *gwConn, rest string) {
 	defer gw.writeMu.Unlock()
 
 	var confirmed []string
-	if offered[featProxyV2] {
+	// PROXY v2 asserts a client source IP into the gateway's rate limiters and audit
+	// ledger, so it is only honored over an AUTHENTICATED (TLS-pinned) control
+	// channel — otherwise an on-path attacker on a plaintext tunnel could rewrite the
+	// header and forge a client IP. On an unpinned channel this stays off and the
+	// gateway honestly reports the data conn's real address (the beacon).
+	if offered[featProxyV2] && gw.controlTLS {
 		gw.proxyProto = true
 		confirmed = append(confirmed, featProxyV2)
 	}
