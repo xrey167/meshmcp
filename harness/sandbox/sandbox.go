@@ -8,6 +8,9 @@ package sandbox
 
 import (
 	"context"
+	"fmt"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -51,17 +54,49 @@ var strength = map[string]int{
 
 // AtLeast returns whichever of want/min is the stronger isolation kind, so a
 // policy minimum can never be weakened by a caller's request.
+//
+// It fails CLOSED on unrecognized kinds. An unknown policy minimum is returned
+// unchanged so the factory rejects it (unknown backend -> error) rather than
+// silently downgrading to host exec; an unknown requested kind resolves to the
+// (known) minimum, or is returned as-is when there is no minimum so the factory
+// likewise rejects it. Only when both kinds are known is the ordering compared.
 func AtLeast(want, min string) string {
-	if strength[want] >= strength[min] {
-		if _, ok := strength[want]; ok {
-			return want
-		}
-	}
-	if _, ok := strength[min]; ok {
+	ws, wok := strength[want]
+	ms, mok := strength[min]
+	// Unknown minimum: never silently satisfy it. Preserve it so New() errors
+	// instead of picking a weaker backend behind the policy's back.
+	if min != "" && !mok {
 		return min
 	}
-	if _, ok := strength[want]; ok {
+	// Unknown requested kind: fall back to the known minimum, else return the
+	// unknown request so the factory rejects it (fail closed, never local).
+	if !wok {
+		if min != "" {
+			return min
+		}
 		return want
 	}
-	return "docker" // unknown pair → safest
+	if ws >= ms {
+		return want
+	}
+	return min
+}
+
+// resolveDir joins a sandbox-relative working directory to root and verifies the
+// result stays within root: a "../" escape (or an absolute Dir, which Join
+// re-roots under the sandbox) can never place a command outside its sandbox.
+func resolveDir(root, sub string) (string, error) {
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("sandbox: resolve root: %w", err)
+	}
+	if sub == "" {
+		return absRoot, nil
+	}
+	joined := filepath.Join(absRoot, sub)
+	rel, err := filepath.Rel(absRoot, joined)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("sandbox: working dir %q escapes the sandbox root", sub)
+	}
+	return joined, nil
 }

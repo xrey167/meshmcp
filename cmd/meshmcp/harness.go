@@ -95,6 +95,7 @@ type harnessDeps struct {
 	nbAPIURL  string
 	nbToken   string
 	nbGroups  string
+	workerCmd string
 }
 
 func (d *harnessDeps) bind(fs *flag.FlagSet) {
@@ -107,6 +108,7 @@ func (d *harnessDeps) bind(fs *flag.FlagSet) {
 	fs.StringVar(&d.nbAPIURL, "nb-api-url", "", "NetBird API URL (default https://api.netbird.io; used by --minter netbird)")
 	fs.StringVar(&d.nbToken, "nb-token", "", "NetBird PAT (or $NB_API_TOKEN; used by --minter netbird)")
 	fs.StringVar(&d.nbGroups, "nb-groups", "workers", "NetBird auto-groups for minted workers (comma-separated)")
+	fs.StringVar(&d.workerCmd, "worker-cmd", "", "run execute-stage jobs as this external worker process (argv; empty = in-process workers)")
 }
 
 // buildMinter selects the worker identity minter. mem (default) generates
@@ -175,12 +177,17 @@ func (d *harnessDeps) engine() (*hn.Engine, func(), error) {
 		return nil, nil, err
 	}
 
-	eng := hn.NewEngine(hn.EngineOpts{
+	opts := hn.EngineOpts{
 		Audit:      al,
 		Cosign:     cosign,
 		Continuity: cont,
 		Minter:     minter,
-	})
+	}
+	if d.workerCmd != "" {
+		opts.Spawner = &hn.ExecSpawner{}
+		opts.WorkerCommand = strings.Fields(d.workerCmd)
+	}
+	eng := hn.NewEngine(opts)
 	closer := func() { al.Flush(); af.Close() }
 	return eng, closer, nil
 }

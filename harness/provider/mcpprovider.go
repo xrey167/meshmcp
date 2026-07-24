@@ -70,6 +70,11 @@ func (p *MCPProvider) Invoke(ctx context.Context, in Prompt) (Completion, error)
 	if err != nil {
 		return Completion{}, fmt.Errorf("provider %s: dial: %w", p.name, err)
 	}
+	// A dial that returns (nil, nil) is a misbehaving dialer; guard it so we
+	// surface a clear error instead of panicking on a nil connection downstream.
+	if conn == nil {
+		return Completion{}, fmt.Errorf("provider %s: dial returned a nil connection", p.name)
+	}
 	c := mcpclient.New(conn, nil)
 	defer c.Close()
 	if _, err := c.Initialize(ctx, "harness-provider"); err != nil {

@@ -5,6 +5,8 @@
 // refused, so the gateway never serves a mis-provisioned transport.
 package channels
 
+import "sync"
+
 // Inbound is a message received from a channel.
 type Inbound struct {
 	Channel string // adapter kind, e.g. "slack"
@@ -31,8 +33,10 @@ type Channel interface {
 
 // WebChat is an in-process channel used for the built-in web chat surface and
 // for tests: it has no external token (always authorized) and records the last
-// reply per user so a caller can read it back.
+// reply per user so a caller can read it back. The gateway delivers from
+// concurrent Handle goroutines, so access to the reply map is mutex-guarded.
 type WebChat struct {
+	mu   sync.Mutex
 	last map[string]Reply
 }
 
@@ -44,12 +48,16 @@ func (w *WebChat) Authorized() bool { return true }
 
 // Send records the reply for user (the built-in surface renders it).
 func (w *WebChat) Send(user string, r Reply) error {
+	w.mu.Lock()
 	w.last[user] = r
+	w.mu.Unlock()
 	return nil
 }
 
 // Last returns the last reply delivered to user (test/inspection helper).
 func (w *WebChat) Last(user string) (Reply, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	r, ok := w.last[user]
 	return r, ok
 }

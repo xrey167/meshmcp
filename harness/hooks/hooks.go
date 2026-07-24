@@ -145,12 +145,27 @@ func (c *Chain) Disable(names ...string) {
 func (c *Chain) Names(phase Phase) []string {
 	var out []string
 	for _, h := range c.hooks {
-		if c.disabled[h.Name()] || !hasPhase(h, phase) {
+		if c.skip(h) || !hasPhase(h, phase) {
 			continue
 		}
 		out = append(out, h.Name())
 	}
 	return out
+}
+
+// skip reports whether a hook is disabled. A Safety hook is NEVER skipped, even
+// if its name is in the disabled set — this is the run-time backstop for the
+// "safety hooks cannot be disabled" guarantee. Disable() already refuses to add
+// a Safety name, but a name can be disabled BEFORE its hook is Added (order
+// independence), so the invariant is re-checked here at evaluation time.
+func (c *Chain) skip(h Hook) bool {
+	if !c.disabled[h.Name()] {
+		return false
+	}
+	if s, ok := h.(Safety); ok && s.IsSafety() {
+		return false
+	}
+	return true
 }
 
 // Run evaluates the chain for e. It applies Mutate effects in place (threading
@@ -162,7 +177,7 @@ func (c *Chain) Run(e Event) (Effect, []string) {
 	var fired []string
 	final := Cont
 	for _, h := range c.hooks {
-		if c.disabled[h.Name()] || !hasPhase(h, e.Phase) {
+		if c.skip(h) || !hasPhase(h, e.Phase) {
 			continue
 		}
 		eff := h.Handle(e)

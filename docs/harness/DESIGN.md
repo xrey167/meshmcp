@@ -90,8 +90,9 @@ each call is authorized against the caller's role via `Governor.Guard` and
 audited. Tools registered: delegation (task, call_agent, background_*,
 synthesize), planning/verify (plan, plan_review, interview, start_work,
 review_work, ultragoal_check), code intel (grep/glob/edit, lsp_symbols +
-lsp_diagnostics via go/parser, and ast_grep_* via the ast-grep binary are real;
-the remaining lsp_* and look_at governed with Phase-2 backends), sessions + task store, terminal
+lsp_diagnostics via go/parser, ast_grep_* via ast-grep, and
+lsp_rename/goto/references/prepare_rename via gopls are real — fail-closed when a
+binary is absent; only look_at (vision) stays pending), sessions + task store, terminal
 (interactive_bash real), browser/canvas/nodes/cron (governed, Phase-2/4 driver),
 skills + market.
 
@@ -157,14 +158,21 @@ worker (so the public key IS the transport-bound identity), obtains a scoped
 one-off enrollment credential from the control plane (`control.NetBirdIssuer`
 via the `harness.Enroller` interface), and deregisters on retire. Selected with
 `harness serve|run --minter netbird` (PAT via `--nb-token`/`$NB_API_TOKEN`);
-`mem` (in-process keys) remains the default.
+`mem` (in-process keys) remains the default. `ExecSpawner` then launches a
+minted identity as a worker subprocess with a **curated environment** — only the
+mesh-join credentials and identity markers, never the parent environment — so a
+worker joins the mesh as exactly its minted key and never inherits an unrelated
+secret (mirroring `cmd/meshmcp`'s `agentChildEnv`); it fails closed on an empty
+command or an unminted identity. The scheduler runs execute-stage jobs as these
+subprocess workers when a `Spawner` + worker command are configured
+(`EngineOpts.Spawner`/`WorkerCommand`, or `harness run --worker-cmd`) — the task
+is injected via `MESHMCP_TASK`/`RUN`/`JOB` and the worker's output becomes the
+job result; otherwise the default in-process provider workers run.
 
 **Deferred (wiring, not design):** live provider CLIs require the binaries +
-broker keys; the remaining lsp_* tools (rename/goto/references) need a language
-server; browser/canvas/nodes/cron live backends (Phase 2/4); the worker-process
-spawner that launches a minted identity onto the mesh with its `WorkerCreds`; the
-non-webchat channel transports (Phase 4 live wiring); Live Canvas / voice
-surfaces. Every deferred tool/channel is still *registered and
+broker keys; the `look_at` vision backend; browser/canvas/nodes/cron live
+backends (Phase 2/4); the non-webchat channel transports
+(Phase 4 live wiring); Live Canvas / voice surfaces. Every deferred tool/channel is still *registered and
 governed* — a call passes the firewall and is audited, and it fails closed rather
 than silently succeeding.
 

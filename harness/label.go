@@ -53,8 +53,11 @@ const (
 	LabelTainted = "tainted"
 )
 
-// highRiskLabels are the labels that, by default, require a human co-sign when
-// they apply to a protected scope. Compiled into require_cosign policy rules.
+// highRiskLabels are the labels that mark an action as high-risk. They are
+// honored two ways: a high-risk run blocks on the approve co-sign gate
+// (orchestrator stageApprove), and a role marks the corresponding tools in its
+// CosignTools so the compiled policy requires a co-sign for them. IsHighRisk is
+// the predicate callers use to decide whether an action needs a co-sign.
 var highRiskLabels = map[string]bool{
 	LabelSecretRef:  true,
 	LabelMarketInst: true,

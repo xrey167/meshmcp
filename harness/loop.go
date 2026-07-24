@@ -39,16 +39,28 @@ type RoundResult struct {
 	Err     error
 }
 
-// Drive runs rounds until a stop condition. It guarantees termination:
-// MaxRounds (via the tracker) bounds it, an operator stop (ctx cancel) always
-// wins, and a round error stops the loop. The returned StopCond and round count
-// are audited by the caller (the orchestrator emits a KindLoopStop action).
+// hardLoopCap is an absolute backstop on loop rounds. Termination is normally
+// bounded by the budget's LoopRounds and/or wall-clock, but a partial budget can
+// leave both unset (LoopRounds 0 means "unbounded" in the tracker), which — with
+// an autopilot round that always changes and never meets the goal — would loop
+// forever. This cap makes Drive terminate UNCONDITIONALLY, honoring the spec's
+// "MaxRounds + StopWhen guarantee termination" even when the budget is open.
+const hardLoopCap = 10000
+
+// Drive runs rounds until a stop condition. It guarantees termination: the
+// hard cap (hardLoopCap) and MaxRounds (via the tracker) bound it, an operator
+// stop (ctx cancel) always wins, and a round error stops the loop. The returned
+// StopCond and round count are audited by the caller (the orchestrator emits a
+// KindLoopStop action).
 //
 // The stop-continuation guarantee: once Drive returns StopOperator, the caller
 // must not silently resume — the orchestrator's stop-continuation guard enforces
 // this by refusing to re-enter a stopped run.
 func (s LoopSpec) Drive(ctx context.Context, tr *tracker, round func(ctx context.Context, n int) RoundResult) (rounds int, stop StopCond, err error) {
 	for {
+		if rounds >= hardLoopCap {
+			return rounds, StopMaxRound, nil
+		}
 		select {
 		case <-ctx.Done():
 			return rounds, StopOperator, ctx.Err()
