@@ -34,22 +34,30 @@ func NewMemContinuity() *MemContinuity {
 	return &MemContinuity{runs: map[RunID]RunState{}, owner: map[RunID]string{}}
 }
 
-// Save persists state under its ID, bound to callerKey.
+// Save persists state under its ID, bound to callerKey. state is deep-copied so
+// the store owns an isolated snapshot — a later mutation of the caller's slices
+// or maps (Labels, Workers, Plan, …) can never reach into the persisted copy.
+// This matches the serialize-on-save semantics of the air-backed store.
 func (m *MemContinuity) Save(state RunState, callerKey string) error {
 	if callerKey == "" {
 		return fmt.Errorf("continuity: blank caller key")
+	}
+	snapshot, err := cloneRunState(state)
+	if err != nil {
+		return err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if o, ok := m.owner[state.ID]; ok && o != callerKey {
 		return fmt.Errorf("continuity: run %s owned by another identity", state.ID)
 	}
-	m.runs[state.ID] = state
+	m.runs[state.ID] = snapshot
 	m.owner[state.ID] = callerKey
 	return nil
 }
 
-// Load reads a run's state.
+// Load reads a run's state. The returned state is a deep copy, so a caller that
+// mutates it cannot corrupt the stored snapshot (or another concurrent reader's).
 func (m *MemContinuity) Load(id RunID, callerKey string) (RunState, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -60,7 +68,26 @@ func (m *MemContinuity) Load(id RunID, callerKey string) (RunState, bool, error)
 	if callerKey == "" || o != callerKey {
 		return RunState{}, false, fmt.Errorf("continuity: run %s owned by another identity", id)
 	}
-	return m.runs[id], true, nil
+	out, err := cloneRunState(m.runs[id])
+	if err != nil {
+		return RunState{}, false, err
+	}
+	return out, true, nil
+}
+
+// cloneRunState returns a deep copy of state via a JSON round-trip — the same
+// serialization the air-backed store performs — so no reference-typed field
+// (slices, maps, pointers) is shared between the caller and the store.
+func cloneRunState(state RunState) (RunState, error) {
+	payload, err := json.Marshal(state)
+	if err != nil {
+		return RunState{}, fmt.Errorf("continuity: clone run state: %w", err)
+	}
+	var out RunState
+	if err := json.Unmarshal(payload, &out); err != nil {
+		return RunState{}, fmt.Errorf("continuity: clone run state: %w", err)
+	}
+	return out, nil
 }
 
 // AirContinuity persists run state through air/checkpoint — the shared,

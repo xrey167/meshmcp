@@ -35,6 +35,128 @@ func validConfig() Config {
 	}
 }
 
+// TestConfigValidateBehindFront proves the loopback fence on the front mode: a
+// loopback listen with no tls block is accepted, a non-loopback bind is refused
+// (OAuth bearers would cross the network in cleartext), and a tls block alongside
+// behind_front is refused (the front terminates TLS, not the edge).
+func TestConfigValidateBehindFront(t *testing.T) {
+	// Accepted: loopback listen, no tls, public_url is still the front's https URL.
+	c := validConfig()
+	c.BehindFront = true
+	c.TLS = TLSConfig{}
+	c.Listen = "127.0.0.1:8080"
+	if _, err := c.Validate(); err != nil {
+		t.Fatalf("loopback behind_front rejected: %v", err)
+	}
+
+	// Accepted: IPv6 loopback.
+	c6 := validConfig()
+	c6.BehindFront = true
+	c6.TLS = TLSConfig{}
+	c6.Listen = "[::1]:8080"
+	if _, err := c6.Validate(); err != nil {
+		t.Fatalf("[::1] behind_front rejected: %v", err)
+	}
+
+	// Refused: a non-loopback bind would leak bearers onto the network.
+	for _, addr := range []string{"0.0.0.0:8080", "203.0.113.7:8443", "192.168.1.5:8080"} {
+		cn := validConfig()
+		cn.BehindFront = true
+		cn.TLS = TLSConfig{}
+		cn.Listen = addr
+		if _, err := cn.Validate(); err == nil || !strings.Contains(err.Error(), "loopback") {
+			t.Fatalf("non-loopback behind_front %q accepted or wrong error: %v", addr, err)
+		}
+	}
+
+	// Refused: a tls block alongside behind_front (the front owns TLS).
+	ct := validConfig() // validConfig sets files-mode TLS
+	ct.BehindFront = true
+	ct.Listen = "127.0.0.1:8080"
+	if _, err := ct.Validate(); err == nil || !strings.Contains(err.Error(), "remove the tls block") {
+		t.Fatalf("behind_front with a tls block accepted or wrong error: %v", err)
+	}
+
+	// public_url is still required and still https — the front's public URL is the
+	// OAuth issuer, so behind_front does not relax it.
+	cu := validConfig()
+	cu.BehindFront = true
+	cu.TLS = TLSConfig{}
+	cu.Listen = "127.0.0.1:8080"
+	cu.PublicURL = "http://insecure.example.com"
+	if _, err := cu.Validate(); err == nil || !strings.Contains(err.Error(), "https") {
+		t.Fatalf("behind_front accepted a non-https public_url: %v", err)
+	}
+}
+
+// TestConfigValidateBeacon covers the beacon ingress mode: files-mode TLS with a
+// control+zone is accepted (listen optional), and the mode rejects a missing
+// control/zone, a behind_front combination, a missing cert, and tls.acme.
+func TestConfigValidateBeacon(t *testing.T) {
+	base := func() Config {
+		c := validConfig() // files-mode TLS
+		c.Beacon = &BeaconConfig{Control: "beacon.example.com:7443", Zone: "beacon.example.com"}
+		c.Listen = "" // optional in beacon mode
+		return c
+	}
+	if _, err := base().Validate(); err != nil {
+		t.Fatalf("valid beacon config rejected: %v", err)
+	}
+
+	c := base()
+	c.Beacon.Control = ""
+	if _, err := c.Validate(); err == nil || !strings.Contains(err.Error(), "beacon.control") {
+		t.Fatalf("missing beacon.control not caught: %v", err)
+	}
+
+	c = base()
+	c.Beacon.Zone = ""
+	if _, err := c.Validate(); err == nil || !strings.Contains(err.Error(), "beacon.zone") {
+		t.Fatalf("missing beacon.zone not caught: %v", err)
+	}
+
+	c = base()
+	c.BehindFront = true
+	if _, err := c.Validate(); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("beacon+behind_front not rejected: %v", err)
+	}
+
+	c = base()
+	c.TLS = TLSConfig{} // no cert -> the gateway can't terminate TLS
+	if _, err := c.Validate(); err == nil || !strings.Contains(err.Error(), "cert_file") {
+		t.Fatalf("beacon without a cert not rejected: %v", err)
+	}
+
+	c = base() // files present; adding acme must be refused (beacon uses auto_cert/files)
+	c.TLS.ACME = &ACMEConfig{Domains: []string{"beacon.example.com"}}
+	if _, err := c.Validate(); err == nil || !strings.Contains(err.Error(), "acme") {
+		t.Fatalf("beacon+acme not rejected: %v", err)
+	}
+
+	// auto_cert (ACME DNS-01) accepted in place of a static cert.
+	c = base()
+	c.TLS = TLSConfig{}
+	c.Beacon.AutoCert = &BeaconAutoCert{Email: "ops@example.com"}
+	if _, err := c.Validate(); err != nil {
+		t.Fatalf("beacon.auto_cert rejected: %v", err)
+	}
+
+	// auto_cert AND static files is ambiguous.
+	c = base() // has files
+	c.Beacon.AutoCert = &BeaconAutoCert{Email: "ops@example.com"}
+	if _, err := c.Validate(); err == nil || !strings.Contains(err.Error(), "exactly one") {
+		t.Fatalf("auto_cert + files not rejected: %v", err)
+	}
+
+	// auto_cert requires an ACME contact email.
+	c = base()
+	c.TLS = TLSConfig{}
+	c.Beacon.AutoCert = &BeaconAutoCert{}
+	if _, err := c.Validate(); err == nil || !strings.Contains(err.Error(), "email") {
+		t.Fatalf("auto_cert without email not rejected: %v", err)
+	}
+}
+
 func TestConfigValidateAcceptsMinimal(t *testing.T) {
 	c, err := validConfig().Validate()
 	if err != nil {

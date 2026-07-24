@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"os/exec"
-	"path/filepath"
 )
 
 // Local runs commands directly on the host in a fixed root directory. It is the
@@ -37,8 +36,12 @@ func (l *Local) Exec(ctx context.Context, cmd Command) (ExecResult, error) {
 		ctx, cancel = context.WithTimeout(ctx, cmd.Timeout)
 		defer cancel()
 	}
+	dir, err := resolveDir(l.root, cmd.Dir)
+	if err != nil {
+		return ExecResult{}, err
+	}
 	c := exec.CommandContext(ctx, cmd.Args[0], cmd.Args[1:]...)
-	c.Dir = filepath.Join(l.root, cmd.Dir)
+	c.Dir = dir
 	if len(cmd.Env) > 0 {
 		c.Env = append(c.Environ(), cmd.Env...)
 	}
@@ -48,7 +51,7 @@ func (l *Local) Exec(ctx context.Context, cmd Command) (ExecResult, error) {
 	var out, errb bytes.Buffer
 	c.Stdout = &out
 	c.Stderr = &errb
-	err := c.Run()
+	err = c.Run()
 	res := ExecResult{Stdout: out.String(), Stderr: errb.String()}
 	if err != nil {
 		var ee *exec.ExitError

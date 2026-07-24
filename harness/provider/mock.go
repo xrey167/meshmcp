@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 // Mock is a deterministic in-process Provider. It performs no inference: it
@@ -74,7 +75,13 @@ func (m *Mock) echo(in Prompt) string {
 	fmt.Fprintf(&b, "[%s/%s] ", m.name, m.class)
 	user := strings.TrimSpace(in.User)
 	if len(user) > 240 {
-		user = user[:240] + "…"
+		// Back up to a UTF-8 rune boundary so the echo never contains a split
+		// multi-byte rune (which would corrupt a downstream digest or diff).
+		cut := 240
+		for cut > 0 && !utf8.RuneStart(user[cut]) {
+			cut--
+		}
+		user = user[:cut] + "…"
 	}
 	b.WriteString(user)
 	if len(in.Files) > 0 {

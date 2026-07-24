@@ -21,6 +21,7 @@ package edge
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"path"
 	"strings"
@@ -126,6 +127,27 @@ type Config struct {
 	// Explicit opt-in (mirrors the gateway's audit key autogen).
 	SigningKeyAutogen bool `yaml:"signing_key_autogen"`
 
+	// Beacon, when set, serves the edge over an OUTBOUND reverse tunnel to a
+	// meshmcp beacon instead of a public bind: the gateway dials the beacon
+	// (zero inbound ports), is assigned a stable public name derived from its
+	// signing-key identity, and terminates TLS itself with its OWN certificate
+	// over the tunnel. See docs/design/HOSTED-CLIENT-INGRESS.md. public_url and
+	// listen are derived/unused in this mode; a tls cert_file/key_file for the
+	// derived name is required (ACME DNS-01 auto-provisioning is a follow-up).
+	Beacon *BeaconConfig `yaml:"beacon"`
+
+	// BehindFront serves the edge over PLAIN HTTP on a loopback Listen address,
+	// with NO edge-side TLS, for deployment behind a trusted TLS-terminating
+	// front (Tailscale Funnel, a reverse proxy, an API gateway) that forwards to
+	// the edge over loopback — the "zero inbound ports" path documented in
+	// docs/design/HOSTED-CLIENT-INGRESS.md. The front owns the public name and
+	// cert; the edge trust core (OAuth, the capability + policy double-gate, the
+	// fail-closed audit ledger) is byte-identical. It is fenced to loopback so
+	// OAuth bearers never traverse a network in the clear; public_url is still
+	// required (the front's https URL, which stays the OAuth issuer) and the tls
+	// block MUST be empty. Off by default.
+	BehindFront bool `yaml:"behind_front"`
+
 	TLS          TLSConfig          `yaml:"tls"`
 	Registration RegistrationConfig `yaml:"registration"`
 	OAuth        OAuthConfig        `yaml:"oauth"`
@@ -144,6 +166,33 @@ type TLSConfig struct {
 
 func (t TLSConfig) files() bool { return t.CertFile != "" || t.KeyFile != "" }
 func (t TLSConfig) acme() bool  { return t.ACME != nil }
+
+// BeaconConfig points the edge at a meshmcp beacon: the gateway dials the beacon
+// control address (outbound, no inbound port) and is published under the beacon's
+// zone at "<derived-label>.<zone>". The derived label comes from the gateway's
+// signing-key identity, so the public name is stable across restarts.
+type BeaconConfig struct {
+	// Control is the beacon's control/tunnel address the gateway dials out to,
+	// e.g. "beacon.example.com:7443".
+	Control string `yaml:"control"`
+	// Zone is the beacon's public DNS zone, e.g. "beacon.example.com" — used to
+	// form (and, at runtime, confirm) the assigned public name.
+	Zone string `yaml:"zone"`
+	// AutoCert, when set, provisions the gateway's certificate automatically via
+	// ACME DNS-01 brokered through the beacon (no static cert_file/key_file
+	// needed, no inbound challenge port). Mutually exclusive with tls.cert_file.
+	AutoCert *BeaconAutoCert `yaml:"auto_cert"`
+}
+
+// BeaconAutoCert requests automatic certificate provisioning for the gateway's
+// derived name via ACME DNS-01: the gateway publishes the challenge TXT over the
+// tunnel and the beacon's authoritative DNS serves it, so no inbound challenge
+// port (HTTP-01/TLS-ALPN) is ever opened.
+type BeaconAutoCert struct {
+	Email    string `yaml:"email"`     // ACME account contact (required)
+	CA       string `yaml:"ca"`        // ACME directory URL; empty = Let's Encrypt production
+	CacheDir string `yaml:"cache_dir"` // cert/account cache; empty = <state_dir>/acme
+}
 
 // ACMEConfig configures certmagic-backed automatic certificates.
 type ACMEConfig struct {
@@ -392,7 +441,7 @@ func (c Config) withDefaults() Config {
 func (c Config) Validate() (Config, error) {
 	c = c.withDefaults()
 
-	if c.Listen == "" {
+	if c.Listen == "" && c.Beacon == nil {
 		return c, fmt.Errorf("edge: listen is required (no default — the edge never binds a default-on public port)")
 	}
 	if c.PublicURL == "" {
@@ -415,26 +464,71 @@ func (c Config) Validate() (Config, error) {
 		return c, fmt.Errorf("edge: signing_key is required")
 	}
 
-	// Exactly one TLS mode.
-	switch {
-	case c.TLS.files() && c.TLS.acme():
-		return c, fmt.Errorf("edge: tls has both cert_file/key_file and acme — choose exactly one")
-	case c.TLS.files():
-		if c.TLS.CertFile == "" || c.TLS.KeyFile == "" {
-			return c, fmt.Errorf("edge: tls cert_file and key_file must both be set")
+	// TLS termination: the edge terminates it (exactly one tls mode, optionally
+	// over a beacon reverse tunnel), or a trusted front terminates it and the edge
+	// serves plain HTTP on loopback.
+	if c.Beacon != nil {
+		if c.Beacon.Control == "" {
+			return c, fmt.Errorf("edge: beacon.control is required (the beacon address the gateway dials out to)")
 		}
-	case c.TLS.acme():
-		if len(c.TLS.ACME.Domains) == 0 {
-			return c, fmt.Errorf("edge: tls.acme.domains must list at least one hostname")
+		if c.Beacon.Zone == "" {
+			return c, fmt.Errorf("edge: beacon.zone is required (the beacon's public DNS zone)")
 		}
-		if c.TLS.ACME.Challenge != ChallengeTLSALPN01 && c.TLS.ACME.Challenge != ChallengeHTTP01 {
-			return c, fmt.Errorf("edge: tls.acme.challenge must be %q or %q", ChallengeTLSALPN01, ChallengeHTTP01)
+		if c.BehindFront {
+			return c, fmt.Errorf("edge: beacon and behind_front are mutually exclusive — choose one ingress")
 		}
-		if !containsFold(c.TLS.ACME.Domains, pu.Hostname()) {
-			return c, fmt.Errorf("edge: public_url host %q must be one of tls.acme.domains %v", pu.Hostname(), c.TLS.ACME.Domains)
+		if c.TLS.acme() {
+			return c, fmt.Errorf("edge: beacon mode certificates come from beacon.auto_cert (ACME DNS-01) or tls.cert_file/key_file, not tls.acme")
 		}
-	default:
-		return c, fmt.Errorf("edge: tls requires either cert_file/key_file or an acme block")
+		// The gateway terminates TLS with its OWN cert over the tunnel: either a
+		// static cert for the derived name (tls.cert_file/key_file) or automatic
+		// provisioning via ACME DNS-01 through the beacon (beacon.auto_cert).
+		hasFiles, hasAuto := c.TLS.files(), c.Beacon.AutoCert != nil
+		switch {
+		case hasFiles && hasAuto:
+			return c, fmt.Errorf("edge: set exactly one of tls.cert_file/key_file OR beacon.auto_cert")
+		case !hasFiles && !hasAuto:
+			return c, fmt.Errorf("edge: beacon mode requires a certificate for the derived <label>.%s name — set beacon.auto_cert (ACME DNS-01) or tls.cert_file/key_file", c.Beacon.Zone)
+		case hasAuto && c.Beacon.AutoCert.Email == "":
+			return c, fmt.Errorf("edge: beacon.auto_cert.email is required (the ACME account contact)")
+		}
+	} else if c.BehindFront {
+		// The front owns TLS, so the edge must NOT also carry a tls block.
+		if c.TLS.files() || c.TLS.acme() {
+			return c, fmt.Errorf("edge: behind_front terminates TLS at the front — remove the tls block")
+		}
+		// Fence the plaintext listener to loopback: in behind_front mode the edge
+		// serves OAuth/MCP over cleartext HTTP, so a non-loopback bind would leak
+		// bearer tokens onto the network. Only 127.0.0.0/8 or ::1 is allowed.
+		host, _, splitErr := net.SplitHostPort(c.Listen)
+		if splitErr != nil {
+			return c, fmt.Errorf("edge: behind_front listen must be host:port, got %q: %w", c.Listen, splitErr)
+		}
+		if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+			return c, fmt.Errorf("edge: behind_front listen must bind a loopback address (e.g. 127.0.0.1:8080) so OAuth bearers never cross a network in cleartext — got %q", c.Listen)
+		}
+	} else {
+		// Exactly one TLS mode.
+		switch {
+		case c.TLS.files() && c.TLS.acme():
+			return c, fmt.Errorf("edge: tls has both cert_file/key_file and acme — choose exactly one")
+		case c.TLS.files():
+			if c.TLS.CertFile == "" || c.TLS.KeyFile == "" {
+				return c, fmt.Errorf("edge: tls cert_file and key_file must both be set")
+			}
+		case c.TLS.acme():
+			if len(c.TLS.ACME.Domains) == 0 {
+				return c, fmt.Errorf("edge: tls.acme.domains must list at least one hostname")
+			}
+			if c.TLS.ACME.Challenge != ChallengeTLSALPN01 && c.TLS.ACME.Challenge != ChallengeHTTP01 {
+				return c, fmt.Errorf("edge: tls.acme.challenge must be %q or %q", ChallengeTLSALPN01, ChallengeHTTP01)
+			}
+			if !containsFold(c.TLS.ACME.Domains, pu.Hostname()) {
+				return c, fmt.Errorf("edge: public_url host %q must be one of tls.acme.domains %v", pu.Hostname(), c.TLS.ACME.Domains)
+			}
+		default:
+			return c, fmt.Errorf("edge: tls requires either cert_file/key_file or an acme block")
+		}
 	}
 
 	switch c.Registration.Mode {

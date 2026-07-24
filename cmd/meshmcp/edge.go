@@ -13,8 +13,10 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/xrey167/meshmcp/beacon"
 	"github.com/xrey167/meshmcp/edge"
 	"github.com/xrey167/meshmcp/pgstore"
+	"github.com/xrey167/meshmcp/policy"
 )
 
 // cmdEdge runs the public OAuth ingress: `meshmcp edge --config edge.yaml`.
@@ -98,6 +100,9 @@ func cmdEdge(args []string) error {
 		fmt.Fprintf(os.Stderr, "meshmcp edge: joined mesh, backend %s reachable over WireGuard\n", cfg.Backend.Addr)
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), shutdownSignals...)
+	defer stop()
+
 	// A configured shared payment single-use store must open before serving, like
 	// the DPoP store: an edge that silently fell back to per-instance single-use
 	// tracking would let two instances double-spend one payment.
@@ -124,15 +129,54 @@ func cmdEdge(args []string) error {
 		fmt.Fprintf(os.Stderr, "meshmcp edge: WARNING payment is using the INSECURE dev verifier (dev_insecure_verifier: true) — it accepts unsettled payments; never use this in production\n")
 	}
 
+	// Beacon mode: derive the stable public name from the signing-key identity,
+	// set it as public_url, dial the beacon OUT, and (for auto_cert) inject the
+	// DNS-01 provider — all BEFORE building the server, which validates public_url
+	// and, in auto_cert mode, requires the provider.
+	var beaconTun *beacon.Tunnel
+	if cfg.Beacon != nil {
+		signer, err := policy.LoadSigner(cfg.SigningKey)
+		if err != nil {
+			return fmt.Errorf("edge: beacon mode needs an existing signing_key %s — generate it first: %w", cfg.SigningKey, err)
+		}
+		fqdn := beacon.SubdomainLabel(signer.PubKeyRaw()) + "." + strings.ToLower(strings.TrimSuffix(cfg.Beacon.Zone, "."))
+		cfg.PublicURL = "https://" + fqdn
+		opts.Signer = signer
+
+		fmt.Fprintf(os.Stderr, "meshmcp edge: beacon mode — dialing %s; public %s\n", cfg.Beacon.Control, cfg.PublicURL)
+		tun, err := beacon.Dial(ctx, cfg.Beacon.Control, signer, func(ctx context.Context, addr string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "tcp", addr)
+		})
+		if err != nil {
+			return fmt.Errorf("edge: dial beacon %s: %w", cfg.Beacon.Control, err)
+		}
+		defer tun.Close()
+		if tun.FQDN != fqdn {
+			return fmt.Errorf("edge: beacon assigned %q but the gateway derived %q (beacon.zone mismatch?)", tun.FQDN, fqdn)
+		}
+		beaconTun = tun
+		if cfg.Beacon.AutoCert != nil {
+			opts.DNS01Provider = beacon.NewDNSProvider(tun)
+			fmt.Fprintf(os.Stderr, "meshmcp edge: auto-provisioning a certificate for %s via ACME DNS-01 through the beacon (may take up to a minute)\n", fqdn)
+		} else {
+			fmt.Fprintf(os.Stderr, "meshmcp edge: using operator cert for %s (its SAN must match)\n", fqdn)
+		}
+	}
+
 	srv, err := edge.New(cfg, opts)
 	if err != nil {
 		return err
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), shutdownSignals...)
-	defer stop()
+	if beaconTun != nil {
+		fmt.Fprintf(os.Stderr, "meshmcp edge: beacon assigned %s; the gateway terminates TLS, the beacon splices ciphertext only\n", beaconTun.FQDN)
+		return srv.ServeOverListener(ctx, beaconTun)
+	}
 
 	fmt.Fprintf(os.Stderr, "meshmcp edge: serving %s on %s (backend %q)\n", cfg.PublicURL, cfg.Listen, cfg.Backend.Name)
+	if cfg.BehindFront {
+		fmt.Fprintf(os.Stderr, "meshmcp edge: behind-front mode — PLAIN HTTP on loopback %s; a trusted front (Tailscale Funnel / reverse proxy) must terminate public TLS for %s and forward to it. Bearers must never leave loopback.\n", cfg.Listen, cfg.PublicURL)
+	}
 	return srv.Run(ctx)
 }
 

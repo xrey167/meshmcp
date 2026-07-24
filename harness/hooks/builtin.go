@@ -1,6 +1,9 @@
 package hooks
 
-import "fmt"
+import (
+	"fmt"
+	"unicode/utf8"
+)
 
 // Built-in hooks: a representative, governed subset of the source harnesses'
 // 54–61 hooks, grouped as in the spec (context/injection, productivity/control,
@@ -111,8 +114,14 @@ func (t ToolOutputTruncator) Handle(e Event) Effect {
 	if len(e.Text) <= max {
 		return Cont
 	}
-	dropped := len(e.Text) - max
-	out := e.Text[:max] + fmt.Sprintf("\n…(truncated %d bytes)", dropped)
+	// Back up to a UTF-8 rune boundary so truncation never splits a multi-byte
+	// rune into invalid UTF-8.
+	cut := max
+	for cut > 0 && !utf8.RuneStart(e.Text[cut]) {
+		cut--
+	}
+	dropped := len(e.Text) - cut
+	out := e.Text[:cut] + fmt.Sprintf("\n…(truncated %d bytes)", dropped)
 	return Effect{Kind: Mutate, Reason: fmt.Sprintf("truncated %d bytes", dropped), Text: out}
 }
 

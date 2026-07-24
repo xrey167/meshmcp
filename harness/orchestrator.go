@@ -25,18 +25,20 @@ type Orchestrator interface {
 // governed, audited action; run state is persisted to continuity after each
 // stage so a crash/roam resumes without loss.
 type Engine struct {
-	gov      *Governor
-	cosign   policy.CosignStore
-	cont     Continuity
-	minter   Minter
-	reg      *provider.Registry
-	gate     *IntentGate
-	planner  *Planner
-	verifier *Verifier
-	table    CategoryTable
-	cfg      Config
-	hooks    *hooks.Chain // optional lifecycle hook chain (nil → no hooks)
-	now      func() time.Time
+	gov       *Governor
+	cosign    policy.CosignStore
+	cont      Continuity
+	minter    Minter
+	reg       *provider.Registry
+	gate      *IntentGate
+	planner   *Planner
+	verifier  *Verifier
+	table     CategoryTable
+	cfg       Config
+	hooks     *hooks.Chain // optional lifecycle hook chain (nil → no hooks)
+	spawner   Spawner      // optional subprocess-worker spawner
+	workerCmd []string     // subprocess worker argv (with spawner)
+	now       func() time.Time
 
 	mu   sync.Mutex
 	runs map[RunID]*runCtx
@@ -65,7 +67,12 @@ type EngineOpts struct {
 	Minter     Minter
 	Config     Config
 	Hooks      *hooks.Chain // optional lifecycle hook chain
-	Now        func() time.Time
+	// Spawner + WorkerCommand opt into subprocess-worker execution: when both are
+	// set, the scheduler runs each job as an external worker process (joining the
+	// mesh as its minted identity) instead of an in-process provider worker.
+	Spawner       Spawner
+	WorkerCommand []string
+	Now           func() time.Time
 }
 
 // NewEngine builds an orchestrator. Sensible defaults fill any nil field: the
@@ -99,19 +106,21 @@ func NewEngine(o EngineOpts) *Engine {
 	table := cfg.CategoryTable()
 	gov := NewGovernor(pol, o.Cosign, o.Audit, now)
 	return &Engine{
-		gov:      gov,
-		cosign:   o.Cosign,
-		cont:     cont,
-		minter:   minter,
-		reg:      reg,
-		gate:     NewIntentGate(reg, table),
-		planner:  NewPlanner(reg),
-		verifier: NewVerifier(reg),
-		table:    table,
-		cfg:      cfg,
-		hooks:    o.Hooks,
-		now:      now,
-		runs:     map[RunID]*runCtx{},
+		gov:       gov,
+		cosign:    o.Cosign,
+		cont:      cont,
+		minter:    minter,
+		reg:       reg,
+		gate:      NewIntentGate(reg, table),
+		planner:   NewPlanner(reg),
+		verifier:  NewVerifier(reg),
+		table:     table,
+		cfg:       cfg,
+		hooks:     o.Hooks,
+		spawner:   o.Spawner,
+		workerCmd: o.WorkerCommand,
+		now:       now,
+		runs:      map[RunID]*runCtx{},
 	}
 }
 
@@ -239,18 +248,23 @@ func (e *Engine) Advance(ctx context.Context, id RunID) (RunState, error) {
 		if err != nil {
 			return e.fail(rc, err)
 		}
-		e.setStage(rc, nextStage(st))
-		if err := e.persist(rc); err != nil {
-			return e.fail(rc, err)
-		}
 		if blocked {
+			// Do NOT advance past a blocking stage: the stage cursor stays at st
+			// so a resume RE-RUNS it and re-checks the co-sign. This is what makes
+			// the gate un-bypassable — calling Advance again without an approval
+			// re-enters approve and blocks again, rather than falling through to
+			// execute.
 			rc.mu.Lock()
 			rc.state.Status = RunBlocked
-			st := rc.state
+			blockedState := rc.state
 			rc.mu.Unlock()
 			_ = e.persist(rc)
 			e.emit(rc, RunEvent{RunID: id, Time: e.now(), Kind: "blocked", Msg: "awaiting co-sign approval"})
-			return st, nil
+			return blockedState, nil
+		}
+		e.setStage(rc, nextStage(st))
+		if err := e.persist(rc); err != nil {
+			return e.fail(rc, err)
 		}
 	}
 	rc.mu.Lock()

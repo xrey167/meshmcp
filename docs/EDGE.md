@@ -161,6 +161,106 @@ default. A self-signed cert will be rejected by the connector.
 
 ---
 
+## Behind a front — zero inbound ports (`behind_front`)
+
+The TLS modes above make the edge itself the public listener: an inbound port, a
+public DNS name, and a cert to obtain and rotate. `behind_front: true` removes all
+three for the common case where a **trusted TLS-terminating front already exists**
+— [Tailscale Funnel](https://tailscale.com/kb/1223/funnel), a reverse proxy, or an
+API gateway that dials out and needs no inbound port on this host:
+
+```yaml
+behind_front: true
+listen: 127.0.0.1:8080          # loopback ONLY — enforced
+public_url: https://mcp.example.com   # the FRONT's public https URL (still the OAuth issuer)
+# no tls: block — the front terminates TLS
+```
+
+In this mode the edge serves **plain HTTP on loopback**; the front terminates the
+public TLS and forwards. Everything that matters is byte-for-byte identical to the
+public-TLS path: the OAuth endpoints, the capability + policy double gate, and the
+fail-closed audit ledger all run on this gateway. Only the listener and where TLS
+terminates change.
+
+Two guarantees keep it safe:
+
+- **Loopback is enforced.** `listen` must bind `127.0.0.0/8` or `::1`; any
+  routable address is a config error, so OAuth bearers can never cross a network
+  in cleartext. The front must reach the edge over loopback (or a host-local
+  socket), never across an untrusted segment.
+- **The front owns TLS.** A `tls:` block alongside `behind_front` is a config
+  error — exactly one party terminates TLS.
+
+Example with Tailscale Funnel (no meshmcp infra, no inbound port, TLS terminates
+on *your own* node so the tunnel provider sees only ciphertext):
+
+```bash
+meshmcp edge --config edge.yaml        # serves http://127.0.0.1:8080
+tailscale funnel 8080                  # publishes https://<node>.ts.net → 127.0.0.1:8080
+# set public_url to the funnel URL; claude.ai connects to it
+```
+
+This is the first, near-zero-code rung of the broader
+[hosted-client ingress design](design/HOSTED-CLIENT-INGRESS.md), whose recommended
+end-state (the passthrough **beacon**) removes the "must already run a front"
+caveat while keeping the same loopback-listener seam.
+
+---
+
+## Behind a beacon — zero inbound ports, no front to run (`beacon`)
+
+`behind_front` still needs a front you operate. A **beacon** (`meshmcp beacon`)
+removes even that: the gateway dials OUT to a shared beacon, is assigned a stable
+public name derived from its key, and the beacon routes inbound TLS to it by the
+cleartext **SNI**, splicing raw bytes. TLS terminates on the **gateway** with the
+gateway's OWN certificate — the beacon holds no key and sees only ciphertext.
+
+```yaml
+beacon:
+  control: beacon.example.com:7443   # the beacon address the gateway dials out to
+  zone: beacon.example.com           # the beacon's public DNS zone
+  auto_cert:                         # automatic cert via ACME DNS-01 (recommended)
+    email: ops@example.com           #   ACME account contact
+# listen / public_url are unused: public_url is derived as https://<label>.<zone>
+```
+
+The public name is `<label>.<zone>` where `label = base32(sha256(signing-key
+pubkey))[:16]` — deterministic, so it survives restarts (the connector needs a
+stable URL). Two ways to get the gateway's certificate:
+
+- **`beacon.auto_cert` (recommended)** — the gateway obtains a publicly-trusted
+  cert for its derived name via **ACME DNS-01**, brokered through the beacon: the
+  gateway publishes the challenge TXT over the tunnel and the beacon's
+  authoritative DNS serves it. No inbound challenge port, no manual cert.
+- **`tls.cert_file` / `tls.key_file`** — an operator-provided cert whose SAN is the
+  derived name (printed on startup). Use `auto_cert` OR files, not both.
+
+Run the relay with its authoritative DNS enabled (required for `auto_cert`):
+
+```bash
+meshmcp beacon --zone beacon.example.com --public :443 --control :7443 \
+               --dns :53 --public-ip 203.0.113.10
+```
+
+Delegate the beacon zone (`beacon.example.com`) to that DNS server at your
+registrar so Let's Encrypt (and hosted clients) resolve it.
+
+**Confidentiality vs. `behind_front`:** the beacon is a shared party that owns the
+public name, so it is DNS authority for the subdomain and *could* actively MITM by
+issuing its own cert — a narrower, CT-detectable risk than a TLS-terminating
+proxy, and escapable by self-hosting the beacon. Against a *passive* beacon, only
+ciphertext and the SNI are exposed. The full trade, and the CT-monitoring /
+DPoP mitigations, are in the
+[design doc](design/HOSTED-CLIENT-INGRESS.md).
+
+> **Status:** experimental. The rendezvous, SNI-routed splice, gateway listener,
+> authoritative DNS server, and ACME DNS-01 challenge brokering are implemented and
+> tested end-to-end (the live Let's Encrypt issuance itself is exercised only in
+> real deployments). Multi-tenant subdomain leasing/HA and CT-monitoring are the
+> next increments.
+
+---
+
 ## Transport
 
 Full MCP Streamable HTTP:
