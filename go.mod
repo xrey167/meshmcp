@@ -5,6 +5,8 @@ go 1.26.0
 require (
 	github.com/caddyserver/certmagic v0.21.3
 	github.com/jackc/pgx/v5 v5.10.0
+	github.com/libdns/libdns v0.2.2
+	github.com/miekg/dns v1.1.72
 	github.com/netbirdio/netbird v0.72.2
 	golang.org/x/crypto v0.52.0
 	golang.org/x/sys v0.45.0
@@ -61,7 +63,6 @@ require (
 	github.com/klauspost/cpuid/v2 v2.2.10 // indirect
 	github.com/koron/go-ssdp v0.0.4 // indirect
 	github.com/kr/fs v0.1.0 // indirect
-	github.com/libdns/libdns v0.2.2 // indirect
 	github.com/libdns/route53 v1.5.0 // indirect
 	github.com/libp2p/go-nat v0.2.0 // indirect
 	github.com/libp2p/go-netroute v0.4.0 // indirect
@@ -71,7 +72,6 @@ require (
 	github.com/mdlayher/netlink v1.7.3-0.20250113171957-fbb4dce95f42 // indirect
 	github.com/mdlayher/socket v0.5.1 // indirect
 	github.com/mholt/acmez/v2 v2.0.1 // indirect
-	github.com/miekg/dns v1.1.72 // indirect
 	github.com/mitchellh/hashstructure/v2 v2.0.2 // indirect
 	github.com/petermattis/goid v0.0.0-20250303134427-723919f7f203 // indirect
 	github.com/pion/dtls/v2 v2.2.10 // indirect

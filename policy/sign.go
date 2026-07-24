@@ -67,6 +67,14 @@ func GenerateSigner() (*Signer, error) {
 // PubKeyHex is the hex-encoded public key others use to verify.
 func (s *Signer) PubKeyHex() string { return hex.EncodeToString(s.pub) }
 
+// PubKeyRaw returns a copy of the raw Ed25519 public key.
+func (s *Signer) PubKeyRaw() []byte { return append([]byte(nil), s.pub...) }
+
+// SignRaw returns an Ed25519 signature over msg. It is for out-of-band
+// challenge-response (e.g. proving key possession when registering with a
+// beacon), distinct from the checkpoint signing above.
+func (s *Signer) SignRaw(msg []byte) []byte { return ed25519.Sign(s.priv, msg) }
+
 // sign fills in PubKey and Sig on a checkpoint.
 func (s *Signer) sign(c Checkpoint) Checkpoint {
 	c.PubKey = s.PubKeyHex()
