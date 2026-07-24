@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -102,6 +103,32 @@ func cmdEdge(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), shutdownSignals...)
 	defer stop()
 
+	// A configured shared payment single-use store must open before serving, like
+	// the DPoP store: an edge that silently fell back to per-instance single-use
+	// tracking would let two instances double-spend one payment.
+	if dsn := cfg.Backend.Payment.SingleUseStore; dsn != "" {
+		if !isPostgresDSN(dsn) {
+			return fmt.Errorf("edge: backend.payment.single_use_store must be a postgres:// or postgresql:// DSN")
+		}
+		store, err := pgstore.Open(dsn)
+		if err != nil {
+			return fmt.Errorf("edge: open payment single_use_store %s: %w", redactDSN(dsn), err)
+		}
+		defer store.Close()
+		opts.PaymentReplay = pgPaymentReplay{store}
+		fmt.Fprintf(os.Stderr, "meshmcp edge: payment single-use store %s (shared)\n", redactDSN(dsn))
+	}
+
+	if p := cfg.Backend.Payment; p.Enabled && !p.DevInsecureVerifier && opts.PaymentVerifier == nil && p.Facilitator != "" {
+		// Wire the real x402 facilitator client from backend.payment.facilitator so
+		// enabling payment does not require the operator to write a verifier.
+		opts.PaymentVerifier = edge.NewHTTPFacilitatorVerifier(p.Facilitator)
+		fmt.Fprintf(os.Stderr, "meshmcp edge: payment verifier = x402 facilitator %s\n", p.Facilitator)
+	}
+	if p := cfg.Backend.Payment; p.Enabled && p.DevInsecureVerifier {
+		fmt.Fprintf(os.Stderr, "meshmcp edge: WARNING payment is using the INSECURE dev verifier (dev_insecure_verifier: true) — it accepts unsettled payments; never use this in production\n")
+	}
+
 	// Beacon mode: derive the stable public name from the signing-key identity,
 	// set it as public_url, dial the beacon OUT, and (for auto_cert) inject the
 	// DNS-01 provider — all BEFORE building the server, which validates public_url
@@ -151,6 +178,23 @@ func cmdEdge(args []string) error {
 		fmt.Fprintf(os.Stderr, "meshmcp edge: behind-front mode — PLAIN HTTP on loopback %s; a trusted front (Tailscale Funnel / reverse proxy) must terminate public TLS for %s and forward to it. Bearers must never leave loopback.\n", cfg.Listen, cfg.PublicURL)
 	}
 	return srv.Run(ctx)
+}
+
+// pgPaymentReplay adapts a *pgstore.Store to edge.PaymentReplayStore, keeping
+// the edge package free of a pgstore dependency (the same pattern as the DPoP
+// store, which pgstore implements structurally).
+type pgPaymentReplay struct{ s *pgstore.Store }
+
+func (p pgPaymentReplay) Redeem(refHash, binding string, expiry, now time.Time) (bool, error) {
+	return p.s.RedeemPaymentRef(refHash, binding, expiry, now)
+}
+
+func (p pgPaymentReplay) Complete(refHash string, response []byte, now time.Time) {
+	p.s.CompletePaymentRef(refHash, response, now)
+}
+
+func (p pgPaymentReplay) Cached(refHash, binding string, now time.Time) ([]byte, bool) {
+	return p.s.CachedPaymentRef(refHash, binding, now)
 }
 
 // resolveEdgeSetupKey resolves the NetBird setup key from a file, env var, or

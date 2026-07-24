@@ -59,6 +59,24 @@ first, fixed with the smallest robust change, and documented in
 
 ### Added
 
+- **x402 payment gating + payment evidence (Experimental)** — the public edge
+  can now gate priced tools behind an x402 payment: an unpaid `tools/call` on a
+  priced tool returns HTTP `402 Payment Required` with an x402
+  `PaymentRequirements` body, a verified `X-PAYMENT` forwards to the backend, and
+  a `payment` receipt is written on the **same** signed, hash-chained audit
+  record that already carries the caller's mesh identity — correlating
+  *who-paid-for-which-call* while storing **references only** (`payment_ref` /
+  `payer_ref` one-way hashes), never a wallet address or raw payment token. An
+  opt-in **free dry-run route** (`X-Meshmcp-Dry-Run`) validates identity + policy
+  and returns a synthetic result with dry-run-marked evidence, so a client can
+  prove compatibility and rehearse the evidence shape before paying. The gate
+  runs **after** the capability + policy double-gate (payment never widens what
+  a deny-by-default policy withheld), settlement is delegated to a pluggable
+  `PaymentVerifier` (built-in dev verifier for tests/demos; production injects a
+  real facilitator), and the whole block is off unless `backend.payment.enabled`
+  — an edge without it is byte-identical to before. New additive `payment` field
+  on the audit record (omitempty; existing chains verify unchanged). See
+  [docs/spec/PAYMENT-EVIDENCE.md](docs/spec/PAYMENT-EVIDENCE.md).
 - **Resolved Send v1 + Universal Node actions** — Air can now select a
   transport-stamped Nearby identity once and carry it through Send, Drop, or a
   transport-key-bound session Steer without copying an address. The web, CLI,

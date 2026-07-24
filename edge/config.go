@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"path"
 	"strings"
 	"time"
 
@@ -278,6 +279,96 @@ type BackendConfig struct {
 	// Policy is the standard meshmcp policy applied to oauth:<client_id>
 	// identities. default_allow: true is a startup error.
 	Policy policy.Policy `yaml:"policy"`
+	// Payment, when present and enabled, gates priced tools behind an x402
+	// payment (HTTP 402 → pay → retry) and optionally exposes a free dry-run
+	// route. Absent/disabled keeps the edge byte-identical to a pre-payment
+	// build. See PaymentConfig and docs/spec/PAYMENT-EVIDENCE.md.
+	Payment PaymentConfig `yaml:"payment"`
+}
+
+// PaymentConfig configures x402 payment gating for the exposed backend. It is
+// off unless Enabled; when off, no tool is priced and no dry-run route exists,
+// so the edge behaves exactly as before. The actual payment verify/settle is
+// performed by an injected PaymentVerifier (Options.PaymentVerifier); this
+// block only declares WHAT is charged and advertises the challenge.
+type PaymentConfig struct {
+	// Enabled turns on payment gating for this backend.
+	Enabled bool `yaml:"enabled"`
+	// Scheme is the payment scheme advertised and recorded. Defaults to "x402".
+	Scheme string `yaml:"scheme"`
+	// Network is the settlement network label, e.g. "base-sepolia".
+	Network string `yaml:"network"`
+	// Asset is the settlement asset label, e.g. "USDC".
+	Asset string `yaml:"asset"`
+	// PayTo is the server's OWN receiving address, advertised publicly in the
+	// 402 challenge. It is the payee, never a caller wallet, and is deliberately
+	// the one address in this system that is public — it is not payment evidence.
+	PayTo string `yaml:"pay_to"`
+	// Facilitator is the advisory URL of the x402 facilitator that verifies and
+	// settles payments; surfaced in the challenge so a client knows where its
+	// payment is checked. The verify itself runs through the injected
+	// PaymentVerifier, never by trusting this field.
+	Facilitator string `yaml:"facilitator"`
+	// Prices maps a tool-name glob (path.Match syntax, like policy tool rules) to
+	// a price in the asset's minor units, kept as a string for exact precision. A
+	// tool matching no entry is free (ungated). Overlapping globs are rejected at
+	// Validate time (see globsOverlap) so at most one entry can match a tool, and
+	// priceFor iterates in sorted order, keeping the charged price unambiguous and
+	// independent of Go's randomized map iteration.
+	Prices map[string]string `yaml:"prices"`
+	// FreeDryRun exposes a free dry-run route: a request carrying the
+	// X-Meshmcp-Dry-Run header is validated (identity + policy) and answered with
+	// a synthetic result WITHOUT charging or invoking the backend, emitting a
+	// dry-run-marked payment-evidence record so a client can rehearse the paid
+	// flow and evidence shape at no cost.
+	FreeDryRun bool `yaml:"free_dry_run"`
+	// DevInsecureVerifier explicitly opts into the built-in dev verifier when no
+	// real PaymentVerifier is injected at construction. The dev verifier checks
+	// only payload well-formedness and amount — it performs NO on-chain
+	// settlement and NO signature verification, so ANY well-formed X-PAYMENT is
+	// accepted. It exists for local testing and demos ONLY. Enabling payment
+	// without either injecting a verifier or setting this flag is a fail-closed
+	// construction error (mirrors the DPoP replay-store and signing-key
+	// precedents): a security-relevant collaborator is never silently
+	// downgraded. NEVER set this in production.
+	DevInsecureVerifier bool `yaml:"dev_insecure_verifier"`
+	// Salt is the SECRET that scopes the payer_ref / payment_ref one-way hashes
+	// in emitted evidence. It MUST be secret and high-entropy: payer ids and
+	// settlement references live in a public/enumerable space (wallet-derived
+	// ids, tx hashes), so a non-secret salt lets anyone holding the exported
+	// audit log brute-force the hashes and de-anonymize payers. It is therefore
+	// NEVER defaulted to a public value (the backend name is rejected); when all
+	// of Salt/SaltEnv/SaltFile are empty, a random 32-byte secret is generated
+	// once and persisted at <state_dir>/payment_salt (0600) and reused across
+	// restarts. Prefer SaltEnv/SaltFile over an inline literal so the secret is
+	// not written to the config file.
+	Salt string `yaml:"salt"`
+	// SaltEnv reads the salt from the named environment variable (preferred over
+	// an inline Salt). Empty when unused.
+	SaltEnv string `yaml:"salt_env"`
+	// SaltFile reads the salt from a file (preferred over an inline Salt). Empty
+	// when unused.
+	SaltFile string `yaml:"salt_file"`
+	// SingleUseStore is a postgres:// DSN backing a SHARED, fleet-wide single-use
+	// store for settled payments, so multiple edge instances behind one public
+	// URL cannot each redeem the same payment (cross-instance double-spend). Empty
+	// uses the in-process store, which is correct ONLY for a single instance. A
+	// configured store that is not supplied at construction is a fail-closed error
+	// (mirrors oauth.dpop_replay_store), never a silent per-instance downgrade.
+	SingleUseStore string `yaml:"single_use_store"`
+	// Retention bounds how long a redeemed settlement reference is remembered. It
+	// must exceed the payment's validity window (past it the on-chain
+	// authorization is dead, so forgetting cannot re-open a replay). Zero uses the
+	// default.
+	Retention Duration `yaml:"retention"`
+}
+
+// scheme returns the effective payment scheme (default "x402").
+func (p PaymentConfig) scheme() string {
+	if p.Scheme == "" {
+		return "x402"
+	}
+	return p.Scheme
 }
 
 // LimitsConfig bounds abuse at the public edge. Zero values take defaults.
@@ -470,8 +561,118 @@ func (c Config) Validate() (Config, error) {
 	if c.Backend.Policy.DefaultAllow {
 		return c, fmt.Errorf("edge: backend.policy.default_allow must be false — the public edge is deny-by-default")
 	}
+	if err := c.Backend.Payment.validate(c.Backend.Name); err != nil {
+		return c, err
+	}
 
 	return c, nil
+}
+
+// validate checks the payment block. A disabled block is always valid (it is
+// inert). An enabled block must name an asset, price at least one tool, and use
+// well-formed, non-overlapping tool globs (overlap would make pricing depend on
+// non-deterministic map iteration).
+func (p PaymentConfig) validate(backendName string) error {
+	if !p.Enabled {
+		return nil
+	}
+	if p.Asset == "" {
+		return fmt.Errorf("edge: backend.payment.asset is required when payment is enabled")
+	}
+	if p.PayTo == "" {
+		return fmt.Errorf("edge: backend.payment.pay_to is required when payment is enabled (the recipient address advertised in the 402 challenge)")
+	}
+	if len(p.Prices) == 0 {
+		return fmt.Errorf("edge: backend.payment.enabled is true but no prices are set (nothing would ever be charged)")
+	}
+	// A non-secret salt defeats payer_ref/payment_ref unlinkability; the backend
+	// name is public (it is the audit Backend field), so reject it explicitly.
+	if p.Salt != "" && p.Salt == backendName {
+		return fmt.Errorf("edge: backend.payment.salt must not equal the backend name — it must be a SECRET (payer_ref is brute-forceable otherwise); use salt_env/salt_file or leave it empty to auto-generate a persisted secret")
+	}
+	if p.SingleUseStore != "" && !isPostgresDSN(p.SingleUseStore) {
+		return fmt.Errorf("edge: backend.payment.single_use_store must be a postgres:// or postgresql:// DSN")
+	}
+	globs := make([]string, 0, len(p.Prices))
+	for pattern, price := range p.Prices {
+		if _, err := path.Match(pattern, ""); err != nil {
+			return fmt.Errorf("edge: backend.payment.prices: bad tool glob %q: %w", pattern, err)
+		}
+		if !isCanonicalMinorUnits(price) {
+			return fmt.Errorf("edge: backend.payment.prices[%q]: price %q must be a positive integer in the asset's minor units (no sign, decimal point, underscores, exponent, or whitespace)", pattern, price)
+		}
+		globs = append(globs, pattern)
+	}
+	for i := 0; i < len(globs); i++ {
+		for j := i + 1; j < len(globs); j++ {
+			if globsOverlap(globs[i], globs[j]) {
+				return fmt.Errorf("edge: backend.payment.prices: tool globs %q and %q overlap; pricing must be unambiguous", globs[i], globs[j])
+			}
+		}
+	}
+	return nil
+}
+
+// isCanonicalMinorUnits reports whether s is a positive integer with no leading
+// zero, sign, decimal point, exponent, underscore, or surrounding whitespace —
+// the exact form the 402 challenge's maxAmountRequired and the big.Int amount
+// comparison expect. Rejects "0", "1.5", "1_000", " 100 ", "1e3", "0x10", "-1".
+func isCanonicalMinorUnits(s string) bool {
+	if s == "" || s == "0" {
+		return false
+	}
+	if s[0] == '0' { // no leading zeros (canonical form)
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// globsOverlap reports whether two price globs could both match some tool name,
+// which would make the charged price ambiguous. It is SOUND (no false
+// negatives): it never reports "no overlap" for a pair that actually
+// intersects, so a config that passes validation can never price a tool
+// non-deterministically. It may be conservative (reject a disjoint pair), which
+// only makes validation stricter — an operator can always rename a glob.
+//
+//   - Two distinct pure literals never overlap.
+//   - Literal vs glob: exact path.Match test.
+//   - Two globs: a common match would have to begin with BOTH patterns' fixed
+//     literal prefixes (the text before the first metacharacter), so it exists
+//     only if one prefix is a prefix of the other. Incompatible prefixes prove
+//     disjointness; compatible prefixes are treated as a (possible) overlap.
+func globsOverlap(a, b string) bool {
+	if a == b {
+		return true
+	}
+	aWild := strings.ContainsAny(a, "*?[")
+	bWild := strings.ContainsAny(b, "*?[")
+	switch {
+	case !aWild && !bWild:
+		return false // two distinct literals cannot both match one tool
+	case !aWild:
+		ok, _ := path.Match(b, a)
+		return ok
+	case !bWild:
+		ok, _ := path.Match(a, b)
+		return ok
+	default:
+		pa, pb := literalPrefix(a), literalPrefix(b)
+		return strings.HasPrefix(pa, pb) || strings.HasPrefix(pb, pa)
+	}
+}
+
+// literalPrefix returns the fixed leading text of a glob, up to (not including)
+// the first path.Match metacharacter.
+func literalPrefix(glob string) string {
+	if i := strings.IndexAny(glob, "*?["); i >= 0 {
+		return glob[:i]
+	}
+	return glob
 }
 
 // isPostgresDSN reports whether a store value selects a PostgreSQL backend.

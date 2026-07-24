@@ -128,3 +128,71 @@ func TestAuditRecordSchema_AllowsDelegationFields(t *testing.T) {
 		}
 	}
 }
+
+// TestAuditRecordSchema_AllowsPayment guards the same schema/doc pairing for the
+// additive payment-evidence field: a record carrying a payment receipt must stay
+// schema-valid under additionalProperties:false, and the nested payment object's
+// own keys must all be declared (its subschema is additionalProperties:false
+// too).
+func TestAuditRecordSchema_AllowsPayment(t *testing.T) {
+	schemaBytes, err := os.ReadFile("../docs/spec/audit-record.schema.json")
+	if err != nil {
+		t.Fatalf("read schema: %v", err)
+	}
+	var schema struct {
+		Required             []string                   `json:"required"`
+		AdditionalProperties bool                       `json:"additionalProperties"`
+		Properties           map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(schemaBytes, &schema); err != nil {
+		t.Fatalf("parse schema: %v", err)
+	}
+	paymentSchemaRaw, ok := schema.Properties["payment"]
+	if !ok {
+		t.Fatalf("schema must declare payment under additionalProperties:false, or every paid record becomes schema-invalid")
+	}
+	var paymentSchema struct {
+		AdditionalProperties bool                       `json:"additionalProperties"`
+		Properties           map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(paymentSchemaRaw, &paymentSchema); err != nil {
+		t.Fatalf("parse payment subschema: %v", err)
+	}
+	if paymentSchema.AdditionalProperties {
+		t.Fatalf("payment subschema must be additionalProperties:false, or an unknown evidence key would slip past the schema/record parity guard")
+	}
+
+	var buf bytes.Buffer
+	a := NewAuditLog(&buf, func() string { return "T" })
+	ev := NewPaymentEvidence("x402", "base-sepolia", "USDC", "1000", "settle-ref", "payer-id", "backend")
+	ev.Request = CanonicalArgsHash([]byte(`{"q":"hi"}`))
+	a.write(AuditRecord{
+		Backend: "edge:carbon", Peer: "oauth:c1", Method: "x402/settle", Tool: "estimate",
+		Decision: "allow", Rule: -1, Payment: &ev,
+	})
+	line := strings.TrimSpace(buf.String())
+	var asMap map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(line), &asMap); err != nil {
+		t.Fatal(err)
+	}
+	rawPayment, ok := asMap["payment"]
+	if !ok {
+		t.Fatalf("written paid record is missing payment: %s", line)
+	}
+	for k := range asMap {
+		if _, ok := schema.Properties[k]; !ok {
+			t.Errorf("record field %q has no matching schema property: %s", k, line)
+		}
+	}
+	// Every key of the emitted payment object must be a declared subschema
+	// property, since the subschema is additionalProperties:false.
+	var payMap map[string]json.RawMessage
+	if err := json.Unmarshal(rawPayment, &payMap); err != nil {
+		t.Fatal(err)
+	}
+	for k := range payMap {
+		if _, ok := paymentSchema.Properties[k]; !ok {
+			t.Errorf("payment field %q has no matching subschema property: %s", k, string(rawPayment))
+		}
+	}
+}

@@ -177,6 +177,45 @@ func TestConfigValidateAcceptsMinimal(t *testing.T) {
 	}
 }
 
+func TestGlobsOverlap(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"search_docs", "search_files", false}, // distinct literals
+		{"search_docs", "search_docs", true},   // equal
+		{"search_*", "search_docs", true},      // glob vs matching literal
+		{"search_*", "verify_docs", false},     // glob vs non-matching literal
+		{"read_*", "read_file_*", true},        // two wildcards, shared prefix — the case the old check missed
+		{"estimate_*", "verify_*", false},      // two wildcards, disjoint prefixes
+		{"a*", "*b", true},                     // "ab" matches both
+		{"*", "read_*", true},                  // star overlaps any glob
+		{"*", "anything", true},                // star overlaps any literal
+		{"read_a*", "read_b*", false},          // shared literal head but divergent before wildcard
+	}
+	for _, tc := range cases {
+		if got := globsOverlap(tc.a, tc.b); got != tc.want {
+			t.Errorf("globsOverlap(%q,%q)=%v want %v", tc.a, tc.b, got, tc.want)
+		}
+		if got := globsOverlap(tc.b, tc.a); got != tc.want {
+			t.Errorf("globsOverlap(%q,%q) (swapped)=%v want %v", tc.b, tc.a, got, tc.want)
+		}
+	}
+}
+
+// A payment config with disjoint wildcard price globs must be ACCEPTED — the
+// overlap check must not be so conservative that it rejects reasonable configs.
+func TestPaymentDisjointWildcardGlobsAccepted(t *testing.T) {
+	c := validConfig()
+	c.Backend.Payment = PaymentConfig{
+		Enabled: true, Asset: "USDC", PayTo: "0xServer", DevInsecureVerifier: true,
+		Prices: map[string]string{"estimate_*": "1000", "verify_*": "5000"},
+	}
+	if _, err := c.Validate(); err != nil {
+		t.Fatalf("disjoint wildcard price globs should validate, got: %v", err)
+	}
+}
+
 func TestConfigValidateRejections(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -210,6 +249,40 @@ func TestConfigValidateRejections(t *testing.T) {
 		{"replay store wrong scheme", func(c *Config) {
 			c.OAuth.DPoPReplayStore = "mysql://u:p@db/x"
 		}, "dpop_replay_store must be a postgres"},
+		{"payment no asset", func(c *Config) {
+			c.Backend.Payment = PaymentConfig{Enabled: true, PayTo: "0xS", Prices: map[string]string{"x": "1"}}
+		}, "payment.asset is required"},
+		{"payment no pay_to", func(c *Config) {
+			c.Backend.Payment = PaymentConfig{Enabled: true, Asset: "USDC", Prices: map[string]string{"x": "1"}}
+		}, "pay_to is required"},
+		{"payment no prices", func(c *Config) {
+			c.Backend.Payment = PaymentConfig{Enabled: true, Asset: "USDC", PayTo: "0xS"}
+		}, "no prices are set"},
+		{"payment empty price", func(c *Config) {
+			c.Backend.Payment = PaymentConfig{Enabled: true, Asset: "USDC", PayTo: "0xS", Prices: map[string]string{"search_docs": ""}}
+		}, "positive integer"},
+		{"payment non-integer price", func(c *Config) {
+			c.Backend.Payment = PaymentConfig{Enabled: true, Asset: "USDC", PayTo: "0xS", Prices: map[string]string{"search_docs": "1.5"}}
+		}, "positive integer"},
+		{"payment zero price", func(c *Config) {
+			c.Backend.Payment = PaymentConfig{Enabled: true, Asset: "USDC", PayTo: "0xS", Prices: map[string]string{"search_docs": "0"}}
+		}, "positive integer"},
+		{"payment salt equals backend name", func(c *Config) {
+			c.Backend.Name = "docs"
+			c.Backend.Payment = PaymentConfig{Enabled: true, Asset: "USDC", PayTo: "0xS", Salt: "docs", Prices: map[string]string{"search_docs": "1"}}
+		}, "salt must not equal the backend name"},
+		{"payment single_use_store not postgres", func(c *Config) {
+			c.Backend.Payment = PaymentConfig{Enabled: true, Asset: "USDC", PayTo: "0xS", SingleUseStore: "/var/lib/x", Prices: map[string]string{"search_docs": "1"}}
+		}, "single_use_store must be a postgres"},
+		{"payment bad glob", func(c *Config) {
+			c.Backend.Payment = PaymentConfig{Enabled: true, Asset: "USDC", PayTo: "0xS", Prices: map[string]string{"[bad": "1"}}
+		}, "bad tool glob"},
+		{"payment overlapping globs", func(c *Config) {
+			c.Backend.Payment = PaymentConfig{Enabled: true, Asset: "USDC", PayTo: "0xS", Prices: map[string]string{"search_*": "1", "search_docs": "2"}}
+		}, "overlap"},
+		{"payment overlapping two-wildcard globs", func(c *Config) {
+			c.Backend.Payment = PaymentConfig{Enabled: true, Asset: "USDC", PayTo: "0xS", Prices: map[string]string{"read_*": "1", "read_file_*": "2"}}
+		}, "overlap"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

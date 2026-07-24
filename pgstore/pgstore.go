@@ -38,7 +38,7 @@ type Store struct {
 	db *sql.DB
 	// Table names, fixed at Open. A non-empty prefix (tests) keeps parallel
 	// runs against a shared database from colliding.
-	sessions, nonces, dpopNonces, dpopJTIs, idemClaims string
+	sessions, nonces, dpopNonces, dpopJTIs, idemClaims, paymentRefs string
 }
 
 // Driver errors can echo the raw connection string: pgx's ParseConfigError
@@ -74,12 +74,13 @@ func open(dsn, prefix string) (*Store, error) {
 		return nil, redactErr("open", err)
 	}
 	s := &Store{
-		db:         db,
-		sessions:   prefix + "sessions",
-		nonces:     prefix + "nonces",
-		dpopNonces: prefix + "dpop_nonces",
-		dpopJTIs:   prefix + "dpop_jtis",
-		idemClaims: prefix + "idempotency_claims",
+		db:          db,
+		sessions:    prefix + "sessions",
+		nonces:      prefix + "nonces",
+		dpopNonces:  prefix + "dpop_nonces",
+		dpopJTIs:    prefix + "dpop_jtis",
+		idemClaims:  prefix + "idempotency_claims",
+		paymentRefs: prefix + "payment_refs",
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), openTimeout)
 	defer cancel()
@@ -93,6 +94,7 @@ func open(dsn, prefix string) (*Store, error) {
 		fmt.Sprintf(ddlDPoPNonces, s.dpopNonces),
 		fmt.Sprintf(ddlDPoPJTIs, s.dpopJTIs),
 		fmt.Sprintf(ddlIdemClaims, s.idemClaims),
+		fmt.Sprintf(ddlPaymentRefs, s.paymentRefs),
 	} {
 		if _, err := db.ExecContext(ctx, ddl); err != nil {
 			db.Close()
