@@ -11,10 +11,25 @@ import (
 	"time"
 
 	"github.com/xrey167/meshmcp/air/checkpoint"
+	"github.com/xrey167/meshmcp/control"
 	hn "github.com/xrey167/meshmcp/harness"
 	"github.com/xrey167/meshmcp/mcp/orchestrator"
 	"github.com/xrey167/meshmcp/policy"
 )
+
+// netbirdEnroller adapts control.NetBirdIssuer to harness.Enroller so the
+// EnrollMinter can mint real ephemeral mesh worker identities.
+type netbirdEnroller struct{ iss *control.NetBirdIssuer }
+
+func (e netbirdEnroller) Enroll(node string) (setupKey, mgmtURL string, err error) {
+	resp, err := e.iss.Enroll(control.EnrollRequest{Node: node})
+	if err != nil {
+		return "", "", err
+	}
+	return resp.SetupKey, resp.ManagementURL, nil
+}
+
+func (e netbirdEnroller) Deregister(node string) error { return e.iss.Deregister(node) }
 
 // cmdHarness is the `meshmcp harness ...` verb: the identity-native, mesh-governed
 // agent orchestration engine. Subverbs mirror the source harnesses' surface but
@@ -76,6 +91,10 @@ type harnessDeps struct {
 	stateDir  string
 	mode      string
 	category  string
+	minter    string
+	nbAPIURL  string
+	nbToken   string
+	nbGroups  string
 }
 
 func (d *harnessDeps) bind(fs *flag.FlagSet) {
@@ -84,6 +103,42 @@ func (d *harnessDeps) bind(fs *flag.FlagSet) {
 	fs.StringVar(&d.stateDir, "state-dir", "", "air/checkpoint continuity directory")
 	fs.StringVar(&d.mode, "mode", "", "run mode")
 	fs.StringVar(&d.category, "category", "", "work category")
+	fs.StringVar(&d.minter, "minter", "mem", "worker identity minter: mem | netbird (netbird mints real ephemeral mesh peers)")
+	fs.StringVar(&d.nbAPIURL, "nb-api-url", "", "NetBird API URL (default https://api.netbird.io; used by --minter netbird)")
+	fs.StringVar(&d.nbToken, "nb-token", "", "NetBird PAT (or $NB_API_TOKEN; used by --minter netbird)")
+	fs.StringVar(&d.nbGroups, "nb-groups", "workers", "NetBird auto-groups for minted workers (comma-separated)")
+}
+
+// buildMinter selects the worker identity minter. mem (default) generates
+// in-process keys; netbird mints real ephemeral mesh peers via the control
+// plane's issuer, retiring them on completion. Every enrollment is audited on al.
+func (d *harnessDeps) buildMinter(al *policy.AuditLog) (hn.Minter, error) {
+	switch d.minter {
+	case "", "mem":
+		return nil, nil // nil → NewEngine uses the in-process MemMinter
+	case "netbird":
+		token := d.nbToken
+		if token == "" {
+			token = os.Getenv("NB_API_TOKEN")
+		}
+		if token == "" {
+			return nil, fmt.Errorf("--minter netbird requires a NetBird PAT via --nb-token or $NB_API_TOKEN")
+		}
+		apiURL := d.nbAPIURL
+		if apiURL == "" {
+			apiURL = "https://api.netbird.io"
+		}
+		var groups []string
+		for _, g := range strings.Split(d.nbGroups, ",") {
+			if g = strings.TrimSpace(g); g != "" {
+				groups = append(groups, g)
+			}
+		}
+		iss := &control.NetBirdIssuer{APIURL: apiURL, Token: token, Groups: groups, Audit: al}
+		return hn.NewEnrollMinter(netbirdEnroller{iss: iss}), nil
+	default:
+		return nil, fmt.Errorf("unknown --minter %q (want mem|netbird)", d.minter)
+	}
 }
 
 // engine builds a governed hn.Engine from the deps. The caller must call
@@ -114,10 +169,17 @@ func (d *harnessDeps) engine() (*hn.Engine, func(), error) {
 		cont = hn.NewAirContinuity(store)
 	}
 
+	minter, err := d.buildMinter(al)
+	if err != nil {
+		af.Close()
+		return nil, nil, err
+	}
+
 	eng := hn.NewEngine(hn.EngineOpts{
 		Audit:      al,
 		Cosign:     cosign,
 		Continuity: cont,
+		Minter:     minter,
 	})
 	closer := func() { al.Flush(); af.Close() }
 	return eng, closer, nil

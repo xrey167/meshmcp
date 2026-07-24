@@ -89,8 +89,9 @@ names. **Governance is a global middleware**, so no tool escapes the firewall:
 each call is authorized against the caller's role via `Governor.Guard` and
 audited. Tools registered: delegation (task, call_agent, background_*,
 synthesize), planning/verify (plan, plan_review, interview, start_work,
-review_work, ultragoal_check), code intel (grep/glob/edit real; lsp_*, ast_grep_*,
-look_at governed with Phase-2 backends), sessions + task store, terminal
+review_work, ultragoal_check), code intel (grep/glob/edit, lsp_symbols +
+lsp_diagnostics via go/parser, and ast_grep_* via the ast-grep binary are real;
+the remaining lsp_* and look_at governed with Phase-2 backends), sessions + task store, terminal
 (interactive_bash real), browser/canvas/nodes/cron (governed, Phase-2/4 driver),
 skills + market.
 
@@ -149,17 +150,23 @@ the gateway ingress with channels, DM pairing, and session slash-commands; the
 (profile→recommend→simulate→apply).
 
 The orchestrator dark service now serves over the mesh (`harness serve
---listen`, mirroring `cmdOrchestrate`'s accept loop) as well as stdio, and remote
-providers are reachable over MCP (`MCPProvider`) — closing the two headline
-wiring gaps.
+--listen`, mirroring `cmdOrchestrate`'s accept loop) as well as stdio; remote
+providers are reachable over MCP (`MCPProvider`); and `EnrollMinter` mints real
+ephemeral mesh worker identities — it generates a WireGuard (X25519) keypair per
+worker (so the public key IS the transport-bound identity), obtains a scoped
+one-off enrollment credential from the control plane (`control.NetBirdIssuer`
+via the `harness.Enroller` interface), and deregisters on retire. Selected with
+`harness serve|run --minter netbird` (PAT via `--nb-token`/`$NB_API_TOKEN`);
+`mem` (in-process keys) remains the default.
 
 **Deferred (wiring, not design):** live provider CLIs require the binaries +
-broker keys; LSP/AST/browser/canvas/nodes/cron live backends (Phase 2/4);
-`control.NetBirdIssuer`-backed minter for real mesh worker keys (Phase 3); the
+broker keys; the remaining lsp_* tools (rename/goto/references) need a language
+server; browser/canvas/nodes/cron live backends (Phase 2/4); the worker-process
+spawner that launches a minted identity onto the mesh with its `WorkerCreds`; the
 non-webchat channel transports (Phase 4 live wiring); Live Canvas / voice
-surfaces. Every deferred tool/channel is still *registered and governed* — a call
-passes the firewall and is audited, and it fails closed rather than silently
-succeeding.
+surfaces. Every deferred tool/channel is still *registered and
+governed* — a call passes the firewall and is audited, and it fails closed rather
+than silently succeeding.
 
 ## Tests
 
