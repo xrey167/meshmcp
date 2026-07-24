@@ -219,21 +219,31 @@ gateway's OWN certificate — the beacon holds no key and sees only ciphertext.
 beacon:
   control: beacon.example.com:7443   # the beacon address the gateway dials out to
   zone: beacon.example.com           # the beacon's public DNS zone
-tls:
-  cert_file: /etc/meshmcp/gw.crt     # a cert whose SAN is the derived <label>.<zone>
-  key_file:  /etc/meshmcp/gw.key
+  auto_cert:                         # automatic cert via ACME DNS-01 (recommended)
+    email: ops@example.com           #   ACME account contact
 # listen / public_url are unused: public_url is derived as https://<label>.<zone>
 ```
 
 The public name is `<label>.<zone>` where `label = base32(sha256(signing-key
 pubkey))[:16]` — deterministic, so it survives restarts (the connector needs a
-stable URL). The gateway prints the derived name on startup; obtain a
-publicly-trusted cert whose SAN is that name and point `tls.cert_file/key_file` at
-it. Run the relay with:
+stable URL). Two ways to get the gateway's certificate:
+
+- **`beacon.auto_cert` (recommended)** — the gateway obtains a publicly-trusted
+  cert for its derived name via **ACME DNS-01**, brokered through the beacon: the
+  gateway publishes the challenge TXT over the tunnel and the beacon's
+  authoritative DNS serves it. No inbound challenge port, no manual cert.
+- **`tls.cert_file` / `tls.key_file`** — an operator-provided cert whose SAN is the
+  derived name (printed on startup). Use `auto_cert` OR files, not both.
+
+Run the relay with its authoritative DNS enabled (required for `auto_cert`):
 
 ```bash
-meshmcp beacon --zone beacon.example.com --public :443 --control :7443
+meshmcp beacon --zone beacon.example.com --public :443 --control :7443 \
+               --dns :53 --public-ip 203.0.113.10
 ```
+
+Delegate the beacon zone (`beacon.example.com`) to that DNS server at your
+registrar so Let's Encrypt (and hosted clients) resolve it.
 
 **Confidentiality vs. `behind_front`:** the beacon is a shared party that owns the
 public name, so it is DNS authority for the subdomain and *could* actively MITM by
@@ -243,10 +253,11 @@ ciphertext and the SNI are exposed. The full trade, and the CT-monitoring /
 DPoP mitigations, are in the
 [design doc](design/HOSTED-CLIENT-INGRESS.md).
 
-> **Status:** experimental. The rendezvous, SNI-routed splice, and gateway
-> listener are implemented and tested end-to-end; automatic cert provisioning
-> (ACME DNS-01 through the beacon) and the beacon's authoritative-DNS / multi-tenant
-> lease layer are the next increment — until then the gateway cert is operator-provided.
+> **Status:** experimental. The rendezvous, SNI-routed splice, gateway listener,
+> authoritative DNS server, and ACME DNS-01 challenge brokering are implemented and
+> tested end-to-end (the live Let's Encrypt issuance itself is exercised only in
+> real deployments). Multi-tenant subdomain leasing/HA and CT-monitoring are the
+> next increments.
 
 ---
 

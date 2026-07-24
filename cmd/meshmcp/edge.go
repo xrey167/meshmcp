@@ -100,23 +100,45 @@ func cmdEdge(args []string) error {
 		fmt.Fprintf(os.Stderr, "meshmcp edge: joined mesh, backend %s reachable over WireGuard\n", cfg.Backend.Addr)
 	}
 
-	// Beacon mode: derive the stable public name from the signing-key identity and
-	// set it as public_url BEFORE building the server (New validates public_url).
-	// The loaded signer is reused via opts so New does not reload it.
-	var beaconPub []byte
+	ctx, stop := signal.NotifyContext(context.Background(), shutdownSignals...)
+	defer stop()
+
+	// Beacon mode: derive the stable public name from the signing-key identity,
+	// set it as public_url, dial the beacon OUT, and (for auto_cert) inject the
+	// DNS-01 provider — all BEFORE building the server, which validates public_url
+	// and, in auto_cert mode, requires the provider.
+	var beaconTun *beacon.Tunnel
 	if cfg.Beacon != nil {
 		signer, err := policy.LoadSigner(cfg.SigningKey)
 		if err != nil {
-			return fmt.Errorf("edge: beacon mode needs an existing signing_key %s — generate it, then obtain a cert whose SAN is the printed name: %w", cfg.SigningKey, err)
+			return fmt.Errorf("edge: beacon mode needs an existing signing_key %s — generate it first: %w", cfg.SigningKey, err)
 		}
 		pub, err := hex.DecodeString(signer.PubKeyHex())
 		if err != nil {
 			return fmt.Errorf("edge: decode signing-key public bytes: %w", err)
 		}
-		beaconPub = pub
 		fqdn := beacon.SubdomainLabel(pub) + "." + strings.ToLower(strings.TrimSuffix(cfg.Beacon.Zone, "."))
 		cfg.PublicURL = "https://" + fqdn
 		opts.Signer = signer
+
+		fmt.Fprintf(os.Stderr, "meshmcp edge: beacon mode — dialing %s; public %s\n", cfg.Beacon.Control, cfg.PublicURL)
+		tun, err := beacon.Dial(ctx, cfg.Beacon.Control, pub, func(ctx context.Context, addr string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "tcp", addr)
+		})
+		if err != nil {
+			return fmt.Errorf("edge: dial beacon %s: %w", cfg.Beacon.Control, err)
+		}
+		defer tun.Close()
+		if tun.FQDN != fqdn {
+			return fmt.Errorf("edge: beacon assigned %q but the gateway derived %q (beacon.zone mismatch?)", tun.FQDN, fqdn)
+		}
+		beaconTun = tun
+		if cfg.Beacon.AutoCert != nil {
+			opts.DNS01Provider = beacon.NewDNSProvider(tun)
+			fmt.Fprintf(os.Stderr, "meshmcp edge: auto-provisioning a certificate for %s via ACME DNS-01 through the beacon (may take up to a minute)\n", fqdn)
+		} else {
+			fmt.Fprintf(os.Stderr, "meshmcp edge: using operator cert for %s (its SAN must match)\n", fqdn)
+		}
 	}
 
 	srv, err := edge.New(cfg, opts)
@@ -124,22 +146,9 @@ func cmdEdge(args []string) error {
 		return err
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), shutdownSignals...)
-	defer stop()
-
-	if cfg.Beacon != nil {
-		fqdn := strings.TrimPrefix(cfg.PublicURL, "https://")
-		fmt.Fprintf(os.Stderr, "meshmcp edge: beacon mode — dialing %s; public %s (obtain a cert whose SAN is %s; the gateway terminates TLS, the beacon splices ciphertext only)\n",
-			cfg.Beacon.Control, cfg.PublicURL, fqdn)
-		tun, err := beacon.Dial(ctx, cfg.Beacon.Control, beaconPub, func(ctx context.Context, addr string) (net.Conn, error) {
-			return (&net.Dialer{}).DialContext(ctx, "tcp", addr)
-		})
-		if err != nil {
-			return fmt.Errorf("edge: dial beacon %s: %w", cfg.Beacon.Control, err)
-		}
-		defer tun.Close()
-		fmt.Fprintf(os.Stderr, "meshmcp edge: beacon assigned %s\n", tun.FQDN)
-		return srv.ServeOverListener(ctx, tun)
+	if beaconTun != nil {
+		fmt.Fprintf(os.Stderr, "meshmcp edge: beacon assigned %s; the gateway terminates TLS, the beacon splices ciphertext only\n", beaconTun.FQDN)
+		return srv.ServeOverListener(ctx, beaconTun)
 	}
 
 	fmt.Fprintf(os.Stderr, "meshmcp edge: serving %s on %s (backend %q)\n", cfg.PublicURL, cfg.Listen, cfg.Backend.Name)

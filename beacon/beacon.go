@@ -42,8 +42,10 @@ type Server struct {
 	logf     func(format string, args ...any)
 
 	mu       sync.Mutex
+	publicIP net.IP                   // A-record answer for <label>.<zone> (DNS server)
 	gateways map[string]*gwConn       // label -> live control conn
 	pending  map[string]chan net.Conn // connID -> waiter for the gateway's data conn
+	txt      map[string][]string      // fqdn -> ACME DNS-01 TXT values a gateway published
 }
 
 type gwConn struct {
@@ -60,6 +62,7 @@ func NewServer(zone string) *Server {
 		logf:     func(string, ...any) {},
 		gateways: map[string]*gwConn{},
 		pending:  map[string]chan net.Conn{},
+		txt:      map[string][]string{},
 	}
 }
 
@@ -68,6 +71,15 @@ func (s *Server) SetLogf(f func(format string, args ...any)) {
 	if f != nil {
 		s.logf = f
 	}
+}
+
+// SetPublicIP sets the address the authoritative DNS server answers for
+// <label>.<zone> A queries — the beacon's own public IP, where hosted clients
+// connect. Required only when the beacon runs its DNS server (ServeDNS).
+func (s *Server) SetPublicIP(ip net.IP) {
+	s.mu.Lock()
+	s.publicIP = ip
+	s.mu.Unlock()
 }
 
 // Run serves until ctx is cancelled or a listener fails. publicLn carries inbound
@@ -146,19 +158,40 @@ func (s *Server) handleRegister(conn net.Conn, b64Key string) {
 	}
 	s.logf("beacon: gateway registered %s.%s", label, s.zone)
 
-	// The control conn stays open; the beacon WRITES OPEN frames to it. Block on a
-	// read so a closed/broken tunnel is detected and deregistered (the gateway
-	// sends nothing more on the control conn).
-	buf := make([]byte, 1)
-	_, _ = conn.Read(buf)
+	// The control conn stays open: the beacon WRITES OPEN frames to it and READS
+	// gateway control frames from it (ACME DNS-01 TXT publish/clear). Loop until
+	// the tunnel closes, then deregister and drop any TXT it left behind.
+	for {
+		line, err := readLine(conn)
+		if err != nil {
+			break
+		}
+		s.handleControlFrame(gw, line)
+	}
 	s.deregister(gw)
 	conn.Close()
+}
+
+// handleControlFrame dispatches a gateway->beacon control line. Only DNS-01 TXT
+// publish/clear for the gateway's OWN challenge name is honoured.
+func (s *Server) handleControlFrame(gw *gwConn, line string) {
+	verb, rest, _ := strings.Cut(line, " ")
+	switch verb {
+	case "TXT-SET":
+		if name, value, ok := strings.Cut(strings.TrimSpace(rest), " "); ok {
+			s.setTXT(gw, name, value)
+		}
+	case "TXT-CLEAR":
+		name, value, _ := strings.Cut(strings.TrimSpace(rest), " ")
+		s.clearTXT(gw, strings.TrimSpace(name), value)
+	}
 }
 
 func (s *Server) deregister(gw *gwConn) {
 	s.mu.Lock()
 	if s.gateways[gw.label] == gw {
 		delete(s.gateways, gw.label)
+		delete(s.txt, s.challengeName(gw.label)) // drop any DNS-01 TXT it left
 		s.logf("beacon: gateway deregistered %s.%s", gw.label, s.zone)
 	}
 	s.mu.Unlock()
@@ -265,8 +298,18 @@ type Tunnel struct {
 	dial       DialFunc
 	conns      chan net.Conn
 	control    net.Conn
+	controlWr  sync.Mutex // serialize gateway->beacon control writes
 	closeOnce  sync.Once
 	done       chan struct{}
+}
+
+// sendControlLine writes one gateway->beacon control frame on the tunnel's
+// control connection (used to publish/clear ACME DNS-01 TXT records).
+func (t *Tunnel) sendControlLine(line string) error {
+	t.controlWr.Lock()
+	defer t.controlWr.Unlock()
+	_, err := fmt.Fprintf(t.control, "%s\n", line)
+	return err
 }
 
 // Dial opens the reverse tunnel: it dials the beacon's control address, registers

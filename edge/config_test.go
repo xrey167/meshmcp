@@ -127,10 +127,33 @@ func TestConfigValidateBeacon(t *testing.T) {
 		t.Fatalf("beacon without a cert not rejected: %v", err)
 	}
 
-	c = base() // files present; adding acme must be refused (not yet supported)
+	c = base() // files present; adding acme must be refused (beacon uses auto_cert/files)
 	c.TLS.ACME = &ACMEConfig{Domains: []string{"beacon.example.com"}}
 	if _, err := c.Validate(); err == nil || !strings.Contains(err.Error(), "acme") {
 		t.Fatalf("beacon+acme not rejected: %v", err)
+	}
+
+	// auto_cert (ACME DNS-01) accepted in place of a static cert.
+	c = base()
+	c.TLS = TLSConfig{}
+	c.Beacon.AutoCert = &BeaconAutoCert{Email: "ops@example.com"}
+	if _, err := c.Validate(); err != nil {
+		t.Fatalf("beacon.auto_cert rejected: %v", err)
+	}
+
+	// auto_cert AND static files is ambiguous.
+	c = base() // has files
+	c.Beacon.AutoCert = &BeaconAutoCert{Email: "ops@example.com"}
+	if _, err := c.Validate(); err == nil || !strings.Contains(err.Error(), "exactly one") {
+		t.Fatalf("auto_cert + files not rejected: %v", err)
+	}
+
+	// auto_cert requires an ACME contact email.
+	c = base()
+	c.TLS = TLSConfig{}
+	c.Beacon.AutoCert = &BeaconAutoCert{}
+	if _, err := c.Validate(); err == nil || !strings.Contains(err.Error(), "email") {
+		t.Fatalf("auto_cert without email not rejected: %v", err)
 	}
 }
 

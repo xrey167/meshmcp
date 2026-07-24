@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/caddyserver/certmagic"
@@ -74,6 +75,61 @@ func (s *Server) buildACMETLSConfig() (*tls.Config, *acmeRuntime, error) {
 		}
 	}
 	return tlsConf, rt, nil
+}
+
+// buildBeaconACMETLSConfig provisions the gateway's certificate for its derived
+// public name via ACME DNS-01, brokered through the beacon: the injected
+// dns01Provider publishes the challenge TXT over the tunnel and the beacon's
+// authoritative DNS serves it, so NO inbound challenge port is opened. The
+// certificate for cfg.PublicURL's host is obtained synchronously at startup
+// (fatal on failure — never a lazy first-handshake error).
+func (s *Server) buildBeaconACMETLSConfig() (*tls.Config, *acmeRuntime, error) {
+	ac := s.cfg.Beacon.AutoCert
+	if s.dns01Provider == nil {
+		return nil, nil, fmt.Errorf("edge: beacon.auto_cert requires a DNS-01 provider (internal wiring error)")
+	}
+	host := strings.TrimPrefix(s.cfg.PublicURL, "https://")
+
+	cacheDir := ac.CacheDir
+	if cacheDir == "" {
+		cacheDir = filepath.Join(s.cfg.StateDir, "acme")
+	}
+
+	var cfg *certmagic.Config
+	cache := certmagic.NewCache(certmagic.CacheOptions{
+		GetConfigForCert: func(certmagic.Certificate) (*certmagic.Config, error) { return cfg, nil },
+	})
+	cfg = certmagic.New(cache, certmagic.Config{
+		Storage: &certmagic.FileStorage{Path: cacheDir},
+	})
+
+	ca := ac.CA
+	if ca == "" {
+		ca = certmagic.LetsEncryptProductionCA
+	}
+	issuer := certmagic.NewACMEIssuer(cfg, certmagic.ACMEIssuer{
+		CA:     ca,
+		Email:  ac.Email,
+		Agreed: true,
+		// DNS-01 only: no inbound challenge port on the gateway.
+		DisableHTTPChallenge:    true,
+		DisableTLSALPNChallenge: true,
+		DNS01Solver: &certmagic.DNS01Solver{
+			DNSManager: certmagic.DNSManager{DNSProvider: s.dns01Provider},
+		},
+	})
+	cfg.Issuers = []certmagic.Issuer{issuer}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	if err := cfg.ManageSync(ctx, []string{host}); err != nil {
+		return nil, nil, fmt.Errorf("edge: beacon ACME DNS-01 provisioning for %s failed at startup: %w", host, err)
+	}
+
+	tlsConf := cfg.TLSConfig()
+	tlsConf.MinVersion = tls.VersionTLS12
+	tlsConf.NextProtos = appendUnique(tlsConf.NextProtos, "h2", "http/1.1")
+	return tlsConf, &acmeRuntime{issuer: issuer}, nil
 }
 
 // start launches any auxiliary listeners (the http-01 challenge server). It is

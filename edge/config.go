@@ -177,6 +177,20 @@ type BeaconConfig struct {
 	// Zone is the beacon's public DNS zone, e.g. "beacon.example.com" — used to
 	// form (and, at runtime, confirm) the assigned public name.
 	Zone string `yaml:"zone"`
+	// AutoCert, when set, provisions the gateway's certificate automatically via
+	// ACME DNS-01 brokered through the beacon (no static cert_file/key_file
+	// needed, no inbound challenge port). Mutually exclusive with tls.cert_file.
+	AutoCert *BeaconAutoCert `yaml:"auto_cert"`
+}
+
+// BeaconAutoCert requests automatic certificate provisioning for the gateway's
+// derived name via ACME DNS-01: the gateway publishes the challenge TXT over the
+// tunnel and the beacon's authoritative DNS serves it, so no inbound challenge
+// port (HTTP-01/TLS-ALPN) is ever opened.
+type BeaconAutoCert struct {
+	Email    string `yaml:"email"`     // ACME account contact (required)
+	CA       string `yaml:"ca"`        // ACME directory URL; empty = Let's Encrypt production
+	CacheDir string `yaml:"cache_dir"` // cert/account cache; empty = <state_dir>/acme
 }
 
 // ACMEConfig configures certmagic-backed automatic certificates.
@@ -372,14 +386,20 @@ func (c Config) Validate() (Config, error) {
 		if c.BehindFront {
 			return c, fmt.Errorf("edge: beacon and behind_front are mutually exclusive — choose one ingress")
 		}
-		// The gateway still terminates TLS (with its OWN cert) over the tunnel, so
-		// a cert for the derived name is required. ACME DNS-01 auto-provisioning
-		// through the beacon is a follow-up.
-		if !c.TLS.files() {
-			return c, fmt.Errorf("edge: beacon mode requires tls.cert_file/key_file — the gateway terminates TLS with its own certificate whose SAN is the derived <label>.%s name (ACME DNS-01 auto-provisioning is a follow-up)", c.Beacon.Zone)
-		}
 		if c.TLS.acme() {
-			return c, fmt.Errorf("edge: beacon mode does not support tls.acme yet — use cert_file/key_file")
+			return c, fmt.Errorf("edge: beacon mode certificates come from beacon.auto_cert (ACME DNS-01) or tls.cert_file/key_file, not tls.acme")
+		}
+		// The gateway terminates TLS with its OWN cert over the tunnel: either a
+		// static cert for the derived name (tls.cert_file/key_file) or automatic
+		// provisioning via ACME DNS-01 through the beacon (beacon.auto_cert).
+		hasFiles, hasAuto := c.TLS.files(), c.Beacon.AutoCert != nil
+		switch {
+		case hasFiles && hasAuto:
+			return c, fmt.Errorf("edge: set exactly one of tls.cert_file/key_file OR beacon.auto_cert")
+		case !hasFiles && !hasAuto:
+			return c, fmt.Errorf("edge: beacon mode requires a certificate for the derived <label>.%s name — set beacon.auto_cert (ACME DNS-01) or tls.cert_file/key_file", c.Beacon.Zone)
+		case hasAuto && c.Beacon.AutoCert.Email == "":
+			return c, fmt.Errorf("edge: beacon.auto_cert.email is required (the ACME account contact)")
 		}
 	} else if c.BehindFront {
 		// The front owns TLS, so the edge must NOT also carry a tls block.

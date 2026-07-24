@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/caddyserver/certmagic"
+
 	"github.com/xrey167/meshmcp/policy"
 	"github.com/xrey167/meshmcp/protocol/authorization"
 )
@@ -39,6 +41,10 @@ type Server struct {
 	registerLimit *fixedWindowLimiter
 	clientLimit   *tokenBucket
 
+	// dns01Provider brokers ACME DNS-01 challenges for beacon.auto_cert mode (the
+	// beacon-backed libdns provider), injected via Options. Nil otherwise.
+	dns01Provider certmagic.DNSProvider
+
 	now func() time.Time
 }
 
@@ -65,6 +71,10 @@ type Options struct {
 	// configured. A configured store that is not supplied is a construction
 	// error (fail closed), never a silent downgrade to per-process tracking.
 	DPoPReplay policy.DPoPReplayStore
+	// DNS01Provider brokers ACME DNS-01 for beacon.auto_cert mode. cmd/meshmcp
+	// injects the beacon-backed libdns provider (beacon.NewDNSProvider(tunnel));
+	// required when the config sets beacon.auto_cert, unused otherwise.
+	DNS01Provider certmagic.DNSProvider
 }
 
 // New validates cfg and constructs a Server. It creates the state directory,
@@ -140,6 +150,13 @@ func New(cfg Config, opts Options) (*Server, error) {
 		replay = policy.NewMemDPoPReplayStore()
 	}
 
+	// Beacon auto-cert needs the DNS-01 broker; a configured-but-unsupplied
+	// provider is a construction error (fail closed), never a start with no way to
+	// obtain a certificate.
+	if cfg.Beacon != nil && cfg.Beacon.AutoCert != nil && opts.DNS01Provider == nil {
+		return nil, fmt.Errorf("edge: beacon.auto_cert is set but no DNS-01 provider was supplied at construction (cmd/meshmcp wires beacon.NewDNSProvider from the tunnel)")
+	}
+
 	pol := cfg.Backend.Policy
 	engine := policy.NewEngine(&pol, now, nil)
 	dial := opts.DialBackend
@@ -164,6 +181,7 @@ func New(cfg Config, opts Options) (*Server, error) {
 		preauthLimit:  newFixedWindowLimiter(cfg.Limits.PreauthPerIPPerMin, time.Minute, now),
 		registerLimit: newFixedWindowLimiter(cfg.Limits.RegisterPerIPPerMin, time.Minute, now),
 		clientLimit:   newTokenBucket(cfg.Limits.PerClientRPS, cfg.Limits.PerClientBurst, now),
+		dns01Provider: opts.DNS01Provider,
 		now:           now,
 	}
 	return s, nil
@@ -291,6 +309,9 @@ func (s *Server) ServeOverListener(ctx context.Context, ln net.Listener) error {
 }
 
 func (s *Server) buildTLSConfig() (*tls.Config, *acmeRuntime, error) {
+	if s.cfg.Beacon != nil && s.cfg.Beacon.AutoCert != nil {
+		return s.buildBeaconACMETLSConfig()
+	}
 	if s.cfg.TLS.files() {
 		cert, err := tls.LoadX509KeyPair(s.cfg.TLS.CertFile, s.cfg.TLS.KeyFile)
 		if err != nil {
