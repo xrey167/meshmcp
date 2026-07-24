@@ -40,12 +40,13 @@ func (o Outcome) String() string {
 // boolean fast-path used by the simple Policy.Decide callers; Outcome carries
 // the richer verdict (including co-sign) produced by the Engine.
 type Decision struct {
-	Allow     bool
-	RuleID    int      // index of the matching rule, or -1 for the default
-	Outcome   Outcome  // allow | deny | cosign
-	Reason    string   // human-readable why (for audit + the denial message)
-	AddLabels []string // data-flow labels this allowed call adds to the session
-	Cost      int      // cost/quota units this call consumed (from the matched rate rule; 0 if untracked)
+	Allow      bool
+	RuleID     int      // index of the matching rule, or -1 for the default
+	Outcome    Outcome  // allow | deny | cosign
+	Reason     string   // human-readable why (for audit + the denial message)
+	AddLabels  []string // data-flow labels this allowed call adds to the session
+	Cost       int      // cost/quota units this call consumed (from the matched rate rule; 0 if untracked)
+	RetryAfter int      // seconds until a rate-limited call may be retried (0 if N/A) — S56
 }
 
 // Rule authorizes (or denies) a set of tools OR a set of JSON-RPC methods

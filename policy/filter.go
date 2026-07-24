@@ -339,7 +339,12 @@ func (f *Filter) handleToolCall(line []byte, msg rpcPeek, capToken string) error
 		if reason == "" {
 			reason = "denied by mesh policy"
 		}
-		f.writeDenial(msg.ID, fmt.Sprintf("tool %q blocked for peer %s: %s", tool, f.caller.Peer, reason))
+		denyMsg := fmt.Sprintf("tool %q blocked for peer %s: %s", tool, f.caller.Peer, reason)
+		if dec.RetryAfter > 0 {
+			f.writeDenialData(msg.ID, denyMsg, map[string]any{"retry_after": dec.RetryAfter})
+		} else {
+			f.writeDenial(msg.ID, denyMsg)
+		}
 		return nil
 	}
 }
@@ -408,14 +413,25 @@ func (f *Filter) record(method, tool, rpcID string, dec Decision) AuditRecord {
 
 // writeDenial emits a JSON-RPC error toward the peer for a blocked request.
 func (f *Filter) writeDenial(id json.RawMessage, message string) {
+	f.writeDenialData(id, message, nil)
+}
+
+// writeDenialData is writeDenial with optional structured error data (e.g.
+// {"retry_after": N} for a rate-limit block, S56), surfaced in error.data so a
+// client can act on it programmatically.
+func (f *Filter) writeDenialData(id json.RawMessage, message string, data map[string]any) {
 	if len(id) == 0 {
 		id = json.RawMessage("null")
 	}
 	msg, _ := json.Marshal(message)
-	resp := fmt.Sprintf(
-		`{"jsonrpc":"2.0","id":%s,"error":{"code":-32001,"message":%s}}`+"\n",
-		id, msg)
-	f.writeOut([]byte(resp))
+	if len(data) == 0 {
+		f.writeOut([]byte(fmt.Sprintf(
+			`{"jsonrpc":"2.0","id":%s,"error":{"code":-32001,"message":%s}}`+"\n", id, msg)))
+		return
+	}
+	db, _ := json.Marshal(data)
+	f.writeOut([]byte(fmt.Sprintf(
+		`{"jsonrpc":"2.0","id":%s,"error":{"code":-32001,"message":%s,"data":%s}}`+"\n", id, msg, db)))
 }
 
 // pumpInner copies backend output to the read side, framed on newlines so

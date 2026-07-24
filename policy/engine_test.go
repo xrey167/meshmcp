@@ -20,6 +20,8 @@ func TestRateLimit(t *testing.T) {
 	}
 	if d := eng.DecideToolCall("p", "K", "any", nil); d.Outcome != OutcomeDeny {
 		t.Fatalf("third call should be rate-limited, got %v", d.Outcome)
+	} else if d.RetryAfter <= 0 {
+		t.Fatalf("rate-limit denial should carry a positive RetryAfter (S56), got %d", d.RetryAfter)
 	}
 	// After the window refills, a call passes again.
 	now = now.Add(time.Minute)

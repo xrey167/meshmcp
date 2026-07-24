@@ -291,3 +291,54 @@ func TestFilterEventHook(t *testing.T) {
 		t.Fatalf("hook decisions: allow=%d deny=%d, want 1/1", allow, deny)
 	}
 }
+
+// TestFilterRateLimitRetryAfter proves S56: a rate-limited tool call's JSON-RPC
+// error carries a machine-readable retry_after in error.data.
+func TestFilterRateLimitRetryAfter(t *testing.T) {
+	backend := newEchoBackend()
+	pol := &Policy{DefaultAllow: false, Rules: []Rule{
+		{Peers: []string{"*"}, Tools: []string{"read_*"}, Allow: true, Rate: &RateLimit{Max: 1, Per: "1m"}},
+	}}
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	eng := NewEngine(pol, func() time.Time { return now }, nil)
+	f := NewFilterEngine(backend, Caller{Backend: "kg", Peer: "laptop.mesh", PeerKey: "KEY"}, eng, nil, nil)
+
+	replies := make(chan string, 8)
+	go func() {
+		sc := bufio.NewScanner(f)
+		for sc.Scan() {
+			replies <- sc.Text()
+		}
+		close(replies)
+	}()
+	write := func(s string) {
+		if _, err := f.Write([]byte(s + "\n")); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	// First read_file is allowed (backend echoes it); the second is rate-limited.
+	write(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_file","arguments":{}}}`)
+	write(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_file","arguments":{}}}`)
+
+	got := map[string]string{}
+	timeout := time.After(5 * time.Second)
+	for len(got) < 2 {
+		select {
+		case line := <-replies:
+			var r struct {
+				ID json.Number `json:"id"`
+			}
+			if json.Unmarshal([]byte(line), &r) == nil {
+				got[r.ID.String()] = line
+			}
+		case <-timeout:
+			t.Fatalf("timed out; got %v", got)
+		}
+	}
+	if !strings.Contains(got["2"], "rate limit exceeded") {
+		t.Fatalf("second call should be rate-limited, got %q", got["2"])
+	}
+	if !strings.Contains(got["2"], `"retry_after"`) {
+		t.Fatalf("rate-limit denial should carry retry_after in error.data, got %q", got["2"])
+	}
+}

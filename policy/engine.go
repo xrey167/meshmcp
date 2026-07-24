@@ -243,7 +243,8 @@ func (e *Engine) DecideToolCall(peerFQDN, peerKey, tool string, labels map[strin
 		}
 		if r.Rate != nil && !e.allowRate(i, peerKey, *r.Rate, now) {
 			return Decision{RuleID: i, Outcome: OutcomeDeny,
-				Reason: fmt.Sprintf("rate limit exceeded (max %d per %s)", r.Rate.Max, r.Rate.window())}
+				Reason:     fmt.Sprintf("rate limit exceeded (max %d per %s)", r.Rate.Max, r.Rate.window()),
+				RetryAfter: retryAfterSeconds(*r.Rate)}
 		}
 		if r.RequireCosign {
 			if e.cosign != nil && e.cosign.Approved(CosignKey(peerFQDN, tool)) {
@@ -256,6 +257,23 @@ func (e *Engine) DecideToolCall(peerFQDN, peerKey, tool string, labels map[strin
 		return Decision{Allow: true, RuleID: i, Outcome: OutcomeAllow, AddLabels: r.emitSet(), Cost: ruleCost(r)}
 	}
 	return Decision{Allow: e.pol.DefaultAllow, RuleID: -1, Outcome: outcomeOf(e.pol.DefaultAllow)}
+}
+
+// retryAfterSeconds estimates how long a rate-limited caller should wait before
+// retrying: the time for one token to refill (window / max), floored at 1s. It
+// is advisory metadata (S56), returned in the JSON-RPC error so a well-behaved
+// client can back off instead of hammering the gateway.
+func retryAfterSeconds(rl RateLimit) int {
+	m := rl.Max
+	if m < 1 {
+		m = 1
+	}
+	per := rl.window() / time.Duration(m)
+	sec := int(per / time.Second)
+	if sec < 1 {
+		sec = 1
+	}
+	return sec
 }
 
 // ruleCost is the cost/quota units an allowed call under rule r consumes: the
