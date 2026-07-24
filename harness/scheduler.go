@@ -1,9 +1,11 @@
 package harness
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"runtime"
+	"strings"
 	"sync"
 
 	"github.com/xrey167/meshmcp/harness/provider"
@@ -20,6 +22,11 @@ type Scheduler struct {
 	reg    *provider.Registry
 	sbSpec sandbox.Spec // template sandbox spec (kind/min/repo)
 
+	// Optional subprocess-worker execution: when both are set, a job runs as an
+	// external worker PROCESS (ExecSpawner) instead of an in-process roleWorker.
+	spawner   Spawner
+	workerCmd []string
+
 	mu       sync.Mutex
 	inflight map[string]JobStatus
 	minted   []Worker // workers minted this run, for the settle/retire seal
@@ -34,6 +41,17 @@ func NewScheduler(gov *Governor, minter Minter, reg *provider.Registry, sb sandb
 		sbSpec:   sb,
 		inflight: map[string]JobStatus{},
 	}
+}
+
+// WithSubprocessWorkers switches execution to spawn an external worker PROCESS
+// per job (via sp, running cmd) instead of an in-process provider worker: the
+// worker joins the mesh as its minted identity and its stdout is captured as the
+// job result. With either argument empty the scheduler keeps in-process workers.
+// The task is passed to the process via the MESHMCP_TASK/RUN/JOB environment.
+func (s *Scheduler) WithSubprocessWorkers(sp Spawner, cmd []string) *Scheduler {
+	s.spawner = sp
+	s.workerCmd = append([]string(nil), cmd...)
+	return s
 }
 
 // cpuCap is the CPU-based concurrency backstop.
@@ -109,6 +127,15 @@ func (s *Scheduler) runOne(ctx context.Context, run RunState, task Task, role Ro
 		return JobResult{JobID: jobID, Role: role, Err: err.Error()}
 	}
 
+	// Subprocess-worker mode: run the job as an external worker process as the
+	// minted identity, capture its output, then retire the identity.
+	if s.spawner != nil && len(s.workerCmd) > 0 {
+		res := s.runSubprocessJob(ctx, run, task, role, id, jobID)
+		s.recordWorker(Worker{Identity: id, Role: role, RunID: run.ID, SandboxKind: "process"})
+		_ = s.minter.Retire(id)
+		return res
+	}
+
 	// Build the worker's sandbox. A worktree spec gets a per-worker branch so
 	// parallel writers never collide.
 	spec := s.sbSpec
@@ -129,6 +156,42 @@ func (s *Scheduler) runOne(ctx context.Context, run RunState, task Task, role Ro
 	_ = s.minter.Retire(id)
 	s.recordWorker(Worker{Identity: id, Role: role, RunID: run.ID, SandboxKind: sb.Kind()})
 	res.JobID = jobID
+	return res
+}
+
+// runSubprocessJob spawns an external worker process for the minted identity and
+// captures its stdout as the job result. When the minter is an EnrollMinter, the
+// worker's real mesh-join credentials are injected so it joins as its identity;
+// otherwise it runs with just its identity markers. The spawner already builds a
+// curated, secret-safe environment (never the parent's).
+func (s *Scheduler) runSubprocessJob(ctx context.Context, run RunState, task Task, role Role, id Identity, jobID string) JobResult {
+	var buf bytes.Buffer
+	spec := SpawnSpec{
+		Identity: id,
+		Command:  append([]string(nil), s.workerCmd...),
+		ExtraEnv: []string{
+			"MESHMCP_TASK=" + task.Title,
+			"MESHMCP_RUN=" + string(run.ID),
+			"MESHMCP_JOB=" + jobID,
+		},
+		Stdout: &buf,
+		Stderr: &buf,
+	}
+	if em, ok := s.minter.(*EnrollMinter); ok {
+		if creds, ok := em.Creds(id.Key); ok {
+			spec.Creds = creds
+		}
+	}
+	h, err := s.spawner.Spawn(ctx, spec)
+	if err != nil {
+		return JobResult{JobID: jobID, Role: role, Err: "spawn: " + err.Error()}
+	}
+	waitErr := h.Wait()
+	out := strings.TrimSpace(buf.String())
+	res := JobResult{JobID: jobID, Role: role, Output: out, Changed: writesCode(role), ResultDigest: digest(out)}
+	if waitErr != nil {
+		res.Err = waitErr.Error()
+	}
 	return res
 }
 

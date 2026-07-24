@@ -49,7 +49,11 @@ func (e *Engine) newScheduler(scope RepoScope) *Scheduler {
 		root = "."
 	}
 	spec := sandbox.Spec{Kind: kind, Root: root, Repo: scope.Repo, Parent: os.TempDir()}
-	return NewScheduler(e.gov, e.minter, e.reg, spec)
+	sch := NewScheduler(e.gov, e.minter, e.reg, spec)
+	if e.spawner != nil && len(e.workerCmd) > 0 {
+		sch.WithSubprocessWorkers(e.spawner, e.workerCmd)
+	}
+	return sch
 }
 
 // clampMode clamps a requested mode by policy/config. The default config allows
