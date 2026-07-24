@@ -192,24 +192,46 @@ adds a small correlation surface only.
   a compensating `x402/backend-error` / `x402/tool-error` record so the ledger
   reflects the true outcome, but the payment is spent (a settlement matter, not a
   silent re-serve). An audit-write failure after settlement likewise fails closed.
+- **Idempotent retry:** the served response is cached against the settlement,
+  scoped to a `binding` = hash(client, request-args). If the SAME client
+  re-sends the SAME paid request (a lost response), the gate replays the cached
+  response instead of denying it — the backend is not re-invoked. Any OTHER
+  presentation of the settlement (different client, or different arguments) does
+  not match the binding, gets no cache hit, and is denied as a replay. (With a
+  shared store this holds across instances; the in-process store covers a single
+  instance, and a reseeded post-restart entry has no cached response so it denies
+  rather than serves.)
+
+## Verifier: the built-in facilitator client
+
+`edge.HTTPFacilitatorVerifier` is the production verifier: it POSTs the presented
+payment + requirements to the facilitator's `/verify` and (only if valid)
+`/settle` endpoints, returning the on-chain settlement `transaction` as the
+`Reference`. `meshmcp edge` wires it automatically from `backend.payment.facilitator`
+when payment is enabled and `dev_insecure_verifier` is off, so enabling payment
+does not require the operator to write a verifier. A transport error, non-2xx,
+invalid verification, failed settlement, or missing transaction all fail closed
+(re-challenge). The facilitator remains the trusted collaborator for the checks
+the gate cannot see (payTo/network/signature); meshmcp layers single-use, the
+amount cross-check, request binding, and audit on top.
 
 ## Non-goals / planned hardening
 
-- On-chain settlement correctness is the facilitator's, not meshmcp's — no
-  production facilitator client ships yet, so a production deployment must inject
-  one (enabling payment without a verifier is a fail-closed construction error).
+- On-chain settlement correctness is the facilitator's, not meshmcp's — the
+  built-in `HTTPFacilitatorVerifier` delegates to a real facilitator; without a
+  facilitator (or an injected verifier) enabling payment is a fail-closed
+  construction error.
 - **Scope:** only `tools/call` is billable. Non-tool methods (`resources/read`,
   `prompts/get`, completion) are protocol plumbing and are **not** payment-gated —
   expose billable work as a tool, not a resource/prompt. An unpriced tool (no
   matching price glob) is free.
-- **Not bound to the caller / not fresh:** `X-PAYMENT` is a bearer instrument;
-  the gate binds a redemption to (tool, args-hash, rpc-id) in the receipt but does
-  not yet issue a per-challenge server nonce, so a leaked payment could be
-  presented by a different approved client before it is redeemed. Per-client
-  challenge nonces + expiry are planned.
-- **No idempotent retry:** a served response lost in transit cannot be recovered
-  by re-presenting the payment (it is now redeemed); a served-result cache keyed
-  by reference is planned.
+- **Not bound to the caller before redemption:** `X-PAYMENT` is a bearer
+  instrument; the gate binds the receipt and the idempotent-retry cache to
+  (client, request-args), so a leaked payment cannot pull another caller's cached
+  result — but a leaked, not-yet-redeemed payment could still be redeemed by a
+  different approved client. Full pre-redemption binding needs a per-challenge
+  server nonce that the verifier confirms the payment commits to (a facilitator-
+  contract extension); that remains planned.
 - **No automated reconciliation** of recorded settlements against
   facilitator/on-chain truth; retain the raw settlement id in the facilitator
   keyed to the salted `payment_ref` for out-of-band reconciliation.

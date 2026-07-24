@@ -128,7 +128,7 @@ func (s *Server) mcpPost(w http.ResponseWriter, r *http.Request) {
 
 	// Enforce tool calls: the capability double-gate first (an Ed25519 grant the
 	// on-disk record cannot widen), then the deny-by-default policy engine.
-	var paid *policy.PaymentEvidence
+	var paid *paidCall
 	if class.Kind == policy.RPCToolCall {
 		if allowed, denyBody := s.enforceToolCall(au, class); !allowed {
 			s.writeJSONRPC(w, denyBody)
@@ -174,17 +174,21 @@ func (s *Server) mcpPost(w http.ResponseWriter, r *http.Request) {
 		// ledger never implies the paid call was served. The payment is spent
 		// (single-use); recovery is a settlement matter, not a silent re-serve.
 		if paid != nil {
-			_ = s.auditPayment(au.clientID, class.Tool, class.ID, "x402/backend-error", "deny", "paid call not served: backend unavailable after settlement", paid)
+			_ = s.auditPayment(au.clientID, class.Tool, class.ID, "x402/backend-error", "deny", "paid call not served: backend unavailable after settlement", paid.evidence)
 		}
 		s.writeJSONRPC(w, jsonRPCErrorResponse(class.ID, -32603, "backend unavailable: "+ferr.Error()))
 		return
 	}
-	// A settled paid call whose backend returned an error result (JSON-RPC error
-	// or a tools/call result with isError:true) was still charged. Record a
-	// compensating x402/tool-error so the ledger reflects the true outcome for
-	// dispute purposes; the payment is spent (pay-before-execute).
-	if paid != nil && toolCallErrored(resp) {
-		_ = s.auditPayment(au.clientID, class.Tool, class.ID, "x402/tool-error", "deny", "paid call: backend returned an error result", paid)
+	if paid != nil {
+		// A settled paid call whose backend returned an error result (JSON-RPC
+		// error or a tools/call result with isError:true) was still charged. Record
+		// a compensating x402/tool-error so the ledger reflects the true outcome.
+		if toolCallErrored(resp) {
+			_ = s.auditPayment(au.clientID, class.Tool, class.ID, "x402/tool-error", "deny", "paid call: backend returned an error result", paid.evidence)
+		}
+		// Cache the served response so a lost-response retry by the same client and
+		// request replays it (idempotent) instead of being denied as a replay.
+		s.payment.complete(paid.refHash, resp)
 	}
 	if sess != nil {
 		w.Header().Set(headerSessionID, sess.id)

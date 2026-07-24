@@ -114,6 +114,12 @@ func cmdEdge(args []string) error {
 		fmt.Fprintf(os.Stderr, "meshmcp edge: payment single-use store %s (shared)\n", redactDSN(dsn))
 	}
 
+	if p := cfg.Backend.Payment; p.Enabled && !p.DevInsecureVerifier && opts.PaymentVerifier == nil && p.Facilitator != "" {
+		// Wire the real x402 facilitator client from backend.payment.facilitator so
+		// enabling payment does not require the operator to write a verifier.
+		opts.PaymentVerifier = edge.NewHTTPFacilitatorVerifier(p.Facilitator)
+		fmt.Fprintf(os.Stderr, "meshmcp edge: payment verifier = x402 facilitator %s\n", p.Facilitator)
+	}
 	if p := cfg.Backend.Payment; p.Enabled && p.DevInsecureVerifier {
 		fmt.Fprintf(os.Stderr, "meshmcp edge: WARNING payment is using the INSECURE dev verifier (dev_insecure_verifier: true) — it accepts unsettled payments; never use this in production\n")
 	}
@@ -135,8 +141,16 @@ func cmdEdge(args []string) error {
 // store, which pgstore implements structurally).
 type pgPaymentReplay struct{ s *pgstore.Store }
 
-func (p pgPaymentReplay) Redeem(refHash string, expiry, now time.Time) (bool, error) {
-	return p.s.RedeemPaymentRef(refHash, expiry, now)
+func (p pgPaymentReplay) Redeem(refHash, binding string, expiry, now time.Time) (bool, error) {
+	return p.s.RedeemPaymentRef(refHash, binding, expiry, now)
+}
+
+func (p pgPaymentReplay) Complete(refHash string, response []byte, now time.Time) {
+	p.s.CompletePaymentRef(refHash, response, now)
+}
+
+func (p pgPaymentReplay) Cached(refHash, binding string, now time.Time) ([]byte, bool) {
+	return p.s.CachedPaymentRef(refHash, binding, now)
 }
 
 // resolveEdgeSetupKey resolves the NetBird setup key from a file, env var, or

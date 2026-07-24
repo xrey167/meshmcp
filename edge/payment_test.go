@@ -498,28 +498,50 @@ func TestFullX402HandshakeSequence(t *testing.T) {
 	}
 }
 
-// A settled payment is single-use: replaying the same X-PAYMENT is denied, and
-// the backend is served exactly once.
-func TestPaymentReplayDenied(t *testing.T) {
+// callToolArgs is callTool with caller-chosen arguments (so a test can vary the
+// request binding).
+func callToolArgs(t *testing.T, base, token, sid, argsJSON string, extra map[string]string) *http.Response {
+	t.Helper()
+	body := `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_docs","arguments":` + argsJSON + `}}`
+	req, _ := http.NewRequest(http.MethodPost, base+pathMCP, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	if sid != "" {
+		req.Header.Set(headerSessionID, sid)
+	}
+	for k, v := range extra {
+		req.Header.Set(k, v)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+// Replaying a settled payment for a DIFFERENT request (the replay attack) is
+// denied, and the backend is served exactly once.
+func TestPaymentReplayForDifferentRequestDenied(t *testing.T) {
 	var calls int64
 	ts, token, audit, _ := newPaidServerFull(t, basicPayment(), countingBackend(t, &calls), nil, nil)
 	sid := initSession(t, ts.URL, token)
 	header := map[string]string{headerPayment: xPaymentHeader("1000", "USDC", "0xPayer")}
 
-	// First use: served.
-	resp := callTool(t, ts.URL, token, sid, header)
+	// First use (args A): served.
+	resp := callToolArgs(t, ts.URL, token, sid, `{"q":"A"}`, header)
 	body := decodeRPC(t, resp)
 	resp.Body.Close()
 	if body["error"] != nil {
 		t.Fatalf("first paid call should succeed: %v", body["error"])
 	}
 
-	// Replay the identical payment: denied.
-	resp = callTool(t, ts.URL, token, sid, header)
+	// Same payment, DIFFERENT request (args B): the binding differs, so no
+	// idempotent-retry hit — it is a replay and must be denied.
+	resp = callToolArgs(t, ts.URL, token, sid, `{"q":"B"}`, header)
 	body = decodeRPC(t, resp)
 	resp.Body.Close()
 	if body["error"] == nil {
-		t.Fatal("replayed payment must be denied")
+		t.Fatal("replaying a payment for a different request must be denied")
 	}
 	if errObj, _ := body["error"].(map[string]any); errObj == nil || !strings.Contains(errObj["message"].(string), "already redeemed") {
 		t.Fatalf("replay denial should explain single-use, got: %v", body["error"])
@@ -529,6 +551,39 @@ func TestPaymentReplayDenied(t *testing.T) {
 	}
 	if !strings.Contains(audit.String(), "x402/replay") {
 		t.Fatalf("replay must be audited: %s", audit.String())
+	}
+}
+
+// A lost-response retry — the SAME client re-sending the SAME paid request —
+// replays the cached response idempotently: the backend runs exactly once, and
+// the second call returns the same successful result rather than a replay error.
+func TestIdempotentRetrySameRequest(t *testing.T) {
+	var calls int64
+	ts, token, _, _ := newPaidServerFull(t, basicPayment(), countingBackend(t, &calls), nil, nil)
+	sid := initSession(t, ts.URL, token)
+	header := map[string]string{headerPayment: xPaymentHeader("1000", "USDC", "0xPayer")}
+
+	resp := callToolArgs(t, ts.URL, token, sid, `{"q":"A"}`, header)
+	first := decodeRPC(t, resp)
+	resp.Body.Close()
+	if first["error"] != nil {
+		t.Fatalf("first paid call should succeed: %v", first["error"])
+	}
+
+	// Identical retry (lost response): returns the cached result, no re-execution.
+	resp = callToolArgs(t, ts.URL, token, sid, `{"q":"A"}`, header)
+	second := decodeRPC(t, resp)
+	resp.Body.Close()
+	if second["error"] != nil {
+		t.Fatalf("idempotent retry should replay the cached result, not error: %v", second["error"])
+	}
+	if got := atomic.LoadInt64(&calls); got != 1 {
+		t.Fatalf("idempotent retry must NOT re-invoke the backend, calls=%d", got)
+	}
+	fb, _ := json.Marshal(first["result"])
+	sb, _ := json.Marshal(second["result"])
+	if string(fb) != string(sb) {
+		t.Fatalf("cached response must match the first: %s vs %s", fb, sb)
 	}
 }
 
@@ -663,10 +718,10 @@ func TestGateSeededReferenceIsReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first, err := g.redeemRef("seeded-ref"); err != nil || first {
+	if first, err := g.redeem("seeded-ref", "b"); err != nil || first {
 		t.Fatalf("a seeded (already-redeemed-across-restart) ref must be a replay, got first=%v err=%v", first, err)
 	}
-	if first, err := g.redeemRef("fresh-ref"); err != nil || !first {
+	if first, err := g.redeem("fresh-ref", "b"); err != nil || !first {
 		t.Fatalf("a fresh ref must redeem, got first=%v err=%v", first, err)
 	}
 }
@@ -685,14 +740,14 @@ func TestSharedStorePreventsCrossInstanceReplay(t *testing.T) {
 		return g
 	}
 	instanceA, instanceB := mk(), mk()
-	if first, err := instanceA.redeemRef("ref-1"); err != nil || !first {
+	if first, err := instanceA.redeem("ref-1", "bindA"); err != nil || !first {
 		t.Fatalf("instance A first redeem should win: first=%v err=%v", first, err)
 	}
-	if first, err := instanceB.redeemRef("ref-1"); err != nil || first {
+	if first, err := instanceB.redeem("ref-1", "bindB"); err != nil || first {
 		t.Fatalf("instance B must see the shared redemption (no cross-instance double-spend): first=%v err=%v", first, err)
 	}
 	// A different reference still redeems on B.
-	if first, err := instanceB.redeemRef("ref-2"); err != nil || !first {
+	if first, err := instanceB.redeem("ref-2", "bindB"); err != nil || !first {
 		t.Fatalf("a fresh ref should redeem on B: first=%v err=%v", first, err)
 	}
 }
@@ -702,15 +757,15 @@ func TestSharedStorePreventsCrossInstanceReplay(t *testing.T) {
 func TestMemPaymentStoreEvictsAndBoundsCapacity(t *testing.T) {
 	base := time.Now()
 	m := newMemPaymentStore(nil, base)
-	if first, err := m.Redeem("a", base.Add(time.Hour), base); err != nil || !first {
+	if first, err := m.Redeem("a", "b", base.Add(time.Hour), base); err != nil || !first {
 		t.Fatalf("first redeem should succeed: %v %v", first, err)
 	}
-	if first, _ := m.Redeem("a", base.Add(time.Hour), base); first {
+	if first, _ := m.Redeem("a", "b", base.Add(time.Hour), base); first {
 		t.Fatal("replay must be denied")
 	}
 	// After the TTL, the old entry is evicted, so the SAME ref redeems again —
 	// safe because the underlying payment authorization is dead by then.
-	if first, err := m.Redeem("a", base.Add(3*time.Hour), base.Add(2*time.Hour)); err != nil || !first {
+	if first, err := m.Redeem("a", "b", base.Add(3*time.Hour), base.Add(2*time.Hour)); err != nil || !first {
 		t.Fatalf("post-TTL redeem should succeed after eviction: %v %v", first, err)
 	}
 }

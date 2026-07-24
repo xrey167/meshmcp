@@ -34,15 +34,16 @@ func (s *Store) Use(nonce string, expiry, now time.Time) bool {
 }
 
 // RedeemPaymentRef claims a settlement reference hash for single use across the
-// fleet: the first redemption wins the insert (true), a replay conflicts
-// (false). A database error is returned so the caller can fail closed with a
-// distinct "store unavailable" outcome (retryable) versus a definite replay.
-// expiry bounds retention (the on-chain authorization is dead by then).
-func (s *Store) RedeemPaymentRef(refHash string, expiry, now time.Time) (bool, error) {
+// fleet on behalf of binding (a client+request fingerprint): the first
+// redemption wins the insert (true), a replay conflicts (false). A database
+// error is returned so the caller can fail closed with a distinct "store
+// unavailable" outcome (retryable) versus a definite replay. expiry bounds
+// retention (the on-chain authorization is dead by then).
+func (s *Store) RedeemPaymentRef(refHash, binding string, expiry, now time.Time) (bool, error) {
 	s.evictExpired(s.paymentRefs, now)
 	res, err := s.db.Exec(
-		fmt.Sprintf(`INSERT INTO %s (refhash, expiry) VALUES ($1, $2) ON CONFLICT (refhash) DO NOTHING`, s.paymentRefs),
-		refHash, expiry,
+		fmt.Sprintf(`INSERT INTO %s (refhash, binding, expiry) VALUES ($1, $2, $3) ON CONFLICT (refhash) DO NOTHING`, s.paymentRefs),
+		refHash, binding, expiry,
 	)
 	if err != nil {
 		return false, err
@@ -52,6 +53,33 @@ func (s *Store) RedeemPaymentRef(refHash string, expiry, now time.Time) (bool, e
 		return false, err
 	}
 	return n == 1, nil
+}
+
+// CompletePaymentRef caches the served response for an already-redeemed
+// reference, so a lost-response retry by the same binding is idempotent.
+// Best-effort: a failure just means the retry re-challenges instead of replaying
+// the cached response.
+func (s *Store) CompletePaymentRef(refHash string, result []byte, now time.Time) {
+	_, _ = s.db.Exec(
+		fmt.Sprintf(`UPDATE %s SET result = $1 WHERE refhash = $2`, s.paymentRefs),
+		result, refHash,
+	)
+}
+
+// CachedPaymentRef returns the response cached for refHash iff the binding
+// matches and the row is unexpired — the idempotent-retry hit. A different
+// binding (different client or request) never matches, so a leaked payment
+// cannot pull another caller's result.
+func (s *Store) CachedPaymentRef(refHash, binding string, now time.Time) ([]byte, bool) {
+	var result []byte
+	err := s.db.QueryRow(
+		fmt.Sprintf(`SELECT result FROM %s WHERE refhash = $1 AND binding = $2 AND expiry > $3 AND result IS NOT NULL`, s.paymentRefs),
+		refHash, binding, now,
+	).Scan(&result)
+	if err != nil {
+		return nil, false
+	}
+	return result, len(result) > 0
 }
 
 func (s *Store) UseJTI(jti string, expiry, now time.Time) bool {

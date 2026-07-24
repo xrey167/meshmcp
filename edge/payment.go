@@ -91,17 +91,23 @@ type PaymentVerifier interface {
 	VerifyPayment(ctx context.Context, req PaymentRequirements, payment []byte) (Settlement, error)
 }
 
-// PaymentReplayStore enforces single-use of settlement references. Redeem claims
-// refHash for single use, returning firstUse=true only on the first redemption;
-// a replay returns (false, nil). err != nil means the store could NOT decide
-// (e.g. a shared database is unreachable, or the in-process store is at
-// capacity) and the caller MUST fail closed. expiry bounds retention (a
-// payment's on-chain authorization is dead by then). The default is in-process
-// (single instance); production behind multiple instances injects a shared,
-// persistent store (edge.Options.PaymentReplay) so one settled payment
-// authorizes exactly one call fleet-wide — mirroring the DPoP replay store.
+// PaymentReplayStore enforces single-use of settlement references, and caches the
+// served response so a lost-response retry is idempotent. Redeem claims refHash
+// for single use on behalf of binding (a client+request fingerprint), returning
+// firstUse=true only on the first redemption; a replay returns (false, nil).
+// err != nil means the store could NOT decide (shared DB unreachable, or the
+// in-process store at capacity) and the caller MUST fail closed. Complete caches
+// the served response for an already-redeemed refHash; Cached returns it iff
+// binding matches (so a different client/request gets no cache hit and is denied
+// as a replay). expiry bounds retention (a payment's on-chain authorization is
+// dead by then). The default is in-process (single instance); production behind
+// multiple instances injects a shared, persistent store (edge.Options.PaymentReplay)
+// so one settled payment authorizes exactly one call fleet-wide — mirroring the
+// DPoP replay store.
 type PaymentReplayStore interface {
-	Redeem(refHash string, expiry, now time.Time) (firstUse bool, err error)
+	Redeem(refHash, binding string, expiry, now time.Time) (firstUse bool, err error)
+	Complete(refHash string, response []byte, now time.Time)
+	Cached(refHash, binding string, now time.Time) (response []byte, ok bool)
 }
 
 // paymentGate is the resolved payment policy for the edge's single backend. A
@@ -141,11 +147,40 @@ func newPaymentGate(cfg PaymentConfig, salt string, v PaymentVerifier, store Pay
 	return &paymentGate{cfg: cfg, verifier: v, salt: salt, store: store, retention: retention, now: now}, nil
 }
 
-// redeemRef claims a settlement reference for single use via the configured
-// store, stamping the retention-bounded expiry.
-func (g *paymentGate) redeemRef(refHash string) (firstUse bool, err error) {
+// redeem claims a settlement reference for single use on behalf of binding.
+func (g *paymentGate) redeem(refHash, binding string) (firstUse bool, err error) {
 	now := g.now()
-	return g.store.Redeem(refHash, now.Add(g.retention), now)
+	return g.store.Redeem(refHash, binding, now.Add(g.retention), now)
+}
+
+// complete caches the served response so a lost-response retry is idempotent.
+func (g *paymentGate) complete(refHash string, response []byte) {
+	g.store.Complete(refHash, response, g.now())
+}
+
+// cachedResponse returns a cached served response for a same-binding retry.
+func (g *paymentGate) cachedResponse(refHash, binding string) ([]byte, bool) {
+	return g.store.Cached(refHash, binding, g.now())
+}
+
+// paidCall carries a settled payment through mcpPost so a backend failure or a
+// successful serve can be recorded/cached against the same settlement.
+type paidCall struct {
+	evidence *policy.PaymentEvidence
+	refHash  string // salted payment_ref (the single-use key)
+	binding  string // client+request fingerprint (idempotency scope)
+}
+
+// paymentBinding fingerprints a call as (client, request-args-hash), scoping the
+// idempotent-retry cache: only the same client replaying the same request gets a
+// cached response; any other presentation of the settlement is a replay.
+func paymentBinding(clientID, requestHash string) string {
+	h := sha256.New()
+	h.Write([]byte("meshmcp-pay-binding-v1\x00"))
+	h.Write([]byte(clientID))
+	h.Write([]byte{0})
+	h.Write([]byte(requestHash))
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // defaultPaymentRetention is how long a redeemed settlement reference is
@@ -164,30 +199,40 @@ const maxConsumedRefs = 1 << 20
 // gate fails closed instead of evicting a still-replayable reference.
 var errPaymentStoreFull = fmt.Errorf("payment single-use store at capacity")
 
+// memPayEntry is one in-process single-use record: its expiry (for TTL
+// eviction), the binding that redeemed it, and the cached served response.
+type memPayEntry struct {
+	expiry  time.Time
+	binding string
+	result  []byte
+}
+
 // memPaymentStore is the default in-process PaymentReplayStore: TTL-evicting
 // (like MemNonceStore) and size-bounded (fails closed on overflow). It is seeded
 // from the audit chain on startup so single-instance restart stays airtight; it
 // is NOT shared across instances (that is the injected store's job).
 type memPaymentStore struct {
 	mu   sync.Mutex
-	seen map[string]time.Time // refHash -> expiry
+	seen map[string]*memPayEntry // refHash -> entry
 }
 
 // newMemPaymentStore builds the in-process store, preloading seed refs with the
-// given expiry (a restart reseed from the audit chain).
+// given expiry (a restart reseed from the audit chain). Reseeded entries carry
+// no binding/result: a post-restart replay is denied (single-use), and it cannot
+// serve a cached response (the response was never persisted).
 func newMemPaymentStore(seed map[string]struct{}, expiry time.Time) *memPaymentStore {
-	m := &memPaymentStore{seen: make(map[string]time.Time, len(seed))}
+	m := &memPaymentStore{seen: make(map[string]*memPayEntry, len(seed))}
 	for k := range seed {
-		m.seen[k] = expiry
+		m.seen[k] = &memPayEntry{expiry: expiry}
 	}
 	return m
 }
 
-func (m *memPaymentStore) Redeem(refHash string, expiry, now time.Time) (bool, error) {
+func (m *memPaymentStore) Redeem(refHash, binding string, expiry, now time.Time) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for k, e := range m.seen { // opportunistic TTL eviction, like MemNonceStore
-		if now.After(e) {
+		if now.After(e.expiry) {
 			delete(m.seen, k)
 		}
 	}
@@ -197,8 +242,26 @@ func (m *memPaymentStore) Redeem(refHash string, expiry, now time.Time) (bool, e
 	if len(m.seen) >= maxConsumedRefs {
 		return false, errPaymentStoreFull
 	}
-	m.seen[refHash] = expiry
+	m.seen[refHash] = &memPayEntry{expiry: expiry, binding: binding}
 	return true, nil
+}
+
+func (m *memPaymentStore) Complete(refHash string, response []byte, now time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if e := m.seen[refHash]; e != nil {
+		e.result = append([]byte(nil), response...)
+	}
+}
+
+func (m *memPaymentStore) Cached(refHash, binding string, now time.Time) ([]byte, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e := m.seen[refHash]
+	if e == nil || e.binding != binding || now.After(e.expiry) || len(e.result) == 0 {
+		return nil, false
+	}
+	return e.result, true
 }
 
 // resolvePaymentSalt resolves the SECRET salt for evidence hashing. Precedence:
@@ -286,11 +349,12 @@ func (g *paymentGate) requirements(tool, price, resourceBase string) PaymentRequ
 // gatePayment runs the payment step for an already-authorized (capability +
 // policy allowed) tools/call. It returns proceed=true when the call should be
 // forwarded to the backend; when it returns false it has already written the
-// HTTP response (a 402 challenge, a free dry-run result, or a fail-closed
-// error). On a settled paid call it also returns the recorded PaymentEvidence
-// so the caller can attach it to a compensating record if the backend forward
-// then fails. Called only when s.payment != nil.
-func (s *Server) gatePayment(w http.ResponseWriter, r *http.Request, au authed, sess *mcpSession, class policy.RPCClass) (proceed bool, paid *policy.PaymentEvidence) {
+// HTTP response (a 402 challenge, a free dry-run result, an idempotent-retry
+// cached response, or a fail-closed error). On a settled paid call it returns a
+// paidCall so the caller can record a compensating event on a backend failure
+// and cache the served response for idempotent retry. Called only when
+// s.payment != nil.
+func (s *Server) gatePayment(w http.ResponseWriter, r *http.Request, au authed, sess *mcpSession, class policy.RPCClass) (proceed bool, paid *paidCall) {
 	g := s.payment
 
 	// An unpriced tool is free: the dry-run header is irrelevant (there is no
@@ -379,7 +443,8 @@ func (s *Server) gatePayment(w http.ResponseWriter, r *http.Request, au authed, 
 	// rather than evicting a still-replayable reference. Redeeming BEFORE
 	// forwarding is airtight against concurrent replay; a backend failure after
 	// redemption spends the payment (a compensating record is written by caller).
-	firstUse, rerr := g.redeemRef(ev.PaymentRef)
+	binding := paymentBinding(au.clientID, ev.Request)
+	firstUse, rerr := g.redeem(ev.PaymentRef, binding)
 	if rerr != nil {
 		// The single-use store could not decide (shared DB unreachable, or the
 		// in-process store at capacity). Fail closed — never forward a payment we
@@ -390,6 +455,17 @@ func (s *Server) gatePayment(w http.ResponseWriter, r *http.Request, au authed, 
 		return false, nil
 	}
 	if !firstUse {
+		// Idempotent retry: the SAME client replaying the SAME request (a lost
+		// response) gets the cached served response, not a replay denial. Any other
+		// presentation of this settlement (different client or request) gets no
+		// cache hit and is denied as a replay.
+		if cached, ok := g.cachedResponse(ev.PaymentRef, binding); ok {
+			if sess != nil {
+				w.Header().Set(headerSessionID, sess.id)
+			}
+			s.writeJSONRPC(w, cached)
+			return false, nil
+		}
 		_ = s.auditPayment(au.clientID, class.Tool, class.ID, "x402/replay", "deny", "payment already redeemed", nil)
 		s.writeJSONRPC(w, jsonRPCErrorResponse(class.ID, -32005, "payment already redeemed — a settled payment authorizes one call; obtain a fresh payment to call again"))
 		return false, nil
@@ -404,7 +480,7 @@ func (s *Server) gatePayment(w http.ResponseWriter, r *http.Request, au authed, 
 	if len(settle.Response) > 0 {
 		w.Header().Set(headerPaymentResponse, base64.StdEncoding.EncodeToString(settle.Response))
 	}
-	return true, &ev
+	return true, &paidCall{evidence: &ev, refHash: ev.PaymentRef, binding: binding}
 }
 
 // writePaymentRequired writes an HTTP 402 with the x402 requirements body and an
