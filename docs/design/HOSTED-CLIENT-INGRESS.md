@@ -1,256 +1,146 @@
 # Hosted-client ingress without the edge's public-listener burden
 
 > **Status:** Design proposal (not yet built). Produced by a multi-agent design
-> exploration — six independent approaches, adversarially verified across three
-> lenses (security/trust-core, Apple-feel/operator-burden, feasibility/protocol/
-> self-host). This doc records the recommendation. Where a claim is grounded in
-> shipping code it cites the file.
+> exploration — six independent approaches, each adversarially verified across
+> three lenses (security/trust-core · Apple-feel/operator-burden ·
+> feasibility/protocol/self-host), then synthesized. All 29 agents completed;
+> verified average scores are cited inline. Where a claim is grounded in shipping
+> code it cites the file; see the "Grounding check" at the end for what was
+> verified against the tree.
 
-## The problem
-
-meshmcp's promise is **"every MCP server runs on a private WireGuard mesh — zero
-open ports — it just works."** [`meshmcp edge`](../EDGE.md) is the one deliberate
-exception, and it breaks that promise for the operator who runs it. To serve a
-hosted MCP client that cannot join the mesh — most concretely a **claude.ai custom
-connector**, which runs on Anthropic's servers and reaches an MCP server over
-public HTTPS with OAuth — the operator must **open a public inbound port**, **own a
-public DNS name**, and **obtain and rotate a publicly-trusted TLS cert** (ACME via
-certmagic, or hand-managed cert files). That is precisely the yak-shaving the rest
-of the product removes. The edge re-establishes the trust core correctly; it just
-does so behind a door the operator has to build, expose, and defend.
-
-The goal of this design: let a hosted client reach a mesh tool **without any of
-that operator burden**, while keeping the trust core exactly where it is today.
+meshmcp's promise is zero open inbound ports: every MCP server lives on a private WireGuard mesh, identity is proven by the transport, and nothing but the operator's own gateway holds a key. The `edge` breaks that promise in exactly one place. To let a hosted client that cannot join the mesh — most concretely a claude.ai custom connector running on Anthropic's servers — reach a mesh tool, today's edge forces the operator to stand up a second, deliberately public TLS listener: open an inbound port, own and point a public DNS name, obtain and rotate a publicly-trusted cert, and harden the listener. Those are precisely the four burdens meshmcp removes everywhere else, which is why the edge feels like a foreign appliance bolted onto an otherwise "it just works" system. This document picks the one ingress design that keeps the trust core whole while deleting all four operator burdens for the default path.
 
 ## The invariants any design must keep
 
-These are non-negotiable — they are what makes the edge safe today, and no ingress
-redesign may weaken them. Every candidate below is judged against this checklist:
+A hosted-client ingress is acceptable only if it preserves meshmcp's trust core **byte-for-byte on the operator's own gateway**. Concretely:
 
-1. **Identity is minted by the gateway, never asserted by the caller.** A hosted
-   client is a single synthetic identity `oauth:<client_id>`, derived by the
-   gateway from a gateway-issued, revocable bearer — the caller never supplies its
-   own identity string.
-2. **The capability double-gate runs on the operator's gateway.** Every
-   `tools/call` passes the capability gate *then* the deny-by-default policy gate,
-   in that order — see `edge/mcp.go:165` `enforceToolCall`: `s.verify.Verify(...)`
-   (capability, `mcp.go:170`) precedes `s.engine.DecideToolCallBound(...)` (policy,
-   `mcp.go:175`).
-3. **The Ed25519 capability signing key never leaves the gateway.** Capabilities
-   are minted at token issuance (`edge/token.go:177` `mintTokenSet`) and
-   re-verified from the signed grant on every call, so a tampered token record
-   cannot widen authority.
-4. **The audit ledger is fail-closed and gateway-only.** An unrecorded allow is
-   denied (`edge/mcp.go:179-181`); the hash chain lives on the gateway and no
-   intermediary can write, reorder, or rewrite it.
-5. **The mesh stays sealed.** The gateway reaches the one tool-scoped backend by
-   dialing *out* over WireGuard with inbound blocked (`cmd/meshmcp/edge.go:94`
-   `client.Dial`, `BlockInbound=true`); the ingress path never gains a route into
-   the mesh, the control plane, or any other backend.
+1. **Gateway-minted, non-caller-asserted identity.** The synthetic identity `oauth:<client_id>` is derived on the gateway from a gateway-issued, revocable, unexpired bearer bound to a still-approved client (`edge/mcp.go` `authenticate` → `oauthIdentity`). No intermediary and no client-supplied header may assert identity.
+2. **The capability double-gate, in order, on the gateway.** `enforceToolCall` (`edge/mcp.go:165`) re-verifies the Ed25519 `CapabilityClaims` (subject/audience/tool-glob/expiry, fail-closed) via `CapabilityVerifier.Verify` **before** the deny-by-default `policy.Engine.DecideToolCallBound`. The signing key (`mintTokenSet`, `edge/token.go`) never leaves the gateway.
+3. **Fail-closed, hash-chained audit on the gateway.** The ledger runs `WithFailClosed(true).WithSync(true)`; an allow that cannot be recorded is denied (`edge/mcp.go:179`); the chain verifies across restart or refuses to append. No intermediary can read, write, reorder, or suppress it.
+4. **Deny-by-default, operator-in-the-loop enrollment.** `default_allow:false`, `edge clients approve`, `edge authz approve`, and the revocation cascade stay exactly as today.
+5. **Egress unchanged.** The tool is reached OUTBOUND over WireGuard (`client.Dial`, `BlockInbound=true`); the bearer never crosses the mesh.
+
+Integrity of these five is non-negotiable. The axis that genuinely varies between designs is **confidentiality**: what a new in-path party can *see* and whether it can *actively MITM*. That is where the six designs separate.
 
 ## The six approaches, compared
 
-The connector places five hard requirements on whatever it connects to (stable
-public HTTPS URL · publicly-trusted cert · `401` discovery · Dynamic Client
-Registration with **no** initial token · PKCE · MCP Streamable HTTP). The
-publicly-trusted cert is the load-bearing constraint: **someone in the path must
-hold a real cert for a real public name**, so the entire design space is "who holds
-that name, and what can they see?"
+| Approach | Who holds the public cert | What the intermediary sees | Operator burden (default path) | Self-host | Avg | Verdict |
+|---|---|---|---|---|---|---|
+| **Terminating broker** | meshmcp/self broker (wildcard) | **Full plaintext**: bearers, tool args, results; can actively MITM & replay | Zero ports / DNS / cert | Yes, but broker still terminates TLS | **7.0** | Highest score, but a strict confidentiality + active-MITM regression vs today's edge |
+| **Passthrough beacon (SNI)** | **Operator's gateway** (per-subdomain LE, DNS-01) | Ciphertext + SNI + traffic metadata only | Zero ports / DNS / cert | Yes; relocates public triad onto the beacon box | **6.3** | Best trust/burden balance; residual = beacon-as-DNS-authority rogue-cert MITM, CT-detectable |
+| **Funnel-style beacon** | **Operator's gateway** (per-subdomain LE) | Ciphertext + SNI + metadata only | Zero ports / DNS / cert | Yes; same relocation | **6.3** | Same architecture as above; surfaces the Let's Encrypt rate-limit / Public-Suffix-List engineering detail |
+| **Adopt existing tunnel** | Provider (Tailscale = operator's **node**; CF/ngrok = provider edge) | Tailscale: ciphertext+SNI. CF/ngrok: **full plaintext** | Low, but a mandatory third-party account + console setup | No meshmcp dep, but SaaS account required | **6.0** | Magic for operators already on Tailscale; CF/ngrok leak plaintext |
+| **BYO-front + RFC 8693** | **Operator's own** front / IdP | The operator's own front (plaintext, but it is the operator's box) | Zero *if* they already run a front; a box otherwise | Fully; no meshmcp dep | **6.0** | Adds no new trust party; Apple-feel only for those who already own public infra |
+| **NetBird Expose** | NetBird hosted proxy | **Full plaintext** at NetBird's proxy node | Zero ports / DNS / cert | Relocates onto self-hosted NetBird proxy | **5.3** | Reuses the SaaS tier the mesh already trusts, but plaintext regression + ephemeral-domain disqualifier |
 
-| # | Approach | Who holds the public cert | What the intermediary can see | Operator burden | Self-host | Score / verdict |
-|---|----------|---------------------------|-------------------------------|-----------------|-----------|-----------------|
-| 1 | **Broker-terminating beacon** ⭐ | Beacon (wildcard cert) | **Plaintext in flight** (relay/replay only; no keys) | One command, **0 inbound ports, 0 DNS, 0 cert** | Yes (small component) | **7.0 — recommended** |
-| 2 | **Beacon, TLS-passthrough** | Beacon issues cert, key shipped to gateway; **gateway** terminates inner TLS | **Ciphertext** vs. a *passive* beacon (active name-holder can still MITM) | Same one command | Yes | 6.0 — hardened variant of #1 |
-| 3 | Adopt existing tunnel (Cloudflare / Tailscale / ngrok) | The tunnel provider | Provider-dependent (usually plaintext) | One daemon + a third-party account | Provider-bound | *not verified (session limit)* |
-| 4 | Reverse-publish over NetBird's own relay infra | Unclear — relays aren't HTTPS-terminating | n/a | Zero new infra (reuse mesh relays) | Yes | *not verified* |
-| 5 | Bring-your-own endpoint + token-exchange (RFC 8693) | The operator's **existing** public infra | The operator's own proxy | Zero *new* meshmcp infra, but needs pre-existing public infra | Yes (if you already have infra) | *not verified* |
-| 6 | Wildcard-subdomain SaaS beacon (Tailscale-Funnel style) | meshmcp-operated beacon | Nothing, if combined with #2 | The maximal "one command" experience | Escape hatch only | *(is #1/#2 operated as a service)* |
+**Terminating broker (7.0).** Operationally flawless — one command, zero of all four burdens — and the integrity core is provably untouched (a keyless broker can neither forge a capability nor corrupt the ledger; a dropped request is never executed, so no unaudited allow occurs). Its killer, from the security lens: because the broker holds the name+cert claude.ai trusts, it terminates TLS, sees every bearer/arg/result in plaintext, and can replay the bearer or actively rewrite the conversation within the ≤1h TTL. That is a new plaintext-and-MITM trust root the current edge simply does not have.
 
-Approaches 3–5 were designed but not adversarially verified before the run hit its
-session limit; they are folded in below as grafts and follow-ups, not dismissed.
-Approach 3 in particular deserves the completeness check called out at the end — it
-may be the lowest-effort **MVP** even if the beacon is the better end-state.
+**Passthrough beacon / Funnel-style beacon (6.3, tie).** These are the *same architecture*: an outbound rendezvous that owns the public name and port but does **pure L4 SNI passthrough** — the gateway obtains its **own** per-subdomain Let's Encrypt cert via a beacon-brokered DNS-01 challenge, and the cert private key is generated on and never leaves the gateway. A passive beacon therefore sees only ciphertext + the SNI label it assigned + metadata. The one residual power is that the beacon is DNS authority for a name the operator doesn't own, so a *malicious* beacon could issue a rogue cert and actively MITM — detectable by gateway-side Certificate-Transparency monitoring (tamper-evident, exactly meshmcp's audit philosophy) and escapable by self-hosting. Funnel-style adds the concrete operational note that all `gw-*.beacon` subdomains roll up to one registered domain under Let's Encrypt's rate limit, so the shared beacon domain must go on the Public Suffix List (as Tailscale did for `ts.net`).
 
-## Recommendation — "meshmcp Beacon"
+**Adopt existing tunnel (6.0).** Rides infrastructure operators already run. Tailscale Funnel is the standout because TLS terminates on the operator's **own** node, so the provider sees only ciphertext — but Funnel is a best-effort/beta streaming path, and Cloudflare/ngrok forfeit confidentiality entirely (plaintext at the provider edge). Its ceiling is the mandatory third-party account and out-of-band console setup that no `meshmcp` command can absorb.
 
-Build a **beacon**: a lightweight public relay that a gateway reaches by dialing
-**out**, so the operator never opens an inbound port. The beacon owns the public
-name and cert; the gateway keeps the entire trust core.
+**BYO-front + RFC 8693 (6.0).** The only design that introduces **no new trust party**: the front is the operator's own nginx/CDN/IdP. Genuinely Apple-feel for operators who already run a public front, and fully self-hostable with zero meshmcp dependency. But for the solo operator with no existing front it degrades to "stand up an always-on serverless container that holds a persistent WireGuard tunnel," which is not zero-infra — and the confidentiality-preserving `meshmcp front` sidecar is net-new.
 
-### The move
+**NetBird Expose (5.3).** Elegant reuse of the exact hosted tier the mesh already trusts, and zero of all four burdens. But HTTPS-mode Expose terminates TLS at NetBird's proxy (full plaintext + replay), and hosted Expose mints **ephemeral, random-suffixed** domains that change on every restart — a direct violation of the connector's stable-URL constraint unless the operator brings a custom domain, which reintroduces the DNS burden.
 
-Split the connector's requirements at the one seam that matters:
+## Recommendation
 
-- **On the beacon** go the three things that cause operator burden: the stable
-  public name, the publicly-trusted cert, and the inbound port.
-- **On the gateway** stays everything that *mints or verifies authority*: the
-  Ed25519 signing key, the deny-by-default policy engine, and the fail-closed audit
-  ledger — i.e. the **unchanged `edge` package**.
+**Adopt the passthrough beacon (a merge of the "beacon-passthrough" and "funnel-saas" designs) as the primary hosted-client ingress, shipped as a new second mode of `meshmcp edge`.**
 
-This works because the connector contract is a property of *the URL and the HTTP
-conversation* (satisfy it at the beacon), while the trust core is a property of
-*who holds the signing key and the ledger* (keep it on the gateway).
+This is deliberately *not* the top raw score. The terminating broker scores 7.0 but its security lens flags a strict, unavoidable regression: it installs a party that sees plaintext and can actively MITM — a downgrade of confidentiality, which *is* part of meshmcp's trust core. The passthrough beacon scores 6.3 but is the highest-scoring design that does **not** regress confidentiality against a passive adversary, and it delivers the full Apple-feel for the default path. Given a choice between "frictionless but a new plaintext trust root" and "frictionless and only ciphertext is exposed," meshmcp's whole pitch demands the latter.
 
-### Wire flow
+### How it beats the current edge on Apple-feel
 
-```
-  claude.ai                          beacon (public)                 operator gateway (0 inbound)
-  ─────────                          ───────────────                 ───────────────────────────
-  TLS to                             holds *.beacon.meshmcp.io        dials OUT ─────────────┐
-  g-ID.beacon.meshmcp.io  ──TLS──►   cert; maps subdomain g-ID  ◄═════ persistent reverse    │
-                                     to this gateway's tunnel         tunnel (mTLS/Noise,     │
-                                     │                                HTTP/2; 1 stream/req)   │
-                                     │  forwards raw HTTP request ═════════════════════►      │
-                                     │                                each stream = net.Conn  │
-                                     │                                served by the UNCHANGED  │
-                                     │                                edge.Server.Handler()    │
-                                     │                                (server.go:210):         │
-                                     │                                  401 discovery          │
-                                     │                                  /register DCR (pending)│
-                                     │                                  /authorize + consent   │
-                                     │                                  /token → Ed25519 cap   │
-                                     │                                  /mcp double-gate+audit  │
-                                     ◄══ response bytes ══════════════════════════════════════┘
-                                                                       then dial the tool over
-                                                                       WireGuard (edge.go:94,
-                                                                       BlockInbound=true)
-```
+The operator runs **one command** and the four burdens vanish:
 
-Net footprint on the operator: **one outbound tunnel + one outbound mesh dial.
-Nothing listens.** The gateway serves each tunnelled stream through the existing
-`edge.Server.Handler()` `ServeMux` as plain HTTP (TLS already handled upstream) —
-the only wiring change is where the listener comes from, not what the handler does.
+- **Zero inbound ports.** The gateway makes only outbound dials: one persistent reverse tunnel to the beacon (over the NetBird mesh, `BlockInbound=true`) and one mesh dial to the tool. No public bind anywhere on the operator.
+- **No operator-owned DNS.** The stable public name is the beacon's deterministically-derived subdomain, e.g. `gw-<hash(pubkey)>.beacon.meshmcp.net`. It is durable because it is derived from the gateway's key, so it survives restarts — satisfying the connector's stable-URL contract.
+- **No operator cert management.** `certmagic` runs ACME **DNS-01** for that subdomain; the challenge TXT is published via the beacon's ACME-DNS-style control API over the tunnel. No inbound challenge port (DNS-01, not HTTP-01/TLS-ALPN), no operator DNS control, no cert files, silent auto-renew.
+- **Config shrinks** from today's required `listen` + `public_url` + `tls`/ACME block to a single `beacon:` stanza; `public_url` is learned at runtime from the assigned subdomain and fed to `metadata.go`, so 401→discovery works unchanged.
 
-### The honest crux: who sees plaintext
+### How it preserves the double-gate + fail-closed audit
 
-Because the connector demands a publicly-trusted cert and the beacon presents it,
-there are two postures, and we are explicit about the trade:
+The beacon sits **strictly below the gateway's TLS**. Each spliced byte stream surfaces on the gateway as a `net.Conn` from a tunnel-backed `net.Listener`; the **unchanged** `edge.Server` terminates TLS with the gateway's own cert and runs `Handler()` verbatim (already proven separable — every edge test drives `srv.Handler()` over `httptest`). Because nothing about the ingress touches `authenticate`, `enforceToolCall`, the signing key, the policy engine, or the ledger, all five invariants hold byte-for-byte. The single change inside the `edge/` package is an injected `Options.Listener` in place of the public `net.Listen`; everything downstream is untouched.
 
-**Posture A — Broker-terminating (default, simplest, top-scored).** The beacon
-terminates the public TLS and therefore **sees plaintext in flight**: bearer
-tokens, tool names, tool-call arguments and results. What it *cannot* do is the
-part that matters: it holds no signing key (cannot mint or widen a capability), no
-policy ruleset (the engine is deny-by-default), and no ledger (cannot forge or
-rewrite audit). A malicious beacon can, at worst, **relay or replay** in-flight
-bytes within a token's ≤1h lifetime — and **every** such request still lands on the
-gateway's capability gate → policy gate → fail-closed audit, recorded under
-`oauth:<client_id>`. Net new trust versus today's edge: **exactly one
-confidentiality-trusted party** (the beacon operator), where today there are zero.
+### Exactly what the beacon can and cannot see
 
-**Posture B — TLS-passthrough (hardened variant).** The beacon ACME-issues a
-per-subdomain cert, ships the key down the tunnel, and does pure SNI/TCP
-forwarding, so the **gateway** terminates the inner TLS and the beacon sees only
-**ciphertext**. This defeats a *passive* beacon — but a beacon that controls the
-public name can always issue *its own* cert and actively MITM, so passthrough is
-**defense-in-depth, not a hard trust boundary.** Ship A first; offer B for
-operators who want to raise the cost of a passive compromise.
+**Can see:** the cleartext TLS **SNI** (the routing label it assigned), the source IP (Anthropic's egress), TCP timing/byte-counts, tunnel liveness, and — at enrollment — the gateway's beacon-identity pubkey plus opaque ACME challenge TXT tokens.
 
-### Why it beats today's edge on Apple-feel
+**Cannot see (passive):** the cert private key, any plaintext HTTP, OAuth bearers/refresh tokens, DCR bodies, authorization codes, PKCE verifiers, MCP JSON-RPC (tool names/arguments/results), WireGuard keys, the mesh backend identity, or the audit ledger. A mis-route fails the TLS handshake (wrong cert) — degrading to DoS, never disclosure.
 
-| | today's `edge --config` | `edge --beacon` |
-|---|---|---|
-| Inbound ports | 1 public | **0** |
-| Public DNS the operator owns | required | **none** |
-| TLS cert to obtain/rotate | required (ACME/files) | **none** (beacon's) |
-| Listener to harden | yes | **no** |
-| Operator steps | port + DNS + cert + config | **one command** |
-| Trust core | on the gateway | **byte-identical, on the gateway** |
+**Cannot do, ever:** forge or widen a capability, assert an identity, alter a policy decision, or write/suppress the ledger. Even under a *full active rogue-cert MITM*, the beacon can wiretap and replay a live fronted session but **cannot fabricate a governed allow** — every injected call still hits the capability gate + deny-by-default policy + fail-closed audit under `oauth:<client_id>`. The integrity core is unbreakable from the beacon's position; only confidentiality of the fronted leg is at stake, and only against an *active* (CT-detectable) adversary.
+
+The one honest regression vs the current edge: the beacon is DNS authority for a name the operator does not own, placing it in the CA issuance path. This is made **tamper-evident** (gateway-side CT monitoring of its own subdomain alarms on any cert whose key is not its own) and **escapable** (self-host, or CNAME delegation from an owned apex). That is a materially narrower and better-defended trust surface than the terminating broker's unconditional plaintext exposure.
 
 ## Grafts from the runners-up
 
-- **Self-host escape hatch (from #5, token-exchange-BYO).** The beacon must be a
-  small, self-hostable binary — an operator with existing public infra runs their
-  own beacon, or points claude.ai at any public endpoint they already run and has
-  it hand the gateway a verifiable identity assertion (RFC 8693 token-exchange).
-  This removes any *hard* dependency on a meshmcp-operated service.
-- **MVP via existing tunnels (from #3).** Before building the beacon, an
-  `edge --tunnel` mode that binds `edge.Server.Handler()` to loopback behind
-  Cloudflare Tunnel / Tailscale Funnel / ngrok delivers the zero-inbound-port win
-  *today* with almost no new code — at the cost of a third-party account and that
-  provider's plaintext visibility. Good first rung; the beacon is the branded,
-  self-hostable end-state.
-- **Reuse the mesh's own transport (from #4).** The gateway↔beacon tunnel should
-  reuse the embedded NetBird/WireGuard outbound-dial machinery already in the
-  binary rather than inventing a new transport, and certmagic (already in the
-  module graph) for the beacon's wildcard cert.
+Fold these into the primary rather than shipping them as rival designs:
+
+- **BYO-front / RFC 8693 as a first-class alternate mode (from `token-exchange-byo`).** For operators who already run nginx/CDN/an enterprise IdP, this is *strictly better* than the beacon: no new trust party at all. Ship `meshmcp edge` "behind-front" mode (bind loopback/mesh, disable public TLS, `public_url` = the operator's own name) plus the `meshmcp front` mesh-joined reverse-proxy sidecar, and the `edge/assertion.go` JWKS-verify + RFC 8693 token-exchange for operators whose IdP can issue the initial assertion. Document it as: *"already have a public front? Use it — zero new trust."*
+- **Tailscale Funnel as a recognized escape hatch (from `adopt-tunnel`).** For the large population already running Tailscale, `meshmcp edge --tunnel tailscale` binds loopback and supervises `tailscale funnel`; TLS terminates on the operator's **own node**, so confidentiality is preserved with no meshmcp infra and no beacon. Explicitly tier CF/ngrok as a "convenience, reduced-confidentiality" option gated behind a startup plaintext-exposure warning — never the default.
+- **DPoP sender-constraining (from `broker-terminating`, `netbird-relay`, and others).** The `DPoPVerifier` seam already exists (`server.go:178`). If/when the claude.ai connector presents DPoP (RFC 9449), enforce it: a bearer captured by an active MITM becomes unreplayable, collapsing the residual beacon risk to read-only disclosure. Wire the plumbing now, enforce when the client supports it.
+- **The three-points-on-one-curve framing (from `broker-terminating`).** Present ingress as a single trust curve: `meshmcp edge` (zero third party) → self-hosted beacon (trust-minimizing) → meshmcp-operated beacon (it-just-works default). Same binary, operator's choice.
+- **CT-monitoring + CAA account-pinning + a signed subdomain→pubkey transparency log (from `beacon-passthrough`/`funnel-saas`).** Build the CT probe into the gateway (auto-alarm, optional fail-closed stop-serving) rather than shipping it as guidance; have the beacon publish CAA records account-pinned to the gateways' ACME accounts to raise the bar on third-party (non-beacon) rogue issuance.
+- **PROXY-protocol-v2 source-IP passthrough (from `beacon-passthrough`).** The beacon prepends the real client IP ahead of the ClientHello so the edge's per-IP rate limiters (`edge/limits.go`, which key on `RemoteAddr`) see real clients, not the tunnel address. Strip it on the gateway before handing bytes to Go's TLS.
 
 ## Coexistence with today's edge
 
-This is a **new mode of `meshmcp edge`, not a replacement.**
+This is a **second mode of `meshmcp edge`, not a replacement and not a rewrite.** The `edge/` OAuth+MCP+double-gate+audit brain is already transport-portable — `Handler()` is cleanly separated from `Run()`/the public bind — so the beacon path is a *Run-over-listener* addition, not a fork.
 
-- `meshmcp edge --config edge.yaml` — own your public listener — stays exactly as
-  documented for operators who want to control their own endpoint.
-- `meshmcp edge --beacon` — the zero-inbound path — is added alongside it.
-- The trust core (`edge/mcp.go`, `edge/token.go`, capability + policy + audit) is
-  **byte-identical** in both modes; only the listener seam differs
-  (`edge.Server.Run` public listener vs. a tunnel `net.Listener`).
-- Operators who run neither are **completely unaffected** — the beacon adds no
-  default-on surface, consistent with the edge's off-by-default posture.
+- **Byte-for-byte identical for users who don't opt in:** anyone running `meshmcp edge` with a `listen` + `public_url` + `tls` block keeps the current public-TLS listener with zero behavior change. The `edge` remains the **zero-third-party** option for operators who accept owning a port/DNS/cert in exchange for no in-path party at all.
+- **What changes** is entirely additive: a new `beacon:` (or `publish:`) config stanza mutually exclusive with `tls`; a runtime-derived `public_url`; and an injected `net.Listener`. `config.Validate` enforces exactly one of `{public TLS listener, beacon publish, behind-front}`.
+- **Identical operator vocabulary:** `edge clients approve`, `edge authz approve`, revocation cascade, `default_allow:false`, the signing key, the audit ledger, and the single tool-scoped backend all carry over unchanged. An operator who understands the edge already understands the beacon.
 
 ## Build sketch
 
-**New components**
-- `beacon/` (or a `meshmcp beacon` subcommand): the public relay — wildcard-cert
-  TLS front (certmagic), a subdomain→tunnel registry, and the accept side of the
-  reverse tunnel. Small; policy-blind by construction.
-- A reverse-tunnel transport shared by gateway and beacon (mTLS/Noise, multiplexed
-  with **HTTP/2 over the single connection — no new mux dependency**, since
-  `golang.org/x/net` is already in the module graph; `yamux`/`smux` are optional
-  alternatives), reusing the embedded WireGuard outbound-dial pattern.
-- `edge --beacon`: dial the beacon, register the gateway's subdomain, expose each
-  tunnelled stream to the **existing** `edge.Server.Handler()`.
+**Reused from the binary (no change):** the entire `edge/` package (DCR, PKCE, consent, `mintTokenSet`, the double-gate, the Streamable-HTTP bridge, lifecycle/revocation); `policy.Engine` + `CapabilityVerifier` + `signer`; the fail-closed hash-chained audit ledger; NetBird embedded WireGuard (`client.Dial`/`BlockInbound` for the backend leg **and** for the outbound rendezvous, `client.ListenTCP` on the netstack); NetBird signal+relay for NAT traversal; `certmagic` (`edge/acme.go`, switched from HTTP-01/TLS-ALPN to DNS-01); `pgstore` for the DPoP replay store.
 
-**Reused unchanged / already in the binary (verified):** the entire `edge/` trust
-core (`Handler`, `authenticate`, `enforceToolCall`, `mintTokenSet`), the capability
-verifier, the policy engine, the fail-closed audit ledger; **`certmagic v0.21.3`**
-for the beacon's wildcard cert and **`golang.org/x/net` (HTTP/2)** for tunnel
-multiplexing — both already dependencies; and the proven outbound-dial pattern
-(`client.Dial` + `BlockInbound`, used today in `edge.go`, `air.go`, `agent.go`).
-So the only genuinely new code is the beacon relay + the tunnel wiring; the trust
-core and both heavy libraries already ship.
+**New components:**
 
-**Phasing**
-1. **MVP:** `edge --tunnel` (loopback bind behind an existing tunnel provider) —
-   proves the zero-inbound-port UX and the "`Handler()` over a non-public listener"
-   seam with near-zero new code.
-2. **Beacon v1 (Posture A):** self-hostable broker-terminating beacon + reverse
-   tunnel; `edge --beacon <url>`; one-command onboarding.
-3. **Hardened (Posture B):** TLS-passthrough so a passive beacon sees only
-   ciphertext.
-4. **Optional SaaS beacon:** a meshmcp-operated beacon with per-gateway subdomains
-   and abuse/rate-limit/tenant-isolation — with the self-host binary as the escape
-   hatch.
+- **`meshmcp beacon`** — a small public binary: (a) authoritative DNS for the beacon zone (`A/AAAA` for `gw-<id>` → self; `TXT` for `_acme-challenge.<id>` from an ACME-DNS-style table gateways populate over the tunnel); (b) a `:443` TCP acceptor that peeks the ClientHello SNI and splices raw bytes into the matching reverse tunnel, prepending PROXY-v2, **decrypting nothing**; (c) a mesh-joined reverse-tunnel rendezvous/mux server that authenticates gateways by WG pubkey / Ed25519 beacon-identity key and binds `subdomain = base32(sha256(pubkey))[:16]` (no land-grab); (d) a subdomain registry with lease/renew/reclaim. Holds **no** per-gateway private key.
+- **Gateway-side beacon transport** — a persistent multiplexed reverse tunnel (auto-reconnect with backoff); a `certmagic` DNS-01 solver pointed at the beacon control API (ACME account + cert key stay on the gateway); a tunnel-backed `net.Listener` (with PROXY-v2 parse) feeding `srv.ServeTLS(ln,"","")` with the gateway's own cert. (Multiplexing can use **HTTP/2 over the single tunnel connection with no new dependency** — `golang.org/x/net` is already in the module graph — with `yamux`/`smux`/QUIC as alternatives if per-stream flow control or connection migration is wanted.)
+- **`edge.Options.Listener` injection point** — the sole change inside `edge/`.
+- **CT-monitoring probe** on the gateway; **config** `beacon:`/`publish:` stanza superseding `listen`/`public_url`/`tls`.
+
+**Phased plan:**
+
+- **Phase 0 — MVP (small; days-to-weeks on the gateway side, reuses everything).** Passthrough beacon with deterministic subdomain, gateway-held DNS-01 cert, single beacon (self-hosted or one meshmcp-run). Goal: a real claude.ai connector completes DCR→PKCE→token→`tools/call` end-to-end, and the SSE GET stream (25s keepalive, `http.Flusher`) survives the muxed tunnel. This proves conformance is *inherited* — `PublicURL` is one uniform origin, all six endpoints tunnel to it, no spec surface can drift. (An even faster first rung: `edge --tunnel tailscale`, which proves the "`Handler()` over a non-public listener" seam behind existing infra with near-zero new code — see the grafts.)
+- **Phase 1 — Hardened (weeks; the beacon is the real work — a new production public service, but a well-trodden Tailscale-Funnel/ngrok/frp shape).** CT auto-alarm + optional fail-closed; CAA pinning; signed subdomain→pubkey transparency log; PROXY-v2 source IP; per-tenant L4 DoS scrubbing/rate limits; durable subdomain lease across gateway reconnect **and** beacon restart/failover (shared state in `pgstore`); HA/anycast beacon fronts. Land DPoP enforcement behind a capability flag.
+- **Phase 2 — Optional SaaS beacon + escape hatches (ongoing).** meshmcp-operated shared beacon with the Public-Suffix-List entry (to escape the Let's Encrypt per-registered-domain cert limit), abuse/enrollment controls, and funding/HA. Ship and document the two escape hatches in parallel: `behind-front`/RFC-8693 for operators with their own infra, and `--tunnel tailscale` for the Tailscale population. Same binary, one trust curve.
+
+**Effort feel:** the gateway delta is genuinely small and reuse-heavy; the standing multi-tenant beacon service is the bulk of the work, and it is a known shape. The confidentiality-preserving default therefore ships cheaply for a self-hosted or single beacon, with the SaaS beacon as the polish pass.
 
 ## Residual risks & unexplored alternatives
 
-- **New trusted party.** Posture A adds one confidentiality-trusted party; both
-  postures add a party that *controls the public name* and can therefore actively
-  MITM within a token lifetime. This is a genuine reduction from today's
-  "operator-owned listener, zero third parties" — accepted deliberately in exchange
-  for the Apple-feel win, and bounded by the gateway-side double-gate + fail-closed
-  audit (the beacon can never mint authority or hide what it relayed).
-- **A meshmcp-operated beacon is a hosted dependency** and a new public namespace
-  to run (abuse, rate-limiting, tenant isolation, availability). The self-host
-  binary must land in the same release, not later, or the "just works" story has a
-  hole.
-- **Replay within a token lifetime** is the beacon's real capability in Posture A.
-  Mitigations to design in: short token TTL (already ≤1h), per-request nonce/DPoP
-  binding through the existing DPoP verifier seam (`docs/EDGE.md` §"Shared DPoP
-  replay store"), and idempotency on mutating tool calls.
-- **Verification gap.** Approaches 3–5 (adopt-tunnel, netbird-relay,
-  token-exchange-BYO) were generated but **not** adversarially verified before the
-  design run hit its session limit. The recommendation stands on the two verified
-  designs, but the completeness check is: **re-run the verification and confirm the
-  beacon still wins — especially against `adopt-tunnel` on effort as the MVP.**
-- **Unexplored:** a pure client-side option (a claude.ai-side connector that speaks
-  WireGuard) is out of scope — it would require Anthropic to change the connector,
-  which the whole premise rules out.
+**Open risks (be honest):**
+
+- **Active rogue-cert MITM by a malicious/compromised/subpoenaed beacon.** Because the beacon is DNS authority for the subdomain, it can satisfy DNS-01 under its own key, obtain a valid publicly-trusted cert, and MITM the outer TLS — exposing bearers and tool traffic and enabling bearer replay. Mitigation is **detective** (CT monitoring), which races the ≤1h bearer window with real CT-indexing lag; the only fully **preventive** fix (operator CNAME from an owned apex) reintroduces the DNS burden. This is the load-bearing residual; it is narrower and better-defended than the terminating broker's unconditional exposure, but it is real and must be documented as a new deviation (D-E) and adversary in the threat model.
+- **Bearer replay without DPoP.** claude.ai presents no DPoP today, so tokens are pure possession-equals-authority. The double-gate bounds *what* a replayed bearer can do (tool-scoped, audited) but cannot prevent it. Enforce DPoP the moment the connector supports it.
+- **Stable-URL durability across failover.** Keeping `gw-<id>` pinned to the same gateway across redials and beacon restart, with no operator account, needs the shared lease state in Phase 1. If it regresses, the connector URL silently breaks after a reconnect.
+- **SSE longevity** over the muxed tunnel + beacon failover; and **ECH** (Encrypted ClientHello) would hide the SNI and break routing — the beacon owns the zone and simply must not publish HTTPS/SVCB ECH configs, and this incompatibility must be documented.
+- **Self-host relocates, does not eliminate, the public triad** onto the beacon box (amortized once across all a gateway's tools, and de-risked because that box holds no key and sees no plaintext).
+
+**Alternatives the six did not cover:**
+
+- **A native connector-side mesh join or mTLS client certificate.** The clean fix is for the hosted client to prove a key meshmcp already trusts (join the mesh, or present a client cert bound to the capability at the TLS layer). This is outside meshmcp's control today but is the only path that removes the in-path party entirely — worth raising with Anthropic.
+- **Application-layer end-to-end encryption / payload signing beneath the transport.** None of the six proposed an MCP-level E2E envelope that would defeat even a *terminating* broker. It is impossible unilaterally (claude.ai speaks vanilla OAuth/MCP), but if the MCP spec ever admits a request-signing or payload-encryption extension, it would collapse the entire confidentiality question for every design here.
+- **DANE/TLSA pinning in the beacon zone.** The beacon controls DNS, so it could publish a TLSA record pinning the gateway's cert — but a *malicious* beacon controls the TLSA record too, so it does not escape the DNS-authority trust problem. Noted and rejected.
+- **Anycast/QUIC-only rendezvous with connection migration** to make beacon failover invisible to a live SSE stream — an optimization worth prototyping in Phase 1 but not required for MVP.
+
+## Grounding check (verified against the tree)
+
+The build sketch rests on primitives confirmed present in this repo:
+
+- **`certmagic v0.21.3`** is already a direct dependency (`go.mod`) — the beacon's DNS-01 ACME path reuses `edge/acme.go`, not a new library.
+- **`golang.org/x/net` (HTTP/2)** and **`google.golang.org/grpc`** are already in the module graph, so tunnel multiplexing needs **no new dependency** (`yamux`/`smux`/QUIC remain optional upgrades).
+- **The outbound-dial pattern** (`client.Dial` + `BlockInbound=true`) is proven and reused today in `cmd/meshmcp/edge.go`, `air.go`, and `agent.go`; the beacon's reverse rendezvous uses the same primitive.
+- **`edge.Server.Handler()`** (`edge/server.go:210`) is a plain `http.ServeMux` cleanly separated from `Run()` (`edge/server.go:292`), and the double-gate order (`edge/mcp.go:165` — capability `Verify` at `:170` before policy `DecideToolCallBound` at `:175`, fail-closed audit at `:179`) is exactly as the invariants require — so serving `Handler()` over a tunnel-backed listener changes the transport, not the trust core.
+
+Secondary code references in this doc (`edge/limits.go` rate-limit keying, the `DPoPVerifier` seam, `metadata.go` discovery, `edge/assertion.go` for the BYO-front graft) name the surfaces a build would touch; confirm exact signatures at implementation time.
 
 ## See also
 
-- [EDGE.md](../EDGE.md) — the current public-listener ingress this proposal
-  removes the burden of.
-- [spec/OAUTH-STANDARDS.md](../spec/OAUTH-STANDARDS.md) — the recorded exposure-model
-  decision and deviations D-A…D-D that any new ingress must respect.
-- `edge/mcp.go` (`enforceToolCall`), `edge/token.go` (`mintTokenSet`),
-  `edge/server.go` (`Handler`, `Run`) — the trust core a beacon must keep intact.
+- [EDGE.md](../EDGE.md) — the current public-listener ingress whose operator burden this proposal removes.
+- [spec/OAUTH-STANDARDS.md](../spec/OAUTH-STANDARDS.md) — the recorded exposure-model decision and deviations D-A…D-D; the beacon adds a proposed **D-E** (beacon as DNS/CA-path authority, CT-detected).
+- [THREAT-MODEL.md](../THREAT-MODEL.md) — adversaries 12–13 (external OAuth registrant, stolen edge bearer); the beacon adds a proposed active-rogue-cert-MITM adversary.
+- `edge/mcp.go` (`enforceToolCall`), `edge/token.go` (`mintTokenSet`), `edge/server.go` (`Handler`, `Run`) — the trust core a beacon must keep intact.
