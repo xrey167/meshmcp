@@ -41,6 +41,23 @@ func newTestIdentity(t *testing.T) *testIdentity {
 func (i *testIdentity) PubKeyRaw() []byte         { return i.pub }
 func (i *testIdentity) SignRaw(msg []byte) []byte { return ed25519.Sign(i.priv, msg) }
 
+// TestSetTXTCap proves a gateway cannot flood the TXT store beyond the per-gateway
+// cap (a DoS bound on the DNS-01 challenge store).
+func TestSetTXTCap(t *testing.T) {
+	s := NewServer("beacon.test")
+	gw := &gwConn{label: "gw"}
+	name := s.challengeName("gw")
+	for i := 0; i < maxTXTPerGateway+5; i++ {
+		s.setTXT(gw, name, fmt.Sprintf("val-%d", i))
+	}
+	s.mu.Lock()
+	n := len(s.txt[name])
+	s.mu.Unlock()
+	if n != maxTXTPerGateway {
+		t.Fatalf("TXT count = %d, want cap %d", n, maxTXTPerGateway)
+	}
+}
+
 // TestBeaconRegistrationRequiresKeyPossession proves a client cannot claim a
 // label for a public key it does not hold the private key for: presenting a
 // victim's pubkey without a valid signature over the beacon's challenge is

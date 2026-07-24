@@ -33,6 +33,10 @@ func (s *Server) setTXT(gw *gwConn, name, value string) {
 			return // idempotent
 		}
 	}
+	if len(s.txt[want]) >= maxTXTPerGateway {
+		s.logf("beacon: TXT limit (%d) reached for %s, dropping", maxTXTPerGateway, want)
+		return
+	}
 	s.txt[want] = append(s.txt[want], value)
 }
 

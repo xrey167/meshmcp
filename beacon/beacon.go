@@ -43,6 +43,14 @@ const (
 	maxLineLen      = 4 << 10
 	defaultDataWait = 15 * time.Second
 	peekTimeout     = 10 * time.Second
+	// maxPendingSplices bounds public connections awaiting a gateway data conn,
+	// so a flood of connections (or a gateway that stops answering OPEN) cannot
+	// grow the pending map without limit.
+	maxPendingSplices = 1024
+	// maxTXTPerGateway bounds how many ACME challenge values a single gateway may
+	// publish, so a malicious gateway cannot flood the TXT store (ACME DNS-01
+	// needs at most a couple at once).
+	maxTXTPerGateway = 8
 )
 
 // ---------------------------------------------------------------------------
@@ -288,6 +296,12 @@ func (s *Server) handlePublicConn(pconn net.Conn) {
 	}
 	ch := make(chan net.Conn, 1)
 	s.mu.Lock()
+	if len(s.pending) >= maxPendingSplices {
+		s.mu.Unlock()
+		s.logf("beacon: pending-splice limit (%d) reached, dropping connection for %q", maxPendingSplices, label)
+		pconn.Close()
+		return
+	}
 	s.pending[connID] = ch
 	s.mu.Unlock()
 
