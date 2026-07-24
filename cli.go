@@ -64,6 +64,7 @@ func dialMCP(o *meshOptions, target string) (*mcpclient.Client, func(), error) {
 func cmdLs(args []string) error {
 	fs := flag.NewFlagSet("ls", flag.ExitOnError)
 	o := meshFlags(fs)
+	jsonOut := fs.Bool("json", false, "emit machine-readable JSON instead of a text listing")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -81,17 +82,26 @@ func cmdLs(args []string) error {
 	if err != nil {
 		return err
 	}
+	res, _ := mc.ListResources(ctx)
+	pr, _ := mc.ListPrompts(ctx)
+
+	if *jsonOut {
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{
+			"tools": tools, "resources": res, "prompts": pr,
+		})
+	}
+
 	fmt.Println("TOOLS:")
 	for _, t := range tools {
 		fmt.Printf("  %-20s %s\n", t.Name, t.Description)
 	}
-	if res, err := mc.ListResources(ctx); err == nil {
+	if len(res) > 0 {
 		fmt.Println("RESOURCES:")
 		for _, r := range res {
 			fmt.Printf("  %-28s %s\n", r.URI, r.Description)
 		}
 	}
-	if pr, err := mc.ListPrompts(ctx); err == nil {
+	if len(pr) > 0 {
 		fmt.Println("PROMPTS:")
 		for _, p := range pr {
 			fmt.Printf("  %-20s %s\n", p.Name, p.Description)
