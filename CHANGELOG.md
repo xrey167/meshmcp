@@ -108,7 +108,62 @@ first, fixed with the smallest robust change, and documented in
 - `SECURITY.md`, `LICENSE-DECISION.md`, `CONTRIBUTING.md`, this changelog, and a
   release checklist.
 
-### Added — hosted clients, day-2 operability, product hardening
+### Added — HA, live migration, multi-tenancy, and enterprise identity
+
+The backlog-completion wave. Every item shipped with adversarial review, tests,
+and honest docs; see `docs/BACKLOG.md` and the capability matrix for scope.
+
+- **Transactional Handoff v2 — live session move.** A deliberate prepare → ready
+  → commit relocation of a *live* session's ownership between gateways: the
+  source serves until commit, the destination pre-warms its backend, and commit
+  is a single generation-CAS ownership swap gated on a consumed single-use grant
+  (`air move grant`). Crash at any step leaves exactly one resumable owner. The
+  Control Room's **drag-to-handoff** (`room --control`) fires it, dual-authorized
+  (room token + the room's own operator identity). `docs/AIR-CONTINUITY.md`.
+- **Cross-gateway HA on PostgreSQL.** A distributed CAS lease/session store
+  (`pgstore`, `session_store: postgres://…`), always-on lease renewal,
+  release-on-shutdown, and opt-in expiry-driven **standby failover adoption**
+  (`session_failover: standby`) — a standby warms a crashed gateway's sessions
+  before the client returns. `docs/HA-TOOLMESH.md`.
+- **Multi-tenant control plane** (`tenants:` control ACL) — per-tenant policy,
+  registry, enrollment, and audit chain, partitioned by the transport-proven key
+  inside the one authorization chokepoint (cross-tenant access absent by
+  construction; no cross-tenant super-role). `docs/MULTI-TENANT.md`.
+- **SSO/OIDC group mapping** (gateway `oidc:` + `POST /v1/sso/attest`) — a
+  verified OIDC token maps to additive `group:<name>` attribution over the
+  WireGuard root (per-issuer pinned algorithm, fail-closed, bound to the
+  transport key; never a replacement for it). `docs/SSO.md`.
+- **Router signed delegation** (`delegation_key` + per-backend `router_delegation`)
+  — the confused-deputy defense wired end to end: an upstream verifies a
+  per-call token bound to the original caller and authorizes caller ∩ router ∩
+  delegation, not the router's own identity.
+- **HTTP transport policy parity** (F16 completion) — per-session taint, secret
+  injection with JSON+SSE response redaction, and signed capability upgrades now
+  apply to Streamable-HTTP backends at parity with stdio.
+- **Witnessed audit anchoring** — `audit verify --anchors` cross-checks each
+  sealed checkpoint against a self-linked file and/or an RBAC-gated peer witness
+  (`/v1/anchor`), exiting non-zero on disagreement even when the chain seals —
+  detecting a key-holding insider's rewrite.
+- **Backend-side idempotency enforcement** (`mcp.Idempotency`) — per-(tool, key)
+  single-flight claim middleware with Mem/PostgreSQL claim stores; the router
+  conveys the key via `retry_tools`.
+- **Spaces / `group:` fan-out** — operator groups resolve to present members
+  (`GET /v1/groups`), and `air steer`/`air ring` fan out one governed
+  single-target call per member, each independently audited; a group is never
+  authority.
+- **Observability** — an OTLP/HTTP logs exporter (`audit_otlp`, zero new deps)
+  and a Prometheus `/metrics` endpoint (`metrics_listen`), both metadata-only
+  observer sinks; size-based audit rotation (`audit_rotate_bytes`); a bounded
+  incremental dashboard tail.
+- **Backend egress restriction** (`egress_wrapper`) — an operator-supplied OS
+  jailer (`firejail --net=none`, bwrap, netns) prepended fail-closed to a stdio
+  backend, denying a secret-holding backend its out-of-band exfil path.
+- **SPIFFE identity labels** (`trust_domain` → `peer_spiffe_id` on audit
+  records), **capability sub-grants** (`--delegate-pub` → attenuated single-use
+  `capability delegate`), **`config lint`**, **`fetch --gc`**, **`federate
+  usage`**, **`air stream --bus`** (subscribe the hook bus over the mesh),
+  **`air node` service hosting** (inbox/ring/screen/cast), **`air steer --to`**
+  identity-bound addressing, and a thin **`meshmcp-connect`** client binary.
 
 - **`meshmcp edge`** — an off-by-default, tool-scoped public OAuth ingress so
   hosted MCP clients that cannot join the mesh (e.g. claude.ai custom
