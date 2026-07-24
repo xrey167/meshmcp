@@ -1,9 +1,13 @@
 package beacon
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -41,6 +45,40 @@ const registerChallengePrefix = "meshmcp-beacon-register-v1\n"
 func registerChallenge(nonce []byte) []byte {
 	return append([]byte(registerChallengePrefix), nonce...)
 }
+
+// dataMACPrefix domain-separates the per-session DATA-connection MAC (connID
+// binding) from every other use of the session key.
+const dataMACPrefix = "meshmcp-beacon-data-v1\n"
+
+// dataMAC is the connID-binding tag a gateway attaches to a DATA frame: a
+// truncated HMAC-SHA256 over the connID under the per-session key the beacon
+// handed it (over the confidential control channel). Only the gateway that
+// registered this session can produce it, so a third party that learns a connID
+// still cannot claim the data conn.
+func dataMAC(key []byte, connID string) []byte {
+	m := hmac.New(sha256.New, key)
+	m.Write([]byte(dataMACPrefix))
+	m.Write([]byte(connID))
+	return m.Sum(nil)[:16] // 128-bit truncation — ample for an online-only check
+}
+
+// verifyDataMAC constant-time-checks a hex-encoded DATA MAC.
+func verifyDataMAC(key []byte, connID, macHex string) bool {
+	got, err := hex.DecodeString(macHex)
+	if err != nil {
+		return false
+	}
+	return hmac.Equal(dataMAC(key, connID), got)
+}
+
+// Control-protocol capability tokens the gateway advertises (FEATURES) and the
+// beacon confirms (FEATURES-ACK). Unknown tokens are ignored by both sides, so
+// old and new peers interoperate: a feature is used for a gateway only when both
+// ends confirm it. See docs/design/HOSTED-CLIENT-INGRESS.md.
+const (
+	featProxyV2    = "proxy-v2"    // PROXY protocol v2 source-IP passthrough on spliced conns
+	featConnIDBind = "connid-bind" // per-session HMAC binding of DATA conns to the session
+)
 
 // defaults for the control protocol.
 const (
@@ -87,6 +125,14 @@ type Server struct {
 	dataWait time.Duration
 	logf     func(format string, args ...any)
 
+	// controlCert, when set, lets the beacon terminate TLS on the control channel:
+	// a control/data conn whose first byte is a TLS record (0x16) is wrapped in
+	// tls.Server with this cert, and a plaintext conn is served as before — so
+	// pinned (new) and plaintext (old) gateways coexist on one port with no flag
+	// day. Gateways verify the beacon by pinning this cert's SPKI (see PinnedDial).
+	controlCert *tls.Certificate
+	rrl         *rrl // authoritative-DNS response rate limiter (anti-amplification)
+
 	mu           sync.Mutex
 	publicIP     net.IP                    // A-record answer for <label>.<zone> (DNS server)
 	gateways     map[string]*gwConn        // label -> live control conn
@@ -95,16 +141,30 @@ type Server struct {
 	txt          map[string][]string       // fqdn -> ACME DNS-01 TXT values a gateway published
 }
 
-// pendingSplice is a public connection awaiting its gateway data conn.
+// pendingSplice is a public connection awaiting its gateway data conn. sendProxy
+// and macKey are latched at OPEN-write time (under the gateway's writeMu) so the
+// splice/verify behavior for this connID is fixed the instant its OPEN goes out —
+// never re-read from the live per-gateway flags, which could have flipped since.
 type pendingSplice struct {
-	ch    chan net.Conn
-	label string
+	ch        chan net.Conn
+	label     string
+	sendProxy bool   // prepend a PROXY v2 header to the bytes spliced to the gateway
+	macKey    []byte // require HMAC(macKey, connID) on the DATA frame (nil = accept bare)
 }
 
+// gwConn is a live gateway control connection. The negotiated-feature fields and
+// the per-session dataKey are written and read ONLY under writeMu — the same lock
+// that serializes OPEN frames — so a feature flip, its FEATURES-ACK, and every
+// OPEN's latch of that flip are one consistent, race-free order on the wire.
 type gwConn struct {
-	label   string
-	control net.Conn
-	writeMu sync.Mutex // serialize OPEN frames written to the control conn
+	label      string
+	pubKey     []byte
+	control    net.Conn
+	controlTLS bool       // this control conn is TLS (enables connid-bind negotiation)
+	writeMu    sync.Mutex // serialize all beacon->gateway control writes (OPEN, FEATURES-ACK)
+	proxyProto bool       // gateway confirmed PROXY v2 passthrough
+	connidBind bool       // gateway confirmed connID HMAC binding (TLS control only)
+	dataKey    []byte     // per-session HMAC key handed to the gateway (set iff connidBind)
 }
 
 // NewServer builds a beacon for the given DNS zone (e.g. "beacon.example.com").
@@ -113,11 +173,23 @@ func NewServer(zone string) *Server {
 		zone:         strings.ToLower(strings.TrimSuffix(zone, ".")),
 		dataWait:     defaultDataWait,
 		logf:         func(string, ...any) {},
+		rrl:          newRRL(),
 		gateways:     map[string]*gwConn{},
 		pending:      map[string]*pendingSplice{},
 		pendingLabel: map[string]int{},
 		txt:          map[string][]string{},
 	}
+}
+
+// SetControlCert enables TLS on the control channel: control/data conns that begin
+// with a TLS handshake are terminated with cert, while plaintext conns still work
+// (so old gateways are not cut off). Gateways pin cert's SPKI to authenticate the
+// beacon; only over such a pinned channel is connID HMAC binding negotiated.
+func (s *Server) SetControlCert(cert tls.Certificate) {
+	s.mu.Lock()
+	c := cert
+	s.controlCert = &c
+	s.mu.Unlock()
 }
 
 // SetLogf installs a log sink (default no-op).
@@ -188,8 +260,15 @@ func (s *Server) acceptLoop(ln net.Listener, sem chan struct{}, handle func(net.
 
 // handleTunnelConn reads the first control line and dispatches: REGISTER makes
 // this a gateway control conn; DATA pairs this conn with a waiting public conn.
+// The read deadline set here bounds the optional TLS handshake, the first-line
+// read, and (for REGISTER) is re-armed around the proof-of-possession exchange.
 func (s *Server) handleTunnelConn(conn net.Conn) {
 	_ = conn.SetReadDeadline(time.Now().Add(peekTimeout))
+	conn, isTLS, err := s.maybeTLS(conn)
+	if err != nil {
+		conn.Close()
+		return
+	}
 	line, err := readLine(conn)
 	_ = conn.SetReadDeadline(time.Time{})
 	if err != nil {
@@ -199,7 +278,7 @@ func (s *Server) handleTunnelConn(conn net.Conn) {
 	verb, rest, _ := strings.Cut(line, " ")
 	switch verb {
 	case "REGISTER":
-		s.handleRegister(conn, strings.TrimSpace(rest))
+		s.handleRegister(conn, isTLS, strings.TrimSpace(rest))
 	case "DATA":
 		s.handleData(conn, strings.TrimSpace(rest))
 	default:
@@ -207,7 +286,47 @@ func (s *Server) handleTunnelConn(conn net.Conn) {
 	}
 }
 
-func (s *Server) handleRegister(conn net.Conn, b64Key string) {
+// maybeTLS demultiplexes a freshly-accepted control/data conn: if the beacon has a
+// control certificate and the first byte is a TLS handshake record (0x16), the
+// conn is wrapped in tls.Server; otherwise it is served as plaintext. The peeked
+// byte is replayed either way, so no bytes are lost. This lets pinned and legacy
+// gateways share one control port without a coordinated cutover.
+func (s *Server) maybeTLS(conn net.Conn) (net.Conn, bool, error) {
+	s.mu.Lock()
+	cert := s.controlCert
+	s.mu.Unlock()
+	if cert == nil {
+		return conn, false, nil
+	}
+	var b [1]byte
+	if _, err := io.ReadFull(conn, b[:]); err != nil {
+		return conn, false, err
+	}
+	pc := &prefixConn{Conn: conn, prefix: b[:]}
+	if b[0] == 0x16 { // TLS handshake record ContentType
+		return tls.Server(pc, &tls.Config{Certificates: []tls.Certificate{*cert}, MinVersion: tls.VersionTLS12}), true, nil
+	}
+	return pc, false, nil
+}
+
+// prefixConn replays a small already-read prefix before the rest of the stream,
+// so a peeked byte (TLS demux) is not consumed.
+type prefixConn struct {
+	net.Conn
+	prefix []byte
+	off    int
+}
+
+func (c *prefixConn) Read(p []byte) (int, error) {
+	if c.off < len(c.prefix) {
+		n := copy(p, c.prefix[c.off:])
+		c.off += n
+		return n, nil
+	}
+	return c.Conn.Read(p)
+}
+
+func (s *Server) handleRegister(conn net.Conn, isTLS bool, b64Key string) {
 	pub, err := base64.RawURLEncoding.DecodeString(b64Key)
 	if err != nil || len(pub) != ed25519.PublicKeySize {
 		fmt.Fprintf(conn, "ERR bad register\n")
@@ -243,7 +362,7 @@ func (s *Server) handleRegister(conn net.Conn, b64Key string) {
 	}
 
 	label := SubdomainLabel(pub)
-	gw := &gwConn{label: label, control: conn}
+	gw := &gwConn{label: label, pubKey: pub, control: conn, controlTLS: isTLS}
 
 	s.mu.Lock()
 	old := s.gateways[label]
@@ -280,8 +399,9 @@ func (s *Server) handleRegister(conn net.Conn, b64Key string) {
 	conn.Close()
 }
 
-// handleControlFrame dispatches a gateway->beacon control line. Only DNS-01 TXT
-// publish/clear for the gateway's OWN challenge name is honoured.
+// handleControlFrame dispatches a gateway->beacon control line: DNS-01 TXT
+// publish/clear for the gateway's OWN challenge name, and the FEATURES capability
+// advertisement. Unknown verbs are ignored (forward compatibility).
 func (s *Server) handleControlFrame(gw *gwConn, line string) {
 	verb, rest, _ := strings.Cut(line, " ")
 	switch verb {
@@ -292,7 +412,48 @@ func (s *Server) handleControlFrame(gw *gwConn, line string) {
 	case "TXT-CLEAR":
 		name, value, _ := strings.Cut(strings.TrimSpace(rest), " ")
 		s.clearTXT(gw, strings.TrimSpace(name), value)
+	case "FEATURES":
+		s.handleFeatures(gw, rest)
 	}
+}
+
+// handleFeatures negotiates the gateway's advertised capabilities and replies with
+// exactly ONE frame — "FEATURES-ACK <confirmed...> [key=<b64>]" — written under
+// writeMu so the flag flip, the ACK, and the (folded-in) session key are one
+// atomic, deadline-bounded write that no OPEN frame can interleave. connid-bind is
+// confirmed only over a TLS control conn (its key would otherwise cross the wire in
+// the clear, making the binding inert). Backward compatible: an old gateway never
+// sends FEATURES, so nothing is confirmed and every feature stays off.
+func (s *Server) handleFeatures(gw *gwConn, rest string) {
+	offered := map[string]bool{}
+	for _, f := range strings.Fields(rest) {
+		offered[f] = true
+	}
+	gw.writeMu.Lock()
+	defer gw.writeMu.Unlock()
+
+	var confirmed []string
+	if offered[featProxyV2] {
+		gw.proxyProto = true
+		confirmed = append(confirmed, featProxyV2)
+	}
+	if offered[featConnIDBind] && gw.controlTLS {
+		key := make([]byte, 32)
+		if _, err := rand.Read(key); err == nil {
+			gw.connidBind = true
+			gw.dataKey = key
+			confirmed = append(confirmed, featConnIDBind)
+		}
+	}
+
+	ack := "FEATURES-ACK " + strings.Join(confirmed, " ")
+	if gw.connidBind {
+		ack += " key=" + base64.RawURLEncoding.EncodeToString(gw.dataKey)
+	}
+	_ = gw.control.SetWriteDeadline(time.Now().Add(peekTimeout))
+	_, _ = fmt.Fprintf(gw.control, "%s\n", ack)
+	_ = gw.control.SetWriteDeadline(time.Time{})
+	s.logf("beacon: %s negotiated features %v (tls=%v)", gw.label, confirmed, gw.controlTLS)
 }
 
 func (s *Server) deregister(gw *gwConn) {
@@ -319,14 +480,29 @@ func (s *Server) removePendingLocked(connID string) *pendingSplice {
 	return ps
 }
 
-func (s *Server) handleData(conn net.Conn, connID string) {
+func (s *Server) handleData(conn net.Conn, rest string) {
+	connID, macHex, _ := strings.Cut(rest, " ")
+	connID = strings.TrimSpace(connID)
+	macHex = strings.TrimSpace(macHex)
+
 	s.mu.Lock()
-	ps := s.removePendingLocked(connID)
-	s.mu.Unlock()
+	ps := s.pending[connID] // peek; do NOT remove until the MAC (if required) verifies
 	if ps == nil {
+		s.mu.Unlock()
 		conn.Close() // no waiter (timed out or unknown id)
 		return
 	}
+	if ps.macKey != nil && !verifyDataMAC(ps.macKey, connID, macHex) {
+		// A DATA frame with a bad/absent MAC must NOT evict the legitimate waiter:
+		// close this conn and leave the pending entry so the real gateway's DATA (or
+		// the dataWait timeout) still reclaims it.
+		s.mu.Unlock()
+		conn.Close()
+		s.logf("beacon: rejected DATA %s with invalid connID binding", connID)
+		return
+	}
+	s.removePendingLocked(connID)
+	s.mu.Unlock()
 	ps.ch <- conn // hand ownership to the public-conn splicer (buffered: never blocks)
 }
 
@@ -361,21 +537,41 @@ func (s *Server) handlePublicConn(pconn net.Conn) {
 		return
 	}
 	ch := make(chan net.Conn, 1)
+
+	// Latch this connection's per-splice behavior AND write its OPEN as one
+	// gw.writeMu-serialized step (a stuck gateway must not wedge routing, so the
+	// write is deadline-bounded). Reading the feature flags under the same lock that
+	// FEATURES-ACK flips them under makes the snapshot consistent with the wire order
+	// of this OPEN vs that ACK. The OPEN is self-describing ("proxy"/"mac" tokens) so
+	// the gateway decides per-connection from the very frame that triggers its data
+	// conn — never from a separately-timed flag.
+	gw.writeMu.Lock()
+	sendProxy := gw.proxyProto
+	var macKey []byte
+	if gw.connidBind {
+		macKey = gw.dataKey
+	}
 	s.mu.Lock()
 	if len(s.pending) >= maxPendingSplices || s.pendingLabel[label] >= maxPendingPerLabel {
 		s.mu.Unlock()
+		gw.writeMu.Unlock()
 		s.logf("beacon: pending-splice limit reached, dropping connection for %q", label)
 		pconn.Close()
 		return
 	}
-	s.pending[connID] = &pendingSplice{ch: ch, label: label}
+	s.pending[connID] = &pendingSplice{ch: ch, label: label, sendProxy: sendProxy, macKey: macKey}
 	s.pendingLabel[label]++
 	s.mu.Unlock()
 
-	// A stuck gateway must not wedge routing: bound the OPEN write.
-	gw.writeMu.Lock()
+	open := "OPEN " + connID
+	if sendProxy {
+		open += " proxy"
+	}
+	if macKey != nil {
+		open += " mac"
+	}
 	_ = gw.control.SetWriteDeadline(time.Now().Add(peekTimeout))
-	_, werr := fmt.Fprintf(gw.control, "OPEN %s\n", connID)
+	_, werr := fmt.Fprintf(gw.control, "%s\n", open)
 	_ = gw.control.SetWriteDeadline(time.Time{})
 	gw.writeMu.Unlock()
 	if werr != nil {
@@ -388,7 +584,15 @@ func (s *Server) handlePublicConn(pconn net.Conn) {
 
 	select {
 	case dconn := <-ch:
-		splice(pconn, replay, dconn)
+		r := replay
+		if sendProxy {
+			// Prepend a PROXY v2 header so the gateway's edge sees the real client
+			// address (not the beacon's) in its rate limiters and audit ledger. The
+			// header's trust equals the beacon's authenticity — pin the control channel
+			// (SetControlCert / beacon.pin) in production; see the design doc.
+			r = io.MultiReader(bytes.NewReader(encodeProxyV2(pconn.RemoteAddr(), pconn.LocalAddr())), replay)
+		}
+		splice(pconn, r, dconn)
 	case <-time.After(s.dataWait):
 		s.mu.Lock()
 		ps := s.removePendingLocked(connID)
@@ -440,6 +644,11 @@ type Tunnel struct {
 	controlWr  sync.Mutex // serialize gateway->beacon control writes
 	closeOnce  sync.Once
 	done       chan struct{}
+	// dataKey is the per-session connID-binding key the beacon assigns in its
+	// FEATURES-ACK. It is written and read ONLY by the single readControl goroutine
+	// (set when the ACK arrives, read when an OPEN is dispatched), so no
+	// synchronization is needed and openData receives it as a value argument.
+	dataKey []byte
 }
 
 // sendControlLine writes one gateway->beacon control frame on the tunnel's
@@ -502,13 +711,21 @@ func Dial(ctx context.Context, beaconAddr string, id Identity, dial DialFunc) (*
 		control:    control,
 		done:       make(chan struct{}),
 	}
+	// Advertise hardening capabilities fire-and-forget: a beacon that supports them
+	// replies with a FEATURES-ACK that readControl applies asynchronously; an old
+	// beacon simply never ACKs and every feature stays off. Startup NEVER blocks on
+	// the ACK, so this is backward compatible in both directions.
+	_ = t.sendControlLine("FEATURES " + featProxyV2 + " " + featConnIDBind)
 	go t.readControl()
 	return t, nil
 }
 
-// readControl reads OPEN frames from the beacon and, for each, dials a fresh data
-// conn (outbound) and delivers it to Accept. When the control conn closes, the
-// listener returns ErrClosed.
+// readControl reads control frames from the beacon in a single goroutine: it
+// applies FEATURES-ACK (recording the negotiated session key) and, for each OPEN,
+// dials a fresh data conn. Because this loop is single-threaded and the beacon
+// writes the ACK before any OPEN that depends on it, the per-connection decisions
+// derived here are consistent with the beacon's. When the control conn closes,
+// Accept returns ErrClosed. Non-OPEN, non-ACK verbs are ignored (compatibility).
 func (t *Tunnel) readControl() {
 	defer t.Close()
 	for {
@@ -517,27 +734,77 @@ func (t *Tunnel) readControl() {
 			return
 		}
 		verb, rest, _ := strings.Cut(line, " ")
-		if verb != "OPEN" {
-			continue
+		switch verb {
+		case "FEATURES-ACK":
+			t.applyFeaturesAck(rest)
+		case "OPEN":
+			connID, flags, _ := strings.Cut(strings.TrimSpace(rest), " ")
+			expectProxy := containsField(flags, "proxy")
+			var key []byte
+			if containsField(flags, "mac") {
+				key = t.dataKey // set from a prior FEATURES-ACK on this same goroutine
+			}
+			go t.openData(strings.TrimSpace(connID), expectProxy, key)
 		}
-		go t.openData(strings.TrimSpace(rest))
 	}
 }
 
-func (t *Tunnel) openData(connID string) {
+// applyFeaturesAck records the session key the beacon folded into its ACK
+// ("key=<base64>"). Feature tokens are informational here — the authoritative
+// per-connection decision rides each OPEN frame — but the key is needed to compute
+// DATA-frame MACs, and it arrives atomically in this same frame.
+func (t *Tunnel) applyFeaturesAck(rest string) {
+	for _, f := range strings.Fields(rest) {
+		if v, ok := strings.CutPrefix(f, "key="); ok {
+			if key, err := base64.RawURLEncoding.DecodeString(v); err == nil {
+				t.dataKey = key
+			}
+		}
+	}
+}
+
+func (t *Tunnel) openData(connID string, expectProxy bool, dataKey []byte) {
 	d, err := t.dial(context.Background(), t.beaconAddr)
 	if err != nil {
 		return
 	}
-	if _, err := fmt.Fprintf(d, "DATA %s\n", connID); err != nil {
+	frame := "DATA " + connID
+	if dataKey != nil {
+		frame += " " + hex.EncodeToString(dataMAC(dataKey, connID))
+	}
+	if _, err := fmt.Fprintf(d, "%s\n", frame); err != nil {
 		d.Close()
 		return
+	}
+	if expectProxy {
+		// Consume the beacon's PROXY v2 header (exactly, no over-read) under a
+		// deadline so a stalled/partial header can't wedge this goroutine and its fd.
+		_ = d.SetReadDeadline(time.Now().Add(peekTimeout))
+		src, perr := readProxyV2(d)
+		_ = d.SetReadDeadline(time.Time{})
+		if perr != nil {
+			d.Close()
+			return
+		}
+		if src != nil { // nil = LOCAL/UNSPEC: keep the data conn's real address
+			d = &proxyConn{Conn: d, remote: src}
+		}
 	}
 	select {
 	case t.conns <- d:
 	case <-t.done:
 		d.Close()
 	}
+}
+
+// containsField reports whether space-separated fields contains tok.
+func containsField(fields, tok string) bool {
+	for _, f := range strings.Fields(fields) {
+		if f == tok {
+			return true
+		}
+	}
+	return false
 }
 
 // Accept returns the next spliced client connection. It blocks until one arrives

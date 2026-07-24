@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"flag"
 	"fmt"
 	"log"
@@ -29,6 +31,9 @@ func cmdBeacon(args []string) error {
 	controlAddr := fs.String("control", ":7443", "gateway tunnel listen address — gateways dial out to here")
 	dnsAddr := fs.String("dns", "", "authoritative DNS listen address, e.g. :53 (optional; enables ACME DNS-01 so gateways auto-provision certs)")
 	publicIP := fs.String("public-ip", "", "the beacon's public IPv4 that <label>.<zone> A records resolve to (required with --dns)")
+	controlTLSAuto := fs.Bool("control-tls-auto", false, "generate a self-signed control-channel certificate and print its SPKI pin (gateways set beacon.pin to it)")
+	controlCert := fs.String("control-cert", "", "control-channel TLS certificate file (enables control TLS; alternative to --control-tls-auto)")
+	controlKey := fs.String("control-key", "", "control-channel TLS key file (used with --control-cert)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -58,6 +63,19 @@ func cmdBeacon(args []string) error {
 	srv := beacon.NewServer(*zone)
 	srv.SetLogf(log.Printf)
 
+	// Optional control-channel TLS + pin: gateways that configure beacon.pin get an
+	// authenticated, confidential control channel (and can negotiate connID HMAC
+	// binding). Plaintext gateways keep working on the same port (the beacon demuxes
+	// per-connection), so enabling this is not a fleet-wide flag day.
+	if *controlTLSAuto || *controlCert != "" {
+		cert, pin, err := loadControlCert(*zone, *controlTLSAuto, *controlCert, *controlKey)
+		if err != nil {
+			return err
+		}
+		srv.SetControlCert(cert)
+		fmt.Fprintf(os.Stderr, "meshmcp beacon: control channel TLS enabled — configure gateways with beacon.pin: \"%s\"\n", pin)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), shutdownSignals...)
 	defer stop()
 
@@ -76,4 +94,32 @@ func cmdBeacon(args []string) error {
 	}
 
 	return srv.Run(ctx, publicLn, controlLn)
+}
+
+// loadControlCert resolves the beacon's control-channel certificate and its SPKI
+// pin, either from operator-provided files or as a freshly generated self-signed
+// certificate (--control-tls-auto). The returned pin is what operators configure
+// as beacon.pin on their gateways.
+func loadControlCert(zone string, auto bool, certFile, keyFile string) (tls.Certificate, string, error) {
+	if certFile != "" {
+		if keyFile == "" {
+			return tls.Certificate{}, "", fmt.Errorf("beacon: --control-cert requires --control-key")
+		}
+		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			return tls.Certificate{}, "", fmt.Errorf("beacon: load control cert: %w", err)
+		}
+		leaf := cert.Leaf
+		if leaf == nil {
+			leaf, err = x509.ParseCertificate(cert.Certificate[0])
+			if err != nil {
+				return tls.Certificate{}, "", fmt.Errorf("beacon: parse control cert: %w", err)
+			}
+		}
+		return cert, beacon.SPKIPin(leaf), nil
+	}
+	if !auto {
+		return tls.Certificate{}, "", fmt.Errorf("beacon: --control-key requires --control-cert (or use --control-tls-auto)")
+	}
+	return beacon.SelfSignedControlCert(zone)
 }

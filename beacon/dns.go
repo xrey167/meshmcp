@@ -5,11 +5,29 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/miekg/dns"
 )
 
-const dnsTTL = 60
+const (
+	dnsTTL = 60
+
+	// dnsMinUDPSize / dnsMaxUDPSize bound the UDP response size used for
+	// EDNS0-aware truncation: below 512 (the classic DNS floor) is never honored,
+	// and we clamp large EDNS0 buffers to 1232 (the DNS-flag-day recommendation) so
+	// a client cannot request a huge UDP answer.
+	dnsMinUDPSize = 512
+	dnsMaxUDPSize = 1232
+
+	// TCP hardening: because RRL is bypassed on TCP (a completed handshake proves
+	// the source), the TCP path is kept cheap with short timeouts and a per-conn
+	// query cap so a slowloris/connection flood cannot pin resources.
+	dnsTCPReadTimeout  = 5 * time.Second
+	dnsTCPWriteTimeout = 5 * time.Second
+	dnsTCPIdleTimeout  = 8 * time.Second
+	dnsMaxTCPQueries   = 32
+)
 
 // challengeName is the DNS-01 record name for a gateway label,
 // "_acme-challenge.<label>.<zone>". No lock is taken (callers may hold s.mu).
@@ -80,12 +98,51 @@ func dnsEqual(a, b string) bool {
 func (s *Server) ServeDNS(ctx context.Context, addr string) error {
 	pc, err := net.ListenPacket("udp", addr)
 	if err != nil {
-		return fmt.Errorf("beacon: dns listen %s: %w", addr, err)
+		return fmt.Errorf("beacon: dns listen udp %s: %w", addr, err)
 	}
-	return s.serveDNSPacketConn(ctx, pc)
+	tcpLn, err := net.Listen("tcp", addr)
+	if err != nil {
+		pc.Close()
+		return fmt.Errorf("beacon: dns listen tcp %s: %w", addr, err)
+	}
+	return s.serveDNS(ctx, pc, tcpLn)
 }
 
+// serveDNS runs the UDP and TCP DNS servers over caller-provided listeners until
+// ctx is cancelled (the test seam behind ServeDNS).
+func (s *Server) serveDNS(ctx context.Context, pc net.PacketConn, tcpLn net.Listener) error {
+	go s.rrl.gcLoop(ctx)
+
+	udp := &dns.Server{PacketConn: pc, Handler: dns.HandlerFunc(s.handleDNS)}
+	tcp := &dns.Server{
+		Listener:      tcpLn,
+		Handler:       dns.HandlerFunc(s.handleDNS),
+		ReadTimeout:   dnsTCPReadTimeout,
+		WriteTimeout:  dnsTCPWriteTimeout,
+		IdleTimeout:   func() time.Duration { return dnsTCPIdleTimeout },
+		MaxTCPQueries: dnsMaxTCPQueries,
+	}
+	go func() {
+		<-ctx.Done()
+		_ = udp.Shutdown()
+		_ = tcp.Shutdown()
+	}()
+	errCh := make(chan error, 2)
+	go func() { errCh <- udp.ActivateAndServe() }()
+	go func() { errCh <- tcp.ActivateAndServe() }()
+	err := <-errCh
+	_ = udp.Shutdown()
+	_ = tcp.Shutdown()
+	if ctx.Err() != nil {
+		return nil
+	}
+	return err
+}
+
+// serveDNSPacketConn serves DNS over a single UDP PacketConn (used by tests). It
+// also roots the RRL garbage-collector to ctx.
 func (s *Server) serveDNSPacketConn(ctx context.Context, pc net.PacketConn) error {
+	go s.rrl.gcLoop(ctx)
 	srv := &dns.Server{PacketConn: pc, Handler: dns.HandlerFunc(s.handleDNS)}
 	go func() {
 		<-ctx.Done()
@@ -94,7 +151,24 @@ func (s *Server) serveDNSPacketConn(ctx context.Context, pc net.PacketConn) erro
 	return srv.ActivateAndServe()
 }
 
+// handleDNS answers a query. Over UDP it applies Response Rate Limiting (skipped
+// for loopback and for TCP, which cannot be source-spoofed) and EDNS0-aware
+// truncation so the beacon cannot be used as a reflection/amplification vector.
 func (s *Server) handleDNS(w dns.ResponseWriter, r *dns.Msg) {
+	udp := isUDPAddr(w.RemoteAddr())
+	if udp {
+		if ip := addrIP(w.RemoteAddr()); ip != nil && !ip.IsLoopback() {
+			switch s.rrl.decide(ip) {
+			case rrlDrop:
+				return // send nothing — starve the reflection
+			case rrlSlip:
+				_ = w.WriteMsg(truncatedReply(r)) // TC=1 forces a (rate-limit-exempt) TCP retry
+				return
+			case rrlAllow:
+			}
+		}
+	}
+
 	m := new(dns.Msg)
 	m.SetReply(r)
 	m.Authoritative = true
@@ -105,7 +179,52 @@ func (s *Server) handleDNS(w dns.ResponseWriter, r *dns.Msg) {
 			m.Ns = append(m.Ns, s.soa()) // NODATA/negative: authority section
 		}
 	}
+	if udp {
+		size := udpSize(r)
+		if opt := r.IsEdns0(); opt != nil {
+			m.SetEdns0(size, opt.Do()) // echo OPT (RFC 6891) so Truncate accounts for it
+		}
+		m.Truncate(int(size))
+	}
 	_ = w.WriteMsg(m)
+}
+
+// truncatedReply is an answer-less TC=1 response: it tells a resolver to retry the
+// query over TCP (where RRL does not apply), the standard RRL "slip" escape hatch.
+func truncatedReply(r *dns.Msg) *dns.Msg {
+	m := new(dns.Msg)
+	m.SetReply(r)
+	m.Authoritative = true
+	m.Truncated = true
+	return m
+}
+
+func isUDPAddr(a net.Addr) bool { _, ok := a.(*net.UDPAddr); return ok }
+
+func addrIP(a net.Addr) net.IP {
+	switch v := a.(type) {
+	case *net.UDPAddr:
+		return v.IP
+	case *net.TCPAddr:
+		return v.IP
+	}
+	return nil
+}
+
+// udpSize is the response size cap for UDP truncation: the query's EDNS0 UDP buffer
+// (clamped to [512, 1232]), or 512 when the query carries no OPT.
+func udpSize(r *dns.Msg) uint16 {
+	if opt := r.IsEdns0(); opt != nil {
+		sz := opt.UDPSize()
+		if sz < dnsMinUDPSize {
+			sz = dnsMinUDPSize
+		}
+		if sz > dnsMaxUDPSize {
+			sz = dnsMaxUDPSize
+		}
+		return sz
+	}
+	return dnsMinUDPSize
 }
 
 func (s *Server) dnsAnswer(q dns.Question) []dns.RR {

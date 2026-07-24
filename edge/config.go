@@ -177,6 +177,14 @@ type BeaconConfig struct {
 	// Zone is the beacon's public DNS zone, e.g. "beacon.example.com" — used to
 	// form (and, at runtime, confirm) the assigned public name.
 	Zone string `yaml:"zone"`
+	// Pin, when set, is the beacon's control-channel SPKI pin ("sha256/<base64>",
+	// printed by `meshmcp beacon` when control TLS is enabled). The gateway then
+	// TLS-wraps and pins every control/data dial to the beacon, so the control
+	// protocol (connIDs, the connID-binding key, ACME TXT publishes) cannot be
+	// observed or MITM'd on the wire. Without a pin the tunnel is plain TCP (as
+	// before) and connID HMAC binding is not negotiated. Strongly recommended for a
+	// public beacon.
+	Pin string `yaml:"pin"`
 	// AutoCert, when set, provisions the gateway's certificate automatically via
 	// ACME DNS-01 brokered through the beacon (no static cert_file/key_file
 	// needed, no inbound challenge port). Mutually exclusive with tls.cert_file.
@@ -382,6 +390,9 @@ func (c Config) Validate() (Config, error) {
 		}
 		if c.Beacon.Zone == "" {
 			return c, fmt.Errorf("edge: beacon.zone is required (the beacon's public DNS zone)")
+		}
+		if c.Beacon.Pin != "" && !strings.HasPrefix(c.Beacon.Pin, "sha256/") {
+			return c, fmt.Errorf("edge: beacon.pin must be an SPKI pin of the form \"sha256/<base64>\" (printed by `meshmcp beacon` when control TLS is enabled), got %q", c.Beacon.Pin)
 		}
 		if c.BehindFront {
 			return c, fmt.Errorf("edge: beacon and behind_front are mutually exclusive — choose one ingress")

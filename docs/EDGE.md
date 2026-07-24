@@ -253,11 +253,50 @@ ciphertext and the SNI are exposed. The full trade, and the CT-monitoring /
 DPoP mitigations, are in the
 [design doc](design/HOSTED-CLIENT-INGRESS.md).
 
+### Hardening a public beacon
+
+For a beacon exposed to the internet, three defenses harden the control path and
+the authoritative DNS. All are backward compatible — an unpinned gateway and a
+beacon without these flags behave exactly as before.
+
+- **Pin the control channel (`--control-tls-auto`, `beacon.pin`).** Start the
+  beacon with a control-channel certificate and it prints an SPKI pin:
+
+  ```bash
+  meshmcp beacon --zone beacon.example.com --control :7443 --control-tls-auto
+  # → control channel TLS enabled — configure gateways with beacon.pin: "sha256/…"
+  ```
+
+  Set that pin in the gateway's `beacon.pin`. Every control **and** data dial to the
+  beacon is then TLS with the beacon's public key pinned (no PKI, so the beacon can
+  rotate its leaf), so the routing protocol — connIDs, the connID-binding key, ACME
+  TXT publishes — cannot be observed or MITM'd. The beacon serves pinned (TLS) and
+  legacy (plaintext) gateways on the same port, so enabling it is not a flag day. BYO
+  cert with `--control-cert`/`--control-key` instead of `--control-tls-auto`.
+
+- **connID HMAC binding (automatic over a pinned channel).** Once the control
+  channel is TLS, the beacon hands each gateway a per-session key and requires every
+  inbound data connection to carry `HMAC(key, connID)`. A third party that learns a
+  connID still cannot claim a pending splice — the data path is authenticated to the
+  session, not just the (already unguessable) connID.
+
+- **DNS response-rate-limiting + TCP.** The authoritative server (`--dns`) answers
+  over **TCP as well as UDP**, applies EDNS0-aware truncation, and rate-limits UDP
+  responses per client prefix (/24, /64): over the budget it slips to a small `TC=1`
+  answer (forcing a rate-limit-exempt TCP retry) or drops — so the beacon cannot be
+  used as a reflection/amplification vector. Loopback and TCP are exempt; Let's
+  Encrypt validation (a few queries per resolver prefix) is well under the budget.
+
+> The PROXY-header source IP the gateway records is exactly as trustworthy as the
+> beacon that asserts it — pin the control channel in production. See the design doc.
+
 > **Status:** experimental. The rendezvous, SNI-routed splice, gateway listener,
-> authoritative DNS server, and ACME DNS-01 challenge brokering are implemented and
-> tested end-to-end (the live Let's Encrypt issuance itself is exercised only in
-> real deployments). Multi-tenant subdomain leasing/HA and CT-monitoring are the
-> next increments.
+> authoritative DNS server (RRL + TCP), ACME DNS-01 challenge brokering, PROXY v2
+> source-IP passthrough, connID HMAC binding, and control-channel TLS pinning are
+> implemented and tested end-to-end (the live Let's Encrypt issuance itself is
+> exercised only in real deployments). Multi-tenant subdomain leasing/HA,
+> per-IP rate limiting on the control listener, and CT-monitoring are the next
+> increments.
 
 ---
 

@@ -117,9 +117,23 @@ func cmdEdge(args []string) error {
 		opts.Signer = signer
 
 		fmt.Fprintf(os.Stderr, "meshmcp edge: beacon mode — dialing %s; public %s\n", cfg.Beacon.Control, cfg.PublicURL)
-		tun, err := beacon.Dial(ctx, cfg.Beacon.Control, signer, func(ctx context.Context, addr string) (net.Conn, error) {
+		baseDial := func(ctx context.Context, addr string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, "tcp", addr)
-		})
+		}
+		dialFn := beacon.DialFunc(baseDial)
+		if cfg.Beacon.Pin != "" {
+			// TLS-wrap and SPKI-pin every control/data dial to the beacon so the
+			// control protocol cannot be observed or MITM'd, and connID HMAC binding
+			// can be negotiated. The SNI is the beacon host (informational; the pin,
+			// not the name, authenticates the beacon).
+			host, _, splitErr := net.SplitHostPort(cfg.Beacon.Control)
+			if splitErr != nil {
+				host = cfg.Beacon.Control
+			}
+			dialFn = beacon.PinnedDial(baseDial, host, cfg.Beacon.Pin)
+			fmt.Fprintf(os.Stderr, "meshmcp edge: beacon control channel TLS-pinned (%s)\n", cfg.Beacon.Pin)
+		}
+		tun, err := beacon.Dial(ctx, cfg.Beacon.Control, signer, dialFn)
 		if err != nil {
 			return fmt.Errorf("edge: dial beacon %s: %w", cfg.Beacon.Control, err)
 		}
