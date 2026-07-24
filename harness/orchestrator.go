@@ -248,18 +248,23 @@ func (e *Engine) Advance(ctx context.Context, id RunID) (RunState, error) {
 		if err != nil {
 			return e.fail(rc, err)
 		}
-		e.setStage(rc, nextStage(st))
-		if err := e.persist(rc); err != nil {
-			return e.fail(rc, err)
-		}
 		if blocked {
+			// Do NOT advance past a blocking stage: the stage cursor stays at st
+			// so a resume RE-RUNS it and re-checks the co-sign. This is what makes
+			// the gate un-bypassable — calling Advance again without an approval
+			// re-enters approve and blocks again, rather than falling through to
+			// execute.
 			rc.mu.Lock()
 			rc.state.Status = RunBlocked
-			st := rc.state
+			blockedState := rc.state
 			rc.mu.Unlock()
 			_ = e.persist(rc)
 			e.emit(rc, RunEvent{RunID: id, Time: e.now(), Kind: "blocked", Msg: "awaiting co-sign approval"})
-			return st, nil
+			return blockedState, nil
+		}
+		e.setStage(rc, nextStage(st))
+		if err := e.persist(rc); err != nil {
+			return e.fail(rc, err)
 		}
 	}
 	rc.mu.Lock()

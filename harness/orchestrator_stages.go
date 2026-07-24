@@ -84,10 +84,13 @@ func (e *Engine) setStage(rc *runCtx, st Stage) {
 }
 
 func (e *Engine) emit(rc *runCtx, ev RunEvent) {
+	// Send while holding rc.mu so a concurrent Observe-cancel (which removes a
+	// subscriber from rc.subs and closes it under the same lock) can never leave
+	// emit sending on a closed channel. The send is non-blocking (select/default),
+	// so holding the lock cannot stall a run on a slow observer.
 	rc.mu.Lock()
-	subs := append([]chan RunEvent(nil), rc.subs...)
-	rc.mu.Unlock()
-	for _, ch := range subs {
+	defer rc.mu.Unlock()
+	for _, ch := range rc.subs {
 		select {
 		case ch <- ev:
 		default: // never block a run on a slow observer

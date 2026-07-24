@@ -30,6 +30,7 @@ type Scheduler struct {
 	mu       sync.Mutex
 	inflight map[string]JobStatus
 	minted   []Worker // workers minted this run, for the settle/retire seal
+	ordinal  int      // monotonic worker-ordinal counter (unique FQDNs across concurrent spawns)
 }
 
 // NewScheduler builds a scheduler.
@@ -84,11 +85,15 @@ func (s *Scheduler) Fan(ctx context.Context, run RunState, tasks []Task, role Ro
 	sem := make(chan struct{}, width)
 	var wg sync.WaitGroup
 
+	var canceled error
 	for i := range tasks {
 		select {
 		case <-ctx.Done():
-			return results, ctx.Err()
+			canceled = ctx.Err()
 		case sem <- struct{}{}:
+		}
+		if canceled != nil {
+			break
 		}
 		wg.Add(1)
 		go func(idx int) {
@@ -97,8 +102,10 @@ func (s *Scheduler) Fan(ctx context.Context, run RunState, tasks []Task, role Ro
 			results[idx] = s.runOne(ctx, run, tasks[idx], role, class, sessionLabels)
 		}(i)
 	}
+	// Always wait for in-flight workers before returning — returning while a
+	// spawned goroutine still writes results[idx] would be a data race.
 	wg.Wait()
-	return results, nil
+	return results, canceled
 }
 
 // runOne governs the spawn, mints the worker identity, builds its sandbox, runs
@@ -195,10 +202,16 @@ func (s *Scheduler) runSubprocessJob(ctx context.Context, run RunState, task Tas
 	return res
 }
 
+// nextOrdinal reserves a unique, monotonic worker ordinal. It must NOT derive
+// from len(minted): minted is appended only after a worker finishes, so
+// concurrent spawns would otherwise read the same length and mint colliding
+// FQDNs.
 func (s *Scheduler) nextOrdinal() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return len(s.minted)
+	n := s.ordinal
+	s.ordinal++
+	return n
 }
 
 func (s *Scheduler) recordWorker(w Worker) {

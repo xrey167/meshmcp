@@ -33,13 +33,20 @@ func NewIntentGate(reg *provider.Registry, table CategoryTable) *IntentGate {
 	return &IntentGate{reg: reg, table: table}
 }
 
-// magicWords maps a keyword to a mode override (omo/OMC "magic words").
-var magicWords = map[string]Mode{
-	"ultrawork":  ModeUltrawork,
-	"ulw":        ModeUltrawork,
-	"autopilot":  ModeAutopilot,
-	"ralph":      ModeRalph,
-	"synthesize": ModeSynthesize,
+// magicWords maps a keyword to a mode override (omo/OMC "magic words"). It is an
+// ordered list, not a map, so a goal that contains several magic words resolves
+// deterministically: the FIRST match in this precedence wins (a map range would
+// pick a nondeterministic winner and make the classification unreproducible —
+// which would in turn desync the audited intent decision across replays).
+var magicWords = []struct {
+	Word string
+	Mode Mode
+}{
+	{"ultrawork", ModeUltrawork},
+	{"ulw", ModeUltrawork},
+	{"autopilot", ModeAutopilot},
+	{"ralph", ModeRalph},
+	{"synthesize", ModeSynthesize},
 }
 
 // Classify returns the intent for goal. hintCat and hintMode, when non-empty,
@@ -49,10 +56,13 @@ func (g *IntentGate) Classify(ctx context.Context, goal string, hintCat Category
 	lc := strings.ToLower(goal)
 	in := Intent{Category: hintCat, Mode: hintMode, Risk: "low"}
 
-	// 1. Keyword pass — magic words and effort raisers.
-	for w, m := range magicWords {
-		if containsWord(lc, w) {
-			in.Mode = m
+	// 1. Keyword pass — magic words and effort raisers. First match in the fixed
+	// precedence wins, so the result is deterministic regardless of how many
+	// magic words the goal contains.
+	for _, mw := range magicWords {
+		if containsWord(lc, mw.Word) {
+			in.Mode = mw.Mode
+			break
 		}
 	}
 	if containsWord(lc, "ultrathink") || containsWord(lc, "think") {

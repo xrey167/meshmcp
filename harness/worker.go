@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/xrey167/meshmcp/harness/provider"
 	"github.com/xrey167/meshmcp/harness/sandbox"
@@ -83,7 +84,13 @@ func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	return s[:n] + "…"
+	// Back up to a UTF-8 rune boundary so a multi-byte rune is never split
+	// (which would emit an invalid-UTF-8 replacement character).
+	cut := n
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
 }
 
 func shortHash(s string) string {

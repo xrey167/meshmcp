@@ -1,10 +1,35 @@
 package harness
 
 import (
+	"path"
 	"sort"
 
 	"github.com/xrey167/meshmcp/policy"
 )
+
+// egressTools are the tool names that perform network egress. When a session is
+// tainted (has ingested untrusted data), a role's compiled policy blocks the
+// egress tools it would otherwise allow — prompt-injection defense at the
+// network layer (the taint-guard rule in CompilePolicy).
+var egressTools = []string{"synthesize", "browser", "search", "websearch", "context7", "grep_app"}
+
+// roleEgressTools returns the egress tools a role's allowlist permits (by glob).
+func roleEgressTools(allow []string) []string {
+	var out []string
+	for _, e := range egressTools {
+		for _, g := range allow {
+			if g == "*" || g == e {
+				out = append(out, e)
+				break
+			}
+			if ok, _ := path.Match(g, e); ok {
+				out = append(out, e)
+				break
+			}
+		}
+	}
+	return out
+}
 
 // Role is a canonical capability role. It is the union of the source harnesses'
 // role agents (Sisyphus, Prometheus, Atlas, Oracle, Librarian, Explore, Metis,
@@ -75,14 +100,16 @@ var canonicalRoles = map[Role]RoleSpec{
 		Summary:    "interviews and produces a plan; read-only over code",
 	},
 	RolePreAnalyst: {
-		Role:       RolePreAnalyst,
-		AllowTools: []string{"grep", "glob", "lsp_*", "ast_grep_search", "plan_review", "session_read", "code.read", "plan.read"},
+		Role: RolePreAnalyst,
+		// Read-only LSP tools ONLY — NOT the "lsp_*" glob, which would also match
+		// the code.write lsp_rename and break the read-only invariant.
+		AllowTools: []string{"grep", "glob", "lsp_diagnostics", "lsp_goto_definition", "lsp_find_references", "lsp_symbols", "lsp_prepare_rename", "ast_grep_search", "plan_review", "session_read", "code.read", "plan.read"},
 		ReadOnly:   true,
 		Summary:    "finds gaps and ambiguities in a plan",
 	},
 	RolePlanReviewer: {
 		Role:       RolePlanReviewer,
-		AllowTools: []string{"grep", "glob", "lsp_*", "ast_grep_search", "plan_review", "code.read", "plan.read"},
+		AllowTools: []string{"grep", "glob", "lsp_diagnostics", "lsp_goto_definition", "lsp_find_references", "lsp_symbols", "lsp_prepare_rename", "ast_grep_search", "plan_review", "code.read", "plan.read"},
 		ReadOnly:   true,
 		Summary:    "validates a plan; emits pass/revise",
 	},
@@ -175,6 +202,19 @@ func CompilePolicy(overrides map[Role]RoleSpec) *policy.Policy {
 				Allow:         true,
 				RequireCosign: true,
 				EmitLabels:    s.EmitLabels,
+			})
+		}
+		// Taint guard: block this role's egress tools when the session is tainted.
+		// Placed BEFORE the general allow rule so a tainted session is denied
+		// (BlockLabels), while an untainted session is still allowed. Only covers
+		// egress tools the role already permits, so it never widens access.
+		if eg := roleEgressTools(s.AllowTools); len(eg) > 0 {
+			pol.Rules = append(pol.Rules, policy.Rule{
+				Peers:       []string{peer},
+				Tools:       eg,
+				Allow:       true,
+				BlockLabels: []string{LabelTainted},
+				EmitLabels:  s.EmitLabels,
 			})
 		}
 		if len(s.AllowTools) > 0 {

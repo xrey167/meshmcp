@@ -60,7 +60,9 @@ func stagesFor(m Mode) []Stage {
 	case ModePlanOnly:
 		return []Stage{StageIntake, StageInterview, StagePlan, StagePlanReview, StageSettle}
 	case ModeSynthesize:
-		return []Stage{StageIntake, StageExecute, StageVerify, StageSettle}
+		// approve is included so a high-risk synthesize (cross-provider egress)
+		// still passes the human co-sign gate before executing.
+		return []Stage{StageIntake, StageApprove, StageExecute, StageVerify, StageSettle}
 	case ModeAutopilot, ModeRalph, ModeUltrawork, ModeTeam:
 		return pipelineOrder
 	default:
