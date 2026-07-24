@@ -99,7 +99,7 @@ conversation* (satisfy it at the beacon), while the trust core is a property of
   TLS to                             holds *.beacon.meshmcp.io        dials OUT ─────────────┐
   g-ID.beacon.meshmcp.io  ──TLS──►   cert; maps subdomain g-ID  ◄═════ persistent reverse    │
                                      to this gateway's tunnel         tunnel (mTLS/Noise,     │
-                                     │                                yamux; 1 stream/req)    │
+                                     │                                HTTP/2; 1 stream/req)   │
                                      │  forwards raw HTTP request ═════════════════════►      │
                                      │                                each stream = net.Conn  │
                                      │                                served by the UNCHANGED  │
@@ -193,14 +193,21 @@ This is a **new mode of `meshmcp edge`, not a replacement.**
 - `beacon/` (or a `meshmcp beacon` subcommand): the public relay — wildcard-cert
   TLS front (certmagic), a subdomain→tunnel registry, and the accept side of the
   reverse tunnel. Small; policy-blind by construction.
-- A reverse-tunnel transport shared by gateway and beacon (mTLS/Noise + yamux),
-  reusing the embedded WireGuard outbound-dial primitives.
+- A reverse-tunnel transport shared by gateway and beacon (mTLS/Noise, multiplexed
+  with **HTTP/2 over the single connection — no new mux dependency**, since
+  `golang.org/x/net` is already in the module graph; `yamux`/`smux` are optional
+  alternatives), reusing the embedded WireGuard outbound-dial pattern.
 - `edge --beacon`: dial the beacon, register the gateway's subdomain, expose each
   tunnelled stream to the **existing** `edge.Server.Handler()`.
 
-**Reused unchanged:** the entire `edge/` trust core (`Handler`, `authenticate`,
-`enforceToolCall`, `mintTokenSet`), the capability verifier, the policy engine, the
-fail-closed audit ledger, and the WireGuard backend dial.
+**Reused unchanged / already in the binary (verified):** the entire `edge/` trust
+core (`Handler`, `authenticate`, `enforceToolCall`, `mintTokenSet`), the capability
+verifier, the policy engine, the fail-closed audit ledger; **`certmagic v0.21.3`**
+for the beacon's wildcard cert and **`golang.org/x/net` (HTTP/2)** for tunnel
+multiplexing — both already dependencies; and the proven outbound-dial pattern
+(`client.Dial` + `BlockInbound`, used today in `edge.go`, `air.go`, `agent.go`).
+So the only genuinely new code is the beacon relay + the tunnel wiring; the trust
+core and both heavy libraries already ship.
 
 **Phasing**
 1. **MVP:** `edge --tunnel` (loopback bind behind an existing tunnel provider) —
