@@ -22,8 +22,8 @@ func (s *Server) challengeName(label string) string {
 // challenge (or publish arbitrary records in the zone).
 func (s *Server) setTXT(gw *gwConn, name, value string) {
 	want := s.challengeName(gw.label)
-	if value == "" || !dnsEqual(name, want) {
-		s.logf("beacon: rejected TXT-SET %q from %s (only %q is allowed)", name, gw.label, want)
+	if value == "" || len(value) > maxTXTValueLen || !dnsEqual(name, want) {
+		s.logf("beacon: rejected TXT-SET %q from %s (only %q, <=%d bytes, is allowed)", name, gw.label, want, maxTXTValueLen)
 		return
 	}
 	s.mu.Lock()

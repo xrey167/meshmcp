@@ -15,9 +15,13 @@ import (
 	"time"
 )
 
-// DialFunc opens a connection to the beacon. Production passes the mesh dialer
-// (client.Dial over WireGuard, BlockInbound=true); tests pass net.Dial. The
-// gateway makes ONLY outbound dials — it never listens.
+// DialFunc opens a connection to the beacon. The gateway makes ONLY outbound
+// dials — it never listens. The client's TLS is end-to-end to the gateway (the
+// beacon splices ciphertext), but the control-protocol frames themselves travel
+// on this connection: today the edge wiring dials the public beacon over plain
+// TCP, so an on-path attacker could observe/race control frames. Pinning the
+// beacon's identity (TLS-wrapping the control channel) is a documented follow-up;
+// callers may also pass a mesh dialer here.
 type DialFunc func(ctx context.Context, addr string) (net.Conn, error)
 
 // Identity is the gateway key used to authenticate registration. The gateway
@@ -55,6 +59,17 @@ const (
 	// publish, so a malicious gateway cannot flood the TXT store (ACME DNS-01
 	// needs at most a couple at once).
 	maxTXTPerGateway = 8
+	// maxTXTValueLen bounds a single TXT value (a DNS string is 255 bytes max);
+	// a longer value is rejected rather than producing a malformed DNS answer.
+	maxTXTValueLen = 255
+	// maxGateways caps concurrently-registered gateways, so an attacker that can
+	// pass proof-of-possession (with fresh keys) cannot exhaust memory by binding
+	// unbounded labels.
+	maxGateways = 65536
+	// maxConnsPerListener bounds concurrent connections accepted on each listener,
+	// shedding load past the cap so a connection flood cannot exhaust goroutines
+	// or file descriptors. A coarse backstop; per-IP rate limiting is a follow-up.
+	maxConnsPerListener = 8192
 )
 
 // ---------------------------------------------------------------------------
@@ -131,8 +146,10 @@ func (s *Server) Run(ctx context.Context, publicLn, controlLn net.Listener) erro
 		controlLn.Close()
 	}()
 	errCh := make(chan error, 2)
-	go func() { errCh <- s.acceptLoop(controlLn, s.handleTunnelConn) }()
-	go func() { errCh <- s.acceptLoop(publicLn, s.handlePublicConn) }()
+	// Separate concurrency budgets per listener so a flood on one cannot starve
+	// the other (a public-conn flood must not block gateway registration).
+	go func() { errCh <- s.acceptLoop(controlLn, make(chan struct{}, maxConnsPerListener), s.handleTunnelConn) }()
+	go func() { errCh <- s.acceptLoop(publicLn, make(chan struct{}, maxConnsPerListener), s.handlePublicConn) }()
 	err := <-errCh
 	publicLn.Close()
 	controlLn.Close()
@@ -142,11 +159,19 @@ func (s *Server) Run(ctx context.Context, publicLn, controlLn net.Listener) erro
 	return err
 }
 
-func (s *Server) acceptLoop(ln net.Listener, handle func(net.Conn)) error {
+func (s *Server) acceptLoop(ln net.Listener, sem chan struct{}, handle func(net.Conn)) error {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			return err
+		}
+		// Shed load past the per-listener concurrency cap rather than spawning an
+		// unbounded number of connection goroutines under a flood.
+		select {
+		case sem <- struct{}{}:
+		default:
+			conn.Close()
+			continue
 		}
 		// Keepalive so a dead peer (no FIN) is eventually detected and torn down,
 		// rather than leaking a spliced or control connection indefinitely.
@@ -154,7 +179,10 @@ func (s *Server) acceptLoop(ln net.Listener, handle func(net.Conn)) error {
 			_ = tc.SetKeepAlive(true)
 			_ = tc.SetKeepAlivePeriod(60 * time.Second)
 		}
-		go handle(conn)
+		go func() {
+			defer func() { <-sem }()
+			handle(conn)
+		}()
 	}
 }
 
@@ -218,8 +246,15 @@ func (s *Server) handleRegister(conn net.Conn, b64Key string) {
 	gw := &gwConn{label: label, control: conn}
 
 	s.mu.Lock()
-	if old := s.gateways[label]; old != nil {
-		old.control.Close() // last registration wins; drop the stale tunnel
+	old := s.gateways[label]
+	if old == nil && len(s.gateways) >= maxGateways {
+		s.mu.Unlock()
+		fmt.Fprintf(conn, "ERR at capacity\n")
+		conn.Close()
+		return
+	}
+	if old != nil {
+		old.control.Close() // last registration (same key) wins; drop the stale tunnel
 	}
 	s.gateways[label] = gw
 	s.mu.Unlock()
