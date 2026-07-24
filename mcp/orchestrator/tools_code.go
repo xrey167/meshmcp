@@ -41,17 +41,40 @@ func (s *Server) registerCode() {
 		}, "file", "old", "new"),
 		Handler: s.toolEdit,
 	})
-	// LSP / AST / vision tools: registered and governed; their live backends
-	// (a language server, an ast-grep binary, a vision model) are Phase-2 wiring.
+	// Real code-intelligence backends (see tools_code_go.go): lsp_symbols and
+	// lsp_diagnostics via go/parser; ast_grep_* via the ast-grep binary
+	// (fail-closed when absent).
+	s.mcp.AddTool(mcp.Tool{
+		Name:        "lsp_symbols",
+		Description: "File outline: top-level declarations (func/method/type/var/const) of a Go source file. (code.read)",
+		InputSchema: obj(map[string]any{"file": str("Go source file")}, "file"),
+		Handler:     s.toolLspSymbols,
+	})
+	s.mcp.AddTool(mcp.Tool{
+		Name:        "lsp_diagnostics",
+		Description: "Syntax diagnostics for a Go file or a directory of Go files (parse errors with position). (code.read)",
+		InputSchema: obj(map[string]any{"file": str("Go file or workspace directory")}, "file"),
+		Handler:     s.toolLspDiagnostics,
+	})
+	s.mcp.AddTool(mcp.Tool{
+		Name:        "ast_grep_search",
+		Description: "AST-aware structural search via ast-grep (25 langs). (code.read)",
+		InputSchema: obj(map[string]any{"pattern": str("ast-grep pattern"), "lang": str("language, e.g. go"), "path": str("root path (default .)")}, "pattern"),
+		Handler:     s.toolAstGrepSearch,
+	})
+	s.mcp.AddTool(mcp.Tool{
+		Name:        "ast_grep_replace",
+		Description: "AST-aware structural rewrite via ast-grep. (code.write)",
+		InputSchema: obj(map[string]any{"pattern": str("ast-grep pattern"), "rewrite": str("rewrite template"), "lang": str("language"), "path": str("root path (default .)")}, "pattern", "rewrite"),
+		Handler:     s.toolAstGrepReplace,
+	})
+	// Remaining lsp_* + look_at: registered and governed; their live backends
+	// (a language server, a vision model) are Phase-2 wiring.
 	for _, t := range []struct{ name, desc, label string }{
-		{"lsp_diagnostics", "Errors/warnings for a file or workspace.", "code.read"},
 		{"lsp_prepare_rename", "Validate a rename at a position.", "code.read"},
 		{"lsp_rename", "Workspace-wide rename.", "code.write"},
 		{"lsp_goto_definition", "Jump to a symbol's definition.", "code.read"},
 		{"lsp_find_references", "All usages of a symbol.", "code.read"},
-		{"lsp_symbols", "File outline / workspace symbol search.", "code.read"},
-		{"ast_grep_search", "AST-aware structural search (25 langs).", "code.read"},
-		{"ast_grep_replace", "AST-aware structural rewrite.", "code.write"},
 		{"look_at", "Extract info from an image/PDF/diagram (Looker).", "media.read"},
 	} {
 		name, desc := t.name, t.desc
@@ -59,9 +82,8 @@ func (s *Server) registerCode() {
 			Name:        name,
 			Description: desc + " (governed; live backend wired in Phase 2)",
 			InputSchema: obj(map[string]any{
-				"file":    str("target file"),
-				"pattern": str("pattern (for search/replace tools)"),
-				"pos":     str("position line:col (for lsp tools)"),
+				"file": str("target file"),
+				"pos":  str("position line:col (for lsp tools)"),
 			}),
 			Handler: s.pendingBackend(name),
 		})
