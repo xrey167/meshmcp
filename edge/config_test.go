@@ -149,6 +149,9 @@ func TestConfigValidateRejections(t *testing.T) {
 			c.Backend.Name = "docs"
 			c.Backend.Payment = PaymentConfig{Enabled: true, Asset: "USDC", PayTo: "0xS", Salt: "docs", Prices: map[string]string{"search_docs": "1"}}
 		}, "salt must not equal the backend name"},
+		{"payment single_use_store not postgres", func(c *Config) {
+			c.Backend.Payment = PaymentConfig{Enabled: true, Asset: "USDC", PayTo: "0xS", SingleUseStore: "/var/lib/x", Prices: map[string]string{"search_docs": "1"}}
+		}, "single_use_store must be a postgres"},
 		{"payment bad glob", func(c *Config) {
 			c.Backend.Payment = PaymentConfig{Enabled: true, Asset: "USDC", PayTo: "0xS", Prices: map[string]string{"[bad": "1"}}
 		}, "bad tool glob"},

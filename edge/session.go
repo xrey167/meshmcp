@@ -135,6 +135,33 @@ func (t *sessionTable) deleteClient(clientID string) int {
 	return len(victims)
 }
 
+// reap closes and removes every session idle (no request) for longer than ttl,
+// freeing its backend bridge and its per-client slot. Returns the count reaped.
+// A restart-safe, bounded alternative to relying on explicit DELETE — a client
+// that abandons a session (or hit its cap and vanished) no longer pins a bridge
+// forever. ttl <= 0 disables reaping.
+func (t *sessionTable) reap(ttl time.Duration) int {
+	if ttl <= 0 {
+		return 0
+	}
+	cutoff := t.now().Add(-ttl)
+	t.mu.Lock()
+	var victims []*mcpSession
+	// lastSeen is written under t.mu (create/get), so read it under t.mu too.
+	for id, s := range t.byID {
+		if s.lastSeen.Before(cutoff) {
+			victims = append(victims, s)
+			delete(t.byID, id)
+		}
+	}
+	t.mu.Unlock()
+	for _, s := range victims {
+		s.detachStream()
+		s.bridge.close()
+	}
+	return len(victims)
+}
+
 // attachStream opens the session's single SSE channel and routes backend
 // notifications onto it. A second GET replaces the first (spec MAY).
 func (s *mcpSession) attachStream(buf int) chan sseEvent {

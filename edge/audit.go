@@ -86,8 +86,11 @@ func seedEdgeAudit(path string) (seq int, lastHash string, err error) {
 // without this, every previously-settled payment would be replayable after a
 // restart. It runs only when payment is enabled, and only AFTER the ledger has
 // been opened (which already refuses to continue an unverifiable log), so it
-// reads a chain that was validated. A missing/empty log yields an empty set.
-func seedRedeemedRefs(path string, enabled bool) (map[string]struct{}, error) {
+// reads a chain that was validated. Only records written under the CURRENT salt
+// (matching saltID) are loaded — refs under a rotated-away salt hash differently
+// and can never match a current-salt redemption. A missing/empty log yields an
+// empty set.
+func seedRedeemedRefs(path string, enabled bool, saltID string) (map[string]struct{}, error) {
 	seed := map[string]struct{}{}
 	if !enabled || path == "" {
 		return seed, nil
@@ -107,9 +110,17 @@ func seedRedeemedRefs(path string, enabled bool) (map[string]struct{}, error) {
 		if err := json.Unmarshal(line, &rec); err != nil {
 			continue // a torn trailing record; the ledger seed already handled integrity
 		}
-		if rec.Method == "x402/settle" && rec.Payment != nil && rec.Payment.PaymentRef != "" {
-			seed[rec.Payment.PaymentRef] = struct{}{}
+		if rec.Method != "x402/settle" || rec.Payment == nil || rec.Payment.PaymentRef == "" {
+			continue
 		}
+		// A record whose SaltID differs from the current salt was written under a
+		// rotated-away salt; its payment_ref can never collide with a current-salt
+		// redemption, so loading it is pointless. Records predating salt_id
+		// (empty) are loaded (best effort — same as before the field existed).
+		if rec.Payment.SaltID != "" && saltID != "" && rec.Payment.SaltID != saltID {
+			continue
+		}
+		seed[rec.Payment.PaymentRef] = struct{}{}
 	}
 	return seed, nil
 }

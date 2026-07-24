@@ -46,4 +46,14 @@ const (
 	done   BOOLEAN NOT NULL DEFAULT FALSE,
 	result BYTEA
 )`
+
+	// Payment single-use references (x402): the primary-key insert is the atomic
+	// single-use claim — the first redemption of a settlement wins, a replay
+	// conflicts and is denied. Shared across edge instances so one settled payment
+	// authorizes exactly one call fleet-wide. Rows expire at expiry (a payment's
+	// on-chain authorization is dead by then), bounding retention.
+	ddlPaymentRefs = `CREATE TABLE IF NOT EXISTS %s (
+	refhash TEXT PRIMARY KEY,
+	expiry  TIMESTAMPTZ NOT NULL
+)`
 )

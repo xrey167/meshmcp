@@ -91,21 +91,28 @@ type PaymentVerifier interface {
 	VerifyPayment(ctx context.Context, req PaymentRequirements, payment []byte) (Settlement, error)
 }
 
+// PaymentReplayStore enforces single-use of settlement references. Redeem claims
+// refHash for single use, returning firstUse=true only on the first redemption;
+// a replay returns (false, nil). err != nil means the store could NOT decide
+// (e.g. a shared database is unreachable, or the in-process store is at
+// capacity) and the caller MUST fail closed. expiry bounds retention (a
+// payment's on-chain authorization is dead by then). The default is in-process
+// (single instance); production behind multiple instances injects a shared,
+// persistent store (edge.Options.PaymentReplay) so one settled payment
+// authorizes exactly one call fleet-wide — mirroring the DPoP replay store.
+type PaymentReplayStore interface {
+	Redeem(refHash string, expiry, now time.Time) (firstUse bool, err error)
+}
+
 // paymentGate is the resolved payment policy for the edge's single backend. A
 // nil *paymentGate means payment is disabled and every tool is free.
 type paymentGate struct {
-	cfg      PaymentConfig
-	verifier PaymentVerifier
-	salt     string
-
-	// consumed enforces single-use: a settlement reference is redeemable exactly
-	// once, so one settled payment authorizes exactly one call (a replayed
-	// X-PAYMENT is denied regardless of whether the verifier is idempotent). It
-	// is an in-process store (bounded to this edge instance and its lifetime); a
-	// shared/persistent, size-bounded store is the HA hardening, mirroring the
-	// DPoP replay store.
-	mu       sync.Mutex
-	consumed map[string]struct{}
+	cfg       PaymentConfig
+	verifier  PaymentVerifier
+	salt      string
+	store     PaymentReplayStore
+	retention time.Duration
+	now       func() time.Time
 }
 
 // newPaymentGate builds the gate, or returns (nil, nil) when payment is
@@ -114,9 +121,8 @@ type paymentGate struct {
 // verifier. Enabling payment with neither is a fail-closed construction error,
 // never a silent downgrade to a verifier that accepts unsettled payments
 // (mirrors the DPoP replay-store and signing-key precedents). salt is the
-// resolved SECRET for evidence hashing (see resolvePaymentSalt); seed preloads
-// the single-use set from durable state (see reseed on restart).
-func newPaymentGate(cfg PaymentConfig, salt string, v PaymentVerifier, seed map[string]struct{}) (*paymentGate, error) {
+// resolved SECRET for evidence hashing; store enforces single-use.
+func newPaymentGate(cfg PaymentConfig, salt string, v PaymentVerifier, store PaymentReplayStore, retention time.Duration, now func() time.Time) (*paymentGate, error) {
 	if !cfg.Enabled {
 		return nil, nil
 	}
@@ -129,20 +135,71 @@ func newPaymentGate(cfg PaymentConfig, salt string, v PaymentVerifier, seed map[
 	if salt == "" {
 		return nil, fmt.Errorf("edge: payment salt resolved empty (internal) — refusing to hash evidence with no secret")
 	}
-	consumed := map[string]struct{}{}
-	for k := range seed {
-		consumed[k] = struct{}{}
+	if store == nil {
+		return nil, fmt.Errorf("edge: payment enabled but no single-use store (internal)")
 	}
-	return &paymentGate{cfg: cfg, verifier: v, salt: salt, consumed: consumed}, nil
+	return &paymentGate{cfg: cfg, verifier: v, salt: salt, store: store, retention: retention, now: now}, nil
 }
 
+// redeemRef claims a settlement reference for single use via the configured
+// store, stamping the retention-bounded expiry.
+func (g *paymentGate) redeemRef(refHash string) (firstUse bool, err error) {
+	now := g.now()
+	return g.store.Redeem(refHash, now.Add(g.retention), now)
+}
+
+// defaultPaymentRetention is how long a redeemed settlement reference is
+// remembered when payment.retention is unset. It must exceed any realistic
+// payment validity window; past it, the on-chain authorization is already dead,
+// so eviction cannot re-open a replayable payment.
+const defaultPaymentRetention = 24 * time.Hour
+
 // maxConsumedRefs bounds the in-process single-use set so a long-running or
-// attacked edge cannot grow it without limit. On overflow the gate fails closed
-// (denies new payments) rather than evicting a reference that would then be
-// replayable — an operator hitting this must front the edge with a shared,
-// size-bounded store (see docs/spec/PAYMENT-EVIDENCE.md). Sized generously so it
-// is reached only by genuinely high volume.
+// attacked edge cannot grow it without limit. On overflow the store fails closed
+// (denies new payments) rather than evicting a still-replayable reference — an
+// operator hitting this must front the edge with a shared store.
 const maxConsumedRefs = 1 << 20
+
+// errPaymentStoreFull is returned by the in-process store at capacity, so the
+// gate fails closed instead of evicting a still-replayable reference.
+var errPaymentStoreFull = fmt.Errorf("payment single-use store at capacity")
+
+// memPaymentStore is the default in-process PaymentReplayStore: TTL-evicting
+// (like MemNonceStore) and size-bounded (fails closed on overflow). It is seeded
+// from the audit chain on startup so single-instance restart stays airtight; it
+// is NOT shared across instances (that is the injected store's job).
+type memPaymentStore struct {
+	mu   sync.Mutex
+	seen map[string]time.Time // refHash -> expiry
+}
+
+// newMemPaymentStore builds the in-process store, preloading seed refs with the
+// given expiry (a restart reseed from the audit chain).
+func newMemPaymentStore(seed map[string]struct{}, expiry time.Time) *memPaymentStore {
+	m := &memPaymentStore{seen: make(map[string]time.Time, len(seed))}
+	for k := range seed {
+		m.seen[k] = expiry
+	}
+	return m
+}
+
+func (m *memPaymentStore) Redeem(refHash string, expiry, now time.Time) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for k, e := range m.seen { // opportunistic TTL eviction, like MemNonceStore
+		if now.After(e) {
+			delete(m.seen, k)
+		}
+	}
+	if _, used := m.seen[refHash]; used {
+		return false, nil
+	}
+	if len(m.seen) >= maxConsumedRefs {
+		return false, errPaymentStoreFull
+	}
+	m.seen[refHash] = expiry
+	return true, nil
+}
 
 // resolvePaymentSalt resolves the SECRET salt for evidence hashing. Precedence:
 // an explicit inline Salt, then SaltEnv, then SaltFile, then a generated 32-byte
@@ -190,25 +247,6 @@ func resolvePaymentSalt(cfg PaymentConfig, stateDir string) (string, error) {
 		return "", fmt.Errorf("edge: persist payment salt %s: %w", path, err)
 	}
 	return salt, nil
-}
-
-// redeem atomically claims a settlement reference for single use. refHash is the
-// SALTED payment_ref hash (equal to the value persisted in the audit evidence),
-// so the in-memory set is comparable to what a restart reseeds from disk. It
-// returns firstUse=true only on the first redemption; a replay returns
-// (false,false); reaching the capacity bound returns (false,true) so the caller
-// fails closed rather than evicting a still-replayable reference.
-func (g *paymentGate) redeem(refHash string) (firstUse, full bool) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if _, used := g.consumed[refHash]; used {
-		return false, false
-	}
-	if len(g.consumed) >= maxConsumedRefs {
-		return false, true
-	}
-	g.consumed[refHash] = struct{}{}
-	return true, false
 }
 
 // priceFor returns the price for a tool and whether it is priced. Overlapping
@@ -341,10 +379,14 @@ func (s *Server) gatePayment(w http.ResponseWriter, r *http.Request, au authed, 
 	// rather than evicting a still-replayable reference. Redeeming BEFORE
 	// forwarding is airtight against concurrent replay; a backend failure after
 	// redemption spends the payment (a compensating record is written by caller).
-	firstUse, full := g.redeem(ev.PaymentRef)
-	if full {
-		_ = s.auditPayment(au.clientID, class.Tool, class.ID, "x402/require", "deny", "single-use store at capacity", nil)
-		s.writeJSONRPC(w, jsonRPCErrorResponse(class.ID, -32002, "tool blocked: payment single-use store at capacity (fail-closed); front the edge with a shared payment store"))
+	firstUse, rerr := g.redeemRef(ev.PaymentRef)
+	if rerr != nil {
+		// The single-use store could not decide (shared DB unreachable, or the
+		// in-process store at capacity). Fail closed — never forward a payment we
+		// cannot prove is first-use.
+		log.Printf("edge: payment single-use store unavailable for %s tool %q: %v", oauthIdentity(au.clientID), class.Tool, rerr)
+		_ = s.auditPayment(au.clientID, class.Tool, class.ID, "x402/require", "deny", "payment single-use store unavailable", nil)
+		s.writeJSONRPC(w, jsonRPCErrorResponse(class.ID, -32002, "tool blocked: payment single-use store unavailable (fail-closed); retry shortly"))
 		return false, nil
 	}
 	if !firstUse {

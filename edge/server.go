@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -66,6 +67,13 @@ type Options struct {
 	// no on-chain settlement — see devPaymentVerifier). Ignored when payment is
 	// disabled.
 	PaymentVerifier PaymentVerifier
+	// PaymentReplay backs the payment single-use store. Production behind multiple
+	// edge instances injects a shared, persistent store (e.g. pgstore-backed) so
+	// one settled payment authorizes exactly one call fleet-wide; nil selects the
+	// in-process store (single-instance semantics). A configured
+	// backend.payment.single_use_store that is not supplied here is a construction
+	// error (fail closed), never a silent per-instance downgrade.
+	PaymentReplay PaymentReplayStore
 	// DPoPReplay backs the edge's DPoP verifier. Production wiring (cmd/meshmcp)
 	// injects the shared PostgreSQL store when oauth.dpop_replay_store is set;
 	// nil selects the in-process store — but ONLY when no shared store is
@@ -163,11 +171,27 @@ func New(cfg Config, opts Options) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	paySeed, err := seedRedeemedRefs(cfg.AuditLog, cfg.Backend.Payment.Enabled)
+	paySeed, err := seedRedeemedRefs(cfg.AuditLog, cfg.Backend.Payment.Enabled, policy.SaltID(paySalt))
 	if err != nil {
 		return nil, err
 	}
-	payGate, err := newPaymentGate(cfg.Backend.Payment, paySalt, opts.PaymentVerifier, paySeed)
+	// Resolve the single-use store: an injected shared store, else fail closed if
+	// one is configured-but-unsupplied (DPoP precedent), else the in-process store
+	// reseeded from the audit chain.
+	payRetention := cfg.Backend.Payment.Retention.Std()
+	if payRetention <= 0 {
+		payRetention = defaultPaymentRetention
+	}
+	var payStore PaymentReplayStore
+	switch {
+	case opts.PaymentReplay != nil:
+		payStore = opts.PaymentReplay
+	case cfg.Backend.Payment.SingleUseStore != "":
+		return nil, fmt.Errorf("edge: backend.payment.single_use_store is configured but no store was supplied at construction (cmd/meshmcp wires it via pgstore.Open)")
+	case cfg.Backend.Payment.Enabled:
+		payStore = newMemPaymentStore(paySeed, now().Add(payRetention))
+	}
+	payGate, err := newPaymentGate(cfg.Backend.Payment, paySalt, opts.PaymentVerifier, payStore, payRetention, now)
 	if err != nil {
 		return nil, err
 	}
@@ -314,6 +338,29 @@ func (s *Server) httpServer(tlsConf *tls.Config) *http.Server {
 	}
 }
 
+// reapSessions periodically evicts idle sessions until ctx is cancelled. The
+// idle TTL is 3× the access-token lifetime (bounded below so a tiny configured
+// TTL still leaves a sane sweep), and the sweep runs at a fraction of that.
+func (s *Server) reapSessions(ctx context.Context) {
+	idleTTL := 3 * s.cfg.OAuth.AccessTokenTTL.Std()
+	if idleTTL < 15*time.Minute {
+		idleTTL = 15 * time.Minute
+	}
+	interval := idleTTL / 3
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if n := s.sessions.reap(idleTTL); n > 0 {
+				log.Printf("edge: reaped %d idle session(s)", n)
+			}
+		}
+	}
+}
+
 // Run builds the TLS config (fatal on cert error), starts any ACME challenge
 // listener, and serves until ctx is cancelled, then shuts down gracefully. It
 // blocks. TLS certificates are already loaded/obtained before Serve begins, so
@@ -338,6 +385,12 @@ func (s *Server) Run(ctx context.Context) error {
 		// tell ServeTLS to use it.
 		errCh <- srv.ServeTLS(ln, "", "")
 	}()
+
+	// Reap idle sessions so an abandoned session cannot pin a backend bridge (or
+	// a per-client slot) indefinitely. The idle TTL is generous (a multiple of
+	// the access-token lifetime — a session outliving its token is already useless
+	// once the SSE stream is cut).
+	go s.reapSessions(ctx)
 
 	select {
 	case <-ctx.Done():

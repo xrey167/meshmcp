@@ -363,6 +363,28 @@ func TestPaymentEnabledWithoutVerifierFailsClosed(t *testing.T) {
 	}
 }
 
+// A configured shared single-use store that is not supplied at construction is
+// a fail-closed error — never a silent per-instance downgrade (DPoP precedent).
+func TestSingleUseStoreConfiguredButUnsuppliedFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	cfg := validConfig()
+	cfg.StateDir = dir
+	cfg.AuditLog = dir + "/audit.jsonl"
+	cfg.SigningKey = dir + "/key.json"
+	cfg.Backend.Payment = PaymentConfig{
+		Enabled: true, Asset: "USDC", PayTo: "0xS", DevInsecureVerifier: true,
+		SingleUseStore: "postgres://user@db/x", Prices: map[string]string{"search_*": "1000"},
+	}
+	_, err := New(cfg, Options{
+		Now: func() time.Time { return time.Now() }, Signer: mustSigner(t),
+		AuditWriter: &discardWriter{}, DialBackend: startBackend(t),
+		// no PaymentReplay supplied
+	})
+	if err == nil || !strings.Contains(err.Error(), "single_use_store is configured but no store was supplied") {
+		t.Fatalf("configured-but-unsupplied store must fail closed, got: %v", err)
+	}
+}
+
 // End-to-end proof that the free dry-run route never reaches the backend, while
 // a paid call does — using a backend that counts invocations.
 func TestDryRunDoesNotInvokeBackendButPaidDoes(t *testing.T) {
@@ -613,7 +635,7 @@ func TestSeedRedeemedRefsCollectsSettleRefs(t *testing.T) {
 	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	seed, err := seedRedeemedRefs(path, true)
+	seed, err := seedRedeemedRefs(path, true, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -627,7 +649,7 @@ func TestSeedRedeemedRefsCollectsSettleRefs(t *testing.T) {
 		t.Fatal("REF-B missing")
 	}
 	// Disabled payment reseeds nothing.
-	if s, _ := seedRedeemedRefs(path, false); len(s) != 0 {
+	if s, _ := seedRedeemedRefs(path, false, ""); len(s) != 0 {
 		t.Fatalf("disabled payment must not reseed, got %v", s)
 	}
 }
@@ -635,15 +657,61 @@ func TestSeedRedeemedRefsCollectsSettleRefs(t *testing.T) {
 // A gate constructed with a seed treats a seeded reference as already redeemed —
 // this is the restart-durability guarantee (single instance).
 func TestGateSeededReferenceIsReplay(t *testing.T) {
-	g, err := newPaymentGate(basicPayment(), "test-salt", devPaymentVerifier{}, map[string]struct{}{"seeded-ref": {}})
+	now := time.Now()
+	store := newMemPaymentStore(map[string]struct{}{"seeded-ref": {}}, now.Add(time.Hour))
+	g, err := newPaymentGate(basicPayment(), "test-salt", devPaymentVerifier{}, store, time.Hour, func() time.Time { return now })
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first, full := g.redeem("seeded-ref"); first || full {
-		t.Fatalf("a seeded (already-redeemed-across-restart) ref must be a replay, got first=%v full=%v", first, full)
+	if first, err := g.redeemRef("seeded-ref"); err != nil || first {
+		t.Fatalf("a seeded (already-redeemed-across-restart) ref must be a replay, got first=%v err=%v", first, err)
 	}
-	if first, full := g.redeem("fresh-ref"); !first || full {
-		t.Fatalf("a fresh ref must redeem, got first=%v full=%v", first, full)
+	if first, err := g.redeemRef("fresh-ref"); err != nil || !first {
+		t.Fatalf("a fresh ref must redeem, got first=%v err=%v", first, err)
+	}
+}
+
+// Two edge "instances" sharing one injected PaymentReplayStore cannot both
+// redeem the same settlement — the multi-instance double-spend that PAY-2 flags,
+// closed by the shared store.
+func TestSharedStorePreventsCrossInstanceReplay(t *testing.T) {
+	now := time.Now()
+	shared := newMemPaymentStore(nil, now)
+	mk := func() *paymentGate {
+		g, err := newPaymentGate(basicPayment(), "shared-salt", devPaymentVerifier{}, shared, time.Hour, func() time.Time { return now })
+		if err != nil {
+			t.Fatal(err)
+		}
+		return g
+	}
+	instanceA, instanceB := mk(), mk()
+	if first, err := instanceA.redeemRef("ref-1"); err != nil || !first {
+		t.Fatalf("instance A first redeem should win: first=%v err=%v", first, err)
+	}
+	if first, err := instanceB.redeemRef("ref-1"); err != nil || first {
+		t.Fatalf("instance B must see the shared redemption (no cross-instance double-spend): first=%v err=%v", first, err)
+	}
+	// A different reference still redeems on B.
+	if first, err := instanceB.redeemRef("ref-2"); err != nil || !first {
+		t.Fatalf("a fresh ref should redeem on B: first=%v err=%v", first, err)
+	}
+}
+
+// The in-process store evicts references past their retention TTL (bounding
+// memory) and fails closed at capacity (never evicting a still-redeemable ref).
+func TestMemPaymentStoreEvictsAndBoundsCapacity(t *testing.T) {
+	base := time.Now()
+	m := newMemPaymentStore(nil, base)
+	if first, err := m.Redeem("a", base.Add(time.Hour), base); err != nil || !first {
+		t.Fatalf("first redeem should succeed: %v %v", first, err)
+	}
+	if first, _ := m.Redeem("a", base.Add(time.Hour), base); first {
+		t.Fatal("replay must be denied")
+	}
+	// After the TTL, the old entry is evicted, so the SAME ref redeems again —
+	// safe because the underlying payment authorization is dead by then.
+	if first, err := m.Redeem("a", base.Add(3*time.Hour), base.Add(2*time.Hour)); err != nil || !first {
+		t.Fatalf("post-TTL redeem should succeed after eviction: %v %v", first, err)
 	}
 }
 

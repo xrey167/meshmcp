@@ -300,6 +300,18 @@ type PaymentConfig struct {
 	// SaltFile reads the salt from a file (preferred over an inline Salt). Empty
 	// when unused.
 	SaltFile string `yaml:"salt_file"`
+	// SingleUseStore is a postgres:// DSN backing a SHARED, fleet-wide single-use
+	// store for settled payments, so multiple edge instances behind one public
+	// URL cannot each redeem the same payment (cross-instance double-spend). Empty
+	// uses the in-process store, which is correct ONLY for a single instance. A
+	// configured store that is not supplied at construction is a fail-closed error
+	// (mirrors oauth.dpop_replay_store), never a silent per-instance downgrade.
+	SingleUseStore string `yaml:"single_use_store"`
+	// Retention bounds how long a redeemed settlement reference is remembered. It
+	// must exceed the payment's validity window (past it the on-chain
+	// authorization is dead, so forgetting cannot re-open a replay). Zero uses the
+	// default.
+	Retention Duration `yaml:"retention"`
 }
 
 // scheme returns the effective payment scheme (default "x402").
@@ -483,6 +495,9 @@ func (p PaymentConfig) validate(backendName string) error {
 	// name is public (it is the audit Backend field), so reject it explicitly.
 	if p.Salt != "" && p.Salt == backendName {
 		return fmt.Errorf("edge: backend.payment.salt must not equal the backend name — it must be a SECRET (payer_ref is brute-forceable otherwise); use salt_env/salt_file or leave it empty to auto-generate a persisted secret")
+	}
+	if p.SingleUseStore != "" && !isPostgresDSN(p.SingleUseStore) {
+		return fmt.Errorf("edge: backend.payment.single_use_store must be a postgres:// or postgresql:// DSN")
 	}
 	globs := make([]string, 0, len(p.Prices))
 	for pattern, price := range p.Prices {

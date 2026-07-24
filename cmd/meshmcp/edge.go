@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -97,6 +98,22 @@ func cmdEdge(args []string) error {
 		fmt.Fprintf(os.Stderr, "meshmcp edge: joined mesh, backend %s reachable over WireGuard\n", cfg.Backend.Addr)
 	}
 
+	// A configured shared payment single-use store must open before serving, like
+	// the DPoP store: an edge that silently fell back to per-instance single-use
+	// tracking would let two instances double-spend one payment.
+	if dsn := cfg.Backend.Payment.SingleUseStore; dsn != "" {
+		if !isPostgresDSN(dsn) {
+			return fmt.Errorf("edge: backend.payment.single_use_store must be a postgres:// or postgresql:// DSN")
+		}
+		store, err := pgstore.Open(dsn)
+		if err != nil {
+			return fmt.Errorf("edge: open payment single_use_store %s: %w", redactDSN(dsn), err)
+		}
+		defer store.Close()
+		opts.PaymentReplay = pgPaymentReplay{store}
+		fmt.Fprintf(os.Stderr, "meshmcp edge: payment single-use store %s (shared)\n", redactDSN(dsn))
+	}
+
 	if p := cfg.Backend.Payment; p.Enabled && p.DevInsecureVerifier {
 		fmt.Fprintf(os.Stderr, "meshmcp edge: WARNING payment is using the INSECURE dev verifier (dev_insecure_verifier: true) — it accepts unsettled payments; never use this in production\n")
 	}
@@ -111,6 +128,15 @@ func cmdEdge(args []string) error {
 
 	fmt.Fprintf(os.Stderr, "meshmcp edge: serving %s on %s (backend %q)\n", cfg.PublicURL, cfg.Listen, cfg.Backend.Name)
 	return srv.Run(ctx)
+}
+
+// pgPaymentReplay adapts a *pgstore.Store to edge.PaymentReplayStore, keeping
+// the edge package free of a pgstore dependency (the same pattern as the DPoP
+// store, which pgstore implements structurally).
+type pgPaymentReplay struct{ s *pgstore.Store }
+
+func (p pgPaymentReplay) Redeem(refHash string, expiry, now time.Time) (bool, error) {
+	return p.s.RedeemPaymentRef(refHash, expiry, now)
 }
 
 // resolveEdgeSetupKey resolves the NetBird setup key from a file, env var, or

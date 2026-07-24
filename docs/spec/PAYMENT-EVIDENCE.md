@@ -113,6 +113,8 @@ backend:
     # salt: "<secret>"               # SECRET; prefer salt_env/salt_file; auto-generated + persisted if unset
     # salt_env: MESHMCP_PAYMENT_SALT
     # salt_file: /run/secrets/payment_salt
+    # single_use_store: "postgres://…"  # SHARED single-use store; REQUIRED for >1 edge instance behind one URL
+    # retention: 24h                 # how long a redeemed reference is remembered (>= payment validity window)
     prices:                          # tool-name globs (path.Match), non-overlapping
       "estimate_*": "1000"           # POSITIVE INTEGER in minor units, string
       "verify_footprint": "5000"
@@ -158,12 +160,14 @@ hashes). Their unlinkability therefore rests entirely on the **secrecy** of the
 salt: with a guessable salt, anyone holding the exported audit log can brute-force
 the hashes and de-anonymize payers. meshmcp treats the salt as a mandatory secret
 (auto-generated, persisted, never the backend name), which closes the default
-weakness — but do **not** rotate the salt in place: historical records hash under
-the salt in force when they were written, so rotation makes old `payment_ref`
-values incomparable (breaking restart-reseed) and old `payer_ref` values
-un-correlatable. A keyed/versioned salt set is planned. `Amount` is retained in
-evidence but is derivable from the priced tool, so it adds a small correlation
-surface only.
+weakness. Each record carries a **non-secret `salt_id`** (a truncated,
+domain-separated hash of the salt) so a verifier/auditor can select the correct
+salt for a historical record and the restart-reseed loads only current-salt
+records. Still, do **not** rotate the salt during live traffic: a payment that
+straddles the rotation settles under the new salt but has no reseeded record
+under it, opening a brief replay window — rotate only during a maintenance pause.
+`Amount` is retained in evidence but is derivable from the priced tool, so it
+adds a small correlation surface only.
 
 ## Single-use, durability, and scale
 
@@ -175,12 +179,14 @@ surface only.
   chain, so a restart does **not** re-open past payments to replay.
 - **Bounded:** the in-process set is size-capped and **fails closed** on overflow
   (denies new payments) rather than evicting a still-replayable reference.
-- **Multi-instance is NOT yet safe:** the consumed set is per-process, so two
-  edge instances behind one URL have independent replay windows (double-spend
-  across instances). Until a shared store lands, **run payment behind a single
-  instance.** A `payment.single_use_store` (postgres, atomic claim, fail-closed
-  when configured-but-unsupplied — mirroring `oauth.dpop_replay_store`) is the
-  planned HA control.
+- **Multi-instance:** the in-process store is per-process, so two edge instances
+  behind one URL would have independent replay windows. Configure
+  `payment.single_use_store` (a postgres DSN) to back single-use with a **shared,
+  fleet-wide** store (atomic `INSERT … ON CONFLICT` claim; a DB error fails
+  closed). Following the `oauth.dpop_replay_store` precedent, a configured store
+  that is not supplied at construction is a **fail-closed startup error**, never
+  a silent per-instance downgrade. Without it, **run payment behind a single
+  instance** (the in-process store + restart reseed is correct there).
 - **Redeem-before-forward:** redeemed before the backend call (airtight vs.
   concurrent replay); a backend failure or error result *after* settlement writes
   a compensating `x402/backend-error` / `x402/tool-error` record so the ledger

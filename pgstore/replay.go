@@ -33,6 +33,27 @@ func (s *Store) Use(nonce string, expiry, now time.Time) bool {
 	return err == nil && n == 1
 }
 
+// RedeemPaymentRef claims a settlement reference hash for single use across the
+// fleet: the first redemption wins the insert (true), a replay conflicts
+// (false). A database error is returned so the caller can fail closed with a
+// distinct "store unavailable" outcome (retryable) versus a definite replay.
+// expiry bounds retention (the on-chain authorization is dead by then).
+func (s *Store) RedeemPaymentRef(refHash string, expiry, now time.Time) (bool, error) {
+	s.evictExpired(s.paymentRefs, now)
+	res, err := s.db.Exec(
+		fmt.Sprintf(`INSERT INTO %s (refhash, expiry) VALUES ($1, $2) ON CONFLICT (refhash) DO NOTHING`, s.paymentRefs),
+		refHash, expiry,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
 func (s *Store) UseJTI(jti string, expiry, now time.Time) bool {
 	s.evictExpired(s.dpopJTIs, now)
 	res, err := s.db.Exec(

@@ -53,6 +53,12 @@ type PaymentEvidence struct {
 	// makes the receipt non-repudiable for a specific request, so a settlement
 	// cannot later be claimed to have paid for a different call. Optional.
 	Request string `json:"request,omitempty"`
+	// SaltID is a NON-secret identifier of the salt used to derive PaymentRef /
+	// PayerRef (a truncated hash of the salt — see SaltID). It carries no secret
+	// (the salt is not recoverable from it) but lets a verifier/auditor select the
+	// correct salt for a historical record after a salt rotation, and lets the
+	// restart reseed load only records written under the current salt. Optional.
+	SaltID string `json:"salt_id,omitempty"`
 }
 
 // Payment-evidence hash domains. Distinct prefixes keep the payment-ref and
@@ -61,14 +67,16 @@ type PaymentEvidence struct {
 const (
 	paymentRefDomain = "meshmcp-payment-ref-v1\x00"
 	payerRefDomain   = "meshmcp-payer-ref-v1\x00"
+	saltIDDomain     = "meshmcp-salt-id-v1\x00"
 )
 
 // NewPaymentEvidence builds settled (non-dry-run) evidence. reference is the
 // facilitator's opaque settlement id and payer is the facilitator's opaque
-// payer id; BOTH are one-way hashed here and never stored raw. salt scopes the
-// payer hash to a deployment/backend so a PayerRef is not comparable across
-// unrelated gateways (pass the backend name at minimum; a secret salt is a
-// hardening option). Either derived ref is omitted when its input is empty.
+// payer id; BOTH are one-way hashed here and never stored raw. salt is the
+// SECRET that scopes the hashes so refs are not comparable across deployments
+// and not reversible from a public payer-id space (see edge resolvePaymentSalt).
+// The record also carries a non-secret SaltID so a rotation can be tracked.
+// Either derived ref is omitted when its input is empty.
 func NewPaymentEvidence(scheme, network, asset, amount, reference, payer, salt string) PaymentEvidence {
 	ev := PaymentEvidence{Scheme: scheme, Network: network, Asset: asset, Amount: amount}
 	if reference != "" {
@@ -77,7 +85,22 @@ func NewPaymentEvidence(scheme, network, asset, amount, reference, payer, salt s
 	if payer != "" {
 		ev.PayerRef = hashRef(payerRefDomain, salt, payer)
 	}
+	if salt != "" {
+		ev.SaltID = SaltID(salt)
+	}
 	return ev
+}
+
+// SaltID is a NON-secret, stable identifier of a salt: the first 8 bytes (16 hex
+// chars) of a domain-separated hash. It reveals nothing about the salt (a
+// separate domain from the ref hashes, truncated), but two records share a
+// SaltID iff they were written under the same salt — enough to select the salt
+// for a historical record after rotation, or to scope a reseed to one salt.
+func SaltID(salt string) string {
+	h := sha256.New()
+	h.Write([]byte(saltIDDomain))
+	h.Write([]byte(salt))
+	return hex.EncodeToString(h.Sum(nil)[:8])
 }
 
 // DryRunEvidence builds evidence for the free dry-run route: the payment-shaped
