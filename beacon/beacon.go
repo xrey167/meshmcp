@@ -47,6 +47,10 @@ const (
 	// so a flood of connections (or a gateway that stops answering OPEN) cannot
 	// grow the pending map without limit.
 	maxPendingSplices = 1024
+	// maxPendingPerLabel bounds pending splices for a SINGLE gateway label, so one
+	// tenant (or an attacker flooding one name) cannot consume the whole global
+	// budget and starve routing for every other gateway.
+	maxPendingPerLabel = 128
 	// maxTXTPerGateway bounds how many ACME challenge values a single gateway may
 	// publish, so a malicious gateway cannot flood the TXT store (ACME DNS-01
 	// needs at most a couple at once).
@@ -68,11 +72,18 @@ type Server struct {
 	dataWait time.Duration
 	logf     func(format string, args ...any)
 
-	mu       sync.Mutex
-	publicIP net.IP                   // A-record answer for <label>.<zone> (DNS server)
-	gateways map[string]*gwConn       // label -> live control conn
-	pending  map[string]chan net.Conn // connID -> waiter for the gateway's data conn
-	txt      map[string][]string      // fqdn -> ACME DNS-01 TXT values a gateway published
+	mu           sync.Mutex
+	publicIP     net.IP                    // A-record answer for <label>.<zone> (DNS server)
+	gateways     map[string]*gwConn        // label -> live control conn
+	pending      map[string]*pendingSplice // connID -> waiter for the gateway's data conn
+	pendingLabel map[string]int            // label -> in-flight pending count (per-tenant fairness)
+	txt          map[string][]string       // fqdn -> ACME DNS-01 TXT values a gateway published
+}
+
+// pendingSplice is a public connection awaiting its gateway data conn.
+type pendingSplice struct {
+	ch    chan net.Conn
+	label string
 }
 
 type gwConn struct {
@@ -84,12 +95,13 @@ type gwConn struct {
 // NewServer builds a beacon for the given DNS zone (e.g. "beacon.example.com").
 func NewServer(zone string) *Server {
 	return &Server{
-		zone:     strings.ToLower(strings.TrimSuffix(zone, ".")),
-		dataWait: defaultDataWait,
-		logf:     func(string, ...any) {},
-		gateways: map[string]*gwConn{},
-		pending:  map[string]chan net.Conn{},
-		txt:      map[string][]string{},
+		zone:         strings.ToLower(strings.TrimSuffix(zone, ".")),
+		dataWait:     defaultDataWait,
+		logf:         func(string, ...any) {},
+		gateways:     map[string]*gwConn{},
+		pending:      map[string]*pendingSplice{},
+		pendingLabel: map[string]int{},
+		txt:          map[string][]string{},
 	}
 }
 
@@ -135,6 +147,12 @@ func (s *Server) acceptLoop(ln net.Listener, handle func(net.Conn)) error {
 		conn, err := ln.Accept()
 		if err != nil {
 			return err
+		}
+		// Keepalive so a dead peer (no FIN) is eventually detected and torn down,
+		// rather than leaking a spliced or control connection indefinitely.
+		if tc, ok := conn.(*net.TCPConn); ok {
+			_ = tc.SetKeepAlive(true)
+			_ = tc.SetKeepAlivePeriod(60 * time.Second)
 		}
 		go handle(conn)
 	}
@@ -252,16 +270,29 @@ func (s *Server) deregister(gw *gwConn) {
 	s.mu.Unlock()
 }
 
+// removePendingLocked deletes a pending entry and decrements its label counter.
+// The caller holds s.mu. Returns the removed entry (nil if already gone).
+func (s *Server) removePendingLocked(connID string) *pendingSplice {
+	ps := s.pending[connID]
+	if ps == nil {
+		return nil
+	}
+	delete(s.pending, connID)
+	if s.pendingLabel[ps.label]--; s.pendingLabel[ps.label] <= 0 {
+		delete(s.pendingLabel, ps.label)
+	}
+	return ps
+}
+
 func (s *Server) handleData(conn net.Conn, connID string) {
 	s.mu.Lock()
-	ch := s.pending[connID]
-	delete(s.pending, connID)
+	ps := s.removePendingLocked(connID)
 	s.mu.Unlock()
-	if ch == nil {
+	if ps == nil {
 		conn.Close() // no waiter (timed out or unknown id)
 		return
 	}
-	ch <- conn // hand ownership to the public-conn splicer
+	ps.ch <- conn // hand ownership to the public-conn splicer (buffered: never blocks)
 }
 
 // handlePublicConn peeks the SNI, finds the gateway, asks it (over the control
@@ -296,21 +327,25 @@ func (s *Server) handlePublicConn(pconn net.Conn) {
 	}
 	ch := make(chan net.Conn, 1)
 	s.mu.Lock()
-	if len(s.pending) >= maxPendingSplices {
+	if len(s.pending) >= maxPendingSplices || s.pendingLabel[label] >= maxPendingPerLabel {
 		s.mu.Unlock()
-		s.logf("beacon: pending-splice limit (%d) reached, dropping connection for %q", maxPendingSplices, label)
+		s.logf("beacon: pending-splice limit reached, dropping connection for %q", label)
 		pconn.Close()
 		return
 	}
-	s.pending[connID] = ch
+	s.pending[connID] = &pendingSplice{ch: ch, label: label}
+	s.pendingLabel[label]++
 	s.mu.Unlock()
 
+	// A stuck gateway must not wedge routing: bound the OPEN write.
 	gw.writeMu.Lock()
+	_ = gw.control.SetWriteDeadline(time.Now().Add(peekTimeout))
 	_, werr := fmt.Fprintf(gw.control, "OPEN %s\n", connID)
+	_ = gw.control.SetWriteDeadline(time.Time{})
 	gw.writeMu.Unlock()
 	if werr != nil {
 		s.mu.Lock()
-		delete(s.pending, connID)
+		s.removePendingLocked(connID)
 		s.mu.Unlock()
 		pconn.Close()
 		return
@@ -321,8 +356,16 @@ func (s *Server) handlePublicConn(pconn net.Conn) {
 		splice(pconn, replay, dconn)
 	case <-time.After(s.dataWait):
 		s.mu.Lock()
-		delete(s.pending, connID)
+		ps := s.removePendingLocked(connID)
 		s.mu.Unlock()
+		if ps == nil {
+			// handleData claimed the slot between the timeout and the delete and is
+			// delivering the data conn; take it off the channel and close it rather
+			// than leak the file descriptor.
+			if dconn := <-ch; dconn != nil {
+				dconn.Close()
+			}
+		}
 		pconn.Close()
 	}
 }

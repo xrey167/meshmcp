@@ -5,8 +5,8 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net/http"
+	"net/url"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/caddyserver/certmagic"
@@ -88,7 +88,11 @@ func (s *Server) buildBeaconACMETLSConfig() (*tls.Config, *acmeRuntime, error) {
 	if s.dns01Provider == nil {
 		return nil, nil, fmt.Errorf("edge: beacon.auto_cert requires a DNS-01 provider (internal wiring error)")
 	}
-	host := strings.TrimPrefix(s.cfg.PublicURL, "https://")
+	pu, err := url.Parse(s.cfg.PublicURL)
+	if err != nil || pu.Hostname() == "" {
+		return nil, nil, fmt.Errorf("edge: beacon public_url %q is not a valid URL: %w", s.cfg.PublicURL, err)
+	}
+	host := pu.Hostname()
 
 	cacheDir := ac.CacheDir
 	if cacheDir == "" {
