@@ -16,6 +16,10 @@ type Verifier struct {
 	reg *provider.Registry
 }
 
+// maxReviewers caps the review_work fan-out so a caller-supplied reviewer count
+// can never launch an unbounded number of provider invocations.
+const maxReviewers = 11
+
 // NewVerifier builds a verifier over a provider registry.
 func NewVerifier(reg *provider.Registry) *Verifier { return &Verifier{reg: reg} }
 
@@ -25,6 +29,12 @@ func NewVerifier(reg *provider.Registry) *Verifier { return &Verifier{reg: reg} 
 func (v *Verifier) ReviewWork(ctx context.Context, run RunID, class string, scope string, reviewers int) ([]Finding, string, error) {
 	if reviewers <= 0 {
 		reviewers = 5
+	}
+	// Clamp the fan-out: a caller-supplied (possibly attacker-influenced) reviewer
+	// count must not be able to launch an unbounded number of provider
+	// invocations (cost / resource exhaustion).
+	if reviewers > maxReviewers {
+		reviewers = maxReviewers
 	}
 	prov, err := v.reg.Resolve(ctx, class)
 	if err != nil {
@@ -66,10 +76,13 @@ func (v *Verifier) UltragoalCheck(ctx context.Context, class, goal string, evide
 	if err != nil {
 		return false, nil, err
 	}
-	// Default posture: the goal is met when there is evidence and no explicit
-	// "NOT MET". A real provider's verdict text drives this; the Mock echo (which
-	// never says NOT MET) makes a well-formed run converge.
-	met := len(evidence) > 0 && !strings.Contains(strings.ToUpper(comp.Text), "NOT MET")
+	// Default posture: the goal is met when there is evidence, the verifier
+	// actually produced a verdict, and it did not say "NOT MET". Treating a blank
+	// verdict as met would be fail-open — a provider that returns nothing (soft
+	// failure) must not silently pass the durable check. A real provider's verdict
+	// text drives this; the Mock echo (non-empty, never "NOT MET") still converges.
+	verdict := strings.ToUpper(strings.TrimSpace(comp.Text))
+	met := len(evidence) > 0 && verdict != "" && !strings.Contains(verdict, "NOT MET")
 	var gaps []string
 	if !met {
 		gaps = []string{"no evidence of goal completion"}

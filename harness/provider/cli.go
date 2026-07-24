@@ -79,6 +79,13 @@ func (c *CLI) Available(ctx context.Context) bool {
 	return err == nil
 }
 
+// maxCLIOutput/maxCLIErr cap the bytes captured from a provider CLI so a runaway
+// child cannot exhaust harness memory.
+const (
+	maxCLIOutput = 8 << 20  // 8 MiB of stdout
+	maxCLIErr    = 64 << 10 // 64 KiB of stderr (only used in the error message)
+)
+
 // Invoke runs the CLI once with the prompt on stdin and returns its stdout.
 func (c *CLI) Invoke(ctx context.Context, in Prompt) (Completion, error) {
 	env := os.Environ()
@@ -87,7 +94,10 @@ func (c *CLI) Invoke(ctx context.Context, in Prompt) (Completion, error) {
 		if !ok {
 			return Completion{}, fmt.Errorf("provider %s: secret %q not available from the broker", c.name, c.keyRef)
 		}
-		env = append(env, c.keyEnv+"="+val)
+		// Drop any ambient copy of the key var first so the child sees EXACTLY the
+		// broker-resolved secret (secrets-by-reference) — never a stale or injected
+		// value inherited from the parent environment that could shadow it.
+		env = append(stripEnvKey(env, c.keyEnv), c.keyEnv+"="+val)
 	}
 	prompt := in.User
 	if in.System != "" {
@@ -96,13 +106,17 @@ func (c *CLI) Invoke(ctx context.Context, in Prompt) (Completion, error) {
 	cmd := exec.CommandContext(ctx, c.bin, c.args...)
 	cmd.Env = env
 	cmd.Stdin = strings.NewReader(prompt)
-	var out, errb bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &errb
+	out := &cappedBuffer{cap: maxCLIOutput}
+	errb := &cappedBuffer{cap: maxCLIErr}
+	cmd.Stdout = out
+	cmd.Stderr = errb
 	if err := cmd.Run(); err != nil {
 		return Completion{}, fmt.Errorf("provider %s: %w: %s", c.name, err, strings.TrimSpace(errb.String()))
 	}
 	text := out.String()
+	if out.truncated {
+		text += fmt.Sprintf("\n…(truncated at %d bytes)", maxCLIOutput)
+	}
 	return Completion{
 		Text:      text,
 		TokensIn:  estimateTokens(prompt),
@@ -110,6 +124,48 @@ func (c *CLI) Invoke(ctx context.Context, in Prompt) (Completion, error) {
 		Provider:  c.name,
 	}, nil
 }
+
+// stripEnvKey returns env with every "KEY=…" entry for key removed. The result
+// uses a fresh backing array so the caller's slice is never mutated.
+func stripEnvKey(env []string, key string) []string {
+	if key == "" {
+		return env
+	}
+	prefix := key + "="
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		if strings.HasPrefix(kv, prefix) {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
+// cappedBuffer captures at most cap bytes and discards the rest, recording
+// whether truncation occurred. Writes always report full acceptance so the child
+// process is never blocked by a short write once the cap is reached.
+type cappedBuffer struct {
+	buf       bytes.Buffer
+	cap       int
+	truncated bool
+}
+
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	if remaining := c.cap - c.buf.Len(); remaining > 0 {
+		if len(p) > remaining {
+			c.buf.Write(p[:remaining])
+			c.truncated = true
+		} else {
+			c.buf.Write(p)
+		}
+	} else if len(p) > 0 {
+		c.truncated = true
+	}
+	return len(p), nil
+}
+
+func (c *cappedBuffer) String() string { return c.buf.String() }
 
 // Stream runs Invoke and delivers the whole output as one delta (the built-in
 // CLIs are used in print mode; per-token streaming would require the CLI's
