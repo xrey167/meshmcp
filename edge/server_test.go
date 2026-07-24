@@ -2,6 +2,7 @@ package edge
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -140,6 +141,79 @@ func TestHealthz(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("healthz status %d", resp.StatusCode)
+	}
+}
+
+// TestRunBehindFrontServesPlainHTTP proves the front-mode seam actually serves
+// the edge over PLAIN HTTP on a loopback listener (no edge TLS) — the front, not
+// the edge, terminates TLS — while the same Handler (trust core) runs. An HTTPS
+// request to the same port must fail, confirming the edge is not terminating TLS.
+func TestRunBehindFrontServesPlainHTTP(t *testing.T) {
+	// Reserve an ephemeral loopback port, then hand its address to the edge.
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := probe.Addr().String()
+	probe.Close()
+
+	dir := t.TempDir()
+	cfg := validConfig()
+	cfg.BehindFront = true
+	cfg.TLS = TLSConfig{}
+	cfg.Listen = addr
+	cfg.StateDir = dir
+	cfg.AuditLog = filepath.Join(dir, "audit.jsonl")
+	cfg.SigningKey = filepath.Join(dir, "key.json")
+	cfg, err = cfg.Validate()
+	if err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	signer, err := policy.GenerateSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(cfg, Options{
+		Now:         func() time.Time { return time.Unix(1_700_000_000, 0).UTC() },
+		Signer:      signer,
+		AuditWriter: &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- srv.Run(ctx) }()
+
+	// Poll /healthz over PLAIN http until the listener is up.
+	var status int
+	for i := 0; i < 200; i++ {
+		resp, gerr := http.Get("http://" + addr + pathHealthz)
+		if gerr == nil {
+			status = resp.StatusCode
+			resp.Body.Close()
+			if status == http.StatusOK {
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("GET http://%s%s = %d, want 200 (plain-HTTP behind-front serve)", addr, pathHealthz, status)
+	}
+
+	// The edge is NOT terminating TLS, so an HTTPS request to the same port fails.
+	if _, err := http.Get("https://" + addr + pathHealthz); err == nil {
+		t.Error("edge answered HTTPS in behind-front mode; it must serve plain HTTP only")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Error("Run did not return after context cancel")
 	}
 }
 

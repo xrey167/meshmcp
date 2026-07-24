@@ -106,6 +106,9 @@ func cmdEdge(args []string) error {
 	defer stop()
 
 	fmt.Fprintf(os.Stderr, "meshmcp edge: serving %s on %s (backend %q)\n", cfg.PublicURL, cfg.Listen, cfg.Backend.Name)
+	if cfg.BehindFront {
+		fmt.Fprintf(os.Stderr, "meshmcp edge: behind-front mode — PLAIN HTTP on loopback %s; a trusted front (Tailscale Funnel / reverse proxy) must terminate public TLS for %s and forward to it. Bearers must never leave loopback.\n", cfg.Listen, cfg.PublicURL)
+	}
 	return srv.Run(ctx)
 }
 
