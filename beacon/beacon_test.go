@@ -1,21 +1,95 @@
 package beacon
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
+
+// testIdentity is a gateway Ed25519 key pair satisfying beacon.Identity (the
+// registration proof-of-possession).
+type testIdentity struct {
+	pub  ed25519.PublicKey
+	priv ed25519.PrivateKey
+}
+
+func newTestIdentity(t *testing.T) *testIdentity {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &testIdentity{pub: pub, priv: priv}
+}
+
+func (i *testIdentity) PubKeyRaw() []byte         { return i.pub }
+func (i *testIdentity) SignRaw(msg []byte) []byte { return ed25519.Sign(i.priv, msg) }
+
+// TestBeaconRegistrationRequiresKeyPossession proves a client cannot claim a
+// label for a public key it does not hold the private key for: presenting a
+// victim's pubkey without a valid signature over the beacon's challenge is
+// refused, and the victim's label is never bound.
+func TestBeaconRegistrationRequiresKeyPossession(t *testing.T) {
+	const zone = "beacon.test"
+	publicLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	controlLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := NewServer(zone)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = s.Run(ctx, publicLn, controlLn) }()
+
+	victim := newTestIdentity(t) // the identity an attacker wants to impersonate
+
+	conn, err := net.Dial("tcp", controlLn.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	br := bufio.NewReader(conn)
+
+	// Present the victim's PUBLIC key (which is not secret)...
+	fmt.Fprintf(conn, "REGISTER %s\n", base64.RawURLEncoding.EncodeToString(victim.PubKeyRaw()))
+	chLine, err := br.ReadString('\n')
+	if err != nil || !strings.HasPrefix(chLine, "CHALLENGE ") {
+		t.Fatalf("want CHALLENGE, got %q (err %v)", chLine, err)
+	}
+	// ...but answer with a signature the attacker cannot actually produce.
+	fmt.Fprintf(conn, "AUTH %s\n", base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0}, ed25519.SignatureSize)))
+	reply, _ := br.ReadString('\n')
+	if !strings.HasPrefix(reply, "ERR") {
+		t.Fatalf("forged registration accepted: %q", reply)
+	}
+
+	// The victim's label must not be bound.
+	s.mu.Lock()
+	_, bound := s.gateways[SubdomainLabel(victim.PubKeyRaw())]
+	s.mu.Unlock()
+	if bound {
+		t.Fatal("victim label was bound despite failed proof-of-possession")
+	}
+}
 
 // selfSignedCert returns a gateway certificate (and a pool that trusts it) for
 // dnsName. The gateway holds this cert; the beacon never does.
@@ -70,13 +144,13 @@ func TestBeaconEndToEnd(t *testing.T) {
 	defer cancel()
 	go func() { _ = s.Run(ctx, publicLn, controlLn) }()
 
-	pub := []byte("gateway-public-key-example")
-	wantFQDN := SubdomainLabel(pub) + "." + zone
+	id := newTestIdentity(t)
+	wantFQDN := SubdomainLabel(id.PubKeyRaw()) + "." + zone
 
 	dial := func(ctx context.Context, addr string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, "tcp", addr)
 	}
-	tun, err := Dial(ctx, controlLn.Addr().String(), pub, dial)
+	tun, err := Dial(ctx, controlLn.Addr().String(), id, dial)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}

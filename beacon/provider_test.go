@@ -62,16 +62,16 @@ func TestBeaconDNS01Brokering(t *testing.T) {
 	go func() { _ = s.serveDNSPacketConn(ctx, dnsPC) }()
 	dnsAddr := dnsPC.LocalAddr().String()
 
-	pub := []byte("gateway-key")
+	id := newTestIdentity(t)
 	dial := func(ctx context.Context, addr string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, "tcp", addr)
 	}
-	tun, err := Dial(ctx, controlLn.Addr().String(), pub, dial)
+	tun, err := Dial(ctx, controlLn.Addr().String(), id, dial)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
 	defer tun.Close()
-	label := SubdomainLabel(pub)
+	label := SubdomainLabel(id.PubKeyRaw())
 	fqdn := label + "." + zone
 
 	// A record for the derived name resolves to the beacon's public IP.

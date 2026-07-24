@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/hex"
 	"flag"
 	"fmt"
 	"net"
@@ -113,16 +112,12 @@ func cmdEdge(args []string) error {
 		if err != nil {
 			return fmt.Errorf("edge: beacon mode needs an existing signing_key %s — generate it first: %w", cfg.SigningKey, err)
 		}
-		pub, err := hex.DecodeString(signer.PubKeyHex())
-		if err != nil {
-			return fmt.Errorf("edge: decode signing-key public bytes: %w", err)
-		}
-		fqdn := beacon.SubdomainLabel(pub) + "." + strings.ToLower(strings.TrimSuffix(cfg.Beacon.Zone, "."))
+		fqdn := beacon.SubdomainLabel(signer.PubKeyRaw()) + "." + strings.ToLower(strings.TrimSuffix(cfg.Beacon.Zone, "."))
 		cfg.PublicURL = "https://" + fqdn
 		opts.Signer = signer
 
 		fmt.Fprintf(os.Stderr, "meshmcp edge: beacon mode — dialing %s; public %s\n", cfg.Beacon.Control, cfg.PublicURL)
-		tun, err := beacon.Dial(ctx, cfg.Beacon.Control, pub, func(ctx context.Context, addr string) (net.Conn, error) {
+		tun, err := beacon.Dial(ctx, cfg.Beacon.Control, signer, func(ctx context.Context, addr string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, "tcp", addr)
 		})
 		if err != nil {

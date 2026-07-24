@@ -6,7 +6,6 @@ import (
 	"crypto/ecdsa"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/hex"
 	"encoding/pem"
 	"io"
 	"net"
@@ -48,10 +47,7 @@ func TestEdgeOverBeacon(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pub, err := hex.DecodeString(signer.PubKeyHex())
-	if err != nil {
-		t.Fatal(err)
-	}
+	pub := signer.PubKeyRaw()
 	fqdn := SubdomainLabel(pub) + "." + zone
 
 	// The gateway holds a cert for its derived name (files mode; ACME DNS-01 later).
@@ -85,7 +81,7 @@ func TestEdgeOverBeacon(t *testing.T) {
 	dial := func(ctx context.Context, addr string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, "tcp", addr)
 	}
-	tun, err := Dial(ctx, controlLn.Addr().String(), pub, dial)
+	tun, err := Dial(ctx, controlLn.Addr().String(), signer, dial)
 	if err != nil {
 		t.Fatalf("beacon Dial: %v", err)
 	}

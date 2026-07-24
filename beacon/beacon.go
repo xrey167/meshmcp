@@ -2,6 +2,7 @@ package beacon
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -18,6 +19,24 @@ import (
 // (client.Dial over WireGuard, BlockInbound=true); tests pass net.Dial. The
 // gateway makes ONLY outbound dials — it never listens.
 type DialFunc func(ctx context.Context, addr string) (net.Conn, error)
+
+// Identity is the gateway key used to authenticate registration. The gateway
+// proves possession of the private key for the Ed25519 public key its subdomain
+// label is derived from, so a client can never claim another gateway's label
+// (or publish its ACME challenge). meshmcp's policy.Signer satisfies it.
+type Identity interface {
+	PubKeyRaw() []byte         // raw Ed25519 public key (32 bytes)
+	SignRaw(msg []byte) []byte // Ed25519 signature over msg
+}
+
+// registerChallengePrefix domain-separates the registration signature from any
+// other use of the gateway key (a signature over a beacon nonce can never be
+// replayed as, say, an audit checkpoint signature, and vice versa).
+const registerChallengePrefix = "meshmcp-beacon-register-v1\n"
+
+func registerChallenge(nonce []byte) []byte {
+	return append([]byte(registerChallengePrefix), nonce...)
+}
 
 // defaults for the control protocol.
 const (
@@ -136,11 +155,39 @@ func (s *Server) handleTunnelConn(conn net.Conn) {
 
 func (s *Server) handleRegister(conn net.Conn, b64Key string) {
 	pub, err := base64.RawURLEncoding.DecodeString(b64Key)
-	if err != nil || len(pub) == 0 {
+	if err != nil || len(pub) != ed25519.PublicKeySize {
 		fmt.Fprintf(conn, "ERR bad register\n")
 		conn.Close()
 		return
 	}
+	// Prove possession of the private key for the presented public key BEFORE
+	// binding its derived label: send a fresh nonce and require an Ed25519
+	// signature over it. Without this, any client could claim another gateway's
+	// subdomain and publish its ACME challenge (cert/namespace hijack).
+	var nonce [32]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		conn.Close()
+		return
+	}
+	if _, err := fmt.Fprintf(conn, "CHALLENGE %s\n", base64.RawURLEncoding.EncodeToString(nonce[:])); err != nil {
+		conn.Close()
+		return
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(peekTimeout))
+	authLine, err := readLine(conn)
+	_ = conn.SetReadDeadline(time.Time{})
+	if err != nil {
+		conn.Close()
+		return
+	}
+	verb, sigB64, _ := strings.Cut(authLine, " ")
+	sig, derr := base64.RawURLEncoding.DecodeString(strings.TrimSpace(sigB64))
+	if verb != "AUTH" || derr != nil || !ed25519.Verify(ed25519.PublicKey(pub), registerChallenge(nonce[:]), sig) {
+		fmt.Fprintf(conn, "ERR auth failed\n")
+		conn.Close()
+		return
+	}
+
 	label := SubdomainLabel(pub)
 	gw := &gwConn{label: label, control: conn}
 
@@ -313,19 +360,37 @@ func (t *Tunnel) sendControlLine(line string) error {
 }
 
 // Dial opens the reverse tunnel: it dials the beacon's control address, registers
-// the gateway by pubKey, and returns a Tunnel (net.Listener) plus nil error once
-// the beacon has assigned the public FQDN. pubKey is the gateway's stable
-// identity (e.g. its WireGuard public key) — the FQDN is derived from it.
-func Dial(ctx context.Context, beaconAddr string, pubKey []byte, dial DialFunc) (*Tunnel, error) {
+// the gateway by proving possession of id's private key, and returns a Tunnel
+// (net.Listener) plus nil error once the beacon has assigned the public FQDN. The
+// FQDN is derived from id's public key, so a gateway can only ever be assigned the
+// name it holds the key for.
+func Dial(ctx context.Context, beaconAddr string, id Identity, dial DialFunc) (*Tunnel, error) {
 	control, err := dial(ctx, beaconAddr)
 	if err != nil {
 		return nil, fmt.Errorf("beacon: dial control %s: %w", beaconAddr, err)
 	}
-	if _, err := fmt.Fprintf(control, "REGISTER %s\n", base64.RawURLEncoding.EncodeToString(pubKey)); err != nil {
+	if _, err := fmt.Fprintf(control, "REGISTER %s\n", base64.RawURLEncoding.EncodeToString(id.PubKeyRaw())); err != nil {
 		control.Close()
 		return nil, fmt.Errorf("beacon: register: %w", err)
 	}
+	// Answer the beacon's proof-of-possession challenge.
 	_ = control.SetReadDeadline(time.Now().Add(peekTimeout))
+	chLine, err := readLine(control)
+	if err != nil {
+		control.Close()
+		return nil, fmt.Errorf("beacon: challenge: %w", err)
+	}
+	cv, nonceB64, _ := strings.Cut(chLine, " ")
+	nonce, derr := base64.RawURLEncoding.DecodeString(strings.TrimSpace(nonceB64))
+	if cv != "CHALLENGE" || derr != nil || len(nonce) == 0 {
+		control.Close()
+		return nil, fmt.Errorf("beacon: unexpected challenge %q", chLine)
+	}
+	sig := id.SignRaw(registerChallenge(nonce))
+	if _, err := fmt.Fprintf(control, "AUTH %s\n", base64.RawURLEncoding.EncodeToString(sig)); err != nil {
+		control.Close()
+		return nil, fmt.Errorf("beacon: auth: %w", err)
+	}
 	line, err := readLine(control)
 	_ = control.SetReadDeadline(time.Time{})
 	if err != nil {
