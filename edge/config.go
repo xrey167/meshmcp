@@ -21,6 +21,7 @@ package edge
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 	"time"
@@ -124,6 +125,18 @@ type Config struct {
 	// SigningKeyAutogen, when true, generates and saves SigningKey if absent.
 	// Explicit opt-in (mirrors the gateway's audit key autogen).
 	SigningKeyAutogen bool `yaml:"signing_key_autogen"`
+
+	// BehindFront serves the edge over PLAIN HTTP on a loopback Listen address,
+	// with NO edge-side TLS, for deployment behind a trusted TLS-terminating
+	// front (Tailscale Funnel, a reverse proxy, an API gateway) that forwards to
+	// the edge over loopback — the "zero inbound ports" path documented in
+	// docs/design/HOSTED-CLIENT-INGRESS.md. The front owns the public name and
+	// cert; the edge trust core (OAuth, the capability + policy double-gate, the
+	// fail-closed audit ledger) is byte-identical. It is fenced to loopback so
+	// OAuth bearers never traverse a network in the clear; public_url is still
+	// required (the front's https URL, which stays the OAuth issuer) and the tls
+	// block MUST be empty. Off by default.
+	BehindFront bool `yaml:"behind_front"`
 
 	TLS          TLSConfig          `yaml:"tls"`
 	Registration RegistrationConfig `yaml:"registration"`
@@ -324,26 +337,45 @@ func (c Config) Validate() (Config, error) {
 		return c, fmt.Errorf("edge: signing_key is required")
 	}
 
-	// Exactly one TLS mode.
-	switch {
-	case c.TLS.files() && c.TLS.acme():
-		return c, fmt.Errorf("edge: tls has both cert_file/key_file and acme — choose exactly one")
-	case c.TLS.files():
-		if c.TLS.CertFile == "" || c.TLS.KeyFile == "" {
-			return c, fmt.Errorf("edge: tls cert_file and key_file must both be set")
+	// TLS termination: either the edge terminates it (exactly one tls mode), or a
+	// trusted front terminates it and the edge serves plain HTTP on loopback.
+	if c.BehindFront {
+		// The front owns TLS, so the edge must NOT also carry a tls block.
+		if c.TLS.files() || c.TLS.acme() {
+			return c, fmt.Errorf("edge: behind_front terminates TLS at the front — remove the tls block")
 		}
-	case c.TLS.acme():
-		if len(c.TLS.ACME.Domains) == 0 {
-			return c, fmt.Errorf("edge: tls.acme.domains must list at least one hostname")
+		// Fence the plaintext listener to loopback: in behind_front mode the edge
+		// serves OAuth/MCP over cleartext HTTP, so a non-loopback bind would leak
+		// bearer tokens onto the network. Only 127.0.0.0/8 or ::1 is allowed.
+		host, _, splitErr := net.SplitHostPort(c.Listen)
+		if splitErr != nil {
+			return c, fmt.Errorf("edge: behind_front listen must be host:port, got %q: %w", c.Listen, splitErr)
 		}
-		if c.TLS.ACME.Challenge != ChallengeTLSALPN01 && c.TLS.ACME.Challenge != ChallengeHTTP01 {
-			return c, fmt.Errorf("edge: tls.acme.challenge must be %q or %q", ChallengeTLSALPN01, ChallengeHTTP01)
+		if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+			return c, fmt.Errorf("edge: behind_front listen must bind a loopback address (e.g. 127.0.0.1:8080) so OAuth bearers never cross a network in cleartext — got %q", c.Listen)
 		}
-		if !containsFold(c.TLS.ACME.Domains, pu.Hostname()) {
-			return c, fmt.Errorf("edge: public_url host %q must be one of tls.acme.domains %v", pu.Hostname(), c.TLS.ACME.Domains)
+	} else {
+		// Exactly one TLS mode.
+		switch {
+		case c.TLS.files() && c.TLS.acme():
+			return c, fmt.Errorf("edge: tls has both cert_file/key_file and acme — choose exactly one")
+		case c.TLS.files():
+			if c.TLS.CertFile == "" || c.TLS.KeyFile == "" {
+				return c, fmt.Errorf("edge: tls cert_file and key_file must both be set")
+			}
+		case c.TLS.acme():
+			if len(c.TLS.ACME.Domains) == 0 {
+				return c, fmt.Errorf("edge: tls.acme.domains must list at least one hostname")
+			}
+			if c.TLS.ACME.Challenge != ChallengeTLSALPN01 && c.TLS.ACME.Challenge != ChallengeHTTP01 {
+				return c, fmt.Errorf("edge: tls.acme.challenge must be %q or %q", ChallengeTLSALPN01, ChallengeHTTP01)
+			}
+			if !containsFold(c.TLS.ACME.Domains, pu.Hostname()) {
+				return c, fmt.Errorf("edge: public_url host %q must be one of tls.acme.domains %v", pu.Hostname(), c.TLS.ACME.Domains)
+			}
+		default:
+			return c, fmt.Errorf("edge: tls requires either cert_file/key_file or an acme block")
 		}
-	default:
-		return c, fmt.Errorf("edge: tls requires either cert_file/key_file or an acme block")
 	}
 
 	switch c.Registration.Mode {

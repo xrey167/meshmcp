@@ -161,6 +161,52 @@ default. A self-signed cert will be rejected by the connector.
 
 ---
 
+## Behind a front — zero inbound ports (`behind_front`)
+
+The TLS modes above make the edge itself the public listener: an inbound port, a
+public DNS name, and a cert to obtain and rotate. `behind_front: true` removes all
+three for the common case where a **trusted TLS-terminating front already exists**
+— [Tailscale Funnel](https://tailscale.com/kb/1223/funnel), a reverse proxy, or an
+API gateway that dials out and needs no inbound port on this host:
+
+```yaml
+behind_front: true
+listen: 127.0.0.1:8080          # loopback ONLY — enforced
+public_url: https://mcp.example.com   # the FRONT's public https URL (still the OAuth issuer)
+# no tls: block — the front terminates TLS
+```
+
+In this mode the edge serves **plain HTTP on loopback**; the front terminates the
+public TLS and forwards. Everything that matters is byte-for-byte identical to the
+public-TLS path: the OAuth endpoints, the capability + policy double gate, and the
+fail-closed audit ledger all run on this gateway. Only the listener and where TLS
+terminates change.
+
+Two guarantees keep it safe:
+
+- **Loopback is enforced.** `listen` must bind `127.0.0.0/8` or `::1`; any
+  routable address is a config error, so OAuth bearers can never cross a network
+  in cleartext. The front must reach the edge over loopback (or a host-local
+  socket), never across an untrusted segment.
+- **The front owns TLS.** A `tls:` block alongside `behind_front` is a config
+  error — exactly one party terminates TLS.
+
+Example with Tailscale Funnel (no meshmcp infra, no inbound port, TLS terminates
+on *your own* node so the tunnel provider sees only ciphertext):
+
+```bash
+meshmcp edge --config edge.yaml        # serves http://127.0.0.1:8080
+tailscale funnel 8080                  # publishes https://<node>.ts.net → 127.0.0.1:8080
+# set public_url to the funnel URL; claude.ai connects to it
+```
+
+This is the first, near-zero-code rung of the broader
+[hosted-client ingress design](design/HOSTED-CLIENT-INGRESS.md), whose recommended
+end-state (the passthrough **beacon**) removes the "must already run a front"
+caveat while keeping the same loopback-listener seam.
+
+---
+
 ## Transport
 
 Full MCP Streamable HTTP:

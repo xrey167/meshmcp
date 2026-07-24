@@ -290,6 +290,10 @@ func (s *Server) httpServer(tlsConf *tls.Config) *http.Server {
 // blocks. TLS certificates are already loaded/obtained before Serve begins, so
 // a certificate problem is a startup error, never a first-handshake surprise.
 func (s *Server) Run(ctx context.Context) error {
+	if s.cfg.BehindFront {
+		return s.runBehindFront(ctx)
+	}
+
 	tlsConf, acme, err := s.buildTLSConfig()
 	if err != nil {
 		return err
@@ -309,6 +313,37 @@ func (s *Server) Run(ctx context.Context) error {
 		// tell ServeTLS to use it.
 		errCh <- srv.ServeTLS(ln, "", "")
 	}()
+
+	select {
+	case <-ctx.Done():
+		shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return srv.Shutdown(shutCtx)
+	case err := <-errCh:
+		if err == http.ErrServerClosed {
+			return nil
+		}
+		return err
+	}
+}
+
+// runBehindFront serves the edge over PLAIN HTTP on the loopback Listen address
+// (Config.Validate guarantees it is loopback), with no edge-side TLS. A trusted
+// TLS-terminating front — Tailscale Funnel, a reverse proxy, an API gateway —
+// owns the public name and cert and forwards to this loopback listener. The
+// edge's OAuth endpoints, the capability + policy double-gate, and the
+// fail-closed audit ledger run byte-for-byte identically to the public-TLS path;
+// only the listener and TLS termination differ. See
+// docs/design/HOSTED-CLIENT-INGRESS.md.
+func (s *Server) runBehindFront(ctx context.Context) error {
+	srv := s.httpServer(nil) // no edge TLS; the front terminates it
+	ln, err := net.Listen("tcp", s.cfg.Listen)
+	if err != nil {
+		return fmt.Errorf("edge: behind-front listen on %s: %w", s.cfg.Listen, err)
+	}
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Serve(ln) }()
 
 	select {
 	case <-ctx.Done():
