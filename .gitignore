@@ -49,3 +49,6 @@ audit-signing-key.json
 /bus
 /scheduler
 /vault
+
+# Claude Code session / workflow worktree scaffolding
+.claude/
