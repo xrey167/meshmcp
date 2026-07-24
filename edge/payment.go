@@ -7,8 +7,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
+	"math/big"
 	"net/http"
 	"path"
+	"sort"
 
 	"github.com/xrey167/meshmcp/policy"
 )
@@ -82,29 +85,44 @@ type paymentGate struct {
 	salt     string
 }
 
-// newPaymentGate builds the gate, or returns nil when payment is disabled. It
-// defaults the verifier to the dev verifier and the payer-hash salt to the
-// backend name.
-func newPaymentGate(cfg PaymentConfig, backend string, v PaymentVerifier) *paymentGate {
+// newPaymentGate builds the gate, or returns (nil, nil) when payment is
+// disabled. When payment is enabled it REQUIRES a verifier: an injected one, or
+// — only behind the explicit dev_insecure_verifier opt-in — the built-in dev
+// verifier. Enabling payment with neither is a fail-closed construction error,
+// never a silent downgrade to a verifier that accepts unsettled payments
+// (mirrors the DPoP replay-store and signing-key precedents). The payer-hash
+// salt defaults to the backend name.
+func newPaymentGate(cfg PaymentConfig, backend string, v PaymentVerifier) (*paymentGate, error) {
 	if !cfg.Enabled {
-		return nil
+		return nil, nil
 	}
 	if v == nil {
+		if !cfg.DevInsecureVerifier {
+			return nil, fmt.Errorf("edge: backend.payment.enabled requires a payment verifier, but none was supplied — inject one at construction (a real x402 facilitator client), or set backend.payment.dev_insecure_verifier: true for local testing only (it accepts unsettled payments and must never be used in production)")
+		}
 		v = devPaymentVerifier{}
 	}
 	salt := cfg.Salt
 	if salt == "" {
 		salt = backend
 	}
-	return &paymentGate{cfg: cfg, verifier: v, salt: salt}
+	return &paymentGate{cfg: cfg, verifier: v, salt: salt}, nil
 }
 
 // priceFor returns the price for a tool and whether it is priced. Overlapping
-// price globs are rejected at config Validate, so at most one entry matches.
+// price globs are rejected at config Validate, so at most one entry matches;
+// iterating patterns in sorted order makes the lookup deterministic regardless
+// (Go map iteration order is randomized) — defense in depth so a pricing result
+// can never depend on hash-seed luck even if an overlap ever slipped through.
 func (g *paymentGate) priceFor(tool string) (string, bool) {
-	for pattern, price := range g.cfg.Prices {
+	patterns := make([]string, 0, len(g.cfg.Prices))
+	for pattern := range g.cfg.Prices {
+		patterns = append(patterns, pattern)
+	}
+	sort.Strings(patterns)
+	for _, pattern := range patterns {
 		if ok, _ := path.Match(pattern, tool); ok {
-			return price, true
+			return g.cfg.Prices[pattern], true
 		}
 	}
 	return "", false
@@ -132,13 +150,21 @@ func (g *paymentGate) requirements(tool, price, resourceBase string) PaymentRequ
 // error). Called only when s.payment != nil.
 func (s *Server) gatePayment(w http.ResponseWriter, r *http.Request, au authed, sess *mcpSession, class policy.RPCClass) (proceed bool) {
 	g := s.payment
-	dryRun := g.cfg.FreeDryRun && r.Header.Get(headerDryRun) != ""
 
-	// Free dry-run route: validate-only, never charge, never invoke the backend.
-	// The caller sees a synthetic result plus dry-run-marked evidence so it can
-	// rehearse the paid flow at no cost.
-	if dryRun {
-		ev := policy.DryRunEvidence(g.cfg.scheme(), g.cfg.Network, g.cfg.Asset, s.dryRunAmount(class.Tool))
+	// An unpriced tool is free: the dry-run header is irrelevant (there is no
+	// paid flow to rehearse), so proceed to the backend unchanged. Deciding this
+	// BEFORE the dry-run branch keeps dry-run from shadowing real execution of a
+	// free tool.
+	price, priced := g.priceFor(class.Tool)
+	if !priced {
+		return true
+	}
+
+	// Free dry-run route (priced tools only): validate-only, never charge, never
+	// invoke the backend. The caller sees a synthetic result plus dry-run-marked
+	// evidence so it can rehearse the paid flow at no cost.
+	if g.cfg.FreeDryRun && r.Header.Get(headerDryRun) != "" {
+		ev := policy.DryRunEvidence(g.cfg.scheme(), g.cfg.Network, g.cfg.Asset, price)
 		if err := s.auditPayment(au.clientID, class.Tool, "x402/dry-run", "allow", "free dry-run", &ev); err != nil {
 			// Fail closed: an unrecorded decision is denied, even a free one.
 			s.writeJSONRPC(w, jsonRPCErrorResponse(class.ID, -32002, "dry-run blocked: audit sink unavailable (fail-closed)"))
@@ -151,11 +177,6 @@ func (s *Server) gatePayment(w http.ResponseWriter, r *http.Request, au authed, 
 		return false
 	}
 
-	price, priced := g.priceFor(class.Tool)
-	if !priced {
-		return true // free tool: proceed unchanged
-	}
-
 	req := g.requirements(class.Tool, price, s.cfg.PublicURL+pathMCP+"#")
 	payload, ok := decodePaymentHeader(r.Header.Get(headerPayment))
 	if !ok {
@@ -165,7 +186,12 @@ func (s *Server) gatePayment(w http.ResponseWriter, r *http.Request, au authed, 
 	}
 	settle, err := g.verifier.VerifyPayment(r.Context(), req, payload)
 	if err != nil {
-		_ = s.auditPayment(au.clientID, class.Tool, "x402/require", "deny", "payment rejected: "+err.Error(), nil)
+		// The verifier's error may echo payload/settlement content (a real
+		// facilitator client can build errors naming an address or token). Record
+		// only a FIXED reason in the exportable, wallet-free audit log; the detail
+		// goes to the operator's local log, never the shared chain.
+		log.Printf("edge: payment verify rejected for %s tool %q: %v", oauthIdentity(au.clientID), class.Tool, err)
+		_ = s.auditPayment(au.clientID, class.Tool, "x402/require", "deny", "payment rejected by verifier", nil)
 		s.writePaymentRequired(w, req)
 		return false
 	}
@@ -176,25 +202,17 @@ func (s *Server) gatePayment(w http.ResponseWriter, r *http.Request, au authed, 
 	}
 	ev := policy.NewPaymentEvidence(g.cfg.scheme(), g.cfg.Network, g.cfg.Asset, amount, settle.Reference, settle.Payer, g.salt)
 	if err := s.auditPayment(au.clientID, class.Tool, "x402/settle", "allow", "x402 settled", &ev); err != nil {
-		// Fail closed: a paid call whose evidence cannot be recorded is denied
-		// (and the client can retry — the settlement reference is idempotent to a
-		// real facilitator). We do NOT forward on an unrecorded settlement.
-		s.writeJSONRPC(w, jsonRPCErrorResponse(class.ID, -32002, "tool blocked: payment recorded fail-closed audit unavailable"))
+		// Fail closed: a paid call whose evidence cannot be recorded is denied.
+		// The client can retry — a real facilitator settles the same payment
+		// authorization idempotently, so a retry re-derives the same reference
+		// rather than double-charging. We do NOT forward on an unrecorded settlement.
+		s.writeJSONRPC(w, jsonRPCErrorResponse(class.ID, -32002, "tool blocked: payment settled but the audit sink is unavailable (fail-closed) — retry, the settlement is idempotent"))
 		return false
 	}
 	if len(settle.Response) > 0 {
 		w.Header().Set(headerPaymentResponse, base64.StdEncoding.EncodeToString(settle.Response))
 	}
 	return true
-}
-
-// dryRunAmount reports the amount a dry-run would have charged (for the
-// evidence descriptor), or empty when the tool is not priced.
-func (s *Server) dryRunAmount(tool string) string {
-	if price, priced := s.payment.priceFor(tool); priced {
-		return price
-	}
-	return ""
 }
 
 // writePaymentRequired writes an HTTP 402 with the x402 requirements body and an
@@ -291,8 +309,22 @@ func (devPaymentVerifier) VerifyPayment(_ context.Context, req PaymentRequiremen
 	if p.Authorization == "" {
 		return Settlement{}, fmt.Errorf("payment missing authorization")
 	}
-	if p.Amount != req.MaxAmountRequired {
-		return Settlement{}, fmt.Errorf("payment amount %q does not meet required %q", p.Amount, req.MaxAmountRequired)
+	// maxAmountRequired is a ceiling the payer authorizes up to, so accept any
+	// amount that MEETS OR EXCEEDS the price; compare as integers (minor units),
+	// never as strings ("9" > "1000" lexically).
+	paid, okPaid := new(big.Int).SetString(p.Amount, 10)
+	need, okNeed := new(big.Int).SetString(req.MaxAmountRequired, 10)
+	if !okPaid {
+		return Settlement{}, fmt.Errorf("payment amount %q is not an integer in minor units", p.Amount)
+	}
+	if !okNeed {
+		return Settlement{}, fmt.Errorf("required amount %q is not an integer in minor units", req.MaxAmountRequired)
+	}
+	if paid.Sign() <= 0 {
+		return Settlement{}, fmt.Errorf("payment amount %q must be positive", p.Amount)
+	}
+	if paid.Cmp(need) < 0 {
+		return Settlement{}, fmt.Errorf("payment amount %q is below the required %q", p.Amount, req.MaxAmountRequired)
 	}
 	if req.Asset != "" && p.Asset != "" && p.Asset != req.Asset {
 		return Settlement{}, fmt.Errorf("payment asset %q != required %q", p.Asset, req.Asset)

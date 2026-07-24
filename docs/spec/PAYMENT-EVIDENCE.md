@@ -66,8 +66,8 @@ client                         meshmcp edge                       backend
 - **402 challenge** — HTTP `402 Payment Required`, header `Accept-Payment:
   <scheme>`, body `{"error":"payment_required","accepts":[PaymentRequirements]}`.
   `PaymentRequirements` carries `scheme`, `network`, `asset`,
-  `maxAmountRequired`, `payTo`, `resource` (the tool), `facilitator`, and
-  `freeDryRun`.
+  `maxAmountRequired`, `payTo`, `resource` (a URL identifying the tool),
+  `facilitator`, and `freeDryRun`.
 - **Payment** — the client presents `X-PAYMENT` (base64-encoded JSON, x402
   convention). meshmcp hands it to the configured `PaymentVerifier`; a real
   deployment injects a facilitator client that verifies and settles, returning
@@ -75,10 +75,13 @@ client                         meshmcp edge                       backend
   settlement is recorded as `x402/settle`. On failure the call is re-challenged
   with 402.
 - **Verifier** — `PaymentVerifier` is an interface. The built-in
-  `devPaymentVerifier` checks payload well-formedness and the required
-  amount/asset, then treats the payment as settled with a deterministic
-  reference — enough to test and demo the whole path, but it performs **no**
-  on-chain settlement or signature check. Production supplies its own verifier.
+  `devPaymentVerifier` checks payload well-formedness and that the amount meets
+  the price, then treats the payment as settled with a deterministic reference —
+  enough to test and demo the whole path, but it performs **no** on-chain
+  settlement or signature check. Enabling payment without either injecting a
+  real verifier or explicitly setting `dev_insecure_verifier: true` is a
+  **fail-closed construction error** — meshmcp never silently accepts unsettled
+  payments (the same rule the DPoP replay store and signing key follow).
 
 ## The free dry-run route
 
@@ -106,6 +109,7 @@ backend:
     pay_to: "0xYourServerReceivingAddress"
     facilitator: "https://facilitator.example/x402"   # advisory; the injected verifier does the work
     free_dry_run: true
+    # dev_insecure_verifier: true    # local/demo ONLY — accepts unsettled payments; omit in production and inject a real verifier
     salt: carbon-tools               # optional; scopes payer_ref (defaults to backend name)
     prices:                          # tool-name globs (path.Match), non-overlapping
       "estimate_*": "1000"           # minor units, string
@@ -121,6 +125,17 @@ inert.
 
 - On-chain settlement correctness is the facilitator's, not meshmcp's — the
   built-in verifier is a dev stand-in.
+- **Replay / single-use** is the facilitator's responsibility, not the gate's.
+  The gate does not itself dedupe payments (there is no per-payment nonce store);
+  it relies on the fact that an x402 payment authorization is single-use on-chain,
+  so a real facilitator rejects a replayed authorization at settle. The built-in
+  dev verifier does NOT dedupe — a dev `X-PAYMENT` is replayable, which is one
+  more reason it is test/demo only. A gate-level replay store is a candidate
+  hardening if a future facilitator does not guarantee single-use.
+- Fail-closed after settlement: if the audit write fails after a payment
+  settled, the call is denied and the client must retry; this assumes the
+  facilitator settles the same authorization idempotently (a retry re-derives the
+  same reference rather than double-charging).
 - `payer_ref` unlinkability is only as strong as the salt; a public/guessable
   payer-id space plus a known salt is correlatable by brute force. Use a secret
   salt where payer anonymity matters.

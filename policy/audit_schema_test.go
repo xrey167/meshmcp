@@ -158,6 +158,9 @@ func TestAuditRecordSchema_AllowsPayment(t *testing.T) {
 	if err := json.Unmarshal(paymentSchemaRaw, &paymentSchema); err != nil {
 		t.Fatalf("parse payment subschema: %v", err)
 	}
+	if paymentSchema.AdditionalProperties {
+		t.Fatalf("payment subschema must be additionalProperties:false, or an unknown evidence key would slip past the schema/record parity guard")
+	}
 
 	var buf bytes.Buffer
 	a := NewAuditLog(&buf, func() string { return "T" })

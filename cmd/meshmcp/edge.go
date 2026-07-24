@@ -97,6 +97,10 @@ func cmdEdge(args []string) error {
 		fmt.Fprintf(os.Stderr, "meshmcp edge: joined mesh, backend %s reachable over WireGuard\n", cfg.Backend.Addr)
 	}
 
+	if p := cfg.Backend.Payment; p.Enabled && p.DevInsecureVerifier {
+		fmt.Fprintf(os.Stderr, "meshmcp edge: WARNING payment is using the INSECURE dev verifier (dev_insecure_verifier: true) — it accepts unsettled payments; never use this in production\n")
+	}
+
 	srv, err := edge.New(cfg, opts)
 	if err != nil {
 		return err

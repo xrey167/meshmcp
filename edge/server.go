@@ -154,6 +154,13 @@ func New(cfg Config, opts Options) (*Server, error) {
 		dial = defaultDial(cfg.Backend.Addr)
 	}
 
+	// Payment gate: fail closed if enabled without a way to verify (see
+	// newPaymentGate). nil when payment is disabled.
+	payGate, err := newPaymentGate(cfg.Backend.Payment, cfg.Backend.Name, opts.PaymentVerifier)
+	if err != nil {
+		return nil, err
+	}
+
 	s := &Server{
 		cfg:           cfg,
 		signer:        signer,
@@ -168,7 +175,7 @@ func New(cfg Config, opts Options) (*Server, error) {
 		dial:          dial,
 		iats:          iats,
 		dpop:          &policy.DPoPVerifier{Replay: replay},
-		payment:       newPaymentGate(cfg.Backend.Payment, cfg.Backend.Name, opts.PaymentVerifier),
+		payment:       payGate,
 		preauthLimit:  newFixedWindowLimiter(cfg.Limits.PreauthPerIPPerMin, time.Minute, now),
 		registerLimit: newFixedWindowLimiter(cfg.Limits.RegisterPerIPPerMin, time.Minute, now),
 		clientLimit:   newTokenBucket(cfg.Limits.PerClientRPS, cfg.Limits.PerClientBurst, now),

@@ -262,9 +262,10 @@ type PaymentConfig struct {
 	Facilitator string `yaml:"facilitator"`
 	// Prices maps a tool-name glob (path.Match syntax, like policy tool rules) to
 	// a price in the asset's minor units, kept as a string for exact precision. A
-	// tool matching no entry is free (ungated). First matching entry wins in the
-	// map's declared-key iteration is non-deterministic, so overlapping globs are
-	// rejected at Validate time to keep pricing unambiguous.
+	// tool matching no entry is free (ungated). Overlapping globs are rejected at
+	// Validate time (see globsOverlap) so at most one entry can match a tool, and
+	// priceFor iterates in sorted order, keeping the charged price unambiguous and
+	// independent of Go's randomized map iteration.
 	Prices map[string]string `yaml:"prices"`
 	// FreeDryRun exposes a free dry-run route: a request carrying the
 	// X-Meshmcp-Dry-Run header is validated (identity + policy) and answered with
@@ -272,6 +273,16 @@ type PaymentConfig struct {
 	// dry-run-marked payment-evidence record so a client can rehearse the paid
 	// flow and evidence shape at no cost.
 	FreeDryRun bool `yaml:"free_dry_run"`
+	// DevInsecureVerifier explicitly opts into the built-in dev verifier when no
+	// real PaymentVerifier is injected at construction. The dev verifier checks
+	// only payload well-formedness and amount — it performs NO on-chain
+	// settlement and NO signature verification, so ANY well-formed X-PAYMENT is
+	// accepted. It exists for local testing and demos ONLY. Enabling payment
+	// without either injecting a verifier or setting this flag is a fail-closed
+	// construction error (mirrors the DPoP replay-store and signing-key
+	// precedents): a security-relevant collaborator is never silently
+	// downgraded. NEVER set this in production.
+	DevInsecureVerifier bool `yaml:"dev_insecure_verifier"`
 	// Salt scopes the payer-ref hash in emitted evidence to this deployment.
 	// Empty defaults to the backend name.
 	Salt string `yaml:"salt"`
@@ -472,31 +483,46 @@ func (p PaymentConfig) validate() error {
 }
 
 // globsOverlap reports whether two price globs could both match some tool name,
-// which would make the charged price depend on non-deterministic map order. It
-// is a conservative check: a literal on either side tested against the other,
-// plus exact equality — enough to catch the realistic overlaps ("*" vs
-// anything, "read_*" vs "read_file", duplicate patterns) without a full
-// glob-intersection solver.
+// which would make the charged price ambiguous. It is SOUND (no false
+// negatives): it never reports "no overlap" for a pair that actually
+// intersects, so a config that passes validation can never price a tool
+// non-deterministically. It may be conservative (reject a disjoint pair), which
+// only makes validation stricter — an operator can always rename a glob.
+//
+//   - Two distinct pure literals never overlap.
+//   - Literal vs glob: exact path.Match test.
+//   - Two globs: a common match would have to begin with BOTH patterns' fixed
+//     literal prefixes (the text before the first metacharacter), so it exists
+//     only if one prefix is a prefix of the other. Incompatible prefixes prove
+//     disjointness; compatible prefixes are treated as a (possible) overlap.
 func globsOverlap(a, b string) bool {
 	if a == b {
 		return true
 	}
-	if !strings.ContainsAny(a, "*?[") {
-		if ok, _ := path.Match(b, a); ok {
-			return true
-		}
+	aWild := strings.ContainsAny(a, "*?[")
+	bWild := strings.ContainsAny(b, "*?[")
+	switch {
+	case !aWild && !bWild:
+		return false // two distinct literals cannot both match one tool
+	case !aWild:
+		ok, _ := path.Match(b, a)
+		return ok
+	case !bWild:
+		ok, _ := path.Match(a, b)
+		return ok
+	default:
+		pa, pb := literalPrefix(a), literalPrefix(b)
+		return strings.HasPrefix(pa, pb) || strings.HasPrefix(pb, pa)
 	}
-	if !strings.ContainsAny(b, "*?[") {
-		if ok, _ := path.Match(a, b); ok {
-			return true
-		}
+}
+
+// literalPrefix returns the fixed leading text of a glob, up to (not including)
+// the first path.Match metacharacter.
+func literalPrefix(glob string) string {
+	if i := strings.IndexAny(glob, "*?["); i >= 0 {
+		return glob[:i]
 	}
-	// Two wildcard patterns: a shared literal prefix before the first wildcard is
-	// a strong overlap signal ("read_*" vs "read_file_*").
-	if a == "*" || b == "*" {
-		return true
-	}
-	return false
+	return glob
 }
 
 // isPostgresDSN reports whether a store value selects a PostgreSQL backend.
