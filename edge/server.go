@@ -34,6 +34,7 @@ type Server struct {
 	dial     DialBackend
 	iats     []resolvedIAT
 	dpop     *policy.DPoPVerifier
+	payment  *paymentGate // nil when backend.payment is disabled (all tools free)
 
 	preauthLimit  *fixedWindowLimiter
 	registerLimit *fixedWindowLimiter
@@ -59,6 +60,12 @@ type Options struct {
 	// injects a WireGuard mesh dial (client.Dial); when nil, a plain TCP dial to
 	// cfg.Backend.Addr is used (same-host backends and tests).
 	DialBackend DialBackend
+	// PaymentVerifier verifies presented x402 payments when backend.payment is
+	// enabled. Production injects a client of a real facilitator (verify +
+	// settle); when nil the built-in dev verifier is used (well-formedness only,
+	// no on-chain settlement — see devPaymentVerifier). Ignored when payment is
+	// disabled.
+	PaymentVerifier PaymentVerifier
 	// DPoPReplay backs the edge's DPoP verifier. Production wiring (cmd/meshmcp)
 	// injects the shared PostgreSQL store when oauth.dpop_replay_store is set;
 	// nil selects the in-process store — but ONLY when no shared store is
@@ -161,6 +168,7 @@ func New(cfg Config, opts Options) (*Server, error) {
 		dial:          dial,
 		iats:          iats,
 		dpop:          &policy.DPoPVerifier{Replay: replay},
+		payment:       newPaymentGate(cfg.Backend.Payment, cfg.Backend.Name, opts.PaymentVerifier),
 		preauthLimit:  newFixedWindowLimiter(cfg.Limits.PreauthPerIPPerMin, time.Minute, now),
 		registerLimit: newFixedWindowLimiter(cfg.Limits.RegisterPerIPPerMin, time.Minute, now),
 		clientLimit:   newTokenBucket(cfg.Limits.PerClientRPS, cfg.Limits.PerClientBurst, now),

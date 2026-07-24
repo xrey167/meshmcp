@@ -76,6 +76,17 @@ type AuditRecord struct {
 	DelegatedCaller  string `json:"delegated_caller,omitempty"`
 	DelegationRouter string `json:"delegation_router,omitempty"`
 	DelegationNonce  string `json:"delegation_nonce,omitempty"`
+
+	// Payment is an additive, optional payment receipt for a call gated on
+	// payment (an x402 paid call or its free dry-run). Appended after the
+	// delegation fields (never inserted) and omitempty, so records for unpaid
+	// calls are byte-identical to a pre-payment build and existing chains,
+	// hashes, and checkpoints verify unchanged. It carries payment REFERENCES
+	// only — never a wallet address or raw payment token — and the paying mesh
+	// identity is this same record's Peer/PeerKey/PeerSpiffeID, so the log
+	// proves who-paid-for-which-call in one signed line. See PaymentEvidence,
+	// docs/spec/AUDIT-RECORD.md §1.1/§1.4, and docs/spec/PAYMENT-EVIDENCE.md.
+	Payment *PaymentEvidence `json:"payment,omitempty"`
 }
 
 // auditSchemaVersion is the current audit-record on-disk format version. A

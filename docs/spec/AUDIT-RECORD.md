@@ -38,6 +38,7 @@ record's hash, forming a hash chain.
 | `delegated_caller` | string | no | Router delegation (Phase 4): the VERIFIED `DelegationToken`'s original-caller claim. Empty/absent when no decodable token was presented. |
 | `delegation_router` | string | no | Router delegation: the transport-proven connecting router — recorded explicitly (alongside `peer_key`) so a forwarded call preserves BOTH identities per ROUTER-DELEGATION.md. |
 | `delegation_nonce` | string | no | Router delegation: the token's single-use replay nonce. |
+| `payment` | object | no | Additive payment receipt for a payment-gated call (an x402 paid call or its free dry-run). Appended after the delegation fields (§1.4). REFERENCES only — never a wallet address or raw payment token; the paying identity is this same record's `peer`/`peer_key`/`peer_spiffe_id`. See [PAYMENT-EVIDENCE.md](PAYMENT-EVIDENCE.md). |
 
 ### 1.2 Record hash
 
@@ -94,7 +95,10 @@ Compatibility semantics:
   in canonical order, or same-version binaries, are unaffected.
 
 Future additive fields MUST follow the same pattern: appended after `hash`
-(and after previously appended additive fields), optional, `omitempty`.
+(and after previously appended additive fields), optional, `omitempty`. The
+`payment` object (§1.1, [PAYMENT-EVIDENCE.md](PAYMENT-EVIDENCE.md)) is such a
+field — a record for an unpaid call omits it and is byte-identical to a
+pre-payment build.
 
 ## 2. Signed checkpoints
 

@@ -22,6 +22,7 @@ package edge
 import (
 	"fmt"
 	"net/url"
+	"path"
 	"strings"
 	"time"
 
@@ -229,6 +230,59 @@ type BackendConfig struct {
 	// Policy is the standard meshmcp policy applied to oauth:<client_id>
 	// identities. default_allow: true is a startup error.
 	Policy policy.Policy `yaml:"policy"`
+	// Payment, when present and enabled, gates priced tools behind an x402
+	// payment (HTTP 402 → pay → retry) and optionally exposes a free dry-run
+	// route. Absent/disabled keeps the edge byte-identical to a pre-payment
+	// build. See PaymentConfig and docs/spec/PAYMENT-EVIDENCE.md.
+	Payment PaymentConfig `yaml:"payment"`
+}
+
+// PaymentConfig configures x402 payment gating for the exposed backend. It is
+// off unless Enabled; when off, no tool is priced and no dry-run route exists,
+// so the edge behaves exactly as before. The actual payment verify/settle is
+// performed by an injected PaymentVerifier (Options.PaymentVerifier); this
+// block only declares WHAT is charged and advertises the challenge.
+type PaymentConfig struct {
+	// Enabled turns on payment gating for this backend.
+	Enabled bool `yaml:"enabled"`
+	// Scheme is the payment scheme advertised and recorded. Defaults to "x402".
+	Scheme string `yaml:"scheme"`
+	// Network is the settlement network label, e.g. "base-sepolia".
+	Network string `yaml:"network"`
+	// Asset is the settlement asset label, e.g. "USDC".
+	Asset string `yaml:"asset"`
+	// PayTo is the server's OWN receiving address, advertised publicly in the
+	// 402 challenge. It is the payee, never a caller wallet, and is deliberately
+	// the one address in this system that is public — it is not payment evidence.
+	PayTo string `yaml:"pay_to"`
+	// Facilitator is the advisory URL of the x402 facilitator that verifies and
+	// settles payments; surfaced in the challenge so a client knows where its
+	// payment is checked. The verify itself runs through the injected
+	// PaymentVerifier, never by trusting this field.
+	Facilitator string `yaml:"facilitator"`
+	// Prices maps a tool-name glob (path.Match syntax, like policy tool rules) to
+	// a price in the asset's minor units, kept as a string for exact precision. A
+	// tool matching no entry is free (ungated). First matching entry wins in the
+	// map's declared-key iteration is non-deterministic, so overlapping globs are
+	// rejected at Validate time to keep pricing unambiguous.
+	Prices map[string]string `yaml:"prices"`
+	// FreeDryRun exposes a free dry-run route: a request carrying the
+	// X-Meshmcp-Dry-Run header is validated (identity + policy) and answered with
+	// a synthetic result WITHOUT charging or invoking the backend, emitting a
+	// dry-run-marked payment-evidence record so a client can rehearse the paid
+	// flow and evidence shape at no cost.
+	FreeDryRun bool `yaml:"free_dry_run"`
+	// Salt scopes the payer-ref hash in emitted evidence to this deployment.
+	// Empty defaults to the backend name.
+	Salt string `yaml:"salt"`
+}
+
+// scheme returns the effective payment scheme (default "x402").
+func (p PaymentConfig) scheme() string {
+	if p.Scheme == "" {
+		return "x402"
+	}
+	return p.Scheme
 }
 
 // LimitsConfig bounds abuse at the public edge. Zero values take defaults.
@@ -376,8 +430,73 @@ func (c Config) Validate() (Config, error) {
 	if c.Backend.Policy.DefaultAllow {
 		return c, fmt.Errorf("edge: backend.policy.default_allow must be false — the public edge is deny-by-default")
 	}
+	if err := c.Backend.Payment.validate(); err != nil {
+		return c, err
+	}
 
 	return c, nil
+}
+
+// validate checks the payment block. A disabled block is always valid (it is
+// inert). An enabled block must name an asset, price at least one tool, and use
+// well-formed, non-overlapping tool globs (overlap would make pricing depend on
+// non-deterministic map iteration).
+func (p PaymentConfig) validate() error {
+	if !p.Enabled {
+		return nil
+	}
+	if p.Asset == "" {
+		return fmt.Errorf("edge: backend.payment.asset is required when payment is enabled")
+	}
+	if len(p.Prices) == 0 {
+		return fmt.Errorf("edge: backend.payment.enabled is true but no prices are set (nothing would ever be charged)")
+	}
+	globs := make([]string, 0, len(p.Prices))
+	for pattern, price := range p.Prices {
+		if _, err := path.Match(pattern, ""); err != nil {
+			return fmt.Errorf("edge: backend.payment.prices: bad tool glob %q: %w", pattern, err)
+		}
+		if price == "" {
+			return fmt.Errorf("edge: backend.payment.prices[%q]: price must not be empty", pattern)
+		}
+		globs = append(globs, pattern)
+	}
+	for i := 0; i < len(globs); i++ {
+		for j := i + 1; j < len(globs); j++ {
+			if globsOverlap(globs[i], globs[j]) {
+				return fmt.Errorf("edge: backend.payment.prices: tool globs %q and %q overlap; pricing must be unambiguous", globs[i], globs[j])
+			}
+		}
+	}
+	return nil
+}
+
+// globsOverlap reports whether two price globs could both match some tool name,
+// which would make the charged price depend on non-deterministic map order. It
+// is a conservative check: a literal on either side tested against the other,
+// plus exact equality — enough to catch the realistic overlaps ("*" vs
+// anything, "read_*" vs "read_file", duplicate patterns) without a full
+// glob-intersection solver.
+func globsOverlap(a, b string) bool {
+	if a == b {
+		return true
+	}
+	if !strings.ContainsAny(a, "*?[") {
+		if ok, _ := path.Match(b, a); ok {
+			return true
+		}
+	}
+	if !strings.ContainsAny(b, "*?[") {
+		if ok, _ := path.Match(a, b); ok {
+			return true
+		}
+	}
+	// Two wildcard patterns: a shared literal prefix before the first wildcard is
+	// a strong overlap signal ("read_*" vs "read_file_*").
+	if a == "*" || b == "*" {
+		return true
+	}
+	return false
 }
 
 // isPostgresDSN reports whether a store value selects a PostgreSQL backend.

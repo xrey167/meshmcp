@@ -132,6 +132,15 @@ func (s *Server) mcpPost(w http.ResponseWriter, r *http.Request) {
 			s.writeJSONRPC(w, denyBody)
 			return
 		}
+		// Payment gate (opt-in): a priced tool needs a verified x402 payment
+		// before it forwards; a free dry-run route answers without charging. Runs
+		// AFTER the capability + policy double-gate — payment never buys access a
+		// deny-by-default policy withheld. No-op when payment is disabled.
+		if s.payment != nil {
+			if proceed := s.gatePayment(w, r, au, sess, class); !proceed {
+				return // 402 challenge, dry-run result, or fail-closed error already written
+			}
+		}
 	} else {
 		// Non-tool methods/notifications: audit and forward (the backend is a
 		// single tool-scoped surface; the tools/call gate is the control).

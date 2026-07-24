@@ -88,6 +88,21 @@ func TestConfigValidateRejections(t *testing.T) {
 		{"replay store wrong scheme", func(c *Config) {
 			c.OAuth.DPoPReplayStore = "mysql://u:p@db/x"
 		}, "dpop_replay_store must be a postgres"},
+		{"payment no asset", func(c *Config) {
+			c.Backend.Payment = PaymentConfig{Enabled: true, Prices: map[string]string{"x": "1"}}
+		}, "payment.asset is required"},
+		{"payment no prices", func(c *Config) {
+			c.Backend.Payment = PaymentConfig{Enabled: true, Asset: "USDC"}
+		}, "no prices are set"},
+		{"payment empty price", func(c *Config) {
+			c.Backend.Payment = PaymentConfig{Enabled: true, Asset: "USDC", Prices: map[string]string{"search_docs": ""}}
+		}, "price must not be empty"},
+		{"payment bad glob", func(c *Config) {
+			c.Backend.Payment = PaymentConfig{Enabled: true, Asset: "USDC", Prices: map[string]string{"[bad": "1"}}
+		}, "bad tool glob"},
+		{"payment overlapping globs", func(c *Config) {
+			c.Backend.Payment = PaymentConfig{Enabled: true, Asset: "USDC", Prices: map[string]string{"search_*": "1", "search_docs": "2"}}
+		}, "overlap"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
