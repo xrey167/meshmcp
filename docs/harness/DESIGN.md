@@ -157,14 +157,19 @@ worker (so the public key IS the transport-bound identity), obtains a scoped
 one-off enrollment credential from the control plane (`control.NetBirdIssuer`
 via the `harness.Enroller` interface), and deregisters on retire. Selected with
 `harness serve|run --minter netbird` (PAT via `--nb-token`/`$NB_API_TOKEN`);
-`mem` (in-process keys) remains the default.
+`mem` (in-process keys) remains the default. `ExecSpawner` then launches a
+minted identity as a worker subprocess with a **curated environment** — only the
+mesh-join credentials and identity markers, never the parent environment — so a
+worker joins the mesh as exactly its minted key and never inherits an unrelated
+secret (mirroring `cmd/meshmcp`'s `agentChildEnv`); it fails closed on an empty
+command or an unminted identity.
 
 **Deferred (wiring, not design):** live provider CLIs require the binaries +
 broker keys; the remaining lsp_* tools (rename/goto/references) need a language
-server; browser/canvas/nodes/cron live backends (Phase 2/4); the worker-process
-spawner that launches a minted identity onto the mesh with its `WorkerCreds`; the
-non-webchat channel transports (Phase 4 live wiring); Live Canvas / voice
-surfaces. Every deferred tool/channel is still *registered and
+server; browser/canvas/nodes/cron live backends (Phase 2/4); scheduler wiring to
+optionally run subprocess workers via `ExecSpawner` (the spawner itself is
+built); the non-webchat channel transports (Phase 4 live wiring); Live Canvas /
+voice surfaces. Every deferred tool/channel is still *registered and
 governed* — a call passes the firewall and is audited, and it fails closed rather
 than silently succeeding.
 
