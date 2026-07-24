@@ -125,17 +125,27 @@ inert.
 
 - On-chain settlement correctness is the facilitator's, not meshmcp's — the
   built-in verifier is a dev stand-in.
-- **Replay / single-use** is the facilitator's responsibility, not the gate's.
-  The gate does not itself dedupe payments (there is no per-payment nonce store);
-  it relies on the fact that an x402 payment authorization is single-use on-chain,
-  so a real facilitator rejects a replayed authorization at settle. The built-in
-  dev verifier does NOT dedupe — a dev `X-PAYMENT` is replayable, which is one
-  more reason it is test/demo only. A gate-level replay store is a candidate
-  hardening if a future facilitator does not guarantee single-use.
-- Fail-closed after settlement: if the audit write fails after a payment
-  settled, the call is denied and the client must retry; this assumes the
-  facilitator settles the same authorization idempotently (a retry re-derives the
-  same reference rather than double-charging).
+- **Single-use is enforced by the gate.** Each settlement reference is redeemable
+  exactly once (an in-process consumed-reference store), so one settled payment
+  authorizes exactly one call and a replayed `X-PAYMENT` is denied
+  (`x402/replay`) regardless of whether the verifier is idempotent. The store is
+  per-edge-instance and its lifetime; a shared, size-bounded store is the HA
+  hardening (mirrors the DPoP replay store), and the map is unbounded within a
+  process today.
+- **Redeem-before-forward.** The reference is redeemed before the backend call,
+  which is airtight against concurrent replay but means a backend failure *after*
+  settlement spends the payment: a compensating `x402/backend-error` record is
+  written (so the ledger never implies the paid call was served), and recovery is
+  a settlement matter, not a silent re-serve. Likewise, if the audit write fails
+  after settlement the call is denied and the payment is spent — a new call needs
+  a new payment.
+- **Fail-closed on incomplete verifier output.** A verifier that returns success
+  but no settlement reference is treated as a failure and re-challenged — a
+  "settled" record is never written without settlement proof.
+- **Verifier error text is confined.** A verifier's error string (which a real
+  facilitator might build from payload/settlement detail) is never written to the
+  audit log OR the process log — both get a fixed reason; raw detail lives only
+  in the facilitator.
 - `payer_ref` unlinkability is only as strong as the salt; a public/guessable
   payer-id space plus a known salt is correlatable by brute force. Use a secret
   salt where payer anonymity matters.

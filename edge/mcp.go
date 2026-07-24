@@ -3,6 +3,7 @@ package edge
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -127,6 +128,7 @@ func (s *Server) mcpPost(w http.ResponseWriter, r *http.Request) {
 
 	// Enforce tool calls: the capability double-gate first (an Ed25519 grant the
 	// on-disk record cannot widen), then the deny-by-default policy engine.
+	var paid *policy.PaymentEvidence
 	if class.Kind == policy.RPCToolCall {
 		if allowed, denyBody := s.enforceToolCall(au, class); !allowed {
 			s.writeJSONRPC(w, denyBody)
@@ -135,9 +137,12 @@ func (s *Server) mcpPost(w http.ResponseWriter, r *http.Request) {
 		// Payment gate (opt-in): a priced tool needs a verified x402 payment
 		// before it forwards; a free dry-run route answers without charging. Runs
 		// AFTER the capability + policy double-gate — payment never buys access a
-		// deny-by-default policy withheld. No-op when payment is disabled.
+		// deny-by-default policy withheld. No-op when payment is disabled. On a
+		// settled paid call it returns the evidence so a subsequent backend
+		// failure can be recorded against the same (already-spent) settlement.
 		if s.payment != nil {
-			if proceed := s.gatePayment(w, r, au, sess, class); !proceed {
+			var proceed bool
+			if proceed, paid = s.gatePayment(w, r, au, sess, class); !proceed {
 				return // 402 challenge, dry-run result, or fail-closed error already written
 			}
 		}
@@ -152,7 +157,11 @@ func (s *Server) mcpPost(w http.ResponseWriter, r *http.Request) {
 		if sess != nil {
 			_ = sess.bridge.notify(class.Method, envelope.Params)
 		} else {
-			s.forwardOnce(r.Context(), au, func(b *bridge) { _ = b.notify(class.Method, envelope.Params) })
+			s.forwardOnce(r.Context(), au, func(b *bridge) {
+				if b != nil {
+					_ = b.notify(class.Method, envelope.Params)
+				}
+			})
 		}
 		w.WriteHeader(http.StatusAccepted)
 		return
@@ -160,6 +169,13 @@ func (s *Server) mcpPost(w http.ResponseWriter, r *http.Request) {
 
 	resp, ferr := s.forward(r.Context(), au, sess, methodOf(class), class.ID, envelope.Params)
 	if ferr != nil {
+		// A settled paid call whose backend then failed: record a compensating
+		// x402/backend-error against the same evidence so the tamper-evident
+		// ledger never implies the paid call was served. The payment is spent
+		// (single-use); recovery is a settlement matter, not a silent re-serve.
+		if paid != nil {
+			_ = s.auditPayment(au.clientID, class.Tool, "x402/backend-error", "deny", "paid call not served: backend unavailable after settlement", paid)
+		}
 		s.writeJSONRPC(w, jsonRPCErrorResponse(class.ID, -32603, "backend unavailable: "+ferr.Error()))
 		return
 	}
@@ -209,12 +225,25 @@ func (s *Server) forward(ctx context.Context, au authed, sess *mcpSession, metho
 	}
 	var out []byte
 	var ferr error
-	s.forwardOnce(ctx, au, func(b *bridge) { out, ferr = b.forward(ctx, method, id, params) })
+	s.forwardOnce(ctx, au, func(b *bridge) {
+		if b == nil {
+			// The backend dial failed (forwardOnce passes nil). Surface it as a
+			// forward error rather than dereferencing a nil bridge.
+			ferr = errBackendDialFailed
+			return
+		}
+		out, ferr = b.forward(ctx, method, id, params)
+	})
 	return out, ferr
 }
 
+// errBackendDialFailed is returned when the stateless one-shot bridge cannot be
+// dialed (backend unreachable); it surfaces as a JSON-RPC "backend unavailable".
+var errBackendDialFailed = errors.New("backend dial failed")
+
 // forwardOnce dials a short-lived bridge, runs fn, and closes it — the stateless
-// (sessions-disabled) path.
+// (sessions-disabled) path. On dial failure fn is invoked with a nil bridge; fn
+// MUST nil-check (see forward).
 func (s *Server) forwardOnce(ctx context.Context, au authed, fn func(*bridge)) {
 	b, err := newBridge(ctx, s.dial)
 	if err != nil {

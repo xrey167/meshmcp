@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -46,9 +47,16 @@ func newPaidServer(t *testing.T, pay PaymentConfig) (*httptest.Server, string, *
 }
 
 // newPaidServerDial is newPaidServer with an injectable backend dial (so a test
-// can observe backend invocations). Returns the server, an access token, the
-// captured audit chain, and the constructed *Server.
+// can observe backend invocations).
 func newPaidServerDial(t *testing.T, pay PaymentConfig, dial DialBackend) (*httptest.Server, string, *syncBuffer, *Server) {
+	return newPaidServerFull(t, pay, dial, nil, nil)
+}
+
+// newPaidServerFull is the flexible builder: it accepts an optional injected
+// PaymentVerifier and an optional config mutator, so tests can exercise a real
+// verifier, session toggles, etc. Returns the server, an access token, the
+// captured audit chain, and the constructed *Server.
+func newPaidServerFull(t *testing.T, pay PaymentConfig, dial DialBackend, verifier PaymentVerifier, mutate func(*Config)) (*httptest.Server, string, *syncBuffer, *Server) {
 	t.Helper()
 	dir := t.TempDir()
 	cfg := validConfig()
@@ -61,13 +69,17 @@ func newPaidServerDial(t *testing.T, pay PaymentConfig, dial DialBackend) (*http
 	cfg.Backend.Tools = []string{"search_*", "forbidden_tool"}
 	cfg.Backend.Policy = policyAllowSearch()
 	cfg.Backend.Payment = pay
+	if mutate != nil {
+		mutate(&cfg)
+	}
 
 	audit := &syncBuffer{}
 	srv, err := New(cfg, Options{
-		Now:         func() time.Time { return time.Now() },
-		Signer:      mustSigner(t),
-		AuditWriter: audit,
-		DialBackend: dial,
+		Now:             func() time.Time { return time.Now() },
+		Signer:          mustSigner(t),
+		AuditWriter:     audit,
+		DialBackend:     dial,
+		PaymentVerifier: verifier,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -76,13 +88,24 @@ func newPaidServerDial(t *testing.T, pay PaymentConfig, dial DialBackend) (*http
 	t.Cleanup(ts.Close)
 
 	clientID := approvedClient(t, srv, ts, testRedirect)
-	verifier, challenge := pkcePair()
+	verif, challenge := pkcePair()
 	code := runAuthorize(t, srv, ts, clientID, testRedirect, challenge, "s")
 	_, tok := postToken(t, ts.URL, url.Values{
 		"grant_type": {"authorization_code"}, "code": {code}, "client_id": {clientID},
-		"redirect_uri": {testRedirect}, "code_verifier": {verifier},
+		"redirect_uri": {testRedirect}, "code_verifier": {verif},
 	})
 	return ts, tok.AccessToken, audit, srv
+}
+
+// stubVerifier is an injectable PaymentVerifier returning a fixed result, so a
+// test can drive verifier edge cases (empty reference, etc.).
+type stubVerifier struct {
+	settle Settlement
+	err    error
+}
+
+func (v stubVerifier) VerifyPayment(context.Context, PaymentRequirements, []byte) (Settlement, error) {
+	return v.settle, v.err
 }
 
 // countingBackend is a DialBackend exposing search_docs that increments *calls
@@ -449,6 +472,103 @@ func TestFullX402HandshakeSequence(t *testing.T) {
 	resp.Body.Close()
 	if body["error"] != nil || body["result"] == nil {
 		t.Fatalf("paid retry should succeed, got: %v", body)
+	}
+}
+
+// A settled payment is single-use: replaying the same X-PAYMENT is denied, and
+// the backend is served exactly once.
+func TestPaymentReplayDenied(t *testing.T) {
+	var calls int64
+	ts, token, audit, _ := newPaidServerFull(t, basicPayment(), countingBackend(t, &calls), nil, nil)
+	sid := initSession(t, ts.URL, token)
+	header := map[string]string{headerPayment: xPaymentHeader("1000", "USDC", "0xPayer")}
+
+	// First use: served.
+	resp := callTool(t, ts.URL, token, sid, header)
+	body := decodeRPC(t, resp)
+	resp.Body.Close()
+	if body["error"] != nil {
+		t.Fatalf("first paid call should succeed: %v", body["error"])
+	}
+
+	// Replay the identical payment: denied.
+	resp = callTool(t, ts.URL, token, sid, header)
+	body = decodeRPC(t, resp)
+	resp.Body.Close()
+	if body["error"] == nil {
+		t.Fatal("replayed payment must be denied")
+	}
+	if errObj, _ := body["error"].(map[string]any); errObj == nil || !strings.Contains(errObj["message"].(string), "already redeemed") {
+		t.Fatalf("replay denial should explain single-use, got: %v", body["error"])
+	}
+	if got := atomic.LoadInt64(&calls); got != 1 {
+		t.Fatalf("backend must be served exactly once for one payment, got %d", got)
+	}
+	if !strings.Contains(audit.String(), "x402/replay") {
+		t.Fatalf("replay must be audited: %s", audit.String())
+	}
+}
+
+// A verifier that returns nil error but no settlement reference is treated as a
+// verification failure (fail-closed): the call is re-challenged, not settled,
+// and the backend is not invoked.
+func TestEmptySettlementReferenceFailsClosed(t *testing.T) {
+	var calls int64
+	v := stubVerifier{settle: Settlement{Amount: "1000"}} // Reference: "" — no proof
+	pay := basicPayment()
+	pay.DevInsecureVerifier = false // a real verifier is injected instead
+	ts, token, audit, _ := newPaidServerFull(t, pay, countingBackend(t, &calls), v, nil)
+	sid := initSession(t, ts.URL, token)
+
+	resp := callTool(t, ts.URL, token, sid, map[string]string{
+		headerPayment: xPaymentHeader("1000", "USDC", "0xPayer"),
+	})
+	status := resp.StatusCode
+	resp.Body.Close()
+	if status != http.StatusPaymentRequired {
+		t.Fatalf("a settlement with no reference must fail closed (402), got %d", status)
+	}
+	if atomic.LoadInt64(&calls) != 0 {
+		t.Fatal("a proof-less settlement must not reach the backend")
+	}
+	if strings.Contains(audit.String(), "x402/settle") {
+		t.Fatalf("no settled record may be written without a settlement reference: %s", audit.String())
+	}
+	if !strings.Contains(audit.String(), "no settlement reference") {
+		t.Fatalf("the fail-closed reason should be recorded: %s", audit.String())
+	}
+}
+
+// When a paid call settles but the backend forward then fails, a compensating
+// x402/backend-error record is written so the ledger never implies the paid
+// call was served — and it carries the payment evidence, not raw wallet detail.
+func TestPaidCallBackendFailureRecordsCompensation(t *testing.T) {
+	failDial := func(ctx context.Context) (net.Conn, error) {
+		return nil, errors.New("backend down")
+	}
+	disableSessions := func(c *Config) { no := false; c.OAuth.Sessions = &no }
+	ts, token, audit, _ := newPaidServerFull(t, basicPayment(), failDial, nil, disableSessions)
+
+	// Stateless (sessions disabled): a paid tools/call settles, then the forward
+	// dial fails.
+	resp := callTool(t, ts.URL, token, "", map[string]string{
+		headerPayment: xPaymentHeader("1000", "USDC", "0xPayer"),
+	})
+	body := decodeRPC(t, resp)
+	resp.Body.Close()
+	if body["error"] == nil {
+		t.Fatal("a failed backend forward should surface an error")
+	}
+	log := audit.String()
+	if !strings.Contains(log, "x402/settle") {
+		t.Fatalf("the settlement should be recorded: %s", log)
+	}
+	comp := findAuditRecord(t, log, "x402/backend-error")
+	if comp["payment"] == nil {
+		t.Fatalf("the compensating record must carry the payment evidence: %v", comp)
+	}
+	if pay, _ := comp["payment"].(map[string]any); pay["payment_ref"] == nil {
+		t.Fatalf("compensating record evidence must carry the (hashed) payment_ref: %v", comp)
 	}
 }
 

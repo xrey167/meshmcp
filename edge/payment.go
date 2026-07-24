@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"path"
 	"sort"
+	"sync"
 
 	"github.com/xrey167/meshmcp/policy"
 )
@@ -83,6 +84,15 @@ type paymentGate struct {
 	cfg      PaymentConfig
 	verifier PaymentVerifier
 	salt     string
+
+	// consumed enforces single-use: a settlement reference is redeemable exactly
+	// once, so one settled payment authorizes exactly one call (a replayed
+	// X-PAYMENT is denied regardless of whether the verifier is idempotent). It
+	// is an in-process store (bounded to this edge instance and its lifetime); a
+	// shared/persistent, size-bounded store is the HA hardening, mirroring the
+	// DPoP replay store.
+	mu       sync.Mutex
+	consumed map[string]struct{}
 }
 
 // newPaymentGate builds the gate, or returns (nil, nil) when payment is
@@ -106,7 +116,20 @@ func newPaymentGate(cfg PaymentConfig, backend string, v PaymentVerifier) (*paym
 	if salt == "" {
 		salt = backend
 	}
-	return &paymentGate{cfg: cfg, verifier: v, salt: salt}, nil
+	return &paymentGate{cfg: cfg, verifier: v, salt: salt, consumed: map[string]struct{}{}}, nil
+}
+
+// redeem atomically claims a settlement reference for single use. It returns
+// true on the first (and only) redemption of that reference and false for every
+// subsequent replay.
+func (g *paymentGate) redeem(reference string) (firstUse bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if _, used := g.consumed[reference]; used {
+		return false
+	}
+	g.consumed[reference] = struct{}{}
+	return true
 }
 
 // priceFor returns the price for a tool and whether it is priced. Overlapping
@@ -147,8 +170,10 @@ func (g *paymentGate) requirements(tool, price, resourceBase string) PaymentRequ
 // policy allowed) tools/call. It returns proceed=true when the call should be
 // forwarded to the backend; when it returns false it has already written the
 // HTTP response (a 402 challenge, a free dry-run result, or a fail-closed
-// error). Called only when s.payment != nil.
-func (s *Server) gatePayment(w http.ResponseWriter, r *http.Request, au authed, sess *mcpSession, class policy.RPCClass) (proceed bool) {
+// error). On a settled paid call it also returns the recorded PaymentEvidence
+// so the caller can attach it to a compensating record if the backend forward
+// then fails. Called only when s.payment != nil.
+func (s *Server) gatePayment(w http.ResponseWriter, r *http.Request, au authed, sess *mcpSession, class policy.RPCClass) (proceed bool, paid *policy.PaymentEvidence) {
 	g := s.payment
 
 	// An unpriced tool is free: the dry-run header is irrelevant (there is no
@@ -157,7 +182,7 @@ func (s *Server) gatePayment(w http.ResponseWriter, r *http.Request, au authed, 
 	// free tool.
 	price, priced := g.priceFor(class.Tool)
 	if !priced {
-		return true
+		return true, nil
 	}
 
 	// Free dry-run route (priced tools only): validate-only, never charge, never
@@ -168,13 +193,13 @@ func (s *Server) gatePayment(w http.ResponseWriter, r *http.Request, au authed, 
 		if err := s.auditPayment(au.clientID, class.Tool, "x402/dry-run", "allow", "free dry-run", &ev); err != nil {
 			// Fail closed: an unrecorded decision is denied, even a free one.
 			s.writeJSONRPC(w, jsonRPCErrorResponse(class.ID, -32002, "dry-run blocked: audit sink unavailable (fail-closed)"))
-			return false
+			return false, nil
 		}
 		if sess != nil {
 			w.Header().Set(headerSessionID, sess.id)
 		}
 		s.writeJSONRPC(w, dryRunResult(class.ID, class.Tool, ev))
-		return false
+		return false, nil
 	}
 
 	req := g.requirements(class.Tool, price, s.cfg.PublicURL+pathMCP+"#")
@@ -182,18 +207,40 @@ func (s *Server) gatePayment(w http.ResponseWriter, r *http.Request, au authed, 
 	if !ok {
 		_ = s.auditPayment(au.clientID, class.Tool, "x402/require", "deny", "payment required", nil)
 		s.writePaymentRequired(w, req)
-		return false
+		return false, nil
 	}
 	settle, err := g.verifier.VerifyPayment(r.Context(), req, payload)
 	if err != nil {
 		// The verifier's error may echo payload/settlement content (a real
-		// facilitator client can build errors naming an address or token). Record
-		// only a FIXED reason in the exportable, wallet-free audit log; the detail
-		// goes to the operator's local log, never the shared chain.
-		log.Printf("edge: payment verify rejected for %s tool %q: %v", oauthIdentity(au.clientID), class.Tool, err)
+		// facilitator client can build errors naming an address or token). Keep
+		// that text out of EVERY meshmcp-emitted sink — the exportable audit log
+		// AND the process log: record a FIXED reason and log a FIXED line. Raw
+		// detail lives only in the facilitator.
+		log.Printf("edge: payment verify rejected for %s tool %q", oauthIdentity(au.clientID), class.Tool)
 		_ = s.auditPayment(au.clientID, class.Tool, "x402/require", "deny", "payment rejected by verifier", nil)
 		s.writePaymentRequired(w, req)
-		return false
+		return false, nil
+	}
+	// Fail closed on incomplete verifier output: a settlement with no reference
+	// cannot be proven (its payment_ref would be empty), so it is not accepted as
+	// a paid call — never emit a "settled" record without settlement proof.
+	if settle.Reference == "" {
+		log.Printf("edge: payment verifier returned no settlement reference for %s tool %q", oauthIdentity(au.clientID), class.Tool)
+		_ = s.auditPayment(au.clientID, class.Tool, "x402/require", "deny", "payment verifier returned no settlement reference", nil)
+		s.writePaymentRequired(w, req)
+		return false, nil
+	}
+	// Single-use: redeem the settlement reference exactly once. A replayed
+	// X-PAYMENT (or any second use of the same settlement) is denied here, so one
+	// settled payment authorizes exactly one call regardless of verifier
+	// idempotency. Redeeming BEFORE forwarding keeps this airtight against
+	// concurrent replay; the cost is that a backend failure after redemption
+	// spends the payment (a compensating x402/backend-error record is written by
+	// the caller, and it is a settlement matter, not a re-serve).
+	if !g.redeem(settle.Reference) {
+		_ = s.auditPayment(au.clientID, class.Tool, "x402/replay", "deny", "payment already redeemed", nil)
+		s.writeJSONRPC(w, jsonRPCErrorResponse(class.ID, -32005, "payment already redeemed — a settled payment authorizes one call; obtain a fresh payment to call again"))
+		return false, nil
 	}
 
 	amount := settle.Amount
@@ -202,17 +249,16 @@ func (s *Server) gatePayment(w http.ResponseWriter, r *http.Request, au authed, 
 	}
 	ev := policy.NewPaymentEvidence(g.cfg.scheme(), g.cfg.Network, g.cfg.Asset, amount, settle.Reference, settle.Payer, g.salt)
 	if err := s.auditPayment(au.clientID, class.Tool, "x402/settle", "allow", "x402 settled", &ev); err != nil {
-		// Fail closed: a paid call whose evidence cannot be recorded is denied.
-		// The client can retry — a real facilitator settles the same payment
-		// authorization idempotently, so a retry re-derives the same reference
-		// rather than double-charging. We do NOT forward on an unrecorded settlement.
-		s.writeJSONRPC(w, jsonRPCErrorResponse(class.ID, -32002, "tool blocked: payment settled but the audit sink is unavailable (fail-closed) — retry, the settlement is idempotent"))
-		return false
+		// Fail closed: a paid call whose evidence cannot be recorded is not
+		// forwarded. The reference is already redeemed (single-use), so this
+		// payment is spent; a new call requires a new payment.
+		s.writeJSONRPC(w, jsonRPCErrorResponse(class.ID, -32002, "tool blocked: payment settled but the audit sink is unavailable (fail-closed); this payment is spent — a new call requires a new payment"))
+		return false, nil
 	}
 	if len(settle.Response) > 0 {
 		w.Header().Set(headerPaymentResponse, base64.StdEncoding.EncodeToString(settle.Response))
 	}
-	return true
+	return true, &ev
 }
 
 // writePaymentRequired writes an HTTP 402 with the x402 requirements body and an
