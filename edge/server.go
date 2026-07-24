@@ -257,6 +257,39 @@ func errCodeOr(code, fallback string) string {
 // buildTLSConfig produces the *tls.Config for the listener. In files mode it
 // loads the operator-provided keypair (fatal on error); in ACME mode it hands
 // off to certmagic (see acme.go). Exactly one mode is guaranteed by Validate.
+// ServeOverListener serves the edge over a caller-provided net.Listener,
+// terminating TLS with the configured certificate exactly as Run does. It is the
+// seam for deployment behind an outbound reverse tunnel (a meshmcp beacon): the
+// listener yields spliced client connections instead of a public bind, but the
+// gateway still terminates TLS with its OWN certificate and the trust core
+// (OAuth, the double-gate, the fail-closed audit ledger) is byte-identical. TLS
+// must be a files/ACME mode (beacon/behind_front are validated mutually
+// exclusive in Config.Validate).
+func (s *Server) ServeOverListener(ctx context.Context, ln net.Listener) error {
+	tlsConf, acme, err := s.buildTLSConfig()
+	if err != nil {
+		return err
+	}
+	acme.start()
+	defer acme.stop(context.Background())
+
+	srv := s.httpServer(tlsConf)
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.ServeTLS(ln, "", "") }()
+
+	select {
+	case <-ctx.Done():
+		shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return srv.Shutdown(shutCtx)
+	case err := <-errCh:
+		if err == http.ErrServerClosed {
+			return nil
+		}
+		return err
+	}
+}
+
 func (s *Server) buildTLSConfig() (*tls.Config, *acmeRuntime, error) {
 	if s.cfg.TLS.files() {
 		cert, err := tls.LoadX509KeyPair(s.cfg.TLS.CertFile, s.cfg.TLS.KeyFile)

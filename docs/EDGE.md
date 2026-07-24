@@ -207,6 +207,49 @@ caveat while keeping the same loopback-listener seam.
 
 ---
 
+## Behind a beacon — zero inbound ports, no front to run (`beacon`)
+
+`behind_front` still needs a front you operate. A **beacon** (`meshmcp beacon`)
+removes even that: the gateway dials OUT to a shared beacon, is assigned a stable
+public name derived from its key, and the beacon routes inbound TLS to it by the
+cleartext **SNI**, splicing raw bytes. TLS terminates on the **gateway** with the
+gateway's OWN certificate — the beacon holds no key and sees only ciphertext.
+
+```yaml
+beacon:
+  control: beacon.example.com:7443   # the beacon address the gateway dials out to
+  zone: beacon.example.com           # the beacon's public DNS zone
+tls:
+  cert_file: /etc/meshmcp/gw.crt     # a cert whose SAN is the derived <label>.<zone>
+  key_file:  /etc/meshmcp/gw.key
+# listen / public_url are unused: public_url is derived as https://<label>.<zone>
+```
+
+The public name is `<label>.<zone>` where `label = base32(sha256(signing-key
+pubkey))[:16]` — deterministic, so it survives restarts (the connector needs a
+stable URL). The gateway prints the derived name on startup; obtain a
+publicly-trusted cert whose SAN is that name and point `tls.cert_file/key_file` at
+it. Run the relay with:
+
+```bash
+meshmcp beacon --zone beacon.example.com --public :443 --control :7443
+```
+
+**Confidentiality vs. `behind_front`:** the beacon is a shared party that owns the
+public name, so it is DNS authority for the subdomain and *could* actively MITM by
+issuing its own cert — a narrower, CT-detectable risk than a TLS-terminating
+proxy, and escapable by self-hosting the beacon. Against a *passive* beacon, only
+ciphertext and the SNI are exposed. The full trade, and the CT-monitoring /
+DPoP mitigations, are in the
+[design doc](design/HOSTED-CLIENT-INGRESS.md).
+
+> **Status:** experimental. The rendezvous, SNI-routed splice, and gateway
+> listener are implemented and tested end-to-end; automatic cert provisioning
+> (ACME DNS-01 through the beacon) and the beacon's authoritative-DNS / multi-tenant
+> lease layer are the next increment — until then the gateway cert is operator-provided.
+
+---
+
 ## Transport
 
 Full MCP Streamable HTTP:
