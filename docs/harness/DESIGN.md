@@ -149,17 +149,22 @@ the gateway ingress with channels, DM pairing, and session slash-commands; the
 (profile→recommend→simulate→apply).
 
 The orchestrator dark service now serves over the mesh (`harness serve
---listen`, mirroring `cmdOrchestrate`'s accept loop) as well as stdio, and remote
-providers are reachable over MCP (`MCPProvider`) — closing the two headline
-wiring gaps.
+--listen`, mirroring `cmdOrchestrate`'s accept loop) as well as stdio; remote
+providers are reachable over MCP (`MCPProvider`); and `EnrollMinter` mints real
+ephemeral mesh worker identities — it generates a WireGuard (X25519) keypair per
+worker (so the public key IS the transport-bound identity), obtains a scoped
+one-off enrollment credential from the control plane (`control.NetBirdIssuer`
+via the `harness.Enroller` interface), and deregisters on retire. Selected with
+`harness serve|run --minter netbird` (PAT via `--nb-token`/`$NB_API_TOKEN`);
+`mem` (in-process keys) remains the default.
 
 **Deferred (wiring, not design):** live provider CLIs require the binaries +
-broker keys; LSP/AST/browser/canvas/nodes/cron live backends (Phase 2/4);
-`control.NetBirdIssuer`-backed minter for real mesh worker keys (Phase 3); the
-non-webchat channel transports (Phase 4 live wiring); Live Canvas / voice
-surfaces. Every deferred tool/channel is still *registered and governed* — a call
-passes the firewall and is audited, and it fails closed rather than silently
-succeeding.
+broker keys; LSP/AST/browser/canvas/nodes/cron live backends (Phase 2/4); the
+worker-process spawner that launches a minted identity onto the mesh with its
+`WorkerCreds`; the non-webchat channel transports (Phase 4 live wiring); Live
+Canvas / voice surfaces. Every deferred tool/channel is still *registered and
+governed* — a call passes the firewall and is audited, and it fails closed rather
+than silently succeeding.
 
 ## Tests
 
