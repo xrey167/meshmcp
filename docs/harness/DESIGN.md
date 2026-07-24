@@ -90,8 +90,9 @@ each call is authorized against the caller's role via `Governor.Guard` and
 audited. Tools registered: delegation (task, call_agent, background_*,
 synthesize), planning/verify (plan, plan_review, interview, start_work,
 review_work, ultragoal_check), code intel (grep/glob/edit, lsp_symbols +
-lsp_diagnostics via go/parser, and ast_grep_* via the ast-grep binary are real;
-the remaining lsp_* and look_at governed with Phase-2 backends), sessions + task store, terminal
+lsp_diagnostics via go/parser, ast_grep_* via ast-grep, and
+lsp_rename/goto/references/prepare_rename via gopls are real — fail-closed when a
+binary is absent; only look_at (vision) stays pending), sessions + task store, terminal
 (interactive_bash real), browser/canvas/nodes/cron (governed, Phase-2/4 driver),
 skills + market.
 
@@ -165,11 +166,10 @@ secret (mirroring `cmd/meshmcp`'s `agentChildEnv`); it fails closed on an empty
 command or an unminted identity.
 
 **Deferred (wiring, not design):** live provider CLIs require the binaries +
-broker keys; the remaining lsp_* tools (rename/goto/references) need a language
-server; browser/canvas/nodes/cron live backends (Phase 2/4); scheduler wiring to
-optionally run subprocess workers via `ExecSpawner` (the spawner itself is
-built); the non-webchat channel transports (Phase 4 live wiring); Live Canvas /
-voice surfaces. Every deferred tool/channel is still *registered and
+broker keys; the `look_at` vision backend; browser/canvas/nodes/cron live
+backends (Phase 2/4); scheduler wiring to optionally run subprocess workers via
+`ExecSpawner` (the spawner itself is built); the non-webchat channel transports
+(Phase 4 live wiring); Live Canvas / voice surfaces. Every deferred tool/channel is still *registered and
 governed* — a call passes the firewall and is audited, and it fails closed rather
 than silently succeeding.
 
